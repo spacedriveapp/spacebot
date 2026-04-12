@@ -1,4 +1,4 @@
 {
   "title": "Getting Started",
-  "pages": ["quickstart", "docker", "desktop"]
+  "pages": ["quickstart", "docker", "desktop", "configuring-channels"]
 }

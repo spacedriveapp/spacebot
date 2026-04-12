@@ -8,21 +8,30 @@ use crate::{ChannelId, InboundMessage, ProcessEvent};
 
 /// Write history back after the agentic loop completes.
 ///
-/// On success or `MaxTurnsError`, the history Rig built is consistent and safe
-/// to keep.
+/// On success, `prompt_once_streaming` writes the final `chat_history` back
+/// to the external `history` parameter, so we extend guard with the net-new
+/// messages from that turn.
 ///
-/// On `PromptCancelled` (e.g. reply tool fired), Rig's carried history has
-/// the user prompt + the assistant's tool-call message but no tool results.
-/// Writing it back wholesale would leave a dangling tool-call that poisons
-/// every subsequent turn. Instead, we preserve only the **first user text
-/// message** Rig appended (the real user prompt), while discarding assistant
-/// tool-call messages and tool-result user messages.
+/// On `MaxTurnsError`, the loop hit the turn cap before the agent finished.
+/// `prompt_once_streaming` does NOT update the external `history` in this
+/// case — only the Ok path does. We therefore use the `chat_history` carried
+/// inside the error, which contains everything built before the limit was hit.
+/// The state is consistent (no dangling tool calls) because the error is
+/// raised at the start of a new loop iteration, after the previous iteration
+/// pushed all tool results.
+///
+/// On `PromptCancelled` (reply tool fired, context injection, loop guard
+/// circuit break, etc.), the same applies: `prompt_once_streaming` does NOT
+/// write `chat_history` back to `history` on early exit, so reading
+/// `history[history_len_before..]` would always return an empty slice —
+/// silently dropping the user message and reply from every cancelled turn.
+/// Instead we destructure `chat_history` from the error, which contains the
+/// real exchange.  For regular turns we preserve only the first user text
+/// message and a clean assistant reply (discarding dangling tool calls and
+/// tool-result user messages). For retrigger turns we extract the relay text.
 ///
 /// On hard errors, we truncate to the pre-turn snapshot since the history
 /// state is unpredictable.
-///
-/// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
-/// before raising it, so history is consistent.
 ///
 /// Returns true when a retrigger PromptCancelled turn had a reply tool call
 /// extracted and persisted as a clean assistant text message.
@@ -35,12 +44,32 @@ pub(crate) fn apply_history_after_turn(
     is_retrigger: bool,
 ) -> bool {
     match result {
-        Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-            *guard = history;
+        Ok(_) => {
+            // prompt_once_streaming writes *history = chat_history in the Ok
+            // path, so `history` is up-to-date. Extend guard with the net-new
+            // messages rather than replacing it wholesale, so that any
+            // concurrent writes from background tasks (e.g. the compaction
+            // worker) that landed in guard between the clone and the write-back
+            // are not erased.
+            let new_messages = history.into_iter().skip(history_len_before);
+            guard.extend(new_messages);
             false
         }
-        Err(rig::completion::PromptError::PromptCancelled { .. }) => {
-            let new_messages = &history[history_len_before..];
+        Err(rig::completion::PromptError::MaxTurnsError { chat_history, .. }) => {
+            // prompt_once_streaming does NOT update `history` for MaxTurnsError.
+            // Use the chat_history embedded in the error instead — it contains
+            // every message built before the turn cap was hit, in a consistent
+            // state (no dangling tool calls; the error fires at loop-iteration
+            // start, after the previous iteration's tool results were pushed).
+            let new_messages = chat_history[history_len_before..].iter().cloned();
+            guard.extend(new_messages);
+            false
+        }
+        Err(rig::completion::PromptError::PromptCancelled { chat_history, .. }) => {
+            // prompt_once_streaming does NOT update `history` for PromptCancelled.
+            // Use chat_history from the error: it contains the messages that
+            // were actually built before cancellation fired.
+            let new_messages = &chat_history[history_len_before..];
 
             // Rig appended the user prompt and possibly an assistant tool-call
             // message to history before cancellation.
@@ -121,7 +150,7 @@ pub(crate) fn apply_history_after_turn(
             // Hard errors: history state is unpredictable, truncate to snapshot.
             tracing::debug!(
                 channel_id = %channel_id,
-                rolled_back = history.len().saturating_sub(history_len_before),
+                rolled_back = guard.len().saturating_sub(history_len_before),
                 "rolling back history after failed turn"
             );
             guard.truncate(history_len_before);

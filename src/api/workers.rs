@@ -124,6 +124,28 @@ pub(super) async fn list_workers(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Resolve project names from the global ProjectStore (projects live in the
+    // instance DB, not in per-agent DBs, so history.rs can't JOIN them in SQL).
+    let project_names: std::collections::HashMap<String, String> = {
+        let mut names = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let store_guard = state.project_store.load();
+        if let Some(store) = store_guard.as_ref() {
+            for row in &rows {
+                let Some(project_id) = row.project_id.as_deref() else {
+                    continue;
+                };
+                if !seen.insert(project_id.to_string()) {
+                    continue;
+                }
+                if let Ok(Some(project)) = store.get_project(project_id).await {
+                    names.insert(project_id.to_string(), project.name);
+                }
+            }
+        }
+        names
+    };
+
     // Build a live status lookup from all channel StatusBlocks
     let live_statuses = {
         let blocks = state.channel_status_blocks.read().await;
@@ -171,8 +193,11 @@ pub(super) async fn list_workers(
                 opencode_session_id: row.opencode_session_id,
                 directory: row.directory,
                 interactive: row.interactive,
+                project_name: row
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| project_names.get(id).cloned()),
                 project_id: row.project_id,
-                project_name: row.project_name,
             }
         })
         .collect();

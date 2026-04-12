@@ -123,7 +123,7 @@ fn parse_response_mode(
     if let Some(mode) = response_mode {
         return match mode {
             "active" => Some(ResponseMode::Active),
-            "quiet" => Some(ResponseMode::Quiet),
+            "observe" | "quiet" => Some(ResponseMode::Observe),
             "mention_only" => Some(ResponseMode::MentionOnly),
             unknown => {
                 tracing::warn!(
@@ -138,9 +138,9 @@ fn parse_response_mode(
     match listen_only_mode {
         Some(true) => {
             tracing::warn!(
-                "listen_only_mode is deprecated, use response_mode = \"quiet\" instead"
+                "listen_only_mode is deprecated, use response_mode = \"observe\" instead"
             );
-            Some(ResponseMode::Quiet)
+            Some(ResponseMode::Observe)
         }
         Some(false) => Some(ResponseMode::Active),
         None => None,
@@ -2455,7 +2455,7 @@ impl Config {
                     }
                     if let Some(r) = s.response_mode.as_deref() {
                         match r {
-                            "quiet" => cs.response_mode = ResponseMode::Quiet,
+                            "observe" | "quiet" => cs.response_mode = ResponseMode::Observe,
                             "mention_only" => cs.response_mode = ResponseMode::MentionOnly,
                             "active" => cs.response_mode = ResponseMode::Active,
                             other => tracing::warn!(

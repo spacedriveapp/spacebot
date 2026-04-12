@@ -425,6 +425,8 @@ impl Tool for DetachedSpawnWorkerTool {
             .resolve(crate::ProcessType::Worker, None)
             .to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
+        let project_context =
+            crate::agent::channel_dispatch::build_project_context(&self.deps, &prompt_engine).await;
         let worker_system_prompt = prompt_engine
             .render_worker_prompt(
                 &rc.instance_dir.display().to_string(),
@@ -436,6 +438,8 @@ impl Tool for DetachedSpawnWorkerTool {
                 &tool_secret_names,
                 browser_config.persist_session,
                 worker_status_text,
+                self.deps.wiki_store.is_some(),
+                project_context,
             )
             .and_then(|prompt| {
                 prompt_engine.maybe_append_tool_use_enforcement(
@@ -461,6 +465,7 @@ impl Tool for DetachedSpawnWorkerTool {
             self.logs_dir.clone(),
             Vec::new(), // no initial history for detached workers
             crate::conversation::settings::WorkerMemoryMode::None,
+            self.deps.wiki_store.is_some(),
             None, // No model override for detached workers
             None, // No task metadata for detached workers
         );
@@ -565,7 +570,6 @@ async fn resolve_directory_from_project(
     }
 
     let store = &deps.project_store;
-    let agent_id = &deps.agent_id;
 
     // Worktree resolution: look up the worktree, derive absolute path from project root.
     if let Some(worktree_id) = worktree_id
@@ -583,7 +587,7 @@ async fn resolve_directory_from_project(
                 "project_id/worktree_id mismatch — using worktree's project"
             );
         }
-        if let Ok(Some(project)) = store.get_project(agent_id, &worktree.project_id).await {
+        if let Ok(Some(project)) = store.get_project(&worktree.project_id).await {
             let abs_path = std::path::Path::new(&project.root_path).join(&worktree.path);
             return Some(abs_path.to_string_lossy().to_string());
         }
@@ -591,7 +595,7 @@ async fn resolve_directory_from_project(
 
     // Project root resolution.
     if let Some(project_id) = project_id
-        && let Ok(Some(project)) = store.get_project(agent_id, project_id).await
+        && let Ok(Some(project)) = store.get_project(project_id).await
     {
         return Some(project.root_path.clone());
     }

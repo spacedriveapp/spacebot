@@ -133,6 +133,10 @@ pub struct ChannelState {
     /// Resolved model overrides from conversation settings.
     /// Used by branches, workers, and compactor to resolve their model.
     pub model_overrides: Arc<crate::conversation::settings::ResolvedConversationSettings>,
+    /// Optional cron outcome for the `set_outcome` tool.
+    /// When set, the `set_outcome` tool is registered for this channel,
+    /// allowing the LLM to explicitly store a delivery payload.
+    pub cron_outcome: Option<crate::cron::CronOutcome>,
 }
 
 impl ChannelState {
@@ -143,20 +147,27 @@ impl ChannelState {
             .await
     }
 
-    /// Cancel a running worker by aborting its tokio task and cleaning up state.
-    /// Emits a synthetic terminal event so downstream consumers converge.
+    /// Cancel a running worker by aborting its tokio task.
+    /// Emits a synthetic terminal event so the event handler can clean up
+    /// worker_handles and trigger a retrigger with the cancellation reason.
     pub async fn cancel_worker_with_reason(
         &self,
         worker_id: WorkerId,
         reason: &str,
     ) -> std::result::Result<(), String> {
-        let removed = self
-            .active_workers
-            .write()
-            .await
-            .remove(&worker_id)
-            .is_some();
-        let handle = self.worker_handles.write().await.remove(&worker_id);
+        // Abort via read access so the handle stays in worker_handles.
+        // The WorkerComplete event handler will remove it and trigger a retrigger.
+        let aborted = {
+            let handles = self.worker_handles.read().await;
+            if let Some(handle) = handles.get(&worker_id) {
+                handle.abort();
+                true
+            } else {
+                false
+            }
+        };
+
+        // Stop routing messages to the dead worker immediately.
         let removed_input = self
             .worker_inputs
             .write()
@@ -164,21 +175,13 @@ impl ChannelState {
             .remove(&worker_id)
             .is_some();
         self.worker_injections.write().await.remove(&worker_id);
-        let removed_status = self.status_block.write().await.remove_worker(worker_id);
-        let should_emit = removed || handle.is_some();
 
-        if !should_emit {
+        if !aborted {
+            let removed_status = self.status_block.write().await.remove_worker(worker_id);
             if removed_input || removed_status {
                 return Ok(());
             }
             return Err(format!("Worker {worker_id} not found"));
-        }
-
-        // Abort first so the worker stops producing new ToolStarted/ToolCompleted
-        // events, then drain whatever was accumulated. This avoids a race where
-        // events written between drain and abort would be lost.
-        if let Some(handle) = handle {
-            handle.abort();
         }
 
         // Now that the worker future is cancelled, drain the live transcript
@@ -278,22 +281,33 @@ impl ChannelState {
     }
 
     /// Cancel a running branch by aborting its tokio task.
-    /// Emits a synthetic terminal result so channel state converges.
+    /// Emits a synthetic terminal result so the event handler can clean up
+    /// active_branches and trigger a retrigger with the cancellation reason.
     pub async fn cancel_branch_with_reason(
         &self,
         branch_id: BranchId,
         reason: &str,
     ) -> std::result::Result<(), String> {
-        let handle = self.active_branches.write().await.remove(&branch_id);
-        let removed_status = self.status_block.write().await.remove_branch(branch_id);
-        let Some(handle) = handle else {
+        // Abort via read access so the handle stays in active_branches.
+        // The BranchResult event handler will remove it and trigger a retrigger.
+        let aborted = {
+            let branches = self.active_branches.read().await;
+            if let Some(handle) = branches.get(&branch_id) {
+                handle.abort();
+                true
+            } else {
+                false
+            }
+        };
+
+        if !aborted {
+            let removed_status = self.status_block.write().await.remove_branch(branch_id);
             if removed_status {
                 return Ok(());
             }
             return Err(format!("Branch {branch_id} not found"));
-        };
+        }
 
-        handle.abort();
         let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
         let conclusion = if reason.is_empty() {
             "Branch cancelled.".to_string()
@@ -376,6 +390,43 @@ impl ChannelControlHandle {
         {
             Ok(()) => ControlActionResult::Cancelled,
             Err(_) => ControlActionResult::NotFound,
+        }
+    }
+
+    /// Cancel all active workers and branches, emitting WorkerComplete/BranchResult
+    /// for each so the channel can retrigger and synthesize partial results.
+    pub async fn cancel_all_workers_and_branches(&self, reason: &str) {
+        let worker_ids: Vec<WorkerId> = self
+            .inner
+            .state
+            .worker_handles
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        for worker_id in worker_ids {
+            let _ = self
+                .inner
+                .state
+                .cancel_worker_with_reason(worker_id, reason)
+                .await;
+        }
+        let branch_ids: Vec<BranchId> = self
+            .inner
+            .state
+            .active_branches
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        for branch_id in branch_ids {
+            let _ = self
+                .inner
+                .state
+                .cancel_branch_with_reason(branch_id, reason)
+                .await;
         }
     }
 }
@@ -500,6 +551,7 @@ impl Channel {
         prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
         live_worker_transcripts: Option<LiveWorkerTranscripts>,
         resolved_settings: ResolvedConversationSettings,
+        cron_outcome: Option<crate::cron::CronOutcome>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -552,6 +604,7 @@ impl Channel {
                 resolved_settings.worker_context.clone(),
             )),
             model_overrides: Arc::new(resolved_settings.clone()),
+            cron_outcome,
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -696,7 +749,7 @@ impl Channel {
         self.resolved_settings = resolved;
     }
 
-    /// Whether the channel is in a non-active response mode (Quiet or MentionOnly).
+    /// Whether the channel is in a non-active response mode (Observe or MentionOnly).
     fn is_suppressed(&self) -> bool {
         !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
     }
@@ -851,6 +904,17 @@ impl Channel {
         self.response_tx.send(routed).await
     }
 
+    /// Drain accumulated channel tool calls from ApiState and serialize as JSON.
+    /// Returns `None` if there are no tool calls or ApiState is unavailable.
+    async fn drain_tool_calls_json(&self) -> Option<String> {
+        let api_state = self.state.deps.api_state.as_ref()?;
+        let calls = api_state.take_channel_tool_calls(&self.id).await;
+        if calls.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&calls).ok()
+    }
+
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
         match self.send_routed(OutboundResponse::Text(text.clone())).await {
             Ok(()) => {
@@ -862,11 +926,15 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
-                self.state.conversation_logger.log_bot_message_with_name(
-                    &self.state.channel_id,
-                    &text,
-                    Some(self.agent_display_name()),
-                );
+                let tool_calls_json = self.drain_tool_calls_json().await;
+                self.state
+                    .conversation_logger
+                    .log_bot_message_with_metadata(
+                        &self.state.channel_id,
+                        &text,
+                        Some(self.agent_display_name()),
+                        tool_calls_json,
+                    );
             }
             Err(error) => {
                 #[cfg(feature = "metrics")]
@@ -919,7 +987,7 @@ impl Channel {
                     .unwrap_or_else(|| routing.resolve(ProcessType::Branch, None));
                 let mode = match self.resolved_settings.response_mode {
                     ResponseMode::Active => "active",
-                    ResponseMode::Quiet => "quiet (only command/@mention/reply)",
+                    ResponseMode::Observe => "observe (learning, never responds)",
                     ResponseMode::MentionOnly => "mention-only (@mention/reply only)",
                 };
                 let adapter = self.current_adapter().unwrap_or("unknown");
@@ -943,12 +1011,12 @@ impl Channel {
                 self.send_builtin_text(body, "status").await;
                 return Ok(true);
             }
-            "/quiet" => {
-                self.set_response_mode(ResponseMode::Quiet).await;
+            "/quiet" | "/observe" => {
+                self.set_response_mode(ResponseMode::Observe).await;
                 self.send_builtin_text(
-                    "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message."
+                    "observe mode enabled. i'll learn from this conversation but won't respond."
                         .to_string(),
-                    "quiet",
+                    "observe",
                 )
                 .await;
                 return Ok(true);
@@ -979,7 +1047,7 @@ impl Channel {
                     "- /today: in-progress + ready task snapshot".to_string(),
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
-                    "- /quiet: only reply to commands, @mentions, or replies".to_string(),
+                    "- /observe: learn from conversation, never respond".to_string(),
                     "- /mention-only: only respond when @mentioned, replied to, or given a command"
                         .to_string(),
                     "- /active: normal reply mode".to_string(),
@@ -1002,6 +1070,22 @@ impl Channel {
         let mut last_lag_warning: Option<std::time::Instant> = None;
 
         loop {
+            // Cron channels have no further user messages after the initial prompt.
+            // Once all workers/branches finish and no retrigger is pending, exit so
+            // the scheduler can flush the reply buffer. Without this the channel
+            // would wait on the broadcast event_rx (which never closes) until the
+            // job timeout kills it.
+            if self.state.cron_outcome.is_some()
+                && self.message_count > 0
+                && !self.pending_retrigger
+                && self.retrigger_deadline.is_none()
+                && self.state.worker_handles.read().await.is_empty()
+                && self.state.active_branches.read().await.is_empty()
+            {
+                tracing::info!(channel_id = %self.id, "cron channel finished all work, exiting");
+                break;
+            }
+
             // Compute next deadline from coalesce and retrigger timers
             let next_deadline = match (self.coalesce_deadline, self.retrigger_deadline) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -1423,22 +1507,38 @@ impl Channel {
             }
         }
 
-        if !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
-            && !batch_has_invoke
-            && !self.is_dm()
-        {
+        // Observe mode: always suppress (even with mentions in batch).
+        // MentionOnly mode: suppress only when no invocations in the batch.
+        let should_suppress_batch = !self.is_dm()
+            && match self.resolved_settings.response_mode {
+                ResponseMode::Active => false,
+                ResponseMode::Observe => true,
+                ResponseMode::MentionOnly => !batch_has_invoke,
+            };
+
+        if should_suppress_batch {
             tracing::debug!(
                 channel_id = %self.id,
                 message_count,
                 response_mode = ?self.resolved_settings.response_mode,
                 "suppressing unsolicited coalesced batch"
             );
-            // In Quiet mode, keep passive memory capture.
-            // In MentionOnly mode, skip memory persistence.
-            if matches!(self.resolved_settings.response_mode, ResponseMode::Quiet) {
-                self.message_count += message_count;
-                self.check_memory_persistence().await;
+            // Inject batch messages into in-memory history so the agent
+            // retains channel context.
+            {
+                let mut history = self.state.history.write().await;
+                for (formatted_text, _, _) in &pending_batch_entries {
+                    history.push(rig::message::Message::User {
+                        content: OneOrMany::one(UserContent::text(formatted_text)),
+                    });
+                }
             }
+            if let Err(error) = self.compactor.check_and_compact().await {
+                tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
+            }
+            // Both Observe and MentionOnly keep passive memory capture.
+            self.message_count += message_count;
+            self.check_memory_persistence().await;
             return Ok(());
         }
 
@@ -1587,9 +1687,12 @@ impl Channel {
         let org_context = self.build_org_context(&prompt_engine);
         let hierarchical_rules = self.build_hierarchical_rules(&prompt_engine);
 
-        let adapter_prompt = self
-            .current_adapter()
-            .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
+        let adapter_prompt = if self.state.cron_outcome.is_some() {
+            prompt_engine.render_channel_adapter_prompt("cron")
+        } else {
+            self.current_adapter()
+                .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter))
+        };
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -1647,6 +1750,8 @@ impl Channel {
         let model_name = routing.resolve(ProcessType::Channel, None).to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
 
+        let direct_mode = self.resolved_settings.delegation == DelegationMode::Direct;
+
         let system_prompt = prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
             memory_bulletin_text,
@@ -1664,6 +1769,7 @@ impl Channel {
             self.backfill_transcript.clone(),
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            direct_mode,
         )?;
 
         prompt_engine.maybe_append_tool_use_enforcement(
@@ -1788,9 +1894,12 @@ impl Channel {
             }
         }
 
-        // Deterministic ping ack for Discord quiet-mode mentions/replies to avoid
+        // Deterministic ping ack for Discord mention-only mentions/replies to avoid
         // flaky model behavior (e.g. skipping or over-formatting simple liveness checks).
-        if should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.is_suppressed()) {
+        // Skipped in Observe mode — the agent never responds in Observe.
+        if !matches!(self.resolved_settings.response_mode, ResponseMode::Observe)
+            && should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.is_suppressed())
+        {
             self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
                 .await;
             return Ok(());
@@ -1838,27 +1947,43 @@ impl Channel {
         let mut invoked_by_reply = false;
 
         // Response mode guardrail:
-        // In Quiet/MentionOnly modes, ingest messages but only reply when explicitly invoked.
+        // Observe mode: always suppress — agent learns but never responds.
+        // MentionOnly mode: suppress unless explicitly invoked.
         if !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
             && message.source != "system"
             && !self.is_dm()
         {
-            (invoked_by_command, invoked_by_mention, invoked_by_reply) =
-                self.compute_listen_mode_invocation(&message, &raw_text);
+            // Observe mode always suppresses; MentionOnly checks for invocation.
+            let should_suppress =
+                if matches!(self.resolved_settings.response_mode, ResponseMode::Observe) {
+                    true
+                } else {
+                    (invoked_by_command, invoked_by_mention, invoked_by_reply) =
+                        self.compute_listen_mode_invocation(&message, &raw_text);
+                    !invoked_by_command && !invoked_by_mention && !invoked_by_reply
+                };
 
-            if !invoked_by_command && !invoked_by_mention && !invoked_by_reply {
+            if should_suppress {
                 tracing::debug!(
                     channel_id = %self.id,
                     source = %message.source,
                     response_mode = ?self.resolved_settings.response_mode,
                     "suppressing unsolicited reply"
                 );
-                // In Quiet mode, keep passive memory capture.
-                // In MentionOnly mode, skip memory persistence entirely.
-                if matches!(self.resolved_settings.response_mode, ResponseMode::Quiet) {
-                    self.message_count += 1;
-                    self.check_memory_persistence().await;
+                // In Observe and MentionOnly modes, inject the message into
+                // in-memory history so the agent retains channel context.
+                {
+                    let mut history = self.state.history.write().await;
+                    history.push(rig::message::Message::User {
+                        content: OneOrMany::one(UserContent::text(&user_text)),
+                    });
                 }
+                if let Err(error) = self.compactor.check_and_compact().await {
+                    tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
+                }
+                // Both Observe and MentionOnly keep passive memory capture.
+                self.message_count += 1;
+                self.check_memory_persistence().await;
                 return Ok(());
             }
         }
@@ -1923,10 +2048,10 @@ impl Channel {
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
 
-        // Safety-net: in quiet mode, explicit mention/reply should never be dropped silently.
+        // Safety-net: in mention-only mode, explicit mention/reply should never be dropped silently.
         if should_send_quiet_mode_fallback(
             &message,
-            QuietModeFallbackState {
+            ObserveModeFallbackState {
                 is_suppressed: self.is_suppressed(),
                 is_retrigger,
                 invoked_by_command,
@@ -2172,100 +2297,13 @@ impl Channel {
 
     /// Build pre-rendered project context for prompt injection.
     ///
-    /// Fetches all active projects with their repos and worktrees, converts them
-    /// to prompt-friendly structs, and renders via the projects_context template.
-    /// Returns `None` if no projects exist or if rendering fails.
+    /// Delegates to the standalone `build_project_context` function shared
+    /// with worker spawning paths.
     async fn build_project_context(
         &self,
         prompt_engine: &crate::prompts::engine::PromptEngine,
     ) -> Option<String> {
-        use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
-
-        let store = &self.deps.project_store;
-        let projects = match store
-            .list_projects(
-                &self.deps.agent_id,
-                Some(crate::projects::ProjectStatus::Active),
-            )
-            .await
-        {
-            Ok(projects) => projects,
-            Err(error) => {
-                tracing::warn!(%error, "failed to load projects for prompt injection");
-                return None;
-            }
-        };
-
-        if projects.is_empty() {
-            return None;
-        }
-
-        let mut contexts = Vec::with_capacity(projects.len());
-        for project in &projects {
-            let repos = match store.list_repos(&project.id).await {
-                Ok(repos) => repos,
-                Err(error) => {
-                    tracing::warn!(%error, project_id = %project.id, "failed to load repos for project");
-                    Vec::new()
-                }
-            };
-
-            let worktrees = match store.list_worktrees_with_repos(&project.id).await {
-                Ok(worktrees) => worktrees,
-                Err(error) => {
-                    tracing::warn!(%error, project_id = %project.id, "failed to load worktrees for project");
-                    Vec::new()
-                }
-            };
-
-            contexts.push(ProjectContext {
-                name: project.name.clone(),
-                root_path: project.root_path.clone(),
-                description: if project.description.is_empty() {
-                    None
-                } else {
-                    Some(project.description.clone())
-                },
-                tags: project.tags.clone(),
-                repos: repos
-                    .into_iter()
-                    .map(|repo| ProjectRepoContext {
-                        name: repo.name.clone(),
-                        path: repo.path.clone(),
-                        default_branch: repo.default_branch.clone(),
-                        remote_url: if repo.remote_url.is_empty() {
-                            None
-                        } else {
-                            Some(repo.remote_url.clone())
-                        },
-                    })
-                    .collect(),
-                worktrees: worktrees
-                    .into_iter()
-                    .map(|worktree_with_repo| ProjectWorktreeContext {
-                        name: worktree_with_repo.worktree.name.clone(),
-                        path: worktree_with_repo.worktree.path.clone(),
-                        branch: worktree_with_repo.worktree.branch.clone(),
-                        repo_name: worktree_with_repo.repo_name.clone(),
-                    })
-                    .collect(),
-            });
-        }
-
-        match prompt_engine.render_projects_context(contexts) {
-            Ok(rendered) => {
-                let rendered = rendered.trim().to_string();
-                if rendered.is_empty() {
-                    None
-                } else {
-                    Some(rendered)
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to render projects context");
-                None
-            }
-        }
+        crate::agent::channel_dispatch::build_project_context(&self.deps, prompt_engine).await
     }
 
     /// Build a snapshot of the system configuration for status block injection.
@@ -2321,9 +2359,12 @@ impl Channel {
         let org_context = self.build_org_context(&prompt_engine);
         let hierarchical_rules = self.build_hierarchical_rules(&prompt_engine);
 
-        let adapter_prompt = self
-            .current_adapter()
-            .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
+        let adapter_prompt = if self.state.cron_outcome.is_some() {
+            prompt_engine.render_channel_adapter_prompt("cron")
+        } else {
+            self.current_adapter()
+                .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter))
+        };
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
@@ -2385,6 +2426,7 @@ impl Channel {
         let routing = rc.routing.load();
         let model_name = routing.resolve(ProcessType::Channel, None).to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
+        let direct_mode = self.resolved_settings.delegation == DelegationMode::Direct;
 
         let system_prompt = prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
@@ -2403,6 +2445,7 @@ impl Channel {
             self.backfill_transcript.clone(),
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            direct_mode,
         )?;
 
         prompt_engine.maybe_append_tool_use_enforcement(
@@ -2456,7 +2499,9 @@ impl Channel {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Add tools based on delegation mode
+        // reply() always sends live — cron channels use set_outcome() for delivery.
+        let reply_target = crate::tools::ReplyTarget::Live(Box::new(routed_sender.clone()));
+
         match self.resolved_settings.delegation {
             DelegationMode::Standard => {
                 // Current behavior - standard channel tools only
@@ -2464,6 +2509,7 @@ impl Channel {
                     &self.tool_server,
                     self.state.clone(),
                     routed_sender,
+                    reply_target,
                     conversation_id,
                     skip_flag.clone(),
                     replied_flag.clone(),
@@ -2472,6 +2518,7 @@ impl Channel {
                     allow_direct_reply,
                     adapter.map(|s| s.to_string()),
                     slack_thread_ts.as_deref(),
+                    self.state.cron_outcome.clone(),
                 )
                 .await
                 {
@@ -2485,6 +2532,7 @@ impl Channel {
                     &self.tool_server,
                     self.state.clone(),
                     routed_sender,
+                    reply_target,
                     conversation_id,
                     skip_flag.clone(),
                     replied_flag.clone(),
@@ -2493,6 +2541,7 @@ impl Channel {
                     allow_direct_reply,
                     adapter.map(|s| s.to_string()),
                     slack_thread_ts.as_deref(),
+                    self.state.cron_outcome.clone(),
                 )
                 .await
                 {
@@ -2519,9 +2568,13 @@ impl Channel {
                 routing.resolve(ProcessType::Channel, None)
             };
 
+        let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::llm::usage::UsageAccumulator::new(),
+        ));
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
-            .with_routing((**routing).clone());
+            .with_routing((**routing).clone())
+            .with_accumulator(usage_accumulator.clone());
 
         let agent = AgentBuilder::new(model)
             .preamble(system_prompt)
@@ -2622,10 +2675,30 @@ impl Channel {
             )
         };
 
-        if let Err(error) =
-            crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
-        {
+        let remove_result = match self.resolved_settings.delegation {
+            DelegationMode::Direct => {
+                crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
+            }
+            DelegationMode::Standard => {
+                crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+            }
+        };
+        if let Err(error) = remove_result {
             tracing::warn!(%error, "failed to remove channel tools");
+        }
+
+        // Flush accumulated token usage to the database.
+        let acc = usage_accumulator.lock().await;
+        if let Err(error) = acc
+            .flush(
+                &self.deps.sqlite_pool,
+                &self.deps.agent_id,
+                "channel",
+                Some(conversation_id),
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to flush token usage");
         }
 
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
@@ -2849,11 +2922,15 @@ impl Channel {
                             if extracted.is_some() {
                                 tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                             }
-                            self.state.conversation_logger.log_bot_message_with_name(
-                                &self.state.channel_id,
-                                &final_text,
-                                Some(self.agent_display_name()),
-                            );
+                            let tool_calls_json = self.drain_tool_calls_json().await;
+                            self.state
+                                .conversation_logger
+                                .log_bot_message_with_metadata(
+                                    &self.state.channel_id,
+                                    &final_text,
+                                    Some(self.agent_display_name()),
+                                    tool_calls_json,
+                                );
                             self.send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
                         }
@@ -2979,11 +3056,12 @@ impl Channel {
                     // Regular branch: accumulate result for the next retrigger.
                     // The result text will be embedded directly in the retrigger
                     // message so the LLM knows exactly which process produced it.
+                    let branch_success = !conclusion.starts_with("Branch cancelled:");
                     self.pending_results.push(PendingResult {
                         process_type: "branch",
                         process_id: branch_id.to_string(),
                         result: conclusion.clone(),
-                        success: true,
+                        success: branch_success,
                     });
                     should_retrigger = true;
 
@@ -2996,7 +3074,8 @@ impl Channel {
 
                     // Truncate for working memory — full conclusion lives in branch_runs.
                     let summary = if conclusion.len() > 200 {
-                        format!("{}...", &conclusion[..200])
+                        let boundary = conclusion.floor_char_boundary(200);
+                        format!("{}...", &conclusion[..boundary])
                     } else {
                         conclusion.clone()
                     };
@@ -3142,7 +3221,10 @@ impl Channel {
         // Multiple branch/worker completions within the debounce window are
         // coalesced into a single retrigger to prevent message spam.
         if should_retrigger {
-            if self.retrigger_count >= MAX_RETRIGGERS_PER_TURN {
+            // Cron channels have no user to send a reset message, so the cap would
+            // permanently stall multi-worker jobs. The job timeout is the natural bound.
+            let cap_applies = self.state.cron_outcome.is_none();
+            if cap_applies && self.retrigger_count >= MAX_RETRIGGERS_PER_TURN {
                 tracing::warn!(
                     channel_id = %self.id,
                     retrigger_count = self.retrigger_count,
@@ -3621,7 +3703,7 @@ fn should_send_discord_quiet_mode_ping_ack(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct QuietModeFallbackState {
+struct ObserveModeFallbackState {
     is_suppressed: bool,
     is_retrigger: bool,
     invoked_by_command: bool,
@@ -3633,7 +3715,7 @@ struct QuietModeFallbackState {
 
 fn should_send_quiet_mode_fallback(
     message: &InboundMessage,
-    state: QuietModeFallbackState,
+    state: ObserveModeFallbackState,
 ) -> bool {
     state.is_suppressed
         && !state.is_retrigger
@@ -3663,7 +3745,7 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        QuietModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
+        ObserveModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
         recv_channel_event, should_process_event_for_channel,
         should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
@@ -3891,7 +3973,7 @@ mod tests {
 
         assert!(should_send_quiet_mode_fallback(
             &message,
-            QuietModeFallbackState {
+            ObserveModeFallbackState {
                 is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
@@ -3903,7 +3985,7 @@ mod tests {
         ));
         assert!(!should_send_quiet_mode_fallback(
             &message,
-            QuietModeFallbackState {
+            ObserveModeFallbackState {
                 is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
@@ -3915,7 +3997,7 @@ mod tests {
         ));
         assert!(!should_send_quiet_mode_fallback(
             &message,
-            QuietModeFallbackState {
+            ObserveModeFallbackState {
                 is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
@@ -3927,7 +4009,7 @@ mod tests {
         ));
         assert!(!should_send_quiet_mode_fallback(
             &message,
-            QuietModeFallbackState {
+            ObserveModeFallbackState {
                 is_suppressed: true,
                 is_retrigger: true,
                 invoked_by_command: false,

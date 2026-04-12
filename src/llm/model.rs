@@ -24,6 +24,7 @@ use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompleti
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 const STREAM_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
 
@@ -60,6 +61,7 @@ pub struct SpacebotModel {
     agent_id: Option<String>,
     process_type: Option<String>,
     worker_type: Option<String>,
+    usage_accumulator: Option<Arc<Mutex<crate::llm::usage::UsageAccumulator>>>,
 }
 
 impl SpacebotModel {
@@ -93,6 +95,15 @@ impl SpacebotModel {
     /// Attach a worker type label for metrics (e.g. "builtin", "opencode").
     pub fn with_worker_type(mut self, worker_type: impl Into<String>) -> Self {
         self.worker_type = Some(worker_type.into());
+        self
+    }
+
+    /// Attach a shared usage accumulator for token tracking.
+    pub fn with_accumulator(
+        mut self,
+        accumulator: Arc<Mutex<crate::llm::usage::UsageAccumulator>>,
+    ) -> Self {
+        self.usage_accumulator = Some(accumulator);
         self
     }
 
@@ -355,6 +366,7 @@ impl CompletionModel for SpacebotModel {
             agent_id: None,
             process_type: None,
             worker_type: None,
+            usage_accumulator: None,
         }
     }
 
@@ -568,6 +580,24 @@ impl CompletionModel for SpacebotModel {
                         .inc();
                 }
             }
+        }
+
+        // Record usage in the accumulator (if attached).
+        if let Some(ref accumulator) = self.usage_accumulator
+            && let Ok(ref response) = result
+        {
+            let body = &response.raw_response.body;
+            let extended = if self.provider == "anthropic" {
+                crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+            } else {
+                crate::llm::usage::ExtendedUsage::from_openai_body(body)
+            };
+            let cost =
+                crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
+            accumulator
+                .lock()
+                .await
+                .add(extended, &self.full_model_name, &self.provider, cost);
         }
 
         result
@@ -1127,6 +1157,9 @@ impl SpacebotModel {
         }
 
         let provider_label = provider_label.to_string();
+        let stream_accumulator = self.usage_accumulator.clone();
+        let stream_model_name = self.full_model_name.clone();
+        let stream_provider = self.provider.clone();
         let stream = async_stream::stream! {
             let mut stream = response.bytes_stream();
             let mut block_buffer = String::new();
@@ -1253,6 +1286,7 @@ impl SpacebotModel {
                     }
                 };
 
+                record_streaming_usage(&stream_accumulator, &response_body, &stream_model_name, &stream_provider).await;
                 yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                     body: response_body,
                     usage: Some(parsed_response.usage),
@@ -1285,6 +1319,7 @@ impl SpacebotModel {
             if let Some(message_id) = parsed_response.message_id {
                 yield Ok(RawStreamingChoice::MessageId(message_id));
             }
+            record_streaming_usage(&stream_accumulator, &response_body, &stream_model_name, &stream_provider).await;
             yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                 body: response_body,
                 usage: Some(parsed_response.usage),
@@ -1538,6 +1573,9 @@ impl SpacebotModel {
         }
 
         let provider_label = provider_label.to_string();
+        let stream_accumulator = self.usage_accumulator.clone();
+        let stream_model_name = self.full_model_name.clone();
+        let stream_provider = self.provider.clone();
         let stream = async_stream::stream! {
             let mut stream = response.bytes_stream();
             let mut block_buffer = String::new();
@@ -1650,6 +1688,7 @@ impl SpacebotModel {
                     }
                 };
 
+                record_streaming_usage(&stream_accumulator, &response_body, &stream_model_name, &stream_provider).await;
                 yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                     body: response_body,
                     usage: Some(parsed_response.usage),
@@ -1683,6 +1722,7 @@ impl SpacebotModel {
                 yield Ok(RawStreamingChoice::MessageId(message_id));
             }
 
+            record_streaming_usage(&stream_accumulator, &response_body, &stream_model_name, &stream_provider).await;
             yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                 body: response_body,
                 usage: Some(parsed_response.usage),
@@ -1693,6 +1733,24 @@ impl SpacebotModel {
     }
 }
 // --- Helpers ---
+
+/// Record usage from a streaming response's raw body into the accumulator.
+async fn record_streaming_usage(
+    accumulator: &Option<Arc<Mutex<crate::llm::usage::UsageAccumulator>>>,
+    body: &serde_json::Value,
+    model_name: &str,
+    provider: &str,
+) {
+    if let Some(acc) = accumulator {
+        let extended = if provider == "anthropic" {
+            crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+        } else {
+            crate::llm::usage::ExtendedUsage::from_openai_body(body)
+        };
+        let cost = crate::llm::pricing::estimate_cost_extended(model_name, &extended);
+        acc.lock().await.add(extended, model_name, provider, cost);
+    }
+}
 
 /// Reverse-map Claude Code canonical tool names back to the original names
 /// from the request's tool definitions.
@@ -3438,6 +3496,15 @@ fn parse_openai_responses_response(
         .as_array()
         .ok_or_else(|| CompletionError::ResponseError("missing output array".into()))?;
 
+    if output_items.is_empty() {
+        tracing::warn!(
+            provider = %provider_label,
+            status = body["status"].as_str().unwrap_or("unknown"),
+            body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
+            "responses API returned empty output array — dumping full body"
+        );
+    }
+
     let mut assistant_content = Vec::new();
     let mut fallback_text_parts = Vec::new();
 
@@ -3547,6 +3614,28 @@ fn parse_openai_responses_sse_response(
     response_text: &str,
     provider_label: &str,
 ) -> Result<serde_json::Value, CompletionError> {
+    // The `response.completed` event may have an empty `output` array when the
+    // ChatGPT Responses API streams content incrementally.  We accumulate
+    // output items from the delta events and patch them into the completed
+    // response if needed.
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    // output_index → { item skeleton + accumulated text parts keyed by content_index }
+    struct OutputItemAcc {
+        /// The full item snapshot from `response.output_item.done`, if received.
+        done_snapshot: Option<Value>,
+        /// Accumulated text per content_index from delta events.
+        text_parts: BTreeMap<usize, String>,
+        /// Item type from `response.output_item.added`.
+        item_type: Option<String>,
+        /// The skeleton from `response.output_item.added`.
+        added_skeleton: Option<Value>,
+    }
+
+    let mut output_acc: BTreeMap<usize, OutputItemAcc> = BTreeMap::new();
+    let mut completed_response: Option<Value> = None;
+
     for line in response_text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -3556,21 +3645,101 @@ fn parse_openai_responses_sse_response(
             continue;
         }
 
-        let Ok(event_body) = serde_json::from_str::<serde_json::Value>(data) else {
+        let Ok(event_body) = serde_json::from_str::<Value>(data) else {
             continue;
         };
 
-        if event_body["type"].as_str() == Some("response.completed")
-            && let Some(response) = event_body.get("response")
-        {
-            return Ok(response.clone());
+        match event_body["type"].as_str() {
+            Some("response.output_item.added") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let item = &event_body["item"];
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry.item_type = item["type"].as_str().map(String::from);
+                entry.added_skeleton = Some(item.clone());
+            }
+            Some("response.output_text.delta") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let content_idx = event_body["content_index"].as_u64().unwrap_or(0) as usize;
+                let delta = event_body["delta"].as_str().unwrap_or("");
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry
+                    .text_parts
+                    .entry(content_idx)
+                    .or_default()
+                    .push_str(delta);
+            }
+            Some("response.output_item.done") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry.done_snapshot = event_body.get("item").cloned();
+            }
+            Some("response.function_call_arguments.delta") => {
+                // Function call deltas are handled by output_item.done snapshot
+            }
+            Some("response.completed") => {
+                completed_response = event_body.get("response").cloned();
+            }
+            _ => {}
         }
     }
 
-    Err(CompletionError::ProviderError(format!(
-        "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
-        truncate_body(response_text)
-    )))
+    let mut response = completed_response.ok_or_else(|| {
+        CompletionError::ProviderError(format!(
+            "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
+            truncate_body(response_text)
+        ))
+    })?;
+
+    // If the completed response has an empty output array, reconstruct from
+    // accumulated SSE events.
+    let output_is_empty = response["output"]
+        .as_array()
+        .is_none_or(|arr| arr.is_empty());
+
+    if output_is_empty && !output_acc.is_empty() {
+        let mut reconstructed: Vec<Value> = Vec::new();
+
+        for (_idx, acc) in output_acc {
+            // Prefer the done snapshot (complete item); fall back to
+            // reconstructing from deltas.
+            if let Some(snapshot) = acc.done_snapshot {
+                reconstructed.push(snapshot);
+            } else if !acc.text_parts.is_empty() {
+                // Build a message output item from accumulated text
+                let full_text: String = acc.text_parts.into_values().collect();
+                let content = serde_json::json!([{
+                    "type": "output_text",
+                    "text": full_text,
+                }]);
+                let mut item = acc
+                    .added_skeleton
+                    .unwrap_or_else(|| serde_json::json!({"type": "message", "role": "assistant"}));
+                item["content"] = content;
+                reconstructed.push(item);
+            }
+        }
+
+        if !reconstructed.is_empty() {
+            response["output"] = Value::Array(reconstructed);
+        }
+    }
+
+    Ok(response)
 }
 
 fn parse_openai_error_message(response_text: &str) -> Option<String> {

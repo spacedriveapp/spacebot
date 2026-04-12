@@ -5,9 +5,7 @@
 <h1 align="center">Spacebot</h1>
 
 <p align="center">
-  <strong>An AI agent for teams, communities, and multi-user environments.</strong><br/>
-  Thinks, executes, and responds — concurrently, not sequentially.<br/>
-  Never blocks. Never forgets.
+  <strong>The agent harness that runs teams, communities, and companies.</strong>
 </p>
 
 <p align="center">
@@ -21,278 +19,55 @@
     <img src="https://img.shields.io/discord/949090953497567312?label=Discord&color=5865F2" />
   </a>
 
-  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/spacedriveapp/spacebot)
+  <a href="https://deepwiki.com/spacedriveapp/spacebot">
+    <img src="https://img.shields.io/static/v1?label=Ask&message=DeepWiki&color=5B6EF7" />
+  </a>
 </p>
 
 <p align="center">
   <a href="https://spacebot.sh"><strong>spacebot.sh</strong></a> •
   <a href="#how-it-works">How It Works</a> •
-  <a href="#architecture">Architecture</a> •
+  <a href="#goals-and-tasks">Goals & Tasks</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#tech-stack">Tech Stack</a> •
+  <a href="#spacebot--spacedrive">Spacedrive</a> •
   <a href="https://docs.spacebot.sh">Docs</a>
 </p>
 
 > **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord, Slack, Telegram, or Twitch, configure your agent, and go. No self-hosting required.
 
 <p align="center">
-  <img src=".github/spacebot-ui.jpg" alt="Spacebot UI" />
+  <img src=".github/spacebot-ui.webp" alt="Spacebot UI" />
 </p>
+
+---
+
+Spacebot is opinionated agent infrastructure, built for teams and usable by anyone. **State belongs in structured storage, not markdown files the LLM manages.** Memory lives in a typed graph in SQLite. Autonomy runs on a task state machine linked to goals, not a heartbeat.json. The LLM reasons. The system holds state.
+
+**It gets smarter the more you use it.** After complex tasks, the agent captures what it learned as reusable skills. After conversations go idle, a background process silently saves skills and memories worth keeping. Every session builds on the last — without any user action.
+
+It works out of the box and scales from one person to a whole community.
 
 ---
 
 ## The Problem
 
-Most AI agent frameworks run everything in a single session. One LLM thread handles conversation, thinking, tool execution, memory retrieval, and context compaction — all in one loop. When it's doing work, it can't talk to you. When it's compacting, it goes dark. When it retrieves memories, raw results pollute the context with noise.
-
-[OpenClaw](https://github.com/anomalyco/openclaw) _does_ have subagents, but handles them poorly and there's no enforcement to their use. The session is the bottleneck for everything.
+Most AI agent frameworks run everything in a single session. One LLM thread handles conversation, thinking, tool execution, memory retrieval, and context compaction, all in one loop. When it's doing work, it can't talk to you. When it's compacting, it goes dark. When it retrieves memories, raw results pollute the context with noise.
 
 Spacebot splits the monolith into specialized processes that only do one thing, and delegate everything else.
 
 ---
 
-## Built for Teams and Communities
+## Built for Teams
 
-Most AI agents are built for one person in one conversation. Spacebot is built for many people working together — a Discord community with hundreds of active members, a Slack workspace with teams running parallel workstreams, a Telegram group coordinating across time zones.
+No other agent harness handles concurrent multi-user conversations, shared memory across channels, and true process-level concurrency. A Discord community with hundreds of active members, a Slack workspace running parallel workstreams, a Telegram group coordinating across time zones. Spacebot handles all of it without any user waiting on another.
 
-This is why the architecture exists. A single-threaded agent breaks the moment two people talk at once. Spacebot's delegation model means it can think about User A's question, execute a task for User B, and respond to User C's small talk — all at the same time, without any of them waiting on each other.
+Solo users get the same infrastructure. Better memory, better concurrency, better structure. Everything teams rely on, for one person.
 
-**For communities** — drop Spacebot into a Discord server. It handles concurrent conversations across channels and threads, remembers context about every member, and does real work (code, research, file operations) without going dark. Fifty people can interact with it simultaneously.
+**For communities:** drop Spacebot into a Discord server. It handles concurrent conversations across channels and threads, remembers context about every member, and does real work without going dark. Fifty people can interact simultaneously. A message coalescing system detects rapid-fire bursts, batches them into a single turn, and lets the agent read the room.
 
-**For fast-moving channels** — when messages are flying in, Spacebot doesn't try to respond to every single one. A message coalescing system detects rapid-fire bursts, batches them into a single turn, and lets the LLM read the room — it picks the most interesting thing to engage with, or stays quiet if there's nothing to add. Configurable debounce timing, automatic DM bypass, and the LLM always knows which messages arrived together.
+**For teams:** connect it to Slack. Each channel gets a dedicated conversation with shared memory. One engineer gets a deep coding session while another gets a quick answer. Workers handle heavy lifting in the background while the channel stays responsive.
 
-**For teams** — connect it to Slack. Each channel gets a dedicated conversation with shared memory. Spacebot can run long coding sessions for one engineer while answering quick questions from another. Workers handle the heavy lifting in the background while the channel stays responsive.
-
-**For multi-agent setups** — run multiple agents on one instance. A community bot with a friendly personality on Discord, a no-nonsense dev assistant on Slack, and a research agent handling background tasks. Each with its own identity, memory, and security permissions. One binary, one deploy.
-
-### Deploy Your Way
-
-| Method                                 | What You Get                                                                                |
-| -------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **[spacebot.sh](https://spacebot.sh)** | One-click hosted deploy. Connect your platforms, configure your agent, done.                |
-| **Self-hosted**                        | Single Rust binary. No Docker, no server dependencies, no microservices. Clone, build, run. |
-| **Docker**                             | Container image with everything included. Mount a volume for persistent data.               |
-
----
-
-## Capabilities
-
-### Task Execution
-
-Workers come loaded with tools for real work:
-
-- **Shell** — run arbitrary commands with configurable timeouts
-- **File** — read, write, and list files with auto-created directories
-- **Exec** — run specific programs with arguments and environment variables
-- **[OpenCode](https://opencode.ai)** — spawn a full coding agent as a persistent worker with codebase exploration, LSP awareness, and deep context management
-- **Browser** — headless Chrome automation with an accessibility-tree ref system. Navigate, click, type, screenshot, manage tabs — the LLM addresses elements by short refs (`e0`, `e1`) instead of fragile CSS selectors
-- **[Brave](https://brave.com/search/api/) web search** — search the web with freshness filters, localization, and configurable result count
-
-### Messaging
-
-Native adapters for Discord, Slack, Telegram, Twitch, and Webchat with full platform feature support:
-
-- **Message coalescing** — rapid-fire messages are batched into a single LLM turn with timing context, so the agent reads the room instead of spamming replies
-- **File attachments** — send and receive files, images, and documents
-- **Rich messages** — embeds/cards, interactive buttons, select menus, and polls (Discord). Block Kit messages and slash commands (Slack)
-- **Threading** — automatic thread creation for long conversations
-- **Reactions** — emoji reactions on messages
-- **Typing indicators** — visual feedback while the agent is thinking
-- **Message history backfill** — reads recent conversation context on first message
-- **Per-channel permissions** — guild, channel, and DM-level access control, hot-reloadable
-- **Webchat** — embeddable portal chat with SSE streaming, per-agent session isolation
-
-### Memory
-
-Not markdown files. Not _unstructured_ blocks in a vector database. Spacebot's memory is a typed, graph-connected knowledge system — and this opinionated structure is why agents are productive out of the box.
-
-Every memory has a type, an importance score, and graph edges connecting it to related memories. The agent doesn't just "remember things" — it knows the difference between a fact it learned, a decision that was made, a goal it's working toward, and a preference the user expressed. This structure is what lets the cortex synthesize a useful briefing instead of dumping raw search results into context.
-
-- **Eight memory types** — Fact, Preference, Decision, Identity, Event, Observation, Goal, Todo
-- **Graph edges** — RelatedTo, Updates, Contradicts, CausedBy, PartOf
-- **Hybrid recall** — vector similarity + full-text search merged via Reciprocal Rank Fusion
-- **Memory import** — dump files into the `ingest/` folder and Spacebot extracts structured memories automatically. Supports text, markdown, and PDF files. Migrating from OpenClaw? Drop your markdown memory files in and walk away.
-- **Cross-channel recall** — branches can read transcripts from other conversations
-- **Memory bulletin** — the cortex generates a periodic briefing of the agent's knowledge, injected into every conversation
-- **Warmup readiness contract** — branch/worker/cron dispatch checks `ready_for_work` (warm state + embedding ready + fresh bulletin), records cold-dispatch metrics, and triggers background forced warmup without blocking channels
-
-### Scheduling
-
-Cron jobs created and managed from conversation or config:
-
-- **Natural scheduling** — "check my inbox every 30 minutes" becomes a cron job with a delivery target
-- **Strict wall-clock schedules** — use cron expressions for exact local-time execution (for example, `0 9 * * *` for 9:00 every day)
-- **Legacy interval compatibility** — existing `interval_secs` jobs still run and remain configurable
-- **Configurable timeouts** — per-job `timeout_secs` to cap execution time (defaults to 120s)
-- **Active hours** — restrict jobs to specific time windows (supports midnight wrapping)
-- **Circuit breaker** — auto-disables after 3 consecutive failures
-- **Full agent capabilities** — each job gets a fresh channel with branching and workers
-
-### Model Routing
-
-Four-level routing system that picks the right model for every LLM call. Structural routing handles the common case — process types and task types are known at spawn time. Prompt-level routing handles the rest, scoring user messages to downgrade simple requests to cheaper models automatically.
-
-- **Process-type defaults** — channels get the best conversational model, workers get something fast and cheap, compactors get the cheapest tier
-- **Task-type overrides** — a coding worker upgrades to a stronger model, a summarization worker stays cheap
-- **Prompt complexity scoring** — lightweight keyword scorer classifies user messages into three tiers (light/standard/heavy) and routes to the cheapest model that can handle it. Scores the user message only — system prompts and context are excluded. <1ms, no external calls
-- **Fallback chains** — when a model returns 429 or 502, the next model in the chain takes over automatically
-- **Rate limit tracking** — 429'd models are deprioritized across all agents for a configurable cooldown
-- **Per-agent routing profiles** — eco, balanced, or premium presets that shift what models each tier maps to. A budget agent routes simple messages to free models while a premium agent stays on opus
-
-```toml
-[defaults.routing]
-channel = "anthropic/claude-sonnet-4"
-worker = "anthropic/claude-haiku-4.5"
-
-[defaults.routing.task_overrides]
-coding = "anthropic/claude-sonnet-4"
-
-[defaults.routing.prompt_routing]
-enabled = true
-process_types = ["channel", "branch"]
-
-[defaults.routing.fallbacks]
-"anthropic/claude-sonnet-4" = ["anthropic/claude-haiku-4.5"]
-```
-
-**Z.ai (GLM) example** — use GLM models directly with a [GLM Coding Plan](https://z.ai) subscription:
-
-```toml
-[llm]
-zhipu_key = "env:ZHIPU_API_KEY"
-
-[defaults.routing]
-channel = "zhipu/glm-4.7"
-worker = "zhipu/glm-4.7"
-
-[defaults.routing.task_overrides]
-coding = "zhipu/glm-4.7"
-```
-
-**Ollama example** — run against a local Ollama instance:
-
-```toml
-[llm]
-ollama_base_url = "http://localhost:11434"
-
-[defaults.routing]
-channel = "ollama/gemma3"
-worker = "ollama/gemma3"
-
-[defaults.routing.task_overrides]
-coding = "ollama/qwen3"
-```
-
-**Custom provider example** — add any OpenAI-compatible or Anthropic-compatible endpoint:
-
-```toml
-[llm.provider.my-provider]
-api_type = "openai_completions"  # or "openai_chat_completions", "openai_responses", "anthropic"
-base_url = "https://my-llm-host.example.com"
-api_key = "env:MY_PROVIDER_KEY"
-
-[defaults.routing]
-channel = "my-provider/my-model"
-```
-
-**Azure OpenAI Service** — configure Azure OpenAI deployments:
-
-```toml
-[llm.provider.azure]
-api_type = "azure"
-base_url = "https://{resource-name}.openai.azure.com"
-api_key = "env:AZURE_API_KEY"
-api_version = "2024-06-01"  # required
-deployment = "gpt-4o"        # required — your deployment name
-
-[defaults.routing]
-channel = "azure/gpt-4o"
-worker = "azure/gpt-4o-mini"
-```
-
-Important notes:
-- `base_url` must end with `.openai.azure.com`
-- `api_version` and `deployment` are required fields
-- API key authentication is handled automatically via the `api-key` header
-- For Azure AI Foundry (accessing Anthropic, Llama, or other models through Azure's model catalog), use `api_type = "openai_chat_completions"` instead and configure the deployment endpoint accordingly
-
-Additional built-in providers include **Kilo Gateway**, **OpenCode Go**, **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `kilo_key`, `opencode_go_key`, `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
-
-### Skills
-
-Extensible skill system integrated with [skills.sh](https://skills.sh):
-
-- **skills.sh registry** — install any skill from the public ecosystem with one command
-- **CLI management** — `spacebot skill add owner/repo` to install, list, remove, and inspect skills
-- **Worker injection** — skills are injected into worker system prompts for specialized tasks
-- **Bundled resources** — scripts, references, and assets packaged with skills
-- **OpenClaw compatible** — drop in existing OpenClaw skills, or any skill from skills.sh
-
-**Install skills from the registry:**
-
-```bash
-spacebot skill add vercel-labs/agent-skills
-spacebot skill add anthropics/skills/pdf
-spacebot skill list
-```
-
-### MCP Integration
-
-Connect workers to external [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) servers for arbitrary tool access -- databases, APIs, SaaS products, custom integrations -- without native Rust implementations:
-
-- **Per-agent config** — each agent declares its own MCP servers in `config.toml`
-- **Both transports** — stdio (subprocess) for local tools, streamable HTTP for remote servers
-- **Automatic tool discovery** — tools are discovered via the MCP protocol and registered on worker ToolServers with namespaced names (`{server}_{tool}`)
-- **Automatic retry** — failed connections retry in the background with exponential backoff (5s initial, 60s cap, 12 attempts). A broken server never blocks agent startup
-- **Hot-reloadable** — add, remove, or change servers in config and they reconcile live
-- **API management** — full CRUD API under `/api/mcp/` for managing server definitions and monitoring connection status programmatically
-
-```toml
-[[mcp_servers]]
-name = "filesystem"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
-
-[[mcp_servers]]
-name = "sentry"
-transport = "http"
-url = "https://mcp.sentry.io"
-headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
-```
-
-### Security
-
-Spacebot runs autonomous LLM processes that execute arbitrary shell commands and spawn subprocesses. Security isn't an add-on — it's a layered system designed so that no single failure exposes credentials or breaks containment.
-
-#### Credential Isolation
-
-Secrets are split into two categories: **system** (LLM API keys, messaging tokens — never exposed to subprocesses) and **tool** (CLI credentials like `GH_TOKEN` — injected as env vars into workers). The category is auto-assigned based on the secret name, or set explicitly.
-
-- **Environment sanitization** — every subprocess starts with a clean environment (`--clearenv` on Linux, `env_clear()` everywhere else). Only safe baseline vars (`PATH`, `HOME`, `LANG`), tool-category secrets, and explicit `passthrough_env` entries are present. In sandbox mode, `HOME` is set to the workspace; in passthrough mode, `HOME` uses the parent environment. System secrets never enter any subprocess
-- **Secret store** — credentials live in a dedicated redb database, not in `config.toml`. Config references secrets by alias (`anthropic_key = "secret:ANTHROPIC_API_KEY"`), so the config file is safe to display, screenshot, or `cat`
-- **Encryption at rest** — optional AES-256-GCM encryption with a master key derived via Argon2id. The master key lives in the OS credential store (macOS Keychain, Linux kernel keyring) — never on disk, never in an env var, never accessible to worker subprocesses
-- **Keyring isolation** — on Linux, workers are spawned with a fresh empty session keyring via `pre_exec`. Even without the sandbox, workers cannot access the parent's kernel keyring where the master key lives
-- **Output scrubbing** — all tool secret values are redacted from worker output before it reaches channels or LLM context. A rolling buffer handles secrets split across stream chunks. Channels see `[REDACTED]`, never raw values
-- **Worker secret management** — workers can store credentials they obtain (API keys from account creation, OAuth tokens) via the `secret_set` tool. Stored secrets are immediately available to future workers
-
-#### Process Containment
-
-- **Process sandbox** — shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the entire filesystem is read-only except the agent's workspace and configured writable paths. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. Kernel-enforced, not string-filtered
-- **Dynamic sandbox mode** — sandbox settings are hot-reloadable. Toggle via the dashboard or API without restarting the agent
-- **Workspace isolation** — file tools canonicalize all paths and reject anything outside the agent's workspace. Symlinks that escape are blocked
-- **Leak detection** — secret-pattern checks are enforced at channel egress (`reply` and plaintext fallback output) across plaintext, URL-encoded, base64, and hex encodings. Outbound text matching a secret pattern is blocked; worker tool outputs no longer hard-fail the worker
-- **Library injection blocking** — the exec tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, etc.) that could hijack child process loading
-- **SSRF protection** — the browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
-- **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, and `USER.md` are blocked at the application level
-- **Durable binary storage** — `tools/bin` directory on PATH survives hosted rollouts. Workers are instructed to install binaries there instead of ephemeral package manager locations
-
-```toml
-[agents.sandbox]
-mode = "enabled"                              # "enabled" (default) or "disabled"
-writable_paths = ["/home/user/projects/myapp"] # additional writable dirs beyond workspace
-passthrough_env = ["CUSTOM_VAR"]              # forward specific env vars to workers
-```
+**For multi-agent setups:** run multiple agents on one instance. A community bot on Discord, a dev assistant on Slack, a research agent handling background tasks. Each with its own identity, memory, and security permissions. One binary, one deploy.
 
 ---
 
@@ -300,75 +75,15 @@ passthrough_env = ["CUSTOM_VAR"]              # forward specific env vars to wor
 
 Five process types. Each does one job.
 
-### Channels
+**Channels** are the user-facing LLM process. One per conversation, with soul, identity, and personality. A channel never executes tasks or searches memories directly. It branches to think, spawns workers to act, and stays responsive.
 
-The user-facing LLM process — the ambassador to the human. One per conversation (Discord thread, Slack channel, Telegram DM, etc). Has soul, identity, and personality. Talks to the user. Delegates everything else.
+**Branches** fork from the channel's context to think. They have the full conversation history and run concurrently. The channel sees the conclusion, not the working.
 
-A channel does **not**: execute tasks directly, search memories itself, or do any heavy tool work. It is always responsive — never blocked by work, never frozen by compaction.
+**Workers** are independent processes. Each gets a specific task, a focused prompt, and task-appropriate tools, with no conversation context. Fire-and-forget for one-shot tasks, or interactive for longer sessions where follow-up routes to the active worker.
 
-When it needs to think, it branches. When it needs work done, it spawns a worker.
+**The Compactor** is a programmatic monitor (not an LLM) that watches context size per channel and triggers compaction before the channel fills up. Compaction workers run alongside without blocking.
 
-### Branches
-
-A fork of the channel's context that goes off to think. Has the channel's full conversation history — same context, same memories, same understanding. Operates independently. The channel never sees the working, only the conclusion.
-
-```
-User A: "what do you know about X?"
-    → Channel branches (branch-1)
-
-User B: "hey, how's it going?"
-    → Channel responds directly: "Going well! Working on something for A."
-
-Branch-1 resolves: "Here's what I found about X: [curated memories]"
-    → Channel sees the branch result on its next turn
-    → Channel responds to User A with the findings
-```
-
-Multiple branches run concurrently. First done, first incorporated. Each branch forks from the channel's context at creation time, like a git branch.
-
-### Workers
-
-Independent processes that do jobs. Get a specific task, a focused system prompt, and task-appropriate tools. No channel context, no soul, no personality.
-
-**Fire-and-forget** — do a job and return a result. Summarization, file operations, one-shot tasks.
-
-**Interactive** — long-running, accept follow-up input from the channel. Coding sessions, multi-step tasks.
-
-```
-User: "refactor the auth module"
-    → Branch spawns interactive coding worker
-    → Branch returns: "Started a coding session for the auth refactor"
-
-User: "actually, update the tests too"
-    → Channel routes message to active worker
-    → Worker receives follow-up, continues with its existing context
-```
-
-Workers are pluggable. Any process that accepts a task and reports status can be a worker.
-
-**Built-in workers** come with shell, file, exec, and browser tools out of the box. They can write code, run commands, manage files, browse the web — enough to build a whole project from scratch.
-
-**[OpenCode](https://opencode.ai) workers** are a built-in integration that spawns a full OpenCode coding agent as a persistent subprocess. OpenCode brings its own codebase exploration, LSP awareness, and context management — purpose-built for deep coding sessions. When a user asks for a complex refactor or a new feature, the channel can spawn an OpenCode worker that maintains a rich understanding of the codebase across the entire session. Both built-in and OpenCode workers support interactive follow-ups.
-
-### The Compactor
-
-Not an LLM process. A programmatic monitor per channel that watches context size and triggers compaction before the channel fills up.
-
-| Threshold | Action                                       |
-| --------- | -------------------------------------------- |
-| **>80%**  | Background compaction (summarize oldest 30%) |
-| **>85%**  | Aggressive compaction (summarize oldest 50%) |
-| **>95%**  | Emergency truncation (hard drop, no LLM)     |
-
-Compaction workers run alongside the channel without blocking it. Summaries stack chronologically at the top of the context window.
-
-### The Cortex
-
-The agent's inner monologue. The only process that sees across all channels, workers, and branches simultaneously. Generates a **memory bulletin** — a periodically refreshed, LLM-curated briefing of the agent's knowledge injected into every conversation. Supervises running processes (kills hanging workers, cleans up stale branches). Maintains the memory graph (decay, pruning, merging near-duplicates, cross-channel consolidation). Detects patterns across conversations and creates observations. Also provides a direct interactive admin chat with full tool access for system inspection and manual intervention.
-
----
-
-## Architecture
+**The Cortex** sees across all channels, workers, and branches simultaneously. It maintains the agent's working memory — a layered context assembly system that gives every conversation structured awareness of what's happening across the agent. Events are recorded as they happen; intra-day synthesis compresses them into narrative; daily summaries roll up at midnight; knowledge synthesis regenerates when the memory graph changes. The cortex supervises processes and maintains the memory graph.
 
 ```
 User sends message
@@ -383,49 +98,12 @@ User sends message
 Channel context hits 80%
     → Compactor notices
         → Spins off a compaction worker
-            → Worker summarizes old context + extracts memories
+            → Worker summarizes old context
             → Compacted summary swaps in
     → Channel never interrupted
 ```
 
-### What Each Process Gets
-
-| Process   | Type               | Tools                                     | Context                             |
-| --------- | ------------------ | ----------------------------------------- | ----------------------------------- |
-| Channel   | LLM                | Reply, branch, spawn workers, route       | Conversation + compaction summaries |
-| Branch    | LLM                | Memory recall, memory save, spawn workers | Fork of channel's context           |
-| Worker    | Pluggable          | Shell, file, exec, browser (configurable) | Fresh prompt + task description     |
-| Compactor | Programmatic       | Monitor context, trigger workers          | N/A                                 |
-| Cortex    | LLM + Programmatic | Memory, consolidation, system monitor     | Entire agent scope                  |
-
-### Memory System
-
-Memories are structured objects, not files. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB.
-
-- **Eight types** — Fact, Preference, Decision, Identity, Event, Observation, Goal, Todo
-- **Graph edges** — RelatedTo, Updates, Contradicts, CausedBy, PartOf
-- **Hybrid search** — Vector similarity + full-text search, merged via Reciprocal Rank Fusion
-- **Three creation paths** — Branch-initiated, compactor-initiated, cortex-initiated
-- **Importance scoring** — Access frequency, recency, graph centrality. Identity memories exempt from decay.
-
-### Cron Jobs
-
-Scheduled recurring tasks. Each cron job gets a fresh short-lived channel with full branching and worker capabilities.
-
-- Multiple cron jobs run independently on wall-clock schedules (or legacy intervals)
-- Stored in the database, created via config, conversation, or programmatically
-- Cron expressions execute against the resolved cron timezone for predictable local-time firing
-- Persisted `next_run_at` cursor for deterministic restart behavior and missed-run fast-forwarding
-- Claim-before-run scheduling so multi-process or restarted schedulers do not double-fire recurring jobs
-- Run-once jobs use at-most-once claiming semantics and disable before execution starts
-- Per-job `timeout_secs` to cap execution time
-- Circuit breaker auto-disables after 3 consecutive failures
-- Active hours support with midnight wrapping
-- Execution and delivery outcomes are logged separately, with bounded retry/backoff for proactive sends
-
-### Multi-Agent
-
-Each agent is an independent entity with its own workspace, databases, identity files, cortex, and messaging bindings. All agents share one binary, one tokio runtime, and one set of API keys.
+For process capabilities, tool access by type, memory internals, cron, and multi-agent isolation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Boss Agent Hierarchy
 
@@ -516,11 +194,143 @@ All specialized agents follow the same pattern: triage requests before acting, d
 
 ---
 
-### Spacedrive Integration (Future)
+## Goals and Tasks
 
-Spacebot is the AI counterpart to [Spacedrive](https://github.com/spacedriveapp/spacedrive) — an open source cross-platform file manager built on a virtual distributed filesystem. Both projects are independent and fully functional on their own, but complementary by design. Spacedrive indexes files across all your devices, clouds, and platforms with content-addressed identity, semantic search, and local AI analysis. Spacebot brings autonomous reasoning, memory, and task execution. Together, an agent that can think, remember, and act — backed by terabytes of queryable data across every device you own.
+Spacebot is built around a task system. Goals set direction. Tasks carry work. The agent executes, remembers, and improves whether or not you're present.
 
-Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx).
+On a configured interval, the **autonomy channel** wakes with full context: identity, memory, working memory, the complete task state, active goals, and a summary of its last few runs. It picks the most important ready task, executes it with full tool access, and exits.
+
+State lives in tasks. Progress notes go on the task itself. After a crash, the next wake reads task metadata and picks up where things left off. At the end of each run the autonomy channel writes a summary of what happened. On next wake, that summary is the first thing it reads.
+
+**The agent proposes. You decide.** Tasks the autonomy channel creates land in `pending_approval`. Nothing runs autonomously until you approve it.
+
+---
+
+## What It Does
+
+### Memory
+
+Spacebot's memory is a typed, graph-connected knowledge system in SQLite and LanceDB. Every memory has a type, an importance score, and graph edges to related memories. The agent distinguishes facts from decisions, preferences from goals.
+
+- **Eight memory types** — Fact, Preference, Decision, Identity, Event, Observation, Goal, Todo
+- **Graph edges** — RelatedTo, Updates, Contradicts, CausedBy, PartOf
+- **Hybrid recall** — vector similarity + full-text search merged via Reciprocal Rank Fusion
+- **Memory import** — drop files into `ingest/` and Spacebot extracts structured memories automatically. Supports text, markdown, and PDF.
+- **Working memory** — a five-layer context assembly system. Identity context, a structured event log, cross-channel activity map, participant awareness, and change-driven knowledge synthesis. Most layers are programmatic — no LLM calls to stay current
+
+### Skills
+
+Skills are reusable procedures injected into worker system prompts. The agent writes them from experience — and they accumulate automatically over time.
+
+- **Autonomous skill capture** — when a channel identifies a workflow that required multiple steps or problem-solving, it delegates to a branch to write it as a skill. The skill loads into the next session and every session after
+- **Post-conversation reflection** — after a conversation goes idle, a background branch silently reviews the history and saves skills and memories worth keeping. No user action required
+- **AI-assisted authoring** — describe a skill in plain language, the agent generates it and shows a preview before saving
+- **Worker injection** — skills are injected into worker system prompts for specialized tasks
+- **skills.sh registry** — install any skill from the public ecosystem with one command. Compatible with any skill from the public registry
+
+```bash
+spacebot skill add vercel-labs/agent-skills
+spacebot skill add anthropics/skills/pdf
+spacebot skill list
+```
+
+### Scheduling
+
+Cron jobs created and managed from conversation:
+
+- **Natural scheduling** — "check my inbox every 30 minutes" becomes a cron job with a delivery target
+- **Strict wall-clock schedules** — cron expressions for exact local-time execution
+- **Single delivery** — all reply calls are buffered during the run and flushed as one message when the job completes. No mid-run fragments.
+- **Circuit breaker** — auto-disables after 3 consecutive failures
+- **Full agent capabilities** — each job gets a fresh channel with branching and workers
+
+### Task Execution
+
+Workers come loaded with tools for real work:
+
+- **Shell** — run arbitrary commands with configurable timeouts
+- **File** — read, write, and list files with auto-created directories
+- **Browser** — headless Chrome automation with accessibility-tree refs. Navigate, click, type, screenshot, manage tabs
+- **[OpenCode](https://opencode.ai)** — spawn a full coding agent as a persistent worker with codebase exploration, LSP awareness, and deep context management
+- **[Brave](https://brave.com/search/api/) web search** — search the web with freshness filters, localization, and configurable result count
+
+### Messaging
+
+Native adapters for Discord, Slack, Telegram, Twitch, Signal, Mattermost, Email, and Webchat, plus a generic Webhook receiver:
+
+- **Message coalescing** — rapid-fire messages are batched into a single LLM turn with timing context
+- **File attachments** — send and receive files, images, and documents. Attachments are saved to the workspace and recalled by ID
+- **Rich messages** — embeds/cards, interactive buttons, select menus, and polls (Discord). Block Kit and slash commands (Slack)
+- **Email** — IMAP polling + SMTP delivery with TLS, UID-based dedup, allowed sender filtering, and attachment limits. Works with local bridges like Proton Bridge
+- **Webchat** — embeddable portal chat with SSE streaming, per-agent session isolation
+- **Per-channel permissions** — guild, channel, and DM-level access control, hot-reloadable
+
+### Model Routing
+
+Four-level routing picks the right model for every call. Channels get the best conversational model. Workers get something fast and cheap. Coding workers upgrade automatically. Simple user messages are downgraded to cheaper models by a sub-millisecond prompt scorer with no external calls. Voice messages route to a dedicated voice model.
+
+Any OpenAI-compatible or Anthropic-compatible endpoint works, including Ollama for local models, Z.ai GLM models, Azure OpenAI, and custom providers. Built-in support for Kilo Gateway, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Go, and more.
+
+### MCP Integration
+
+Connect workers to external [MCP](https://modelcontextprotocol.io/) servers for arbitrary tool access — databases, APIs, SaaS products, custom integrations. Both stdio and streamable HTTP transports. Automatic tool discovery, hot-reloadable, exponential-backoff retry so a broken server never blocks startup.
+
+### Security
+
+Spacebot runs autonomous LLM processes that execute arbitrary shell commands. Security is layered so no single failure exposes credentials or breaks containment.
+
+**Credential isolation:** secrets split into system credentials (LLM API keys, messaging tokens, never exposed to subprocesses) and tool credentials (CLI tokens injected as env vars into workers). Every subprocess starts with a sanitized environment. System secrets never enter any subprocess.
+
+- **Secret store** — credentials live in a dedicated encrypted database, referenced by alias. Plain config files never contain secrets
+- **Encryption at rest** — optional AES-256-GCM with a master key derived via Argon2id, stored in the OS credential store (macOS Keychain, Linux kernel keyring), never on disk or in an env var
+- **Output scrubbing** — all tool secret values are redacted from worker output before it reaches channels or LLM context. A rolling buffer handles secrets split across stream chunks
+
+**Process containment:** shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the filesystem is read-only except the agent's workspace. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. Enforced at the kernel level.
+
+- **Dynamic sandbox** — toggle sandbox mode via dashboard or API without restarting
+- **Workspace isolation** — file tools reject paths outside the agent's workspace. Symlinks that escape are blocked.
+- **Leak detection** — secret-pattern checks at channel egress across plaintext, URL-encoded, base64, and hex encodings
+- **SSRF protection** — browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
+
+---
+
+## Gets Better with Use
+
+Spacebot builds on itself over time through four specific mechanisms.
+
+**Branches write skills from experience.** When a channel identifies a workflow that required multiple steps, problem-solving, or domain knowledge, it delegates to a branch to capture it as a structured skill. The skill goes to disk and loads into the next session. Future workers get it injected into their system prompt.
+
+**Post-conversation reflection saves what's worth keeping.** After a conversation goes idle, a background branch reviews the history and silently saves skills and memories worth keeping. It runs with a capped turn budget, produces no user-visible output, and fires only when there's enough conversation to learn from.
+
+**Memory deepens with every interaction.** Each conversation adds facts, preferences, decisions, and observations to a typed graph with importance scoring and graph edges. The cortex synthesizes this into a briefing every future conversation benefits from.
+
+**Goals drive autonomous work between conversations.** The autonomy channel wakes on its interval, picks up ready tasks, and works through them. Working memory records what happened, so the next conversation picks up where things left off.
+
+Everything goes through typed tools into structured storage. Nothing drifts.
+
+---
+
+## Spacebot + Spacedrive
+
+Spacebot pairs with [Spacedrive](https://github.com/spacedriveapp/spacedrive), an open-source cross-platform file manager built on a virtual distributed filesystem. Neither requires the other. When paired, Spacebot is the only agent harness with direct integration into a cross-device filesystem.
+
+### What Pairing Enables Today
+
+**Multi-device access:** one Spacebot instance, all your devices. Talk to your agent from your phone while a worker executes on your server. Spacedrive's P2P layer (Iroh/QUIC) routes from every device through the paired node to Spacebot. No separate SDK, no separate auth.
+
+**Remote execution:** workers can target any device in your library. A task that needs your home server's GPU, your work laptop's local repos, or your phone's camera routes through Spacedrive's permission system to the target device. From the agent's perspective, the tool call is identical.
+
+**File system intelligence:** every directory can carry context nodes describing what it contains and what policies apply. When the agent navigates your filesystem it gets that context, not a blind listing.
+
+**Safe data access:** Spacedrive indexes external sources (Gmail, Slack, Obsidian, GitHub, Apple Notes, contacts, calendar, browser history) as searchable data the agent can query. Every record passes through a local prompt injection classifier (Prompt Guard 2) before reaching the agent. The agent can search your emails without a malicious email hijacking it.
+
+### Where This Is Going
+
+A company deploys Spacebot + Spacedrive on their infrastructure. Employees install Spacedrive on their devices and join the company library. The company agent has access to employee devices through Spacedrive's permission system, with individual-level controls. The org graph in Spacebot defines hierarchy and delegation: which agents report to which, who can approve what, how tasks flow.
+
+An employee talks to the company agent from their MacBook. The agent knows their projects, their device, their role, and can spawn workers on any authorized machine. They switch to their personal Spacedrive library and connect to their home Spacebot, with personal data and personal context. The app is the same. The agent is different.
+
+No other agent harness is building this. It's a category.
 
 ---
 
@@ -529,7 +339,7 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen, OpenCode Go) — or use `spacebot auth login` for Anthropic OAuth
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Zen, OpenCode Go), or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 
@@ -544,35 +354,7 @@ cd spacebot
 cargo build --release
 ```
 
-### Minimal Config
-
-Create `config.toml`:
-
-```toml
-[llm]
-openrouter_key = "env:OPENROUTER_API_KEY"
-
-[defaults.routing]
-channel = "anthropic/claude-sonnet-4"
-worker = "anthropic/claude-sonnet-4"
-
-[[agents]]
-id = "my-agent"
-
-[messaging.discord]
-token = "env:DISCORD_BOT_TOKEN"
-
-[[bindings]]
-agent_id = "my-agent"
-channel = "discord"
-guild_id = "your-discord-guild-id"
-
-# Optional: route a named adapter instance
-[[bindings]]
-agent_id = "my-agent"
-channel = "discord"
-adapter = "ops"
-```
+### Run
 
 ```bash
 spacebot                      # start as background daemon
@@ -583,11 +365,11 @@ spacebot status               # show pid and uptime
 spacebot auth login           # authenticate via Anthropic OAuth
 ```
 
-The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/content/docs/(getting-started)/quickstart.mdx) for more detail.
+The binary creates all databases and directories automatically on first run. See the [quickstart guide](<docs/content/docs/(getting-started)/quickstart.mdx>) for more detail.
 
 ### Authentication
 
-Spacebot supports Anthropic OAuth as an alternative to static API keys. Use your Claude Pro, Max, or API Console subscription directly:
+Spacebot supports Anthropic OAuth as an alternative to static API keys:
 
 ```bash
 spacebot auth login             # OAuth via Claude Pro/Max (opens browser)
@@ -597,7 +379,17 @@ spacebot auth refresh           # manually refresh the access token
 spacebot auth logout            # remove stored credentials
 ```
 
-OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently before each API call. When OAuth credentials are present, they take priority over a static `ANTHROPIC_API_KEY`.
+OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh before each API call. When OAuth credentials are present, they take priority over a static `ANTHROPIC_API_KEY`.
+
+---
+
+## Deploy Your Way
+
+| Method                                 | What You Get                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **[spacebot.sh](https://spacebot.sh)** | One-click hosted deploy. Connect your platforms, configure your agent, done.                |
+| **Self-hosted**                        | Single Rust binary. No Docker, no server dependencies, no microservices. Clone, build, run. |
+| **Docker**                             | Container image with everything included. Mount a volume for persistent data.               |
 
 ---
 
@@ -605,56 +397,41 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently
 
 | Layer           | Technology                                                                                                      |
 | --------------- | --------------------------------------------------------------------------------------------------------------- |
-| Language        | **Rust** (edition 2024)                                                                                         |
+| Language        | **Rust** (edition 2024) — single binary, no runtime dependencies, no GC pauses                                  |
 | Async runtime   | **Tokio**                                                                                                       |
 | LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.31 — agentic loop, tool execution, hooks                     |
-| Relational data | **SQLite** (sqlx) — conversations, memory graph, cron jobs                                                      |
+| Relational data | **SQLite** (sqlx) — conversations, memory graph, tasks, goals, cron jobs                                        |
 | Vector + FTS    | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
 | Key-value       | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets                                       |
 | Embeddings      | **FastEmbed** — local embedding generation                                                                      |
 | Crypto          | **AES-256-GCM** — secret encryption at rest                                                                     |
-| Discord         | **Serenity** — gateway, cache, events, rich messages, interactions                              |
-| Slack           | **slack-morphism** — Socket Mode, events, Block Kit, slash commands, streaming via message edits |
-| Telegram        | **teloxide** — long-poll, media attachments, group/DM support                                   |
-| Twitch          | **twitch-irc** — chat integration with trigger prefix                                           |
-| Browser         | **Chromiumoxide** — headless Chrome via CDP                                                     |
+| Discord         | **Serenity** — gateway, cache, events, rich messages, interactions                                              |
+| Slack           | **slack-morphism** — Socket Mode, events, Block Kit, slash commands                                             |
+| Telegram        | **teloxide** — long-poll, media attachments, group/DM support                                                   |
+| Twitch          | **twitch-irc** — chat integration with trigger prefix                                                           |
+| Browser         | **Chromiumoxide** — headless Chrome via CDP                                                                     |
 | CLI             | **Clap** — command line interface                                                                               |
 
-No server dependencies. Single binary. All data lives in embedded databases in a local directory.
+Single binary, no server dependencies. All data lives in embedded databases in a local directory.
 
 ---
 
 ## Documentation
 
-| Doc                                    | Description                                              |
-| -------------------------------------- | -------------------------------------------------------- |
-| [Quick Start](docs/content/docs/(getting-started)/quickstart.mdx) | Setup, config, first run                                 |
-| [Config Reference](docs/content/docs/(configuration)/config.mdx) | Full `config.toml` reference                             |
-| [Agents](docs/content/docs/(core)/agents.mdx)                    | Multi-agent setup and isolation                          |
-| [Memory](docs/content/docs/(core)/memory.mdx)                    | Memory system design                                     |
-| [Tools](docs/content/docs/(features)/tools.mdx)                  | All available LLM tools                                  |
-| [Compaction](docs/content/docs/(core)/compaction.mdx)            | Context window management                                |
-| [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Memory bulletin and system observation                   |
-| [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                                |
-| [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
-| [Secrets](docs/content/docs/(configuration)/secrets.mdx)         | Credential storage, encryption, and output scrubbing     |
-| [Sandbox](docs/content/docs/(configuration)/sandbox.mdx)         | Process containment and environment sanitization         |
-| [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, Twitch, Webchat, webhook) |
-| [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
-| [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
-| [MCP](docs/content/docs/(features)/mcp.mdx)                      | External tool servers via Model Context Protocol         |
-| [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                             |
-| [Philosophy](docs/content/docs/(core)/philosophy.mdx)            | Why Rust                                                 |
-
----
-
-## Why Rust
-
-Spacebot isn't a chatbot — it's an orchestration layer for autonomous AI processes running concurrently, sharing memory, and delegating to each other. That's infrastructure, and infrastructure should be machine code.
-
-Rust's strict type system and compiler mean there's one correct way to express something. When multiple AI processes share mutable state and spawn tasks without human oversight, "the compiler won't let you do that" is a feature. The result is a single binary with no runtime dependencies, no garbage collector pauses, and predictable resource usage.
-
-Read the full argument in [docs/philosophy](docs/content/docs/(core)/philosophy.mdx).
+| Doc                                                                 | Description                                               |
+| ------------------------------------------------------------------- | --------------------------------------------------------- |
+| [Quick Start](<docs/content/docs/(getting-started)/quickstart.mdx>) | Setup, config, first run                                  |
+| [Config Reference](<docs/content/docs/(configuration)/config.mdx>)  | Full `config.toml` reference                              |
+| [Architecture](ARCHITECTURE.md)                                     | Process types, tool access, memory internals, multi-agent |
+| [Memory](<docs/content/docs/(core)/memory.mdx>)                     | Memory system design                                      |
+| [Tools](<docs/content/docs/(features)/tools.mdx>)                   | All available LLM tools                                   |
+| [Routing](<docs/content/docs/(core)/routing.mdx>)                   | Model routing and fallback chains                         |
+| [Secrets](<docs/content/docs/(configuration)/secrets.mdx>)          | Credential storage, encryption, output scrubbing          |
+| [Sandbox](<docs/content/docs/(configuration)/sandbox.mdx>)          | Process containment and environment sanitization          |
+| [Cron Jobs](<docs/content/docs/(features)/cron.mdx>)                | Scheduled recurring tasks                                 |
+| [MCP](<docs/content/docs/(features)/mcp.mdx>)                       | External tool servers via Model Context Protocol          |
+| [OpenCode](<docs/content/docs/(features)/opencode.mdx>)             | OpenCode as a worker backend                              |
+| [Messaging](<docs/content/docs/(messaging)/messaging.mdx>)          | Adapter architecture and platform setup                   |
 
 ---
 
@@ -670,10 +447,14 @@ Contributions welcome. Read [RUST_STYLE_GUIDE.md](RUST_STYLE_GUIDE.md) before wr
 6. Run `just preflight` and `just gate-pr`
 7. Submit a PR
 
+### SpaceUI (Frontend Components)
+
+The dashboard uses [`@spacedrive/*`](https://github.com/spacedriveapp/spaceui) packages from npm. For local development with linked packages, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit. `just gate-pr` mirrors the CI gate and includes migration safety, compile checks, and test verification.
 
 ---
 
 ## License
 
-FSL-1.1-ALv2 — [Functional Source License](https://fsl.software/), converting to Apache 2.0 after two years. See [LICENSE](LICENSE) for details.
+FSL-1.1-ALv2, [Functional Source License](https://fsl.software/), converting to Apache 2.0 after two years. See [LICENSE](LICENSE) for details.

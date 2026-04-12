@@ -2,9 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
-    messaging, models, opencode_proxy, portal, projects, providers, secrets, settings, skills, ssh,
-    system, tasks, tools, workers,
+    activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
+    links, mcp, memories, messaging, models, notifications, opencode_proxy, portal, projects,
+    providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki, workers,
 };
 
 use axum::Json;
@@ -124,6 +124,13 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(cron::cron_executions))
         .routes(routes!(cron::trigger_cron))
         .routes(routes!(cron::toggle_cron))
+        // Notification routes
+        .routes(routes!(notifications::list_notifications))
+        .routes(routes!(notifications::unread_count))
+        .routes(routes!(notifications::mark_read))
+        .routes(routes!(notifications::dismiss_notification))
+        .routes(routes!(notifications::mark_all_read))
+        .routes(routes!(notifications::dismiss_read))
         // Task routes
         .routes(routes!(tasks::list_tasks, tasks::create_task))
         .routes(routes!(
@@ -134,14 +141,23 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::approve_task))
         .routes(routes!(tasks::execute_task))
         .routes(routes!(tasks::assign_task))
+        // Wiki routes
+        .routes(routes!(wiki::list_pages, wiki::create_page))
+        .routes(routes!(wiki::search_pages))
+        .routes(routes!(wiki::get_page, wiki::archive_page))
+        .routes(routes!(wiki::edit_page))
+        .routes(routes!(wiki::get_history))
+        .routes(routes!(wiki::restore_version))
         // Project routes
         .routes(routes!(projects::list_projects, projects::create_project))
+        .routes(routes!(projects::reorder_projects))
         .routes(routes!(
             projects::get_project,
             projects::update_project,
             projects::delete_project
         ))
         .routes(routes!(projects::scan_project))
+        .routes(routes!(projects::serve_logo))
         .routes(routes!(projects::disk_usage))
         .routes(routes!(projects::create_repo))
         .routes(routes!(projects::delete_repo))
@@ -227,6 +243,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(portal::update_portal_conversation))
         .routes(routes!(portal::delete_portal_conversation))
         .routes(routes!(portal::conversation_defaults))
+        // Attachment routes
+        .routes(routes!(attachments::upload_attachment))
+        .routes(routes!(attachments::serve_attachment))
+        .routes(routes!(attachments::list_attachments))
         // Link routes
         .routes(routes!(links::list_links, links::create_link))
         .routes(routes!(links::update_link, links::delete_link))
@@ -236,6 +256,11 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(links::update_group, links::delete_group))
         .routes(routes!(links::list_humans, links::create_human))
         .routes(routes!(links::update_human, links::delete_human))
+        // Usage routes
+        .routes(routes!(usage::get_usage))
+        .routes(routes!(usage::get_conversation_usage))
+        // Activity routes
+        .routes(routes!(activity::get_activity))
         // Factory routes
         .routes(routes!(factory::list_presets))
         .routes(routes!(factory::get_preset))

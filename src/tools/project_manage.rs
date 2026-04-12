@@ -18,15 +18,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ProjectManageTool {
     project_store: Arc<ProjectStore>,
-    agent_id: String,
 }
 
 impl ProjectManageTool {
-    pub fn new(project_store: Arc<ProjectStore>, agent_id: impl Into<String>) -> Self {
-        Self {
-            project_store,
-            agent_id: agent_id.into(),
-        }
+    pub fn new(project_store: Arc<ProjectStore>) -> Self {
+        Self { project_store }
     }
 }
 
@@ -156,7 +152,7 @@ impl ProjectManageTool {
     async fn handle_list(&self) -> Result<ProjectManageOutput, ProjectManageError> {
         let projects = self
             .project_store
-            .list_projects(&self.agent_id, Some(ProjectStatus::Active))
+            .list_projects(Some(ProjectStatus::Active))
             .await
             .map_err(|error| ProjectManageError(format!("failed to list projects: {error}")))?;
 
@@ -231,7 +227,6 @@ impl ProjectManageTool {
         let project = self
             .project_store
             .create_project(CreateProjectInput {
-                agent_id: self.agent_id.clone(),
                 name: name.clone(),
                 description: String::new(),
                 icon: String::new(),
@@ -335,7 +330,7 @@ impl ProjectManageTool {
 
         let project = self
             .project_store
-            .get_project(&self.agent_id, &project_id)
+            .get_project(&project_id)
             .await
             .map_err(|error| ProjectManageError(format!("failed to get project: {error}")))?
             .ok_or_else(|| ProjectManageError(format!("project not found: {project_id}")))?;
@@ -478,7 +473,7 @@ impl ProjectManageTool {
 
         let project = self
             .project_store
-            .get_project(&self.agent_id, &project_id)
+            .get_project(&project_id)
             .await
             .map_err(|error| ProjectManageError(format!("failed to get project: {error}")))?
             .ok_or_else(|| ProjectManageError(format!("project not found: {project_id}")))?;
@@ -593,7 +588,7 @@ impl ProjectManageTool {
 
         let project = self
             .project_store
-            .get_project(&self.agent_id, &project_id)
+            .get_project(&project_id)
             .await
             .map_err(|error| ProjectManageError(format!("failed to get project: {error}")))?
             .ok_or_else(|| ProjectManageError(format!("project not found: {project_id}")))?;
@@ -704,7 +699,7 @@ impl ProjectManageTool {
 
         let project = self
             .project_store
-            .get_project(&self.agent_id, &project_id)
+            .get_project(&project_id)
             .await
             .map_err(|error| ProjectManageError(format!("failed to get project: {error}")))?
             .ok_or_else(|| ProjectManageError(format!("project not found: {project_id}")))?;
@@ -780,7 +775,7 @@ impl ProjectManageTool {
 
         let project = self
             .project_store
-            .get_project(&self.agent_id, &project_id)
+            .get_project(&project_id)
             .await
             .map_err(|error| ProjectManageError(format!("failed to get project: {error}")))?
             .ok_or_else(|| ProjectManageError(format!("project not found: {project_id}")))?;

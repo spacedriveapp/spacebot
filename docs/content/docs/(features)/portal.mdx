@@ -1,0 +1,126 @@
+---
+title: Portal
+description: Built-in web chat interface with conversation persistence, file attachments, and per-conversation settings.
+---
+
+# Portal
+
+The portal is Spacebot's built-in web chat interface. It's the primary way to interact with agents from the dashboard — a full conversation UI with message history, file attachments, streaming responses, and per-conversation settings.
+
+Portal conversations are first-class channels. They follow the same delegation model as Discord or Slack — messages go through channel processing, branches think, workers execute. The difference is that portal conversations are managed entirely within the Spacebot UI.
+
+## Conversations
+
+Each portal conversation is a persistent chat session tied to an agent. Conversations are stored in SQLite and survive restarts.
+
+```sql
+CREATE TABLE portal_conversations (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    title_source TEXT NOT NULL DEFAULT 'system',
+    archived INTEGER NOT NULL DEFAULT 0,
+    settings TEXT,                    -- JSON (ConversationSettings)
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+```
+
+### Conversation Lifecycle
+
+- **Create** — start a new conversation from the portal sidebar or API
+- **Chat** — send messages, receive streaming responses, view tool calls
+- **Rename** — title is auto-generated from the first message, editable manually
+- **Archive** — soft-delete, hidden from the sidebar but preserved in the database
+- **Delete** — removes the conversation and its message history
+
+### Channel Mapping
+
+Each portal conversation maps to a channel with ID `portal:{conversation_id}`. The channel is created on the first message and follows the standard channel lifecycle — upsert, history persistence, compaction, and status block injection.
+
+## Settings
+
+Every portal conversation can be configured independently via the settings panel (cog icon in the chat header). Settings are stored as JSON in the `settings` column and follow the same resolution chain as all channel settings:
+
+```
+Per-conversation settings → Per-channel settings → Binding defaults → System defaults
+```
+
+Available settings:
+
+| Setting | Options | Default |
+|---------|---------|---------|
+| **Response Mode** | Active, Observe, Mention Only | Active |
+| **Model** | Any configured model (per-process overrides) | Agent default |
+| **Memory** | Full, Ambient, Off | Full |
+| **Delegation** | Standard, Direct | Standard |
+| **Worker Context** | History mode (None/Summary/Recent/Full), Memory mode (None/Ambient/Tools/Full) | None, None |
+
+See [Configuring Channels](/docs/configuring-channels) for the full settings reference.
+
+### Defaults Endpoint
+
+`GET /api/portal/defaults?agent_id=` returns the resolved default settings for new portal conversations. The UI pre-populates the settings panel with these values.
+
+## File Attachments
+
+Portal conversations support file attachments via multipart upload:
+
+- **Upload** — drag files onto the composer or click to browse. Files are uploaded via `POST /api/portal/send` as multipart form data.
+- **Timeline rendering** — attachments appear inline in the conversation timeline with filename, size, and type metadata
+- **Conversation history** — attachment metadata is included in the conversation history sent to the LLM, so the agent is aware of uploaded files
+
+Attachments are stored on disk in the agent's data directory. The `save_attachments` flag on `ConversationSettings` controls whether attachments are persisted for future reference.
+
+## Frontend Components
+
+The portal UI is modular:
+
+| Component | Purpose |
+|-----------|---------|
+| `PortalPanel` | Main container — routes between conversation list and active chat |
+| `PortalTimeline` | Message list with auto-scroll, streaming text, and tool call rendering |
+| `PortalComposer` | Input field with file drag-and-drop, send button, and attachment preview |
+| `PortalHeader` | Conversation title, agent name, response mode badge, model name, settings cog |
+| `PortalHistoryPopover` | Conversation sidebar with search, create, rename, archive, and delete |
+| `PortalActiveWorkers` | Live worker status display in the portal view |
+
+### Tool Call Rendering
+
+In direct mode (when the channel has worker-level tools), tool calls are rendered inline in the portal timeline. Each tool call shows the tool name, arguments, and result — giving visibility into what the agent is doing without needing to check the workers panel.
+
+## Streaming
+
+Portal responses stream token-by-token via SSE. The `PortalTimeline` component renders text as it arrives, with a typing indicator during the initial processing delay. Auto-scroll keeps the latest content visible.
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/portal/send` | Send a message (supports multipart for attachments) |
+| `GET` | `/api/portal/history` | Get message history for a conversation |
+| `GET` | `/api/portal/conversations` | List conversations for an agent |
+| `POST` | `/api/portal/conversations` | Create a new conversation |
+| `PUT` | `/api/portal/conversations/:id` | Update title or archive status |
+| `DELETE` | `/api/portal/conversations/:id` | Delete a conversation |
+| `GET` | `/api/portal/defaults` | Get default settings for new conversations |
+
+All endpoints require `agent_id` as a query parameter.
+
+## Module Layout
+
+```
+src/
+├── conversation/
+│   ├── portal.rs              — PortalConversationStore: CRUD, settings persistence
+│   └── settings.rs            — ConversationSettings, ResolvedConversationSettings
+│
+├── api/
+│   ├── portal.rs              — REST endpoints (send, history, CRUD, defaults)
+│   └── attachments.rs         — File attachment handling
+│
+└── migrations/
+    ├── 20260324000001_webchat_conversations.sql     — Original table
+    ├── 20260325120000_rename_webchat_to_portal.sql  — Rename migration
+    └── 20260325130000_add_portal_conversation_settings.sql
+```

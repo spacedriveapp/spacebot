@@ -115,9 +115,13 @@ impl Branch {
             .as_deref()
             .unwrap_or_else(|| routing.resolve(ProcessType::Branch, None))
             .to_string();
+        let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::llm::usage::UsageAccumulator::new(),
+        ));
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "branch")
-            .with_routing((**routing).clone());
+            .with_routing((**routing).clone())
+            .with_accumulator(usage_accumulator.clone());
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
@@ -256,6 +260,20 @@ impl Branch {
             channel_id: self.channel_id.clone(),
             conclusion: conclusion.clone(),
         });
+
+        // Flush accumulated token usage.
+        let acc = usage_accumulator.lock().await;
+        if let Err(error) = acc
+            .flush(
+                &self.deps.sqlite_pool,
+                &self.deps.agent_id,
+                "branch",
+                Some(&*self.channel_id),
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to flush branch token usage");
+        }
 
         tracing::info!(branch_id = %self.id, "branch completed");
 

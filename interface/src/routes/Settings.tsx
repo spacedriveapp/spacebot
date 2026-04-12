@@ -1,292 +1,55 @@
-import { useState, useEffect, useRef } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState } from "@/api/client";
-import { Badge, Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
-import { useSearch, useNavigate } from "@tanstack/react-router";
-import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
-import { ModelSelect } from "@/components/ModelSelect";
-import { ProviderIcon } from "@/lib/providerIcons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faSearch } from "@fortawesome/free-solid-svg-icons";
-
-import { parse as parseToml } from "smol-toml";
-import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
-import { Markdown } from "@/components/Markdown";
-import { useSetTopBar } from "@/components/TopBar";
-
-type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file" | "changelog";
-
-const SECTIONS = [
-	{
-		id: "providers" as const,
-		label: "Providers",
-		group: "general" as const,
-		description: "LLM provider credentials",
-	},
-	{
-		id: "channels" as const,
-		label: "Channels",
-		group: "messaging" as const,
-		description: "Messaging platforms and bindings",
-	},
-	{
-		id: "api-keys" as const,
-		label: "API Keys",
-		group: "general" as const,
-		description: "Third-party service keys",
-	},
-	{
-		id: "secrets" as const,
-		label: "Secrets",
-		group: "general" as const,
-		description: "Encrypted secret storage",
-	},
-	{
-		id: "server" as const,
-		label: "Server",
-		group: "system" as const,
-		description: "API server configuration",
-	},
-	{
-		id: "opencode" as const,
-		label: "OpenCode",
-		group: "system" as const,
-		description: "OpenCode worker integration",
-	},
-	{
-		id: "worker-logs" as const,
-		label: "Worker Logs",
-		group: "system" as const,
-		description: "Worker execution logging",
-	},
-	{
-		id: "updates" as const,
-		label: "Updates",
-		group: "system" as const,
-		description: "Release checks and update controls",
-	},
-	{
-		id: "appearance" as const,
-		label: "Appearance",
-		group: "general" as const,
-		description: "Theme and display settings",
-	},
-	{
-		id: "config-file" as const,
-		label: "Config File",
-		group: "system" as const,
-		description: "Raw config.toml editor",
-	},
-	{
-		id: "changelog" as const,
-		label: "Changelog",
-		group: "system" as const,
-		description: "Release history",
-	},
-] satisfies {
-	id: SectionId;
-	label: string;
-	group: string;
-	description: string;
-}[];
-
-const PROVIDERS = [
-	{
-		id: "openrouter",
-		name: "OpenRouter",
-		description: "Multi-provider gateway with unified API",
-		placeholder: "sk-or-...",
-		envVar: "OPENROUTER_API_KEY",
-		defaultModel: "openrouter/anthropic/claude-sonnet-4",
-	},
-	{
-		id: "kilo",
-		name: "Kilo Gateway",
-		description: "OpenAI-compatible multi-provider gateway",
-		placeholder: "sk-...",
-		envVar: "KILO_API_KEY",
-		defaultModel: "kilo/anthropic/claude-sonnet-4.5",
-	},
-	{
-		id: "opencode-zen",
-		name: "OpenCode Zen",
-		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",
-		placeholder: "...",
-		envVar: "OPENCODE_ZEN_API_KEY",
-		defaultModel: "opencode-zen/kimi-k2.5",
-	},
-	{
-		id: "opencode-go",
-		name: "OpenCode Go",
-		description: "Lite OpenCode model catalog and limits",
-		placeholder: "...",
-		envVar: "OPENCODE_GO_API_KEY",
-		defaultModel: "opencode-go/kimi-k2.5",
-	},
-	{
-		id: "anthropic",
-		name: "Anthropic",
-		description: "Claude models (Sonnet, Opus, Haiku)",
-		placeholder: "sk-ant-...",
-		envVar: "ANTHROPIC_API_KEY",
-		defaultModel: "anthropic/claude-sonnet-4",
-	},
-	{
-		id: "openai",
-		name: "OpenAI",
-		description: "GPT models",
-		placeholder: "sk-...",
-		envVar: "OPENAI_API_KEY",
-		defaultModel: "openai/gpt-4.1",
-	},
-	{
-		id: "zai-coding-plan",
-		name: "Z.AI Coding Plan",
-		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
-		placeholder: "...",
-		envVar: "ZAI_CODING_PLAN_API_KEY",
-		defaultModel: "zai-coding-plan/glm-5",
-	},
-	{
-		id: "zhipu",
-		name: "Z.ai (GLM)",
-		description: "GLM models (GLM-4, GLM-4-Flash)",
-		placeholder: "...",
-		envVar: "ZHIPU_API_KEY",
-		defaultModel: "zhipu/glm-4-plus",
-	},
-	{
-		id: "groq",
-		name: "Groq",
-		description: "Fast inference for Llama, Mixtral models",
-		placeholder: "gsk_...",
-		envVar: "GROQ_API_KEY",
-		defaultModel: "groq/llama-3.3-70b-versatile",
-	},
-	{
-		id: "together",
-		name: "Together AI",
-		description: "Wide model selection with competitive pricing",
-		placeholder: "...",
-		envVar: "TOGETHER_API_KEY",
-		defaultModel: "together/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
-	},
-	{
-		id: "fireworks",
-		name: "Fireworks AI",
-		description: "Fast inference for popular OSS models",
-		placeholder: "...",
-		envVar: "FIREWORKS_API_KEY",
-		defaultModel: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",
-	},
-	{
-		id: "deepseek",
-		name: "DeepSeek",
-		description: "DeepSeek Chat and Reasoner models",
-		placeholder: "sk-...",
-		envVar: "DEEPSEEK_API_KEY",
-		defaultModel: "deepseek/deepseek-chat",
-	},
-	{
-		id: "xai",
-		name: "xAI",
-		description: "Grok models",
-		placeholder: "xai-...",
-		envVar: "XAI_API_KEY",
-		defaultModel: "xai/grok-2-latest",
-	},
-	{
-		id: "mistral",
-		name: "Mistral AI",
-		description: "Mistral Large, Small, Codestral models",
-		placeholder: "...",
-		envVar: "MISTRAL_API_KEY",
-		defaultModel: "mistral/mistral-large-latest",
-	},
-	{
-		id: "gemini",
-		name: "Google Gemini",
-		description: "Google Gemini experimental and production models",
-		placeholder: "AIza...",
-		envVar: "GEMINI_API_KEY",
-		defaultModel: "gemini/gemini-2.5-flash",
-	},
-	{
-		id: "nvidia",
-		name: "NVIDIA NIM",
-		description: "NVIDIA-hosted models via NIM API",
-		placeholder: "nvapi-...",
-		envVar: "NVIDIA_API_KEY",
-		defaultModel: "nvidia/meta/llama-3.1-405b-instruct",
-	},
-	{
-		id: "minimax",
-		name: "MiniMax",
-		description: "MiniMax (Anthropic message format)",
-		placeholder: "sk-...",
-		envVar: "MINIMAX_API_KEY",
-		defaultModel: "minimax/MiniMax-M2.5",
-	},
-	{
-		id: "minimax-cn",
-		name: "MiniMax CN",
-		description: "MiniMax China (Anthropic message format)",
-		placeholder: "sk-...",
-		envVar: "MINIMAX_CN_API_KEY",
-		defaultModel: "minimax-cn/MiniMax-M2.5",
-	},
-	{
-		id: "moonshot",
-		name: "Moonshot AI",
-		description: "Kimi models (Kimi K2, Kimi K2.5)",
-		placeholder: "sk-...",
-		envVar: "MOONSHOT_API_KEY",
-		defaultModel: "moonshot/kimi-k2.5",
-	},
-	{
-		id: "github-copilot",
-		name: "GitHub Copilot",
-		description: "GitHub Copilot API (uses GitHub PAT for token exchange)",
-		placeholder: "ghp_... or gh auth token",
-		envVar: "GITHUB_COPILOT_API_KEY",
-		defaultModel: "github-copilot/claude-sonnet-4",
-	},
-	{
-		id: "azure",
-		name: "Azure OpenAI",
-		description: "Azure OpenAI Service with custom deployments",
-		placeholder: "Azure API key (alphanumeric string)",
-		envVar: "AZURE_API_KEY",
-		defaultModel: "azure/gpt-4o",
-	},
-	{
-		id: "ollama",
-		name: "Ollama",
-		description: "Local or remote Ollama API endpoint",
-		placeholder: "http://localhost:11434",
-		envVar: "OLLAMA_BASE_URL",
-		defaultModel: "ollama/llama3.2",
-	},
-] as const;
-
-const CHATGPT_OAUTH_DEFAULT_MODEL = "openai-chatgpt/gpt-5.3-codex";
+import {useState, useEffect, useRef} from "react";
+import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
+import {api} from "@/api/client";
+import {
+	Button,
+	Input,
+	DialogRoot,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
+	DialogDescription,
+	DialogFooter,
+} from "@spacedrive/primitives";
+import {SettingSidebarButton} from "@/ui/SettingSidebarButton";
+import {useSearch, useNavigate} from "@tanstack/react-router";
+import {ModelSelect} from "@/components/ModelSelect";
+import {
+	InstanceSection,
+	AppearanceSection,
+	ChannelsSection,
+	SecretsSection,
+	ApiKeysSection,
+	ServerSection,
+	WorkerLogsSection,
+	OpenCodeSection,
+	UpdatesSection,
+	ChangelogSection,
+	ConfigFileSection,
+	ProviderCard,
+	ChatGptOAuthDialog,
+	SECTIONS,
+	PROVIDERS,
+	CHATGPT_OAUTH_DEFAULT_MODEL,
+	type SectionId,
+} from "@/components/settings";
 
 export function Settings() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const search = useSearch({ from: "/settings" }) as { tab?: string };
+	const search = useSearch({from: "/settings"}) as {tab?: string};
 	const [activeSection, setActiveSection] = useState<SectionId>("providers");
 
 	// Sync activeSection with URL search param
 	useEffect(() => {
-		if (search.tab && SECTIONS.some(s => s.id === search.tab)) {
+		if (search.tab && SECTIONS.some((s) => s.id === search.tab)) {
 			setActiveSection(search.tab as SectionId);
 		}
 	}, [search.tab]);
 
 	const handleSectionChange = (section: SectionId) => {
 		setActiveSection(section);
-		navigate({ to: "/settings", search: { tab: section } });
+		navigate({to: "/settings", search: {tab: section}});
 	};
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
 	const [keyInput, setKeyInput] = useState("");
@@ -297,7 +60,8 @@ export function Settings() {
 		message: string;
 		sample?: string | null;
 	} | null>(null);
-	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
+	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] =
+		useState(false);
 	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -319,7 +83,7 @@ export function Settings() {
 	const fetchAbortControllerRef = useRef<AbortController | null>(null);
 
 	// Fetch providers data (only when on providers tab)
-	const { data, isLoading } = useQuery({
+	const {data, isLoading} = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
 		staleTime: 5_000,
@@ -327,16 +91,42 @@ export function Settings() {
 	});
 
 	// Fetch global settings (only when on api-keys, server, or worker-logs tabs)
-	const { data: globalSettings, isLoading: globalSettingsLoading } = useQuery({
+	const {data: globalSettings, isLoading: globalSettingsLoading} = useQuery({
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
-		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs",
+		enabled:
+			activeSection === "instance" ||
+			activeSection === "api-keys" ||
+			activeSection === "server" ||
+			activeSection === "opencode" ||
+			activeSection === "worker-logs",
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: ({ provider, apiKey, model, baseUrl, apiVersion, deployment }: { provider: string; apiKey: string; model: string; baseUrl?: string; apiVersion?: string; deployment?: string }) =>
-			api.updateProvider(provider, apiKey, model, baseUrl, apiVersion, deployment),
+		mutationFn: ({
+			provider,
+			apiKey,
+			model,
+			baseUrl,
+			apiVersion,
+			deployment,
+		}: {
+			provider: string;
+			apiKey: string;
+			model: string;
+			baseUrl?: string;
+			apiVersion?: string;
+			deployment?: string;
+		}) =>
+			api.updateProvider(
+				provider,
+				apiKey,
+				model,
+				baseUrl,
+				apiVersion,
+				deployment,
+			),
 		onSuccess: (result) => {
 			if (result.success) {
 				setEditingProvider(null);
@@ -344,48 +134,64 @@ export function Settings() {
 				setModelInput("");
 				setTestedSignature(null);
 				setTestResult(null);
-				setMessage({ text: result.message, type: "success" });
-				queryClient.invalidateQueries({ queryKey: ["providers"] });
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["providers"]});
 				// Agents will auto-start on the backend, refetch agent list after a short delay
 				setTimeout(() => {
-					queryClient.invalidateQueries({ queryKey: ["agents"] });
-					queryClient.invalidateQueries({ queryKey: ["overview"] });
+					queryClient.invalidateQueries({queryKey: ["agents"]});
+					queryClient.invalidateQueries({queryKey: ["overview"]});
 				}, 3000);
 			} else {
-				setMessage({ text: result.message, type: "error" });
+				setMessage({text: result.message, type: "error"});
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
 		},
 	});
 
 	const testModelMutation = useMutation({
-		mutationFn: ({ provider, apiKey, model, baseUrl, apiVersion, deployment }: {
+		mutationFn: ({
+			provider,
+			apiKey,
+			model,
+			baseUrl,
+			apiVersion,
+			deployment,
+		}: {
 			provider: string;
 			apiKey: string;
 			model: string;
 			baseUrl?: string;
 			apiVersion?: string;
 			deployment?: string;
-		}) => api.testProviderModel(provider, apiKey, model, baseUrl, apiVersion, deployment),
+		}) =>
+			api.testProviderModel(
+				provider,
+				apiKey,
+				model,
+				baseUrl,
+				apiVersion,
+				deployment,
+			),
 	});
 	const startOpenAiBrowserOAuthMutation = useMutation({
-		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
+		mutationFn: (params: {model: string}) =>
+			api.startOpenAiOAuthBrowser(params),
 	});
 
 	const removeMutation = useMutation({
 		mutationFn: (provider: string) => api.removeProvider(provider),
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({ text: result.message, type: "success" });
-				queryClient.invalidateQueries({ queryKey: ["providers"] });
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["providers"]});
 			} else {
-				setMessage({ text: result.message, type: "error" });
+				setMessage({text: result.message, type: "error"});
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
 		},
 	});
 
@@ -401,24 +207,40 @@ export function Settings() {
 
 		if (editingProvider === "azure") {
 			if (!keyInput.trim()) {
-				setTestResult({ success: false, message: "API key is required for Azure OpenAI" });
+				setTestResult({
+					success: false,
+					message: "API key is required for Azure OpenAI",
+				});
 				return false;
 			}
 			if (!azureBaseUrl.trim()) {
-				setTestResult({ success: false, message: "Base URL is required for Azure OpenAI" });
+				setTestResult({
+					success: false,
+					message: "Base URL is required for Azure OpenAI",
+				});
 				return false;
 			}
 			if (!azureApiVersion.trim()) {
-				setTestResult({ success: false, message: "API Version is required for Azure OpenAI" });
+				setTestResult({
+					success: false,
+					message: "API Version is required for Azure OpenAI",
+				});
 				return false;
 			}
 			if (!azureDeployment.trim()) {
-				setTestResult({ success: false, message: "Deployment Name is required for Azure OpenAI" });
+				setTestResult({
+					success: false,
+					message: "Deployment Name is required for Azure OpenAI",
+				});
 				return false;
 			}
-			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
+			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, "");
 			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
-				setTestResult({ success: false, message: "Base URL must end with '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)" });
+				setTestResult({
+					success: false,
+					message:
+						"Base URL must end with '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)",
+				});
 				return false;
 			}
 		}
@@ -426,16 +248,28 @@ export function Settings() {
 		setMessage(null);
 		setTestResult(null);
 		try {
-			const azureModel = editingProvider === "azure" ? `azure/${azureDeployment.trim()}` : modelInput.trim();
+			const azureModel =
+				editingProvider === "azure"
+					? `azure/${azureDeployment.trim()}`
+					: modelInput.trim();
 			const result = await testModelMutation.mutateAsync({
 				provider: editingProvider,
 				apiKey: keyInput.trim(),
 				model: azureModel,
-				baseUrl: editingProvider === "azure" ? azureBaseUrl.trim().replace(/\/+$/, '') : undefined,
-				apiVersion: editingProvider === "azure" ? azureApiVersion.trim() : undefined,
-				deployment: editingProvider === "azure" ? azureDeployment.trim() : undefined,
+				baseUrl:
+					editingProvider === "azure"
+						? azureBaseUrl.trim().replace(/\/+$/, "")
+						: undefined,
+				apiVersion:
+					editingProvider === "azure" ? azureApiVersion.trim() : undefined,
+				deployment:
+					editingProvider === "azure" ? azureDeployment.trim() : undefined,
 			});
-			setTestResult({ success: result.success, message: result.message, sample: result.sample });
+			setTestResult({
+				success: result.success,
+				message: result.message,
+				sample: result.sample,
+			});
 			if (result.success) {
 				setTestedSignature(currentSignature);
 				return true;
@@ -444,7 +278,7 @@ export function Settings() {
 				return false;
 			}
 		} catch (error: any) {
-			setTestResult({ success: false, message: `Failed: ${error.message}` });
+			setTestResult({success: false, message: `Failed: ${error.message}`});
 			setTestedSignature(null);
 			return false;
 		}
@@ -455,24 +289,39 @@ export function Settings() {
 
 		if (editingProvider === "azure") {
 			if (!keyInput.trim()) {
-				setMessage({ text: "API key is required for Azure OpenAI", type: "error" });
+				setMessage({
+					text: "API key is required for Azure OpenAI",
+					type: "error",
+				});
 				return;
 			}
 			if (!azureBaseUrl.trim()) {
-				setMessage({ text: "Base URL is required for Azure OpenAI", type: "error" });
+				setMessage({
+					text: "Base URL is required for Azure OpenAI",
+					type: "error",
+				});
 				return;
 			}
 			if (!azureApiVersion.trim()) {
-				setMessage({ text: "API Version is required for Azure OpenAI", type: "error" });
+				setMessage({
+					text: "API Version is required for Azure OpenAI",
+					type: "error",
+				});
 				return;
 			}
 			if (!azureDeployment.trim()) {
-				setMessage({ text: "Deployment Name is required for Azure OpenAI", type: "error" });
+				setMessage({
+					text: "Deployment Name is required for Azure OpenAI",
+					type: "error",
+				});
 				return;
 			}
-			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
+			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, "");
 			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
-				setMessage({ text: "Base URL must end with '.openai.azure.com'", type: "error" });
+				setMessage({
+					text: "Base URL must end with '.openai.azure.com'",
+					type: "error",
+				});
 				return;
 			}
 		}
@@ -488,7 +337,7 @@ export function Settings() {
 				provider: editingProvider,
 				apiKey: keyInput.trim(),
 				model: azureModel,
-				baseUrl: azureBaseUrl.trim().replace(/\/+$/, ''),
+				baseUrl: azureBaseUrl.trim().replace(/\/+$/, ""),
 				apiVersion: azureApiVersion.trim(),
 				deployment: azureDeployment.trim(),
 			});
@@ -501,7 +350,10 @@ export function Settings() {
 		}
 	};
 
-	const monitorOpenAiBrowserOAuth = async (stateToken: string, signal: AbortSignal) => {
+	const monitorOpenAiBrowserOAuth = async (
+		stateToken: string,
+		signal: AbortSignal,
+	) => {
 		setIsPollingOpenAiBrowserOAuth(true);
 		setOpenAiBrowserOAuthMessage(null);
 		try {
@@ -539,7 +391,7 @@ export function Settings() {
 						signal.removeEventListener("abort", onAbort);
 						resolve(undefined);
 					}, 2000);
-					signal.addEventListener("abort", onAbort, { once: true });
+					signal.addEventListener("abort", onAbort, {once: true});
 				});
 			}
 			if (signal.aborted) return;
@@ -570,7 +422,12 @@ export function Settings() {
 			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
 				model: CHATGPT_OAUTH_DEFAULT_MODEL,
 			});
-			if (!result.success || !result.user_code || !result.verification_url || !result.state) {
+			if (
+				!result.success ||
+				!result.user_code ||
+				!result.verification_url ||
+				!result.state
+			) {
 				setOpenAiBrowserOAuthMessage({
 					text: result.message || "Failed to start device sign-in",
 					type: "error",
@@ -588,7 +445,10 @@ export function Settings() {
 			});
 			void monitorOpenAiBrowserOAuth(result.state, abort.signal);
 		} catch (error: any) {
-			setOpenAiBrowserOAuthMessage({text: `Failed: ${error.message}`, type: "error"});
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed: ${error.message}`,
+				type: "error",
+			});
 		}
 	};
 
@@ -657,24 +517,17 @@ export function Settings() {
 
 	const isConfigured = (providerId: string): boolean => {
 		if (!data) return false;
-		const statusKey = providerId.replace(/-/g, "_") as keyof typeof data.providers;
+		const statusKey = providerId.replace(
+			/-/g,
+			"_",
+		) as keyof typeof data.providers;
 		return data.providers[statusKey] ?? false;
 	};
-
-	const sectionLabel = SECTIONS.find((s) => s.id === activeSection)?.label;
-
-	useSetTopBar(
-		<div className="flex h-full items-center px-6">
-			<h1 className="font-plex text-sm font-medium text-ink">
-				{sectionLabel ?? "Settings"}
-			</h1>
-		</div>,
-	);
 
 	return (
 		<div className="flex h-full min-h-0 overflow-hidden">
 			{/* Sidebar */}
-			<div className="flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-darkBox/20">
+			<div className="flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-dark-box/20">
 				<div className="px-3 pb-1 pt-4">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						Settings
@@ -696,7 +549,12 @@ export function Settings() {
 			{/* Content */}
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-					{activeSection === "appearance" ? (
+					{activeSection === "instance" ? (
+						<InstanceSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
+					) : activeSection === "appearance" ? (
 						<AppearanceSection />
 					) : activeSection === "providers" ? (
 						<div className="mx-auto max-w-2xl px-6 py-6">
@@ -706,15 +564,16 @@ export function Settings() {
 									LLM Providers
 								</h2>
 								<p className="mt-1 text-sm text-ink-dull">
-									Configure credentials/endpoints for LLM providers. At least one provider is
-									required for agents to function.
+									Configure credentials/endpoints for LLM providers. At least
+									one provider is required for agents to function.
 								</p>
 							</div>
 
-							<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+							<div className="mb-4 rounded-md border border-app-line bg-app-dark-box/20 px-4 py-3">
 								<p className="text-sm text-ink-faint">
-									When you add a provider, choose a model and run a completion test before saving.
-									Saving applies that model to all five default routing roles and to your default agent.
+									When you add a provider, choose a model and run a completion
+									test before saving. Saving applies that model to all five
+									default routing roles and to your default agent.
 								</p>
 							</div>
 
@@ -725,80 +584,84 @@ export function Settings() {
 								</div>
 							) : (
 								<div className="flex flex-col gap-3">
-									{PROVIDERS.map((provider) => (
-										[
+									{PROVIDERS.map((provider) => [
+										<ProviderCard
+											key={provider.id}
+											provider={provider.id}
+											name={provider.name}
+											description={provider.description}
+											configured={isConfigured(provider.id)}
+											defaultModel={provider.defaultModel}
+											onEdit={() => {
+												setEditingProvider(provider.id);
+												setKeyInput("");
+												setModelInput(provider.defaultModel ?? "");
+												setTestedSignature(null);
+												setTestResult(null);
+												setMessage(null);
+												if (provider.id === "azure") {
+													// Reset Azure fields before hydrating
+													setAzureBaseUrl("");
+													setAzureApiVersion("");
+													setAzureDeployment("");
+
+													// Cancel previous request
+													fetchAbortControllerRef.current?.abort();
+
+													// Create new abort controller
+													const abortController = new AbortController();
+													fetchAbortControllerRef.current = abortController;
+
+													api
+														.getProviderConfig("azure", {
+															signal: abortController.signal,
+														})
+														.then((result) => {
+															// Check if aborted
+															if (abortController.signal.aborted) return;
+															if (!result.success) return;
+
+															setAzureBaseUrl(result.base_url ?? "");
+															setAzureApiVersion(result.api_version ?? "");
+															const deployment = result.deployment ?? "";
+															setAzureDeployment(deployment);
+															if (deployment) {
+																setModelInput(`azure/${deployment}`);
+															}
+														})
+														.catch((error) => {
+															if (error.name === "AbortError") return;
+															console.error(
+																"Failed to fetch Azure config:",
+																error,
+															);
+														});
+												}
+											}}
+											onRemove={() => removeMutation.mutate(provider.id)}
+											removing={removeMutation.isPending}
+										/>,
+										provider.id === "openai" ? (
 											<ProviderCard
-												key={provider.id}
-												provider={provider.id}
-												name={provider.name}
-												description={provider.description}
-												configured={isConfigured(provider.id)}
-												defaultModel={provider.defaultModel}
-												onEdit={() => {
-													setEditingProvider(provider.id);
-													setKeyInput("");
-													setModelInput(provider.defaultModel ?? "");
-													setTestedSignature(null);
-													setTestResult(null);
-													setMessage(null);
-													if (provider.id === "azure") {
-														// Reset Azure fields before hydrating
-														setAzureBaseUrl("");
-														setAzureApiVersion("");
-														setAzureDeployment("");
-
-														// Cancel previous request
-														fetchAbortControllerRef.current?.abort();
-
-														// Create new abort controller
-														const abortController = new AbortController();
-														fetchAbortControllerRef.current = abortController;
-
-														api.getProviderConfig("azure", { signal: abortController.signal })
-															.then((result) => {
-																// Check if aborted
-																if (abortController.signal.aborted) return;
-																if (!result.success) return;
-
-																setAzureBaseUrl(result.base_url ?? "");
-																setAzureApiVersion(result.api_version ?? "");
-																const deployment = result.deployment ?? "";
-																setAzureDeployment(deployment);
-																if (deployment) {
-																	setModelInput(`azure/${deployment}`);
-																}
-															})
-															.catch((error) => {
-																if (error.name === 'AbortError') return;
-																console.error("Failed to fetch Azure config:", error);
-															});
-													}
-												}}
-												onRemove={() => removeMutation.mutate(provider.id)}
+												key="openai-chatgpt"
+												provider="openai-chatgpt"
+												name="ChatGPT Plus (OAuth)"
+												description="Sign in with your ChatGPT Plus account using a device code."
+												configured={isConfigured("openai-chatgpt")}
+												defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
+												onEdit={() => setOpenAiOAuthDialogOpen(true)}
+												onRemove={() => removeMutation.mutate("openai-chatgpt")}
 												removing={removeMutation.isPending}
-											/>,
-											provider.id === "openai" ? (
-												<ProviderCard
-													key="openai-chatgpt"
-													provider="openai-chatgpt"
-													name="ChatGPT Plus (OAuth)"
-													description="Sign in with your ChatGPT Plus account using a device code."
-													configured={isConfigured("openai-chatgpt")}
-													defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
-													onEdit={() => setOpenAiOAuthDialogOpen(true)}
-													onRemove={() => removeMutation.mutate("openai-chatgpt")}
-													removing={removeMutation.isPending}
-													actionLabel="Sign in"
-													showRemove={isConfigured("openai-chatgpt")}
-												/>
-											) : null,
-										]
-									))}
+												actionLabel="Sign in"
+												showRemove={isConfigured("openai-chatgpt")}
+											/>
+										) : null,
+									])}
 								</div>
 							)}
 
 							{/* Info note */}
-							<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+							<div className="mt-6 rounded-md border border-app-line bg-app-dark-box/20 px-4 py-3">
 								<p className="text-sm text-ink-faint">
 									Provider values are written to{" "}
 									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
@@ -829,15 +692,27 @@ export function Settings() {
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
 					) : activeSection === "api-keys" ? (
-						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
+						<ApiKeysSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
 					) : activeSection === "secrets" ? (
 						<SecretsSection />
 					) : activeSection === "server" ? (
-						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
+						<ServerSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
 					) : activeSection === "opencode" ? (
-						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
+						<OpenCodeSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
 					) : activeSection === "worker-logs" ? (
-						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
+						<WorkerLogsSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
 					) : activeSection === "updates" ? (
 						<UpdatesSection />
 					) : activeSection === "config-file" ? (
@@ -848,21 +723,28 @@ export function Settings() {
 				</div>
 			</div>
 
-			<Dialog open={!!editingProvider} onOpenChange={(open) => { if (!open) handleClose(); }}>
+			<DialogRoot
+				open={!!editingProvider}
+				onOpenChange={(open) => {
+					if (!open) handleClose();
+				}}
+			>
 				<DialogContent className="max-w-md">
 					<DialogHeader>
 						<DialogTitle>
 							{isConfigured(editingProvider ?? "") ? "Update" : "Add"}{" "}
-							{editingProvider === "ollama" || editingProvider === "azure" ? "Endpoint" : "API Key"}
+							{editingProvider === "ollama" || editingProvider === "azure"
+								? "Endpoint"
+								: "API Key"}
 						</DialogTitle>
 						<DialogDescription>
 							{editingProvider === "ollama"
 								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
 								: editingProvider === "azure"
 									? "Enter your Azure OpenAI configuration. API key, base URL, API version, and deployment name are required."
-								: editingProvider === "openai"
-									? "Enter an OpenAI API key. The model below will be applied to routing."
-								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
+									: editingProvider === "openai"
+										? "Enter an OpenAI API key. The model below will be applied to routing."
+										: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
 					{editingProvider === "azure" ? (
@@ -899,7 +781,9 @@ export function Settings() {
 								</p>
 							</div>
 							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">API Version</label>
+								<label className="text-sm font-medium text-ink">
+									API Version
+								</label>
 								<Input
 									type="text"
 									value={azureApiVersion}
@@ -917,7 +801,9 @@ export function Settings() {
 								</p>
 							</div>
 							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">Deployment Name</label>
+								<label className="text-sm font-medium text-ink">
+									Deployment Name
+								</label>
 								<Input
 									type="text"
 									value={azureDeployment}
@@ -940,7 +826,7 @@ export function Settings() {
 									type="text"
 									value={`azure/${azureDeployment || "deployment"}`}
 									disabled
-									className="bg-app-darkBox/50"
+									className="bg-app-dark-box/50"
 								/>
 								<p className="text-tiny text-ink-faint">
 									Model is auto-generated from deployment name
@@ -977,10 +863,16 @@ export function Settings() {
 					<div className="flex items-center gap-2 mt-3">
 						<Button
 							onClick={handleTestModel}
-							disabled={!editingProvider || !modelInput.trim() || (editingProvider === "azure" && (!azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()))}
-							loading={testModelMutation.isPending}
+							disabled={
+								!editingProvider ||
+								!modelInput.trim() ||
+								(editingProvider === "azure" &&
+									(!azureBaseUrl.trim() ||
+										!azureApiVersion.trim() ||
+										!azureDeployment.trim()))
+							}
 							variant="outline"
-							size="sm"
+							size="md"
 						>
 							Test model
 						</Button>
@@ -990,23 +882,27 @@ export function Settings() {
 					</div>
 					{testResult && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${testResult.success
+							className={`rounded-md border px-3 py-2 text-sm ${
+								testResult.success
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
-								}`}
+							}`}
 						>
 							<div>{testResult.message}</div>
 							{testResult.success && testResult.sample ? (
-								<div className="mt-1 text-xs text-ink-dull">Sample: {testResult.sample}</div>
+								<div className="mt-1 text-xs text-ink-dull">
+									Sample: {testResult.sample}
+								</div>
 							) : null}
 						</div>
 					)}
 					{message && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+							className={`rounded-md border px-3 py-2 text-sm ${
+								message.type === "success"
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
-								}`}
+							}`}
 						>
 							{message.text}
 						</div>
@@ -1016,36 +912,44 @@ export function Settings() {
 							<>
 								{isConfigured(editingProvider ?? "") && (
 									<Button
-										onClick={() => removeMutation.mutate(editingProvider, { onSuccess: (result) => { if (result.success) handleClose(); } })}
-										loading={removeMutation.isPending}
-										variant="destructive"
-										size="sm"
+										onClick={() =>
+											removeMutation.mutate(editingProvider, {
+												onSuccess: (result) => {
+													if (result.success) handleClose();
+												},
+											})
+										}
+										variant="accent"
+										size="md"
 									>
 										Remove
 									</Button>
 								)}
-								<Button onClick={handleClose} variant="ghost" size="sm">
+								<Button onClick={handleClose} variant="outline" size="md">
 									Cancel
 								</Button>
-							<Button
-								onClick={handleSave}
-								disabled={!keyInput.trim() || !azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()}
-								loading={updateMutation.isPending}
-								size="sm"
-							>
-								Save
-							</Button>
+								<Button
+									onClick={handleSave}
+									disabled={
+										!keyInput.trim() ||
+										!azureBaseUrl.trim() ||
+										!azureApiVersion.trim() ||
+										!azureDeployment.trim()
+									}
+									size="md"
+								>
+									Save
+								</Button>
 							</>
 						) : (
 							<>
-								<Button onClick={handleClose} variant="ghost" size="sm">
+								<Button onClick={handleClose} variant="outline" size="md">
 									Cancel
 								</Button>
 								<Button
 									onClick={handleSave}
 									disabled={!modelInput.trim()}
-									loading={updateMutation.isPending}
-									size="sm"
+									size="md"
 								>
 									Save
 								</Button>
@@ -1053,2228 +957,7 @@ export function Settings() {
 						)}
 					</DialogFooter>
 				</DialogContent>
-			</Dialog>
+			</DialogRoot>
 		</div>
-	);
-}
-
-function AppearanceSection() {
-	const { theme, setTheme } = useTheme();
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Theme</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Choose a theme for the dashboard interface.
-				</p>
-			</div>
-
-			<div className="grid grid-cols-2 gap-3">
-				{THEMES.map((t) => (
-					<button
-						key={t.id}
-						onClick={() => setTheme(t.id)}
-						className={`group relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors ${
-							theme === t.id
-								? "border-accent bg-accent/10"
-								: "border-app-line bg-app-box hover:border-app-line/80 hover:bg-app-hover"
-						}`}
-					>
-						<div className="flex w-full items-center justify-between">
-							<span className="text-sm font-medium text-ink">{t.name}</span>
-							{theme === t.id && (
-								<span className="h-2 w-2 rounded-full bg-accent" />
-							)}
-						</div>
-						<p className="mt-1 text-sm text-ink-dull">{t.description}</p>
-						<ThemePreview themeId={t.id} />
-					</button>
-				))}
-			</div>
-		</div>
-	);
-}
-
-function ThemePreview({ themeId }: { themeId: ThemeId }) {
-	const colors = {
-		default: { bg: "#0d0d0f", sidebar: "#0a0a0b", accent: "#a855f7" },
-		vanilla: { bg: "#ffffff", sidebar: "#f5f5f6", accent: "#3b82f6" },
-		midnight: { bg: "#14162b", sidebar: "#0c0e1a", accent: "#3b82f6" },
-		noir: { bg: "#080808", sidebar: "#000000", accent: "#3b82f6" },
-	};
-	const c = colors[themeId];
-
-	return (
-		<div
-			className="mt-3 flex h-12 w-full overflow-hidden rounded border border-app-line/50"
-			style={{ backgroundColor: c.bg }}
-		>
-			<div className="w-8 border-r" style={{ backgroundColor: c.sidebar, borderColor: c.accent + "30" }} />
-			<div className="flex flex-1 flex-col gap-1 p-1.5">
-				<div className="h-1.5 w-12 rounded-sm" style={{ backgroundColor: c.accent }} />
-				<div className="h-1 w-16 rounded-sm opacity-30" style={{ backgroundColor: c.accent }} />
-				<div className="h-1 w-10 rounded-sm opacity-20" style={{ backgroundColor: c.accent }} />
-			</div>
-		</div>
-	);
-}
-
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal";
-
-function ChannelsSection() {
-	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-	const [addingPlatform, setAddingPlatform] = useState<Platform | null>(null);
-
-	const { data: messagingStatus, isLoading } = useQuery({
-		queryKey: ["messaging-status"],
-		queryFn: api.messagingStatus,
-		staleTime: 5_000,
-	});
-
-	const instances = messagingStatus?.instances ?? [];
-
-	// Determine whether to show default or named add form
-	function handleAddInstance(platform: Platform) {
-		setAddingPlatform(platform);
-	}
-
-	function isDefaultAdd(): boolean {
-		if (!addingPlatform) return true;
-		return !instances.some(
-			(inst) => inst.platform === addingPlatform && inst.name === null,
-		);
-	}
-
-	return (
-		<div className="mx-auto max-w-3xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Messaging Platforms</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Connect messaging platforms and configure how conversations route to agents.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading channels...
-				</div>
-			) : (
-				<div className="grid grid-cols-[200px_1fr] gap-6">
-					{/* Left column: Platform catalog */}
-					<div className="flex-shrink-0">
-						<PlatformCatalog onAddInstance={handleAddInstance} />
-					</div>
-
-					{/* Right column: Configured instances */}
-					<div className="flex flex-col gap-3 min-w-0">
-						{/* Active add-instance card */}
-						{addingPlatform && (
-							<AddInstanceCard
-								platform={addingPlatform}
-								isDefault={isDefaultAdd()}
-								onCancel={() => setAddingPlatform(null)}
-								onCreated={() => setAddingPlatform(null)}
-							/>
-						)}
-
-						{/* Configured instance cards */}
-						{instances.length > 0 ? (
-							instances.map((instance) => (
-								<InstanceCard
-									key={instance.runtime_key}
-									instance={instance}
-									expanded={expandedKey === instance.runtime_key}
-									onToggleExpand={() =>
-										setExpandedKey(
-											expandedKey === instance.runtime_key ? null : instance.runtime_key,
-										)
-									}
-								/>
-							))
-						) : !addingPlatform ? (
-							<div className="rounded-lg border border-app-line border-dashed bg-app-box/50 p-8 text-center">
-								<p className="text-sm text-ink-dull">
-									No messaging platforms configured yet.
-								</p>
-								<p className="mt-1 text-sm text-ink-faint">
-									Click a platform on the left to get started.
-								</p>
-							</div>
-						) : null}
-					</div>
-				</div>
-			)}
-		</div>
-	);
-}
-
-
-
-// ── Secrets Section ──────────────────────────────────────────────────────
-
-function SecretsSection() {
-	const queryClient = useQueryClient();
-
-	// Store status.
-	const { data: storeStatus, isLoading: statusLoading } = useQuery({
-		queryKey: ["secrets-status"],
-		queryFn: () => api.secretsStatus(),
-		staleTime: 5_000,
-	});
-
-	// Secret list.
-	const { data: secretsData, isLoading: secretsLoading } = useQuery({
-		queryKey: ["secrets"],
-		queryFn: () => api.listSecrets(),
-		staleTime: 5_000,
-	});
-
-	const secrets = secretsData?.secrets ?? [];
-	const isLoading = statusLoading || secretsLoading;
-	const state: StoreState = storeStatus?.state ?? "unencrypted";
-	const isLocked = state === "locked";
-	const canMutate = !isLocked;
-
-	// ── UI state ─────────────────────────────────────────────────────────
-	const [addDialogOpen, setAddDialogOpen] = useState(false);
-	const [editingSecret, setEditingSecret] = useState<string | null>(null);
-	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-	const [nameInput, setNameInput] = useState("");
-	const [valueInput, setValueInput] = useState("");
-	const [categoryInput, setCategoryInput] = useState<SecretCategory>("tool");
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-
-	// Encryption flow state.
-	const [encryptDialogOpen, setEncryptDialogOpen] = useState(false);
-	const [masterKeyDisplay, setMasterKeyDisplay] = useState<string | null>(null);
-	const [masterKeyCopied, setMasterKeyCopied] = useState(false);
-	const [unlockKeyInput, setUnlockKeyInput] = useState("");
-	const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
-
-	const [filterCategory, setFilterCategory] = useState<"all" | SecretCategory>("all");
-	const [searchQuery, setSearchQuery] = useState("");
-
-	// ── Mutations ────────────────────────────────────────────────────────
-	const invalidateSecrets = () => {
-		queryClient.invalidateQueries({ queryKey: ["secrets"] });
-		queryClient.invalidateQueries({ queryKey: ["secrets-status"] });
-	};
-
-	const putMutation = useMutation({
-		mutationFn: ({ name, value, category }: { name: string; value: string; category?: SecretCategory }) =>
-			api.putSecret(name, value, category),
-		onSuccess: (result) => {
-			invalidateSecrets();
-			setAddDialogOpen(false);
-			setEditingSecret(null);
-			setNameInput("");
-			setValueInput("");
-			setMessage({
-				text: result.reload_required
-					? `${result.name} saved (${result.category}). Restart required for system secrets to take effect.`
-					: `${result.name} saved (${result.category}).`,
-				type: "success",
-			});
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const deleteMutation = useMutation({
-		mutationFn: (name: string) => api.deleteSecret(name),
-		onSuccess: (result) => {
-			invalidateSecrets();
-			setDeleteTarget(null);
-			setMessage({
-				text: result.warning
-					? `Deleted ${result.deleted}. ${result.warning}`
-					: `Deleted ${result.deleted}.`,
-				type: "success",
-			});
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const encryptMutation = useMutation({
-		mutationFn: () => api.enableEncryption(),
-		onSuccess: (result) => {
-			invalidateSecrets();
-			setMasterKeyDisplay(result.master_key);
-			setMasterKeyCopied(false);
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-			setEncryptDialogOpen(false);
-		},
-	});
-
-	const unlockMutation = useMutation({
-		mutationFn: (key: string) => api.unlockSecrets(key),
-		onSuccess: () => {
-			invalidateSecrets();
-			setUnlockKeyInput("");
-			setMessage({ text: "Secret store unlocked.", type: "success" });
-		},
-		onError: (error) => {
-			setMessage({ text: `Unlock failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const lockMutation = useMutation({
-		mutationFn: () => api.lockSecrets(),
-		onSuccess: () => {
-			invalidateSecrets();
-			setMessage({ text: "Secret store locked.", type: "success" });
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const rotateMutation = useMutation({
-		mutationFn: () => api.rotateKey(),
-		onSuccess: (result) => {
-			invalidateSecrets();
-			setRotateDialogOpen(false);
-			setMasterKeyDisplay(result.master_key);
-			setMasterKeyCopied(false);
-			setEncryptDialogOpen(true);
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-			setRotateDialogOpen(false);
-		},
-	});
-
-	const migrateMutation = useMutation({
-		mutationFn: () => api.migrateSecrets(),
-		onSuccess: (result) => {
-			invalidateSecrets();
-			setMessage({
-				text: result.migrated.length > 0
-					? `Migrated ${result.migrated.length} secrets from config.toml.`
-					: result.message,
-				type: result.migrated.length > 0 ? "success" : "success",
-			});
-		},
-		onError: (error) => {
-			setMessage({ text: `Migration failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	// ── Handlers ─────────────────────────────────────────────────────────
-	const handleOpenAdd = () => {
-		setNameInput("");
-		setValueInput("");
-		setCategoryInput("tool");
-		setMessage(null);
-		setAddDialogOpen(true);
-	};
-
-	const handleOpenEdit = (secret: SecretListItem) => {
-		setEditingSecret(secret.name);
-		setNameInput(secret.name);
-		setValueInput("");
-		setCategoryInput(secret.category);
-		setMessage(null);
-	};
-
-	const handleSave = () => {
-		const name = editingSecret ?? nameInput.trim().toUpperCase();
-		if (!name || !valueInput) return;
-		putMutation.mutate({ name, value: valueInput, category: categoryInput });
-	};
-
-	const handleCopyKey = async () => {
-		if (!masterKeyDisplay) return;
-		try {
-			await navigator.clipboard.writeText(masterKeyDisplay);
-			setMasterKeyCopied(true);
-		} catch {
-			// Fallback
-			const textarea = document.createElement("textarea");
-			textarea.value = masterKeyDisplay;
-			textarea.setAttribute("readonly", "");
-			textarea.style.position = "absolute";
-			textarea.style.left = "-9999px";
-			document.body.appendChild(textarea);
-			textarea.select();
-			document.execCommand("copy");
-			document.body.removeChild(textarea);
-			setMasterKeyCopied(true);
-		}
-	};
-
-	const filteredSecrets = secrets.filter((secret) => {
-		if (filterCategory !== "all" && secret.category !== filterCategory) return false;
-		if (searchQuery && !secret.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-		return true;
-	});
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			{/* Header */}
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Secrets</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Manage credentials for LLM providers (system) and CLI tools used by workers (tool).
-					System secrets are never exposed to worker subprocesses. Tool secrets are injected as
-					environment variables.
-				</p>
-			</div>
-
-			{/* Status bar */}
-			{storeStatus && (
-				<div className="mb-4 flex items-center gap-3 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-					<div className="flex items-center gap-2">
-						<div className={`h-2 w-2 rounded-full ${
-							state === "unlocked" ? "bg-green-500"
-								: state === "locked" ? "bg-red-500"
-									: "bg-amber-500"
-						}`} />
-						<span className="text-sm font-medium text-ink">
-							{state === "unlocked" ? "Encrypted & Unlocked"
-								: state === "locked" ? "Encrypted & Locked"
-									: "Unencrypted"}
-						</span>
-					</div>
-					<div className="flex-1" />
-					<span className="text-tiny text-ink-faint">
-						{storeStatus.secret_count} secrets ({storeStatus.system_count} system, {storeStatus.tool_count} tool)
-					</span>
-				</div>
-			)}
-
-			{/* Encryption banner (unencrypted stores) */}
-			{state === "unencrypted" && !storeStatus?.platform_managed && (
-				<div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/5 px-4 py-3">
-					<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-						<div className="sm:pr-4">
-							<p className="text-sm font-medium text-amber-400">Encryption not enabled</p>
-							<p className="mt-0.5 text-sm text-ink-faint">
-								Secrets are stored without encryption. Enable encryption for protection
-								against volume compromise.
-							</p>
-						</div>
-						<Button
-							onClick={() => { setEncryptDialogOpen(true); setMasterKeyDisplay(null); }}
-							variant="outline"
-							className="w-full shrink-0 whitespace-nowrap sm:w-auto"
-						>
-							Enable Encryption
-						</Button>
-					</div>
-				</div>
-			)}
-
-			{/* Unlock prompt (locked stores) */}
-			{isLocked && (
-				<div className="mb-4 rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3">
-					<p className="text-sm font-medium text-red-400">Secrets are locked</p>
-					<p className="mt-0.5 text-sm text-ink-faint">
-						Enter your master key to unlock encrypted secrets. You can view secret names
-						but cannot add, edit, or read values while locked.
-					</p>
-					<div className="mt-3 flex items-center gap-2">
-						<Input
-							type="password"
-							value={unlockKeyInput}
-							onChange={(e) => setUnlockKeyInput(e.target.value)}
-							placeholder="Paste master key (hex)"
-							className="max-w-sm font-mono text-tiny"
-							onKeyDown={(e) => { if (e.key === "Enter" && unlockKeyInput.trim()) unlockMutation.mutate(unlockKeyInput.trim()); }}
-						/>
-						<Button
-							onClick={() => unlockMutation.mutate(unlockKeyInput.trim())}
-							disabled={!unlockKeyInput.trim()}
-							loading={unlockMutation.isPending}
-							size="sm"
-						>
-							Unlock
-						</Button>
-					</div>
-				</div>
-			)}
-
-			{/* Feedback message */}
-			{message && (
-				<div className={`mb-4 rounded-md border px-3 py-2 text-sm ${
-					message.type === "success"
-						? "border-green-500/20 bg-green-500/10 text-green-400"
-						: "border-red-500/20 bg-red-500/10 text-red-400"
-				}`}>
-					{message.text}
-				</div>
-			)}
-
-			{/* Toolbar */}
-			<div className="mb-3 flex items-center gap-2">
-				<Input
-					value={searchQuery}
-					onChange={(e) => setSearchQuery(e.target.value)}
-					placeholder="Filter secrets..."
-					className="max-w-xs"
-				/>
-				<div className="flex gap-1">
-					{(["all", "system", "tool"] as const).map((cat) => (
-						<button
-							key={cat}
-							onClick={() => setFilterCategory(cat)}
-							className={`rounded-full px-2.5 py-1 text-tiny font-medium transition-colors ${
-								filterCategory === cat
-									? "bg-accent/15 text-accent"
-									: "text-ink-faint hover:text-ink-dull"
-							}`}
-						>
-							{cat === "all" ? "All" : cat.charAt(0).toUpperCase() + cat.slice(1)}
-						</button>
-					))}
-				</div>
-				<div className="flex-1" />
-				{canMutate && (
-					<Button onClick={handleOpenAdd} size="sm">
-						Add secret
-					</Button>
-				)}
-			</div>
-
-			{/* Secret list */}
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading secrets...
-				</div>
-			) : filteredSecrets.length === 0 ? (
-				<div className="flex flex-col items-center rounded-lg border border-dashed border-app-line py-12">
-					<p className="text-sm font-medium text-ink-dull">
-						{secrets.length === 0 ? "No secrets yet" : "No matching secrets"}
-					</p>
-					<p className="mt-1 text-sm text-ink-faint">
-						{secrets.length === 0
-							? "Add credentials for LLM providers or CLI tools."
-							: "Try a different filter."}
-					</p>
-					{secrets.length === 0 && canMutate && (
-						<div className="mt-4 flex gap-2">
-							<Button onClick={handleOpenAdd} size="sm">
-								Add secret
-							</Button>
-							<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
-								Migrate from config
-							</Button>
-						</div>
-					)}
-				</div>
-			) : (
-				<div className="flex flex-col gap-1.5">
-					{filteredSecrets.map((secret) => (
-						<div
-							key={secret.name}
-							className="group flex items-center rounded-lg border border-app-line bg-app-box px-4 py-3"
-						>
-							<div className="flex-1 min-w-0">
-								<div className="flex items-center gap-2">
-									<code className="text-sm font-medium text-ink">{secret.name}</code>
-									<Badge
-										variant="outline"
-										size="sm"
-										className="pointer-events-none transition-none"
-									>
-										{secret.category}
-									</Badge>
-								</div>
-								<p className="mt-0.5 text-tiny text-ink-faint">
-									Updated {new Date(secret.updated_at).toLocaleDateString()}
-								</p>
-							</div>
-							{canMutate && (
-								<div className="flex gap-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto">
-									<Button onClick={() => handleOpenEdit(secret)} variant="outline" size="sm">
-										Update
-									</Button>
-									<Button onClick={() => setDeleteTarget(secret.name)} variant="outline" size="sm">
-										Delete
-									</Button>
-								</div>
-							)}
-						</div>
-					))}
-				</div>
-			)}
-
-			{/* Bottom actions for encrypted stores */}
-			{storeStatus?.encrypted && !storeStatus.platform_managed && canMutate && (
-				<div className="mt-6 flex items-center gap-2 border-t border-app-line pt-4">
-					<Button onClick={() => lockMutation.mutate()} variant="outline" size="sm" loading={lockMutation.isPending}>
-						Lock store
-					</Button>
-					<Button onClick={() => setRotateDialogOpen(true)} variant="outline" size="sm">
-						Rotate master key
-					</Button>
-					<div className="flex-1" />
-					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
-						Migrate from config
-					</Button>
-				</div>
-			)}
-
-			{/* Migrate button for unencrypted stores */}
-			{state === "unencrypted" && secrets.length > 0 && (
-				<div className="mt-4 flex justify-end">
-					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
-						Migrate from config
-					</Button>
-				</div>
-			)}
-
-			{/* ── Add / Edit Dialog ─────────────────────────────────────── */}
-			<Dialog
-				open={addDialogOpen || !!editingSecret}
-				onOpenChange={(open) => {
-					if (!open) {
-						setAddDialogOpen(false);
-						setEditingSecret(null);
-						setNameInput("");
-						setValueInput("");
-					}
-				}}
-			>
-				<DialogContent className="max-w-md">
-					<DialogHeader>
-						<DialogTitle>{editingSecret ? "Update Secret" : "Add Secret"}</DialogTitle>
-						<DialogDescription>
-							{editingSecret
-								? `Enter a new value for ${editingSecret}. The existing value will be overwritten.`
-								: "Add a new credential. System secrets are internal (LLM keys, messaging tokens). Tool secrets are exposed to worker subprocesses as environment variables."}
-						</DialogDescription>
-					</DialogHeader>
-
-					{!editingSecret && (
-						<div className="space-y-1.5">
-							<label className="text-sm font-medium text-ink">Name</label>
-							<Input
-								value={nameInput}
-								onChange={(e) => setNameInput(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
-								placeholder="GH_TOKEN"
-								className="font-mono"
-								autoFocus
-							/>
-							<p className="text-tiny text-ink-faint">
-								UPPER_SNAKE_CASE. This is also the env var name for tool secrets.
-							</p>
-						</div>
-					)}
-
-					<div className="space-y-1.5">
-						<label className="text-sm font-medium text-ink">Value</label>
-						<Input
-							type="password"
-							value={valueInput}
-							onChange={(e) => setValueInput(e.target.value)}
-							placeholder={editingSecret ? "Enter new value" : "Secret value"}
-							autoFocus={!!editingSecret}
-							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
-						/>
-					</div>
-
-					<div className="space-y-1.5">
-						<label className="text-sm font-medium text-ink">Category</label>
-						<Select
-							value={categoryInput}
-							onValueChange={(value) => setCategoryInput(value as SecretCategory)}
-						>
-							<SelectTrigger>
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="tool">
-									Tool — exposed to workers as env vars
-								</SelectItem>
-								<SelectItem value="system">
-									System — internal only, never exposed
-								</SelectItem>
-							</SelectContent>
-						</Select>
-						<p className="text-tiny text-ink-faint">
-							{categoryInput === "tool"
-								? "Workers will have access to this credential via environment variable."
-								: "Only the Spacebot process can read this credential. Workers never see it."}
-						</p>
-					</div>
-
-					<DialogFooter>
-						<Button
-							onClick={() => { setAddDialogOpen(false); setEditingSecret(null); }}
-							variant="ghost"
-							size="sm"
-						>
-							Cancel
-						</Button>
-						<Button
-							onClick={handleSave}
-							disabled={(!editingSecret && !nameInput.trim()) || !valueInput}
-							loading={putMutation.isPending}
-							size="sm"
-						>
-							Save
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-
-			{/* ── Delete Confirmation ───────────────────────────────────── */}
-			<Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-				<DialogContent className="max-w-sm">
-					<DialogHeader>
-						<DialogTitle>Delete Secret</DialogTitle>
-						<DialogDescription>
-							Are you sure you want to delete <code className="font-mono text-ink">{deleteTarget}</code>?
-							{" "}If this secret is referenced in config.toml, the reference will fail to resolve.
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button onClick={() => setDeleteTarget(null)} variant="ghost" size="sm">
-							Cancel
-						</Button>
-						<Button
-							onClick={() => { if (deleteTarget) deleteMutation.mutate(deleteTarget); }}
-							loading={deleteMutation.isPending}
-							variant="destructive"
-							size="sm"
-						>
-							Delete
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-
-			{/* ── Enable Encryption / Master Key Display Dialog ─────────── */}
-			<Dialog
-				open={encryptDialogOpen}
-				onOpenChange={(open) => {
-					if (!open) {
-						setEncryptDialogOpen(false);
-						setMasterKeyDisplay(null);
-						setMasterKeyCopied(false);
-					}
-				}}
-			>
-				<DialogContent className="max-w-md">
-					{!masterKeyDisplay ? (
-						<>
-							<DialogHeader>
-								<DialogTitle>Enable Encryption</DialogTitle>
-								<DialogDescription>
-									This will generate a master key and encrypt all secrets at rest using
-									AES-256-GCM. On Linux, you will need the master key to unlock secrets
-									after a reboot.
-								</DialogDescription>
-							</DialogHeader>
-							<DialogFooter>
-								<Button
-									onClick={() => setEncryptDialogOpen(false)}
-									variant="ghost"
-									size="sm"
-								>
-									Cancel
-								</Button>
-								<Button
-									onClick={() => encryptMutation.mutate()}
-									loading={encryptMutation.isPending}
-									size="sm"
-								>
-									Enable encryption
-								</Button>
-							</DialogFooter>
-						</>
-					) : (
-						<>
-							<DialogHeader>
-								<DialogTitle>Master Key Generated</DialogTitle>
-								<DialogDescription>
-									Save this key somewhere safe. On Linux, you will need it to unlock the
-									secret store after a reboot. This is the only time the key will be shown.
-								</DialogDescription>
-							</DialogHeader>
-							<div className="space-y-3">
-								<div className="flex items-center gap-2">
-									<code className="flex-1 rounded border border-app-line bg-app-darkerBox px-3 py-2 font-mono text-tiny text-ink break-all select-all">
-										{masterKeyDisplay}
-									</code>
-									<Button onClick={handleCopyKey} size="sm" variant={masterKeyCopied ? "secondary" : "outline"}>
-										{masterKeyCopied ? "Copied" : "Copy"}
-									</Button>
-								</div>
-								<div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-sm text-amber-400">
-									If you lose this key and the OS credential store is cleared (e.g. after
-									a Linux reboot), you will not be able to access your encrypted secrets.
-								</div>
-							</div>
-							<DialogFooter>
-								<Button
-									onClick={() => {
-										setEncryptDialogOpen(false);
-										setMasterKeyDisplay(null);
-										setMasterKeyCopied(false);
-									}}
-									size="sm"
-								>
-									Done
-								</Button>
-							</DialogFooter>
-						</>
-					)}
-				</DialogContent>
-			</Dialog>
-
-			{/* ── Rotate Key Confirmation ───────────────────────────────── */}
-			<Dialog open={rotateDialogOpen} onOpenChange={(open) => { if (!open) setRotateDialogOpen(false); }}>
-				<DialogContent className="max-w-sm">
-					<DialogHeader>
-						<DialogTitle>Rotate Master Key</DialogTitle>
-						<DialogDescription>
-							This will generate a new master key and re-encrypt all secrets. Your current
-							master key will be invalidated. You will need to save the new key.
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button onClick={() => setRotateDialogOpen(false)} variant="ghost" size="sm">
-							Cancel
-						</Button>
-						<Button
-							onClick={() => rotateMutation.mutate()}
-							loading={rotateMutation.isPending}
-							size="sm"
-						>
-							Rotate key
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-		</div>
-	);
-}
-
-interface GlobalSettingsSectionProps {
-	settings: GlobalSettingsResponse | undefined;
-	isLoading: boolean;
-}
-
-function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
-	const queryClient = useQueryClient();
-	const [editingBraveKey, setEditingBraveKey] = useState(false);
-	const [braveKeyInput, setBraveKeyInput] = useState("");
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-
-	const updateMutation = useMutation({
-		mutationFn: api.updateGlobalSettings,
-		onSuccess: (result) => {
-			if (result.success) {
-				setEditingBraveKey(false);
-				setBraveKeyInput("");
-				setMessage({ text: result.message, type: "success" });
-				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
-			} else {
-				setMessage({ text: result.message, type: "error" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const handleSaveBraveKey = () => {
-		updateMutation.mutate({ brave_search_key: braveKeyInput.trim() || null });
-	};
-
-	const handleRemoveBraveKey = () => {
-		updateMutation.mutate({ brave_search_key: null });
-	};
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Third-Party API Keys</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Configure API keys for third-party services used by workers.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading settings...
-				</div>
-			) : (
-				<div className="flex flex-col gap-3">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<div className="flex items-center gap-3">
-							<FontAwesomeIcon icon={faSearch} className="text-ink-faint" />
-							<div className="flex-1">
-								<div className="flex items-center gap-2">
-									<span className="text-sm font-medium text-ink">Brave Search</span>
-									{settings?.brave_search_key && (
-										<span className="text-tiny text-green-400">● Configured</span>
-									)}
-								</div>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Powers web search capabilities for workers
-								</p>
-							</div>
-							<div className="flex gap-2">
-								<Button
-									onClick={() => {
-										setEditingBraveKey(true);
-										setBraveKeyInput(settings?.brave_search_key || "");
-										setMessage(null);
-									}}
-									variant="outline"
-									size="sm"
-								>
-									{settings?.brave_search_key ? "Update" : "Add key"}
-								</Button>
-								{settings?.brave_search_key && (
-									<Button
-										onClick={handleRemoveBraveKey}
-										variant="outline"
-										size="sm"
-										loading={updateMutation.isPending}
-									>
-										Remove
-									</Button>
-								)}
-							</div>
-						</div>
-					</div>
-				</div>
-			)}
-
-			{message && (
-				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
-						}`}
-				>
-					{message.text}
-				</div>
-			)}
-
-			<Dialog open={editingBraveKey} onOpenChange={(open) => { if (!open) setEditingBraveKey(false); }}>
-				<DialogContent className="max-w-md">
-					<DialogHeader>
-						<DialogTitle>{settings?.brave_search_key ? "Update" : "Add"} Brave Search Key</DialogTitle>
-						<DialogDescription>
-							Enter your Brave Search API key. Get one at brave.com/search/api
-						</DialogDescription>
-					</DialogHeader>
-					<Input
-						type="password"
-						value={braveKeyInput}
-						onChange={(e) => setBraveKeyInput(e.target.value)}
-						placeholder="BSA..."
-						autoFocus
-						onKeyDown={(e) => {
-							if (e.key === "Enter") handleSaveBraveKey();
-						}}
-					/>
-					<DialogFooter>
-						<Button onClick={() => setEditingBraveKey(false)} variant="ghost" size="sm">
-							Cancel
-						</Button>
-						<Button
-							onClick={handleSaveBraveKey}
-							disabled={!braveKeyInput.trim()}
-							loading={updateMutation.isPending}
-							size="sm"
-						>
-							Save
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-		</div>
-	);
-}
-
-function ServerSection({ settings, isLoading }: GlobalSettingsSectionProps) {
-	const queryClient = useQueryClient();
-	const [apiEnabled, setApiEnabled] = useState(settings?.api_enabled ?? true);
-	const [apiPort, setApiPort] = useState(settings?.api_port.toString() ?? "19898");
-	const [apiBind, setApiBind] = useState(settings?.api_bind ?? "127.0.0.1");
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error"; requiresRestart?: boolean } | null>(null);
-
-	// Update form state when settings load
-	useEffect(() => {
-		if (settings) {
-			setApiEnabled(settings.api_enabled);
-			setApiPort(settings.api_port.toString());
-			setApiBind(settings.api_bind);
-		}
-	}, [settings]);
-
-	const updateMutation = useMutation({
-		mutationFn: api.updateGlobalSettings,
-		onSuccess: (result) => {
-			if (result.success) {
-				setMessage({ text: result.message, type: "success", requiresRestart: result.requires_restart });
-				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
-			} else {
-				setMessage({ text: result.message, type: "error" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const handleSave = () => {
-		const port = parseInt(apiPort, 10);
-		if (isNaN(port) || port < 1024 || port > 65535) {
-			setMessage({ text: "Port must be between 1024 and 65535", type: "error" });
-			return;
-		}
-
-		updateMutation.mutate({
-			api_enabled: apiEnabled,
-			api_port: port,
-			api_bind: apiBind.trim(),
-		});
-	};
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">API Server Configuration</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Configure the HTTP API server. Changes require a restart to take effect.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading settings...
-				</div>
-			) : (
-				<div className="flex flex-col gap-4">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<div className="flex items-center justify-between">
-							<div>
-								<span className="text-sm font-medium text-ink">Enable API Server</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Disable to prevent the HTTP API from starting
-								</p>
-							</div>
-							<Toggle
-								size="sm"
-								checked={apiEnabled}
-								onCheckedChange={setApiEnabled}
-							/>
-						</div>
-					</div>
-
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<label className="block">
-							<span className="text-sm font-medium text-ink">Port</span>
-							<p className="mt-0.5 text-sm text-ink-dull">Port number for the API server</p>
-							<Input
-								type="number"
-								value={apiPort}
-								onChange={(e) => setApiPort(e.target.value)}
-								min="1024"
-								max="65535"
-								className="mt-2"
-							/>
-						</label>
-					</div>
-
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<label className="block">
-							<span className="text-sm font-medium text-ink">Bind Address</span>
-							<p className="mt-0.5 text-sm text-ink-dull">
-								IP address to bind to (127.0.0.1 for local, 0.0.0.0 for all interfaces)
-							</p>
-							<Input
-								type="text"
-								value={apiBind}
-								onChange={(e) => setApiBind(e.target.value)}
-								placeholder="127.0.0.1"
-								className="mt-2"
-							/>
-						</label>
-					</div>
-
-					<Button onClick={handleSave} loading={updateMutation.isPending}>
-						Save Changes
-					</Button>
-				</div>
-			)}
-
-			{message && (
-				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
-						}`}
-				>
-					{message.text}
-					{message.requiresRestart && (
-						<div className="mt-1 text-yellow-400">
-							⚠️ Restart required for changes to take effect
-						</div>
-					)}
-				</div>
-			)}
-		</div>
-	);
-}
-
-function WorkerLogsSection({ settings, isLoading }: GlobalSettingsSectionProps) {
-	const queryClient = useQueryClient();
-	const [logMode, setLogMode] = useState(settings?.worker_log_mode ?? "errors_only");
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-
-	// Update form state when settings load
-	useEffect(() => {
-		if (settings) {
-			setLogMode(settings.worker_log_mode);
-		}
-	}, [settings]);
-
-	const updateMutation = useMutation({
-		mutationFn: api.updateGlobalSettings,
-		onSuccess: (result) => {
-			if (result.success) {
-				setMessage({ text: result.message, type: "success" });
-				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
-			} else {
-				setMessage({ text: result.message, type: "error" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const handleSave = () => {
-		updateMutation.mutate({ worker_log_mode: logMode });
-	};
-
-	const modes = [
-		{
-			value: "errors_only",
-			label: "Errors Only",
-			description: "Only log failed worker runs (saves disk space)",
-		},
-		{
-			value: "all_separate",
-			label: "All (Separate)",
-			description: "Log all runs with separate directories for success/failure",
-		},
-		{
-			value: "all_combined",
-			label: "All (Combined)",
-			description: "Log all runs to the same directory",
-		},
-	];
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Worker Execution Logs</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Control how worker execution logs are stored in the logs directory.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading settings...
-				</div>
-			) : (
-				<div className="flex flex-col gap-4">
-					<div className="flex flex-col gap-3">
-						{modes.map((mode) => (
-							<div
-								key={mode.value}
-								className={`rounded-lg border p-4 cursor-pointer transition-colors ${logMode === mode.value
-										? "border-accent bg-accent/5"
-										: "border-app-line bg-app-box hover:border-app-line/80"
-									}`}
-								onClick={() => setLogMode(mode.value)}
-							>
-								<label className="flex items-start gap-3 cursor-pointer">
-									<input
-										type="radio"
-										value={mode.value}
-										checked={logMode === mode.value}
-										onChange={(e) => setLogMode(e.target.value)}
-										className="mt-0.5"
-									/>
-									<div className="flex-1">
-										<span className="text-sm font-medium text-ink">{mode.label}</span>
-										<p className="mt-0.5 text-sm text-ink-dull">{mode.description}</p>
-									</div>
-								</label>
-							</div>
-						))}
-					</div>
-
-					<Button onClick={handleSave} loading={updateMutation.isPending}>
-						Save Changes
-					</Button>
-				</div>
-			)}
-
-			{message && (
-				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
-						}`}
-				>
-					{message.text}
-				</div>
-			)}
-		</div>
-	);
-}
-
-const PERMISSION_OPTIONS = [
-	{ value: "allow", label: "Allow", description: "Tool can run without restriction" },
-	{ value: "deny", label: "Deny", description: "Tool is completely disabled" },
-];
-
-function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
-	const queryClient = useQueryClient();
-	const [enabled, setEnabled] = useState(settings?.opencode?.enabled ?? false);
-	const [path, setPath] = useState(settings?.opencode?.path ?? "opencode");
-	const [maxServers, setMaxServers] = useState(settings?.opencode?.max_servers?.toString() ?? "5");
-	const [startupTimeout, setStartupTimeout] = useState(settings?.opencode?.server_startup_timeout_secs?.toString() ?? "30");
-	const [maxRetries, setMaxRetries] = useState(settings?.opencode?.max_restart_retries?.toString() ?? "5");
-	const [editPerm, setEditPerm] = useState(settings?.opencode?.permissions?.edit ?? "allow");
-	const [bashPerm, setBashPerm] = useState(settings?.opencode?.permissions?.bash ?? "allow");
-	const [webfetchPerm, setWebfetchPerm] = useState(settings?.opencode?.permissions?.webfetch ?? "allow");
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-
-	useEffect(() => {
-		if (settings?.opencode) {
-			setEnabled(settings.opencode.enabled);
-			setPath(settings.opencode.path);
-			setMaxServers(settings.opencode.max_servers.toString());
-			setStartupTimeout(settings.opencode.server_startup_timeout_secs.toString());
-			setMaxRetries(settings.opencode.max_restart_retries.toString());
-			setEditPerm(settings.opencode.permissions.edit);
-			setBashPerm(settings.opencode.permissions.bash);
-			setWebfetchPerm(settings.opencode.permissions.webfetch);
-		}
-	}, [settings?.opencode]);
-
-	const updateMutation = useMutation({
-		mutationFn: api.updateGlobalSettings,
-		onSuccess: (result) => {
-			if (result.success) {
-				setMessage({ text: result.message, type: "success" });
-				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
-			} else {
-				setMessage({ text: result.message, type: "error" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const handleSave = () => {
-		const servers = parseInt(maxServers, 10);
-		if (isNaN(servers) || servers < 1) {
-			setMessage({ text: "Max servers must be at least 1", type: "error" });
-			return;
-		}
-		const timeout = parseInt(startupTimeout, 10);
-		if (isNaN(timeout) || timeout < 1) {
-			setMessage({ text: "Startup timeout must be at least 1", type: "error" });
-			return;
-		}
-		const retries = parseInt(maxRetries, 10);
-		if (isNaN(retries) || retries < 0) {
-			setMessage({ text: "Max retries cannot be negative", type: "error" });
-			return;
-		}
-
-		updateMutation.mutate({
-			opencode: {
-				enabled,
-				path: path.trim() || "opencode",
-				max_servers: servers,
-				server_startup_timeout_secs: timeout,
-				max_restart_retries: retries,
-				permissions: {
-					edit: editPerm,
-					bash: bashPerm,
-					webfetch: webfetchPerm,
-				},
-			},
-		});
-	};
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">OpenCode Workers</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Spawn <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">OpenCode</a> coding agents as worker subprocesses. Requires the <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">opencode</code> binary on PATH or a custom path below.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading settings...
-				</div>
-			) : (
-				<div className="flex flex-col gap-4">
-					{/* Enable toggle */}
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<label className="flex items-center gap-3">
-							<input
-								type="checkbox"
-								checked={enabled}
-								onChange={(e) => setEnabled(e.target.checked)}
-								className="h-4 w-4"
-							/>
-							<div>
-								<span className="text-sm font-medium text-ink">Enable OpenCode Workers</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Allow agents to spawn OpenCode coding sessions
-								</p>
-							</div>
-						</label>
-					</div>
-
-					{enabled && (
-						<>
-							{/* Binary path */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<label className="block">
-									<span className="text-sm font-medium text-ink">Binary Path</span>
-									<p className="mt-0.5 text-sm text-ink-dull">
-										Path to the OpenCode binary, or just the name if it's on PATH
-									</p>
-									<Input
-										type="text"
-										value={path}
-										onChange={(e) => setPath(e.target.value)}
-										placeholder="opencode"
-										className="mt-2"
-									/>
-								</label>
-							</div>
-
-							{/* Pool settings */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Server Pool</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Controls how many OpenCode server processes can run concurrently
-								</p>
-								<div className="mt-3 grid grid-cols-3 gap-3">
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Max Servers</span>
-										<Input
-											type="number"
-											value={maxServers}
-											onChange={(e) => setMaxServers(e.target.value)}
-											min="1"
-											max="20"
-											className="mt-1"
-										/>
-									</label>
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Startup Timeout (s)</span>
-										<Input
-											type="number"
-											value={startupTimeout}
-											onChange={(e) => setStartupTimeout(e.target.value)}
-											min="1"
-											className="mt-1"
-										/>
-									</label>
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Max Retries</span>
-										<Input
-											type="number"
-											value={maxRetries}
-											onChange={(e) => setMaxRetries(e.target.value)}
-											min="0"
-											className="mt-1"
-										/>
-									</label>
-								</div>
-							</div>
-
-							{/* Permissions */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Permissions</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Control which tools OpenCode workers can use
-								</p>
-								<div className="mt-3 flex flex-col gap-3">
-									{([
-										{ label: "File Edit", value: editPerm, setter: setEditPerm },
-										{ label: "Shell / Bash", value: bashPerm, setter: setBashPerm },
-										{ label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm },
-									] as const).map(({ label, value, setter }) => (
-										<div key={label} className="flex items-center justify-between">
-											<span className="text-sm text-ink">{label}</span>
-											<Select value={value} onValueChange={(v) => setter(v)}>
-												<SelectTrigger className="w-28">
-													<SelectValue />
-												</SelectTrigger>
-												<SelectContent>
-													{PERMISSION_OPTIONS.map((opt) => (
-														<SelectItem key={opt.value} value={opt.value}>
-															{opt.label}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										</div>
-									))}
-								</div>
-							</div>
-						</>
-					)}
-
-					<Button onClick={handleSave} loading={updateMutation.isPending}>
-						Save Changes
-					</Button>
-				</div>
-			)}
-
-			{message && (
-				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
-						}`}
-				>
-					{message.text}
-				</div>
-			)}
-		</div>
-	);
-}
-
-function formatCheckedAt(checkedAt: string | null): string {
-	if (!checkedAt) return "Never";
-	const timestamp = new Date(checkedAt);
-	if (Number.isNaN(timestamp.getTime())) return checkedAt;
-	return timestamp.toLocaleString();
-}
-
-function pullableDockerImage(image: string | null): string {
-	if (!image) return "ghcr.io/spacedriveapp/spacebot:latest";
-	return image.split("@")[0] ?? image;
-}
-
-function UpdatesSection() {
-	const queryClient = useQueryClient();
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-	const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
-
-	const { data, isLoading, isFetching } = useQuery<UpdateStatus>({
-		queryKey: ["update-check"],
-		queryFn: api.updateCheck,
-		staleTime: 30_000,
-		refetchInterval: 300_000,
-	});
-
-	const checkNowMutation = useMutation({
-		mutationFn: api.updateCheckNow,
-		onSuccess: (status) => {
-			queryClient.setQueryData(["update-check"], status);
-			if (status.update_available && status.latest_version) {
-				setMessage({
-					text: `Update ${status.latest_version} is available.`,
-					type: "success",
-				});
-			} else {
-				setMessage({ text: "No newer release found.", type: "success" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed to check updates: ${error.message}`, type: "error" });
-		},
-	});
-
-	const applyMutation = useMutation({
-		mutationFn: api.updateApply,
-		onSuccess: (result) => {
-			if (result.status === "updating") {
-				setMessage({
-					text: "Applying update. This instance will restart in a few seconds.",
-					type: "success",
-				});
-				setTimeout(() => {
-					queryClient.invalidateQueries({ queryKey: ["update-check"] });
-				}, 3000);
-				return;
-			}
-
-			setMessage({ text: result.error ?? "Update failed", type: "error" });
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed to apply update: ${error.message}`, type: "error" });
-		},
-	});
-
-	const handleCopy = async (label: string, content: string) => {
-		try {
-			if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(content);
-			} else {
-				const textarea = document.createElement("textarea");
-				textarea.value = content;
-				textarea.setAttribute("readonly", "");
-				textarea.style.position = "absolute";
-				textarea.style.left = "-9999px";
-				document.body.appendChild(textarea);
-				textarea.select();
-				document.execCommand("copy");
-				document.body.removeChild(textarea);
-			}
-			setCopiedBlock(label);
-			setTimeout(() => setCopiedBlock((current) => (current === label ? null : current)), 1200);
-		} catch (error: any) {
-			setMessage({ text: `Failed to copy commands: ${error.message}`, type: "error" });
-		}
-	};
-
-	const deployment = data?.deployment ?? "native";
-	const deploymentLabel = deployment === "docker"
-		? "Docker"
-		: deployment === "hosted"
-			? "Hosted"
-			: "Native";
-
-	const dockerComposeCommands = [
-		"docker compose pull spacebot",
-		"docker compose up -d --force-recreate spacebot",
-	];
-
-	const dockerRunCommands = [
-		`docker pull ${pullableDockerImage(data?.docker_image ?? null)}`,
-		"docker stop spacebot && docker rm spacebot",
-		"# re-run your docker run command",
-	];
-
-	const nativeCommands = [
-		"git pull",
-		"cargo install --path . --force",
-		"spacebot restart",
-	];
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Updates</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Check release status, trigger one-click Docker updates, and copy manual update commands.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading update status...
-				</div>
-			) : (
-				<div className="flex flex-col gap-4">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<div className="flex items-center justify-between gap-4">
-							<div>
-								<p className="text-sm font-medium text-ink">Release Status</p>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									{data?.update_available
-										? `Update ${data.latest_version ?? ""} is available`
-										: "You're running the latest available release"}
-								</p>
-							</div>
-							<Button
-								onClick={() => {
-									setMessage(null);
-									checkNowMutation.mutate();
-								}}
-								loading={checkNowMutation.isPending || isFetching}
-								size="sm"
-								variant="outline"
-							>
-								Check now
-							</Button>
-						</div>
-
-						<div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-							<div>
-								<p className="text-ink-faint">Deployment</p>
-								<p className="text-ink">{deploymentLabel}</p>
-							</div>
-							<div>
-								<p className="text-ink-faint">Current version</p>
-								<p className="text-ink">{data?.current_version ?? "Unknown"}</p>
-							</div>
-							<div>
-								<p className="text-ink-faint">Latest release</p>
-								<p className="text-ink">{data?.latest_version ?? "Unknown"}</p>
-							</div>
-							<div>
-								<p className="text-ink-faint">Last checked</p>
-								<p className="text-ink">{formatCheckedAt(data?.checked_at ?? null)}</p>
-							</div>
-						</div>
-
-						{data?.docker_image && (
-							<div className="mt-3 rounded border border-app-line/70 bg-app-darkBox/30 px-3 py-2">
-								<p className="text-tiny text-ink-faint">Container image</p>
-								<p className="font-mono text-xs text-ink">{data.docker_image}</p>
-							</div>
-						)}
-
-						{data?.release_url && (
-							<a
-								href={data.release_url}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="mt-3 inline-block text-sm text-accent hover:underline"
-							>
-								View release notes
-							</a>
-						)}
-					</div>
-
-					{deployment === "docker" && (
-						<div className="rounded-lg border border-app-line bg-app-box p-4">
-							<div className="flex items-center justify-between gap-3">
-								<div>
-									<p className="text-sm font-medium text-ink">One-Click Docker Update</p>
-									<p className="mt-0.5 text-sm text-ink-dull">
-										Pull and swap to the latest release image from the web UI.
-									</p>
-								</div>
-								<Button
-									onClick={() => {
-										setMessage(null);
-										applyMutation.mutate();
-									}}
-									disabled={!data?.can_apply || !data?.update_available}
-									loading={applyMutation.isPending}
-									size="sm"
-								>
-									Update now
-								</Button>
-							</div>
-							{!data?.update_available && (
-								<p className="mt-3 text-xs text-ink-faint">No update available yet.</p>
-							)}
-							{!data?.can_apply && data?.cannot_apply_reason && (
-								<p className="mt-3 text-xs text-yellow-300">{data.cannot_apply_reason}</p>
-							)}
-							{data?.can_apply && (
-								<p className="mt-3 text-xs text-ink-faint">
-									Applying an update restarts this instance. The UI should reconnect in 10-30 seconds.
-								</p>
-							)}
-						</div>
-					)}
-
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<p className="text-sm font-medium text-ink">Manual Update Commands</p>
-						<p className="mt-0.5 text-sm text-ink-dull">
-							Use these when one-click update is unavailable or when you prefer manual rollouts.
-						</p>
-
-						{deployment === "docker" && (
-							<div className="mt-3 flex flex-col gap-3">
-								<div className="rounded border border-app-line/70 bg-app-darkBox/30 p-3">
-									<div className="mb-2 flex items-center justify-between">
-										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Docker Compose</p>
-										<Button
-											onClick={() => handleCopy("compose", dockerComposeCommands.join("\n"))}
-											variant="ghost"
-											size="sm"
-										>
-											{copiedBlock === "compose" ? "Copied" : "Copy"}
-										</Button>
-									</div>
-									<pre className="overflow-x-auto text-xs text-ink"><code>{dockerComposeCommands.join("\n")}</code></pre>
-								</div>
-								<div className="rounded border border-app-line/70 bg-app-darkBox/30 p-3">
-									<div className="mb-2 flex items-center justify-between">
-										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">docker run</p>
-										<Button
-											onClick={() => handleCopy("docker-run", dockerRunCommands.join("\n"))}
-											variant="ghost"
-											size="sm"
-										>
-											{copiedBlock === "docker-run" ? "Copied" : "Copy"}
-										</Button>
-									</div>
-									<pre className="overflow-x-auto text-xs text-ink"><code>{dockerRunCommands.join("\n")}</code></pre>
-								</div>
-							</div>
-						)}
-
-						{deployment === "native" && (
-							<div className="mt-3 rounded border border-app-line/70 bg-app-darkBox/30 p-3">
-								<div className="mb-2 flex items-center justify-between">
-									<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Source Install</p>
-									<Button
-										onClick={() => handleCopy("native", nativeCommands.join("\n"))}
-										variant="ghost"
-										size="sm"
-									>
-										{copiedBlock === "native" ? "Copied" : "Copy"}
-									</Button>
-								</div>
-								<pre className="overflow-x-auto text-xs text-ink"><code>{nativeCommands.join("\n")}</code></pre>
-							</div>
-						)}
-
-						{deployment === "hosted" && (
-							<p className="mt-3 text-sm text-ink-dull">
-								Hosted instances are updated through platform rollouts.
-							</p>
-						)}
-					</div>
-
-					{data?.error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-							Update check error: {data.error}
-						</div>
-					)}
-				</div>
-			)}
-
-			{message && (
-				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
-						}`}
-				>
-					{message.text}
-				</div>
-			)}
-		</div>
-	);
-}
-
-interface ChangelogRelease {
-	version: string;
-	body: string;
-}
-
-function parseChangelog(raw: string): ChangelogRelease[] {
-	const releases: ChangelogRelease[] = [];
-	const versionPattern = /^## (v\d+\.\S+)/;
-	let current: ChangelogRelease | null = null;
-	const lines: string[] = [];
-
-	for (const line of raw.split("\n")) {
-		const match = line.match(versionPattern);
-		if (match) {
-			if (current) {
-				current.body = lines.join("\n").trim();
-				releases.push(current);
-				lines.length = 0;
-			}
-			current = { version: match[1], body: "" };
-			continue;
-		}
-		if (current) lines.push(line);
-	}
-	if (current) {
-		current.body = lines.join("\n").trim();
-		releases.push(current);
-	}
-	return releases;
-}
-
-function ChangelogSection() {
-	const { data: changelog, isLoading } = useQuery<string>({
-		queryKey: ["changelog"],
-		queryFn: api.changelog,
-		staleTime: 60_000 * 60, // 1 hour — changelog is baked into the binary
-	});
-
-	const releases = changelog ? parseChangelog(changelog) : [];
-
-	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Changelog</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Release history for this Spacebot build.
-				</p>
-			</div>
-
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-ink-dull">
-					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-					Loading changelog...
-				</div>
-			) : releases.length > 0 ? (
-				<div className="flex flex-col gap-4">
-					{releases.map((release) => (
-						<div
-							key={release.version}
-							className="rounded-lg border border-app-line bg-app-box p-5"
-						>
-							<h3 className="font-plex text-2xl font-bold text-ink mb-3">
-								{release.version}
-							</h3>
-							{release.body && (
-								<Markdown className="text-sm text-ink-dull">{release.body}</Markdown>
-							)}
-						</div>
-					))}
-				</div>
-			) : (
-				<p className="text-sm text-ink-faint">No changelog available.</p>
-			)}
-		</div>
-	);
-}
-
-function ConfigFileSection() {
-	const queryClient = useQueryClient();
-	const editorRef = useRef<HTMLDivElement>(null);
-	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
-	const [originalContent, setOriginalContent] = useState("");
-	const [currentContent, setCurrentContent] = useState("");
-	const [validationError, setValidationError] = useState<string | null>(null);
-	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-	const [editorLoaded, setEditorLoaded] = useState(false);
-
-	const { data, isLoading } = useQuery({
-		queryKey: ["raw-config"],
-		queryFn: api.rawConfig,
-		staleTime: 5_000,
-	});
-
-	const updateMutation = useMutation({
-		mutationFn: (content: string) => api.updateRawConfig(content),
-		onSuccess: (result) => {
-			if (result.success) {
-				setOriginalContent(currentContent);
-				setMessage({ text: result.message, type: "success" });
-				setValidationError(null);
-				// Invalidate all config-related queries so other tabs pick up changes
-				queryClient.invalidateQueries({ queryKey: ["providers"] });
-				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
-				queryClient.invalidateQueries({ queryKey: ["agents"] });
-				queryClient.invalidateQueries({ queryKey: ["overview"] });
-			} else {
-				setMessage({ text: result.message, type: "error" });
-			}
-		},
-		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
-		},
-	});
-
-	const isDirty = currentContent !== originalContent;
-
-	// Initialize CodeMirror when data loads
-	useEffect(() => {
-		if (!data?.content || !editorRef.current || editorLoaded) return;
-
-		const content = data.content;
-		setOriginalContent(content);
-		setCurrentContent(content);
-
-		// Lazy-load CodeMirror to avoid SSR issues and keep initial bundle small
-		Promise.all([
-			import("@codemirror/view"),
-			import("@codemirror/state"),
-			import("codemirror"),
-			import("@codemirror/theme-one-dark"),
-			import("@codemirror/language"),
-			import("@codemirror/legacy-modes/mode/toml"),
-		]).then(([viewMod, stateMod, cm, themeMod, langMod, tomlMode]) => {
-			if (!editorRef.current) return;
-
-			const tomlLang = langMod.StreamLanguage.define(tomlMode.toml);
-
-			const updateListener = viewMod.EditorView.updateListener.of((update) => {
-				if (update.docChanged) {
-					const newContent = update.state.doc.toString();
-					setCurrentContent(newContent);
-					try {
-						parseToml(newContent);
-						setValidationError(null);
-					} catch (error: any) {
-						setValidationError(error.message || "Invalid TOML");
-					}
-				}
-			});
-
-			const theme = viewMod.EditorView.theme({
-				"&": {
-					height: "100%",
-					fontSize: "13px",
-				},
-				".cm-scroller": {
-					fontFamily: "'IBM Plex Mono', monospace",
-					overflow: "auto",
-				},
-				".cm-gutters": {
-					backgroundColor: "transparent",
-					borderRight: "1px solid hsl(var(--color-app-line) / 0.3)",
-				},
-				".cm-activeLineGutter": {
-					backgroundColor: "transparent",
-				},
-			});
-
-			const state = stateMod.EditorState.create({
-				doc: content,
-				extensions: [
-					cm.basicSetup,
-					tomlLang,
-					themeMod.oneDark,
-					theme,
-					updateListener,
-					viewMod.keymap.of([{
-						key: "Mod-s",
-						run: () => {
-							// Trigger save via DOM event since we can't access React state here
-							editorRef.current?.dispatchEvent(new CustomEvent("cm-save"));
-							return true;
-						},
-					}]),
-				],
-			});
-
-			const view = new viewMod.EditorView({
-				state,
-				parent: editorRef.current,
-			});
-
-			viewRef.current = view;
-			setEditorLoaded(true);
-		});
-
-		return () => {
-			viewRef.current?.destroy();
-			viewRef.current = null;
-		};
-	}, [data?.content]);
-
-	// Handle Cmd+S from CodeMirror
-	useEffect(() => {
-		const element = editorRef.current;
-		if (!element) return;
-
-		const handler = () => {
-			if (isDirty && !validationError) {
-				updateMutation.mutate(currentContent);
-			}
-		};
-
-		element.addEventListener("cm-save", handler);
-		return () => element.removeEventListener("cm-save", handler);
-	}, [isDirty, validationError, currentContent]);
-
-	const handleSave = () => {
-		if (!isDirty || validationError) return;
-		setMessage(null);
-		updateMutation.mutate(currentContent);
-	};
-
-	const handleRevert = () => {
-		if (!viewRef.current) return;
-		const view = viewRef.current;
-		view.dispatch({
-			changes: { from: 0, to: view.state.doc.length, insert: originalContent },
-		});
-		setCurrentContent(originalContent);
-		setValidationError(null);
-		setMessage(null);
-	};
-
-	return (
-		<div className="flex h-full flex-col">
-			{/* Description + actions */}
-			<div className="flex items-center justify-between px-6 py-4 border-b border-app-line/30">
-				<p className="text-sm text-ink-dull">
-					Edit the raw configuration file. Changes are validated as TOML before saving.
-				</p>
-				<div className="flex items-center gap-2 flex-shrink-0 ml-4">
-					{isDirty && (
-						<Button onClick={handleRevert} variant="ghost" size="sm">
-							Revert
-						</Button>
-					)}
-					<Button
-						onClick={handleSave}
-						disabled={!isDirty || !!validationError}
-						loading={updateMutation.isPending}
-						size="sm"
-					>
-						Save
-					</Button>
-				</div>
-			</div>
-
-			{/* Validation / status bar */}
-			{(validationError || message) && (
-				<div className={`border-b px-6 py-2 text-sm ${validationError
-						? "border-red-500/20 bg-red-500/5 text-red-400"
-						: message?.type === "success"
-							? "border-green-500/20 bg-green-500/5 text-green-400"
-							: "border-red-500/20 bg-red-500/5 text-red-400"
-					}`}>
-					{validationError ? `Syntax error: ${validationError}` : message?.text}
-				</div>
-			)}
-
-			{/* Editor */}
-			<div className="flex-1 overflow-hidden">
-				{isLoading ? (
-					<div className="flex items-center gap-2 p-6 text-ink-dull">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-						Loading config...
-					</div>
-				) : (
-					<div ref={editorRef} className="h-full" />
-				)}
-			</div>
-		</div>
-	);
-}
-
-interface ProviderCardProps {
-	provider: string;
-	name: string;
-	description: string;
-	configured: boolean;
-	defaultModel: string;
-	onEdit: () => void;
-	onRemove: () => void;
-	removing: boolean;
-	actionLabel?: string;
-	showRemove?: boolean;
-}
-
-function ProviderCard({
-	provider,
-	name,
-	description,
-	configured,
-	defaultModel,
-	onEdit,
-	onRemove,
-	removing,
-	actionLabel,
-	showRemove,
-}: ProviderCardProps) {
-	const primaryLabel = actionLabel ?? (configured ? "Update" : "Add key");
-	const shouldShowRemove = showRemove ?? configured;
-	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4">
-			<div className="flex items-center gap-3">
-				<ProviderIcon provider={provider} size={32} />
-				<div className="flex-1">
-					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium text-ink">{name}</span>
-						{configured && (
-							<span className="inline-flex items-center">
-								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
-								<span className="sr-only">Configured</span>
-							</span>
-						)}
-					</div>
-					<p className="mt-0.5 text-sm text-ink-dull">{description}</p>
-					<p className="mt-1 text-tiny text-ink-faint">
-						Default model: <span className="text-ink-dull">{defaultModel}</span>
-					</p>
-				</div>
-				<div className="flex gap-2">
-					<Button onClick={onEdit} variant="outline" size="sm">
-						{primaryLabel}
-					</Button>
-					{shouldShowRemove && (
-						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
-							Remove
-						</Button>
-					)}
-				</div>
-			</div>
-		</div>
-	);
-}
-
-interface ChatGptOAuthDialogProps {
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-	isRequesting: boolean;
-	isPolling: boolean;
-	message: { text: string; type: "success" | "error" } | null;
-	deviceCodeInfo: { userCode: string; verificationUrl: string } | null;
-	deviceCodeCopied: boolean;
-	onCopyDeviceCode: () => void;
-	onOpenDeviceLogin: () => void;
-	onRestart: () => void;
-}
-
-function ChatGptOAuthDialog({
-	open,
-	onOpenChange,
-	isRequesting,
-	isPolling,
-	message,
-	deviceCodeInfo,
-	deviceCodeCopied,
-	onCopyDeviceCode,
-	onOpenDeviceLogin,
-	onRestart,
-}: ChatGptOAuthDialogProps) {
-	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="max-w-md">
-				<DialogHeader>
-					<DialogTitle className="flex items-center gap-2">
-						<ProviderIcon provider="openai-chatgpt" size={20} />
-						Sign in with ChatGPT Plus
-					</DialogTitle>
-					{!message && (
-						<DialogDescription>
-							Copy the device code below, then sign in to your OpenAI account to authorize access.
-							You must first <a href="https://chatgpt.com/security-settings" target="_blank" rel="noopener noreferrer" className="underline text-accent hover:text-accent/80">enable device code login</a> in your ChatGPT security settings.
-						</DialogDescription>
-					)}
-				</DialogHeader>
-
-				<div className="space-y-4">
-					{message && !deviceCodeInfo ? (
-						/* Completed state — success or error with no active flow */
-						<div
-							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
-								? "border-green-500/20 bg-green-500/10 text-green-400"
-								: "border-red-500/20 bg-red-500/10 text-red-400"
-							}`}
-						>
-							{message.text}
-						</div>
-					) : isRequesting && !deviceCodeInfo ? (
-						<div className="flex items-center gap-2 text-sm text-ink-dull">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-							Requesting device code...
-						</div>
-					) : deviceCodeInfo ? (
-						<div className="space-y-4">
-							<div className="rounded-md border border-app-line p-3">
-								<div className="flex items-center gap-2">
-									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
-									<p className="text-sm text-ink-dull">Copy this device code</p>
-								</div>
-								<div className="mt-2.5 flex items-center gap-2 pl-7">
-									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
-										{deviceCodeInfo.userCode}
-									</code>
-									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
-										{deviceCodeCopied ? "Copied" : "Copy"}
-									</Button>
-								</div>
-							</div>
-
-							<div className={`rounded-md border border-app-line p-3 ${!deviceCodeCopied ? "opacity-50" : ""}`}>
-								<div className="flex items-center gap-2">
-									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
-									<p className="text-sm text-ink-dull">Open OpenAI and paste the code</p>
-								</div>
-								<div className="mt-2.5 pl-7">
-									<Button
-										onClick={onOpenDeviceLogin}
-										disabled={!deviceCodeCopied}
-										size="sm"
-										variant="outline"
-									>
-										Open login page
-									</Button>
-								</div>
-							</div>
-
-							{isPolling && !message && (
-								<div className="flex items-center gap-2 text-sm text-ink-faint">
-									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-									Waiting for sign-in confirmation...
-								</div>
-							)}
-
-							{message && (
-								<div
-									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
-										? "border-green-500/20 bg-green-500/10 text-green-400"
-										: "border-red-500/20 bg-red-500/10 text-red-400"
-									}`}
-								>
-									{message.text}
-								</div>
-							)}
-						</div>
-					) : null}
-				</div>
-
-				<DialogFooter>
-					{message && !deviceCodeInfo ? (
-						/* Completed — show Done (or Retry for errors) */
-						message.type === "success" ? (
-							<Button onClick={() => onOpenChange(false)} size="sm">
-								Done
-							</Button>
-						) : (
-							<>
-								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
-									Close
-								</Button>
-								<Button
-									onClick={onRestart}
-									disabled={isRequesting}
-									loading={isRequesting}
-									size="sm"
-								>
-									Try again
-								</Button>
-							</>
-						)
-					) : (
-						<>
-							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
-								Cancel
-							</Button>
-							{deviceCodeInfo && (
-								<Button
-									onClick={onRestart}
-									disabled={isRequesting}
-									loading={isRequesting}
-									variant="outline"
-									size="sm"
-								>
-									Get new code
-								</Button>
-							)}
-						</>
-					)}
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
 	);
 }

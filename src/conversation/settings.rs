@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Memory mode controls how memory is used in a conversation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -116,12 +120,21 @@ pub enum ResponseMode {
     /// Respond to all messages normally.
     #[default]
     Active,
-    /// Observe and learn (history + memory persistence) but only respond
-    /// to @mentions, replies-to-bot, and slash commands.
-    Quiet,
-    /// Only respond when explicitly @mentioned or replied to.
-    /// Messages that don't pass the mention check are recorded in history
-    /// but receive no processing (no memory persistence, no LLM).
+    /// Observe only — never respond, even when mentioned or replied to.
+    /// All messages are ingested into in-memory context and conversation
+    /// history, and passive memory capture continues. The agent learns
+    /// from the conversation but never generates a response.
+    #[serde(alias = "quiet")]
+    Observe,
+    /// Only respond when explicitly @mentioned, replied to, or given a command.
+    /// Messages that don't pass the mention check are still ingested into
+    /// the in-memory context window (so the agent stays context-aware),
+    /// recorded in conversation history, and contribute to passive memory
+    /// capture — but do not trigger an LLM turn.
+    ///
+    /// This differs from the binding-level `require_mention` flag, which
+    /// blocks message routing entirely — unmentioned messages never reach
+    /// the channel and are invisible to the agent.
     MentionOnly,
 }
 
@@ -132,6 +145,10 @@ pub struct WorkerContextMode {
     pub history: WorkerHistoryMode,
     /// What memory context the worker gets.
     pub memory: WorkerMemoryMode,
+    /// Whether the worker gets wiki tools (wiki_create, wiki_edit, wiki_read, wiki_list,
+    /// wiki_search, wiki_history). Defaults to true so all workers can access the wiki.
+    #[serde(default = "default_true")]
+    pub wiki_write: bool,
 }
 
 /// Per-process model overrides. Each field, when set, overrides the
@@ -322,7 +339,7 @@ impl Default for ResolvedConversationSettings {
             memory: MemoryMode::Full,
             delegation: DelegationMode::Standard,
             response_mode: ResponseMode::Active,
-            save_attachments: false,
+            save_attachments: true,
             worker_context: WorkerContextMode::default(),
         }
     }
@@ -418,6 +435,7 @@ mod tests {
             worker_context: WorkerContextMode {
                 history: WorkerHistoryMode::Recent(20),
                 memory: WorkerMemoryMode::Tools,
+                wiki_write: false,
             },
             ..Default::default()
         };

@@ -1,11 +1,11 @@
 ---
 title: Tasks
-description: Kanban-style task board with structured tracking, cortex pickup, and worker execution.
+description: Task management with structured tracking, cortex pickup, and worker execution.
 ---
 
 # Tasks
 
-A kanban-style task board built into every agent. Tasks are spec-driven documents — the description is a full markdown spec that evolves through conversation, with pre-filled subtasks as an execution plan. Each task has a short title, rich description, status, priority, subtasks, and a numeric reference (`#42`). Each agent has its own independent task store backed by its own SQLite database.
+A task management system built into every agent. Tasks are spec-driven documents — the description is a full markdown spec that evolves through conversation, with pre-filled subtasks as an execution plan. Each task has a short title, rich description, status, priority, subtasks, and a numeric reference (`#42`). Each agent has its own independent task store backed by its own SQLite database.
 
 Tasks are not tickets. They're living specs written for workers who have no conversation context. A good task description includes requirements, constraints, file paths, examples, and acceptance criteria. The branch refines the spec as the user clarifies scope, and moves it to `ready` when it's complete. The cortex picks it up and spawns a worker that executes against the spec.
 
@@ -252,22 +252,29 @@ The `action` field is one of `"created"`, `"updated"`, or `"deleted"`. The kanba
 
 ## Interface
 
-### Kanban Board
+### Task List
 
-The **Tasks** tab on the agent page renders a five-column kanban board. Each column corresponds to a task status. Task cards show:
+The **Tasks** tab renders a Linear-style task list. Each row shows:
 
 - `#N` task number and title
+- Status indicator
 - Priority badge (color-coded: red for critical, amber for high, default for medium, outline for low)
-- Subtask progress bar (if subtasks exist)
+- Subtask progress (if subtasks exist)
+- GitHub metadata badges (linked issues and PRs, rendered from metadata fields)
 - Worker badge (if a worker is bound)
-- Quick action buttons (Approve, Execute, Mark Done)
 - Creation timestamp and author
 
-Clicking a card opens a detail dialog with the full description, subtask checklist, metadata, timestamps, and status action buttons.
+### Task Detail
+
+Clicking a task opens a detail view with the full markdown description, subtask checklist, metadata, timestamps, and action buttons (Approve, Execute, Mark Done). GitHub issue and PR links in metadata render as clickable badges with status indicators.
 
 ### Create Task
 
-The "Create Task" button opens a dialog with fields for title, description, priority, and initial status. Tasks created from the UI default to `backlog` status and `"human"` as the creator.
+The create form has fields for title, description, priority, and initial status. Tasks created from the UI default to `backlog` status and `"human"` as the creator.
+
+### Real-Time Updates
+
+Task state changes are pushed to the UI via SSE events. When a worker completes a task, marks subtasks done, or a status transition occurs, the task list updates immediately without polling.
 
 ## Storage
 
@@ -336,8 +343,7 @@ The channel itself has no task tools — it always branches to manage tasks. Thi
 ## What's Not Implemented Yet
 
 - **Cortex todo-promotion loop** — the cortex loop that scans `Todo` memories and promotes them to `pending_approval` tasks. The data model and execution path are ready; the promotion evaluation prompt and loop are not yet built.
-- **Drag-and-drop** — the kanban board has quick action buttons but no drag-and-drop between columns yet.
-- **Activity timeline** — the detail dialog doesn't show a history of status changes, approvals, and worker events.
+- **Activity timeline** — the detail view doesn't show a history of status changes, approvals, and worker events.
 - **Task count badge** — the Tasks tab doesn't show a badge with the pending approval count yet.
-- **Task archival** — done tasks accumulate indefinitely. Options: auto-archive after N days, a separate `archived` status, or UI filtering (currently, done tasks are shown in the Done column).
+- **Task archival** — done tasks accumulate indefinitely. Options: auto-archive after N days, a separate `archived` status, or UI filtering.
 - **Rejection feedback** — when a human deletes a pending task, that signal isn't fed back to the cortex. Saving it as a memory would help the cortex learn what's not actionable.

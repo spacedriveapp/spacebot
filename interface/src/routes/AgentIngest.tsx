@@ -2,7 +2,7 @@ import {useState, useRef, useCallback} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api, type IngestFileInfo} from "@/api/client";
 import {formatTimeAgo} from "@/lib/format";
-import {Badge} from "@/ui";
+import {Badge} from "@spacedrive/primitives";
 import {clsx} from "clsx";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faTrash} from "@fortawesome/free-solid-svg-icons";
@@ -15,10 +15,10 @@ function formatFileSize(bytes: number): string {
 
 function StatusBadge({status}: {status: IngestFileInfo["status"]}) {
 	const styles: Record<string, string> = {
-		queued: "bg-amber-500/20 text-amber-400",
-		processing: "bg-blue-500/20 text-blue-400",
-		completed: "bg-green-500/20 text-green-400",
-		failed: "bg-red-500/20 text-red-400",
+		queued: "bg-status-warning/20 text-status-warning",
+		processing: "bg-status-info/20 text-status-info",
+		completed: "bg-status-success/20 text-status-success",
+		failed: "bg-status-error/20 text-status-error",
 	};
 	return (
 		<span
@@ -26,7 +26,7 @@ function StatusBadge({status}: {status: IngestFileInfo["status"]}) {
 		>
 			{(status === "processing" || status === "queued") && (
 				<span
-					className={`mr-1.5 h-1.5 w-1.5 animate-pulse rounded-full ${status === "queued" ? "bg-amber-400" : "bg-blue-400"}`}
+					className={`mr-1.5 h-1.5 w-1.5 animate-pulse rounded-full ${status === "queued" ? "bg-status-warning" : "bg-status-info"}`}
 				/>
 			)}
 			{status}
@@ -129,7 +129,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 					{files.length} total
 				</Badge>
 				{queued > 0 && (
-					<Badge variant="amber" size="md">
+					<Badge variant="warning" size="md">
 						{queued} queued
 					</Badge>
 				)}
@@ -138,11 +138,11 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 						{processing} processing
 					</Badge>
 				)}
-				<Badge variant="green" size="md">
+				<Badge variant="success" size="md">
 					{completed} completed
 				</Badge>
 				{failed > 0 && (
-					<Badge variant="red" size="md">
+					<Badge variant="error" size="md">
 						{failed} failed
 					</Badge>
 				)}
@@ -258,7 +258,7 @@ function FileRow({
 			: 0;
 
 	return (
-		<div className="group flex items-center gap-4 rounded-lg border border-app-line bg-app-darkBox/30 px-4 py-3">
+		<div className="group flex items-center gap-4 rounded-lg border border-app-line bg-app-dark-box/30 px-4 py-3">
 			{/* File icon */}
 			<div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-app-box text-xs text-ink-faint">
 				{file.filename.split(".").pop()?.toUpperCase() ?? "TXT"}

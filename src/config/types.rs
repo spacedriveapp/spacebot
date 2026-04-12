@@ -940,7 +940,7 @@ impl Default for BrowserConfig {
 }
 
 /// Channel behavior configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
     /// Deprecated: use `response_mode` instead. Kept for backwards compatibility.
     pub listen_only_mode: bool,
@@ -950,6 +950,16 @@ pub struct ChannelConfig {
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
     pub save_attachments: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            listen_only_mode: false,
+            response_mode: None,
+            save_attachments: true,
+        }
+    }
 }
 
 /// OpenCode subprocess worker configuration.
@@ -1027,7 +1037,7 @@ impl Default for CortexConfig {
         Self {
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
-            branch_timeout_secs: 60,
+            branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,
@@ -1638,6 +1648,11 @@ pub struct Binding {
     /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
     /// Require explicit @mention (or reply-to-bot) for inbound messages.
+    /// Messages that don't match are blocked at the routing level and never
+    /// reach the channel — the agent cannot see them at all.
+    /// For context-aware mention filtering (agent sees messages but only
+    /// responds to mentions), use the channel-level `MentionOnly` response
+    /// mode instead.
     pub require_mention: bool,
     /// User IDs allowed to DM the bot through this binding.
     pub dm_allowed_users: Vec<String>,

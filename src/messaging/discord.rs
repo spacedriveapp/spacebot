@@ -835,6 +835,7 @@ fn extract_content(message: &Message) -> MessageContent {
                 url: attachment.url.clone(),
                 size_bytes: Some(attachment.size as u64),
                 auth_header: None,
+                pre_saved_id: None,
             })
             .collect();
 

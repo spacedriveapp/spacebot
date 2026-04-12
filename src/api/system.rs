@@ -133,6 +133,8 @@ pub(super) async fn events_sse(
                             ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
                             ApiEvent::WorkerText { .. } => "worker_text",
                             ApiEvent::CortexChatMessage { .. } => "cortex_chat_message",
+                            ApiEvent::NotificationCreated { .. } => "notification_created",
+                            ApiEvent::NotificationUpdated { .. } => "notification_updated",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

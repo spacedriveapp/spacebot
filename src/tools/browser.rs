@@ -797,7 +797,7 @@ pub(crate) struct BrowserContext {
 }
 
 impl BrowserContext {
-    fn new(
+    pub(crate) fn new(
         state: Arc<Mutex<BrowserState>>,
         config: BrowserConfig,
         screenshot_dir: PathBuf,
@@ -1276,7 +1276,7 @@ impl BrowserContext {
 
 #[derive(Debug, Clone)]
 pub struct BrowserLaunchTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1307,7 +1307,7 @@ impl Tool for BrowserLaunchTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserNavigateTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1368,7 +1368,7 @@ impl Tool for BrowserNavigateTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserSnapshotTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1470,7 +1470,7 @@ impl ElementTarget {
 
 #[derive(Debug, Clone)]
 pub struct BrowserClickTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1529,7 +1529,7 @@ impl Tool for BrowserClickTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTypeTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1646,7 +1646,7 @@ impl Tool for BrowserTypeTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserPressKeyTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1690,7 +1690,7 @@ impl Tool for BrowserPressKeyTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserScreenshotTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1773,7 +1773,7 @@ impl Tool for BrowserScreenshotTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserEvaluateTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1838,7 +1838,7 @@ impl Tool for BrowserEvaluateTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabOpenTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1910,7 +1910,7 @@ impl Tool for BrowserTabOpenTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabListTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1965,7 +1965,7 @@ impl Tool for BrowserTabListTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabCloseTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2024,7 +2024,7 @@ impl Tool for BrowserTabCloseTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserCloseTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

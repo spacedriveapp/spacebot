@@ -586,6 +586,20 @@ impl SpacebotHook {
                                     )
                                     .await
                                 {
+                                    // Flush the current tool call (and any prior
+                                    // accumulated ones from this stream iteration)
+                                    // into chat_history so apply_history_after_turn
+                                    // can extract the reply content from the
+                                    // PromptCancelled error variant.  Without this,
+                                    // the reply tool call is never visible in
+                                    // chat_history and every cancelled turn loses
+                                    // the assistant reply from state.history.
+                                    tool_calls.push(AssistantContent::ToolCall(tool_call.clone()));
+                                    if let Ok(content) =
+                                        rig::OneOrMany::many(std::mem::take(&mut tool_calls))
+                                    {
+                                        chat_history.push(Message::Assistant { id: None, content });
+                                    }
                                     return Err(PromptError::PromptCancelled {
                                         chat_history: Box::new(chat_history),
                                         reason,

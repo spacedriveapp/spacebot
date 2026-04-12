@@ -501,7 +501,7 @@ pub(crate) fn content_from_bytes(bytes: &[u8], attachment: &crate::Attachment) -
 // ---------------------------------------------------------------------------
 
 /// Metadata for a saved attachment, returned after persisting to disk and DB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SavedAttachmentMeta {
     pub id: String,
     pub filename: String,
@@ -526,6 +526,30 @@ pub(crate) async fn save_channel_attachments(
     let mut results = Vec::with_capacity(attachments.len());
 
     for attachment in attachments {
+        // Pre-saved: file is already on disk from a portal upload — look up the
+        // DB record by id + channel_id and re-derive the path from saved_dir
+        // instead of trusting struct fields.
+        if let Some(ref pre_saved_id) = attachment.pre_saved_id {
+            match lookup_pre_saved(pool, pre_saved_id, channel_id, saved_dir).await {
+                Ok(Some(pair)) => results.push(pair),
+                Ok(None) => {
+                    tracing::warn!(
+                        attachment_id = %pre_saved_id,
+                        channel_id,
+                        "pre-saved attachment not found or wrong channel"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        attachment_id = %pre_saved_id,
+                        "failed to load pre-saved attachment"
+                    );
+                }
+            }
+            continue;
+        }
+
         let safe_name = match sanitize_filename(&attachment.filename) {
             Ok(name) => name,
             Err(error) => {
@@ -796,4 +820,124 @@ async fn filename_taken(pool: &sqlx::SqlitePool, saved_dir: &Path, filename: &st
 
     // Also check filesystem in case of orphaned files
     saved_dir.join(filename).exists()
+}
+
+// ---------------------------------------------------------------------------
+// Pre-saved attachment lookup
+// ---------------------------------------------------------------------------
+
+/// Look up a pre-saved attachment by id + channel_id and read its bytes from
+/// disk. Returns `None` if the row doesn't exist or the channel doesn't match.
+/// The path is re-derived from `saved_dir` + the `saved_filename` column to
+/// avoid trusting the `disk_path` column.
+async fn lookup_pre_saved(
+    pool: &sqlx::SqlitePool,
+    attachment_id: &str,
+    channel_id: &str,
+    saved_dir: &Path,
+) -> anyhow::Result<Option<(SavedAttachmentMeta, Vec<u8>)>> {
+    use sqlx::Row as _;
+
+    let row = sqlx::query(
+        "SELECT id, original_filename, saved_filename, mime_type, size_bytes \
+         FROM saved_attachments WHERE id = ? AND channel_id = ?",
+    )
+    .bind(attachment_id)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let id: String = row.try_get("id")?;
+    let original_filename: String = row.try_get("original_filename")?;
+    let saved_filename: String = row.try_get("saved_filename")?;
+    let mime_type: String = row.try_get("mime_type")?;
+    let size_bytes: i64 = row.try_get("size_bytes")?;
+
+    let path = saved_dir.join(&saved_filename);
+    if !path.starts_with(saved_dir) {
+        anyhow::bail!("pre-saved attachment path escapes saved dir: {saved_filename}");
+    }
+
+    let bytes = tokio::fs::read(&path).await?;
+
+    Ok(Some((
+        SavedAttachmentMeta {
+            id,
+            filename: original_filename,
+            saved_filename,
+            mime_type,
+            size_bytes: u64::try_from(size_bytes).unwrap_or(0),
+        },
+        bytes,
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Portal upload — persist bytes directly (no URL download)
+// ---------------------------------------------------------------------------
+
+/// Save raw bytes from a portal upload to `workspace/saved/` and insert a
+/// record into `saved_attachments`. Used by the portal attachment upload
+/// endpoint where the file is already in memory (no URL to download from).
+pub async fn persist_attachment_bytes(
+    pool: &sqlx::SqlitePool,
+    channel_id: &str,
+    saved_dir: &Path,
+    original_filename: &str,
+    mime_type: &str,
+    bytes: &[u8],
+) -> anyhow::Result<SavedAttachmentMeta> {
+    let safe_name = sanitize_filename(original_filename)
+        .map_err(|e| anyhow::anyhow!("unsafe filename: {e}"))?;
+
+    tokio::fs::create_dir_all(saved_dir).await?;
+
+    let saved_filename = deduplicate_filename(pool, saved_dir, &safe_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("filename dedup failed: {e}"))?;
+    let disk_path = saved_dir.join(&saved_filename);
+
+    write_file_atomic(&disk_path, bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("write failed: {e}"))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let size_bytes = bytes.len() as u64;
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+
+    sqlx::query(
+        "INSERT INTO saved_attachments \
+         (id, channel_id, original_filename, saved_filename, mime_type, size_bytes, disk_path) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(channel_id)
+    .bind(original_filename)
+    .bind(&saved_filename)
+    .bind(mime_type)
+    .bind(size_bytes as i64)
+    .bind(&disk_path_str)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        attachment_id = %id,
+        original = %original_filename,
+        saved = %saved_filename,
+        size = size_bytes,
+        channel_id,
+        "persisted portal upload attachment"
+    );
+
+    Ok(SavedAttachmentMeta {
+        id,
+        filename: original_filename.to_string(),
+        saved_filename,
+        mime_type: mime_type.to_string(),
+        size_bytes,
+    })
 }
