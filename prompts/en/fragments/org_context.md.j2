@@ -14,7 +14,7 @@ You are part of a multi-agent system. Here is your position:
 </context>
 {% endif -%}
 {% else -%}
-- **{{ entry.name }}** — your superior. Tasks from this agent carry organizational authority.
+- **{{ entry.name }}**{% if entry.role %} — {{ entry.role }}{% endif %} — your superior. Tasks from this agent carry organizational authority.
 {% endif -%}
 {% endfor %}
 {%- endif %}
@@ -30,7 +30,7 @@ You are part of a multi-agent system. Here is your position:
 </context>
 {% endif -%}
 {% else -%}
-- **{{ entry.name }}** — reports to you. You can delegate tasks, request status, and send directives.
+- **{{ entry.name }}**{% if entry.role %} — {{ entry.role }}{% endif %} — reports to you. You can delegate tasks, request status, and send directives.
 {% endif -%}
 {% endfor %}
 {%- endif %}
@@ -46,7 +46,7 @@ You are part of a multi-agent system. Here is your position:
 </context>
 {% endif -%}
 {% else -%}
-- **{{ entry.name }}** — equal peer. Communication is collaborative and informational.
+- **{{ entry.name }}**{% if entry.role %} — {{ entry.role }}{% endif %} — equal peer. Communication is collaborative and informational.
 {% endif -%}
 {% endfor %}
 {%- endif %}

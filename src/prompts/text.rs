@@ -135,6 +135,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/org_context") => {
             include_str!("../../prompts/en/fragments/org_context.md.j2")
         }
+        ("en", "fragments/hierarchical_rules") => {
+            include_str!("../../prompts/en/fragments/hierarchical_rules.md.j2")
+        }
         // Coalesce Hint
         ("en", "fragments/coalesce_hint") => {
             include_str!("../../prompts/en/fragments/coalesce_hint.md.j2")

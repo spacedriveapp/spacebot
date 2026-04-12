@@ -97,6 +97,8 @@ pub struct Worker {
     pub wiki_write: bool,
     /// Model override from conversation settings (per-process or blanket).
     pub model_override: Option<String>,
+    /// Task metadata from the task store, used for delegation detection.
+    pub task_metadata: Option<serde_json::Value>,
 }
 
 impl Worker {
@@ -115,6 +117,7 @@ impl Worker {
         worker_memory_mode: WorkerMemoryMode,
         wiki_write: bool,
         model_override: Option<String>,
+        task_metadata: Option<serde_json::Value>,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -153,6 +156,7 @@ impl Worker {
                 worker_memory_mode,
                 wiki_write,
                 model_override,
+                task_metadata,
             },
             inject_tx,
         )
@@ -177,6 +181,7 @@ impl Worker {
         worker_memory_mode: WorkerMemoryMode,
         wiki_write: bool,
         model_override: Option<String>,
+        task_metadata: Option<serde_json::Value>,
     ) -> (Self, mpsc::Sender<String>) {
         Self::build(
             channel_id,
@@ -192,6 +197,7 @@ impl Worker {
             worker_memory_mode,
             wiki_write,
             model_override,
+            task_metadata,
         )
     }
 
@@ -214,6 +220,7 @@ impl Worker {
         worker_memory_mode: WorkerMemoryMode,
         wiki_write: bool,
         model_override: Option<String>,
+        task_metadata: Option<serde_json::Value>,
     ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
         let (worker, inject_tx) = Self::build(
@@ -230,6 +237,7 @@ impl Worker {
             worker_memory_mode,
             wiki_write,
             model_override,
+            task_metadata,
         );
 
         (worker, input_tx, inject_tx)
@@ -268,7 +276,8 @@ impl Worker {
             Vec::new(), // initial_history - will be replaced by prior_history below
             WorkerMemoryMode::None, // Resumed workers don't have context settings
             wiki_write,
-            None, // Resumed workers don't have model override
+            None,       // Resumed workers don't have model override
+            None,       // Resumed workers don't have task metadata
         );
         // Reuse the original worker ID so DB row stays linked.
         worker.id = existing_id;
@@ -336,6 +345,31 @@ impl Worker {
 
         let mcp_tools = self.deps.mcp_manager.get_tools().await;
 
+        // Build delegation config from task metadata if this worker was
+        // delegated by a superior agent.
+        let delegation_config = self
+            .task_metadata
+            .as_ref()
+            .and_then(|m| m.get("delegated_by"))
+            .map(|_| crate::tools::DelegationConfig {
+                links: self.deps.links.clone(),
+                agent_names: self.deps.agent_names.clone(),
+                conversation_logger: crate::conversation::history::ConversationLogger::new(
+                    self.deps.sqlite_pool.clone(),
+                ),
+                originating_channel: self
+                    .task_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("originating_channel"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                parent_task_number: self
+                    .task_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("task_number"))
+                    .and_then(|v| v.as_i64()),
+            });
+
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
             self.deps.agent_id.clone(),
@@ -354,6 +388,7 @@ impl Worker {
             self.deps.memory_search.clone(),
             self.wiki_write,
             self.deps.wiki_store.clone(),
+            delegation_config,
         );
 
         let routing = self.deps.runtime_config.routing.load();

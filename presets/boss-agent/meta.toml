@@ -1,0 +1,9 @@
+id = "boss-agent"
+name = "Boss Agent"
+description = "Strategic director agent. Oversees planning, coordinates specialist agents, and handles escalations from the planning-lead."
+icon = "crown"
+tags = ["strategic", "director", "escalation", "coordination"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 10

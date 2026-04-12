@@ -3395,6 +3395,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         })),
     );
 
+    let is_delegated = task.metadata.get("delegated_by").is_some();
+
     let prompt_engine = deps.runtime_config.prompts.load();
     let sandbox_enabled = deps.sandbox.mode_enabled();
     let sandbox_containment_active = deps.sandbox.containment_active();
@@ -3454,10 +3456,60 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         }
     };
 
+    let system_prompt = if is_delegated {
+        let identity_content = deps.runtime_config.identity.load().render();
+        let org_context = crate::prompts::engine::PromptEngine::build_org_context_for_agent(
+            &prompt_engine,
+            &deps.agent_id,
+            &deps.links.load(),
+            &deps.humans.load(),
+            &deps.agent_names,
+            &deps.agent_roles,
+        );
+
+        let mut enhanced = worker_system_prompt;
+        if !identity_content.is_empty() {
+            enhanced.push_str("\n\n## Your Identity\n\n");
+            enhanced.push_str(&identity_content);
+        }
+        if let Some(org) = org_context {
+            enhanced.push_str("\n\n");
+            enhanced.push_str(&org);
+        }
+        enhanced
+    } else {
+        worker_system_prompt
+    };
+
+    // Inject hierarchical rules for ANY worker spawned by an agent with
+    // hierarchical links — not just delegated workers. This ensures workers
+    // from hierarchical agents see delegation rules even when the agent
+    // spawns them directly instead of delegating.
+    let has_hierarchical_links = crate::links::links_for_agent(&deps.links.load(), &deps.agent_id)
+        .iter()
+        .any(|l| l.kind == crate::links::LinkKind::Hierarchical);
+
+    let system_prompt = if has_hierarchical_links {
+        let mut enhanced = system_prompt;
+        if let Some(rules) = prompt_engine.build_hierarchical_rules_for_agent(
+            &deps.agent_id,
+            &deps.links.load(),
+            &deps.humans.load(),
+            &deps.agent_names,
+            &deps.agent_roles,
+        ) {
+            enhanced.push_str("\n\n");
+            enhanced.push_str(&rules);
+        }
+        enhanced
+    } else {
+        system_prompt
+    };
+
     // Tool-use enforcement must be the last instruction appended.
-    let worker_system_prompt = prompt_engine
+    let system_prompt = prompt_engine
         .maybe_append_tool_use_enforcement(
-            worker_system_prompt,
+            system_prompt,
             tool_use_enforcement.as_ref(),
             &model_name,
         )
@@ -3497,7 +3549,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let (worker, inject_tx) = Worker::new(
         None,
         task_prompt,
-        worker_system_prompt,
+        system_prompt,
         deps.clone(),
         browser_config,
         screenshot_dir,
@@ -3507,6 +3559,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         crate::conversation::settings::WorkerMemoryMode::None,
         deps.wiki_store.is_some(),
         None, // No model override for cortex workers
+        Some(task.metadata.clone()),
     );
 
     // Detached workers are not channel-owned, so injection senders are not
@@ -3660,8 +3713,46 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
+
+                                // Auto-complete parent task if this child task has a parent.
+                                if let Some(parent_num) = task
+                                    .metadata
+                                    .get("parent task_number")
+                                    .and_then(|v| v.as_i64())
+                                {
+                                    tracing::info!(
+                                        parent_task = parent_num,
+                                        child_task = task.task_number,
+                                        "auto-completing parent task after child completion"
+                                    );
+                                    let _ = task_store
+                                        .update(
+                                            parent_num,
+                                            UpdateTaskInput {
+                                                status: Some(TaskStatus::Done),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await;
+                                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                                        agent_id: Arc::from(agent_id.as_str()),
+                                        task_number: parent_num,
+                                        status: "done".to_string(),
+                                        action: "auto-completed by child".to_string(),
+                                    });
+                                    logger.log(
+                                        "parent_task_auto_completed",
+                                        &format!("Parent task #{} auto-completed after child #{} finished", parent_num, task.task_number),
+                                        Some(serde_json::json!({
+                                            "parent_task_number": parent_num,
+                                            "child_task_number": task.task_number,
+                                            "child_title": task.title,
+                                        })),
+                                    );
+                                }
 
                                 let _ = event_tx.send(ProcessEvent::WorkerComplete {
                                     agent_id: Arc::from(agent_id.as_str()),
@@ -3739,6 +3830,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
                             }
@@ -3805,6 +3897,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
                             }
@@ -3898,6 +3991,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                             &agent_names,
                             &sqlite_pool,
                             &injection_tx,
+                            &task_store,
                         )
                         .await;
 
@@ -4026,6 +4120,7 @@ async fn notify_delegation_completion(
     agent_names: &std::collections::HashMap<String, String>,
     sqlite_pool: &sqlx::SqlitePool,
     injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
+    task_store: &Arc<crate::tasks::TaskStore>,
 ) {
     // Check if this is a delegated task.
     let delegating_agent_id = task
@@ -4078,9 +4173,15 @@ async fn notify_delegation_completion(
     };
 
     // Truncate very long results for the notification message.
-    let truncated_result = if result_summary.len() > 500 {
-        let boundary = result_summary.floor_char_boundary(500);
-        format!("{}... [truncated]", &result_summary[..boundary])
+    // 3000 chars is enough for a meaningful summary while keeping the
+    // notification readable in the channel context window.
+    let truncated_result = if result_summary.len() > 3000 {
+        let boundary = result_summary.floor_char_boundary(3000);
+        format!(
+            "{}... [result truncated to 3000 chars. Use `task_get` on task #{} to read the full result.]",
+            &result_summary[..boundary],
+            task.task_number
+        )
     } else {
         result_summary.to_string()
     };
@@ -4124,6 +4225,41 @@ async fn notify_delegation_completion(
             success,
             "injected delegation completion retrigger"
         );
+    }
+
+    // Auto-complete parent task if this child was spawned from a parent task.
+    if let Some(parent_num) = task
+        .metadata
+        .get("parent_task_number")
+        .and_then(|v| v.as_i64())
+    {
+        if let Err(error) = task_store
+            .update(
+                parent_num,
+                UpdateTaskInput {
+                    status: Some(if success {
+                        TaskStatus::Done
+                    } else {
+                        TaskStatus::Backlog
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                %error,
+                parent_task_number = parent_num,
+                child_task_number = task.task_number,
+                "failed to auto-complete parent task"
+            );
+        } else {
+            tracing::info!(
+                parent_task_number = parent_num,
+                child_task_number = task.task_number,
+                "auto-completed parent task after child completion"
+            );
+        }
     }
 }
 

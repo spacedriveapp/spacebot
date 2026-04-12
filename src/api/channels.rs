@@ -772,6 +772,7 @@ pub(super) async fn inspect_prompt(
             available_channels,
             sandbox_enabled,
             org_context,
+            None, // hierarchical_rules — not needed for API inspect
             adapter_prompt,
             project_context,
             None, // backfill_transcript — only set during channel initialization

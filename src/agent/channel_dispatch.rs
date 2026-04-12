@@ -718,6 +718,7 @@ async fn spawn_worker_inner(
             worker_context.memory,
             worker_context.wiki_write,
             worker_model_override,
+            None, // task_metadata — channel-dispatched workers are not delegated
         );
         let worker_id = worker.id;
         state
@@ -745,6 +746,7 @@ async fn spawn_worker_inner(
             worker_context.memory,
             worker_context.wiki_write,
             worker_model_override,
+            None, // task_metadata — channel-dispatched workers are not delegated
         );
         state
             .worker_injections

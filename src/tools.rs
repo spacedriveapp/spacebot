@@ -60,8 +60,10 @@ pub mod skip;
 pub mod spacebot_docs;
 pub mod spawn_worker;
 pub mod task_create;
+pub mod task_get;
 pub mod task_list;
 pub mod task_update;
+pub mod wait_for_task;
 pub mod web_search;
 pub mod wiki_create;
 pub mod wiki_edit;
@@ -149,8 +151,10 @@ pub use spawn_worker::{
     DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
 };
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
+pub use task_get::{TaskGetArgs, TaskGetError, TaskGetOutput, TaskGetTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
+pub use wait_for_task::{WaitForTaskArgs, WaitForTaskError, WaitForTaskOutput, WaitForTaskTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use wiki_create::{WikiCreateArgs, WikiCreateError, WikiCreateOutput, WikiCreateTool};
 pub use wiki_edit::{WikiEditArgs, WikiEditError, WikiEditOutput, WikiEditTool};
@@ -193,6 +197,7 @@ use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
 use crate::{AgentId, ChannelId, ProcessEvent, RoutedSender, WorkerId};
+use arc_swap::ArcSwap;
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::path::PathBuf;
@@ -850,13 +855,25 @@ pub fn create_branch_tool_server(
     server.run()
 }
 
+/// Configuration for enabling agent-to-agent delegation in workers.
+///
+/// When present, the worker gets a `send_agent_message` tool so it can
+/// delegate tasks to subordinate agents in the communication graph.
+pub struct DelegationConfig {
+    pub links: Arc<ArcSwap<Vec<crate::links::AgentLink>>>,
+    pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    pub conversation_logger: crate::conversation::history::ConversationLogger,
+    pub originating_channel: Option<String>,
+    pub parent_task_number: Option<i64>,
+}
+
 /// Create a per-worker ToolServer with task-appropriate tools.
 ///
 /// Each worker gets its own isolated ToolServer. The `set_status` tool is bound to
 /// the specific worker's ID so status updates route correctly. The browser tool
 /// is included when browser automation is enabled in the agent config.
 ///
-/// Shell commands are sandboxed via the `Sandbox` backend.
+/// Shell commands are sandboxed by the `Sandbox` backend.
 /// File operations are restricted to `workspace` via path validation.
 #[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
@@ -876,13 +893,19 @@ pub fn create_worker_tool_server(
     memory_search: Arc<MemorySearch>,
     wiki_write: bool,
     wiki_store: Option<Arc<crate::wiki::WikiStore>>,
+    delegation_config: Option<DelegationConfig>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
         .tool(TaskUpdateTool::for_worker(
-            task_store,
+            task_store.clone(),
             agent_id.clone(),
             worker_id,
+        ))
+        .tool(TaskCreateTool::new(
+            task_store.clone(),
+            agent_id.to_string(),
+            format!("worker:{}", worker_id),
         ))
         .tool({
             let mut status_tool =
@@ -907,6 +930,9 @@ pub fn create_worker_tool_server(
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
     }
+
+    // Clone agent_id for potential use in delegation config (after memory tools may move it).
+    let agent_id_for_delegation = agent_id.clone();
 
     // Conditionally add memory tools based on worker memory mode.
     if worker_memory_mode.recall_enabled() {
@@ -944,6 +970,40 @@ pub fn create_worker_tool_server(
 
     for mcp_tool in mcp_tools {
         server = server.tool(mcp_tool);
+    }
+
+    if let Some(config) = delegation_config {
+        let mut send_tool = SendAgentMessageTool::new(
+            agent_id_for_delegation.clone(),
+            config.links,
+            config.agent_names,
+            task_store.clone(),
+            config.conversation_logger,
+        );
+        if let Some(ch) = config.originating_channel {
+            send_tool = send_tool.with_originating_channel(ch);
+        }
+        if let Some(parent_task) = config.parent_task_number {
+            send_tool = send_tool.with_parent_task_number(parent_task);
+        }
+        server = server.tool(send_tool);
+        server = server.tool(TaskListTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.to_string(),
+        ));
+        server = server.tool(TaskGetTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.clone(),
+        ));
+        server = server.tool(WaitForTaskTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.clone(),
+        ));
+        server = server.tool(TaskUpdateTool::for_worker(
+            task_store.clone(),
+            agent_id_for_delegation.clone(),
+            worker_id,
+        ));
     }
 
     server.run()

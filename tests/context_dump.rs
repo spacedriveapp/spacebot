@@ -121,6 +121,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        agent_roles: Arc::new(std::collections::HashMap::new()),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         process_control_registry: Arc::new(
             spacebot::agent::process_control::ProcessControlRegistry::new(),
@@ -418,6 +419,7 @@ async fn dump_worker_context() {
         deps.memory_search.clone(),
         false,
         None,
+        None,
     );
 
     let tool_defs = worker_tool_server
@@ -612,6 +614,7 @@ async fn dump_all_contexts() {
         Default::default(),
         deps.memory_search.clone(),
         false,
+        None,
         None,
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();

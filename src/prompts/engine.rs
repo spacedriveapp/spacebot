@@ -119,6 +119,10 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/org_context"),
         )?;
         env.add_template(
+            "fragments/hierarchical_rules",
+            crate::prompts::text::get("fragments/hierarchical_rules"),
+        )?;
+        env.add_template(
             "fragments/projects_context",
             crate::prompts::text::get("fragments/projects_context"),
         )?;
@@ -561,13 +565,14 @@ impl PromptEngine {
             coalesce_hint,
             available_channels,
             sandbox_enabled,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
+            None, // org_context
+            None, // hierarchical_rules
+            None, // adapter_prompt
+            None, // project_context
+            None, // backfill_transcript
+            None, // working_memory
+            None, // channel_activity_map
+            false, // direct_mode
         )
     }
 
@@ -648,6 +653,169 @@ impl PromptEngine {
         )
     }
 
+    /// Render the hierarchical rules fragment for an agent.
+    pub fn render_hierarchical_rules(&self, ctx: HierarchicalRulesContext) -> Result<String> {
+        self.render(
+            "fragments/hierarchical_rules",
+            context! {
+                hierarchical_rules => ctx,
+            },
+        )
+    }
+
+    /// Build org context for any agent from links, humans, and agent names.
+    ///
+    /// Replicates the logic from `channel.rs:build_org_context` so that
+    /// non-channel processes (like cortex task pickup) can render org context.
+    pub fn build_org_context_for_agent(
+        &self,
+        agent_id: &str,
+        links: &[crate::links::AgentLink],
+        humans: &[crate::config::HumanDef],
+        agent_names: &std::collections::HashMap<String, String>,
+        agent_roles: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        let agent_links = crate::links::links_for_agent(links, agent_id);
+        if agent_links.is_empty() {
+            return None;
+        }
+
+        let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+            humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
+        let mut superiors = Vec::new();
+        let mut subordinates = Vec::new();
+        let mut peers = Vec::new();
+
+        for link in &agent_links {
+            let is_from = link.from_agent_id == agent_id;
+            let other_id = if is_from {
+                &link.to_agent_id
+            } else {
+                &link.from_agent_id
+            };
+
+            let is_human = humans_by_id.contains_key(other_id.as_str());
+
+            let (name, role, description) = if let Some(human) = humans_by_id.get(other_id.as_str())
+            {
+                let name = human
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone(), human.description.clone())
+            } else {
+                let name = agent_names
+                    .get(other_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| other_id.clone());
+                let role = agent_roles.get(other_id.as_str()).cloned();
+                (name, role, None)
+            };
+
+            let info = LinkedAgent {
+                name,
+                id: other_id.clone(),
+                is_human,
+                role,
+                description,
+            };
+
+            match link.kind {
+                crate::links::LinkKind::Hierarchical => {
+                    if is_from {
+                        subordinates.push(info);
+                    } else {
+                        superiors.push(info);
+                    }
+                }
+                crate::links::LinkKind::Peer => peers.push(info),
+            }
+        }
+
+        if superiors.is_empty() && subordinates.is_empty() && peers.is_empty() {
+            return None;
+        }
+
+        self.render_org_context(OrgContext {
+            superiors,
+            subordinates,
+            peers,
+        })
+        .ok()
+    }
+
+    /// Build hierarchical rules context for any agent from links, humans, and agent names.
+    pub fn build_hierarchical_rules_for_agent(
+        &self,
+        agent_id: &str,
+        links: &[crate::links::AgentLink],
+        humans: &[crate::config::HumanDef],
+        agent_names: &std::collections::HashMap<String, String>,
+        agent_roles: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        let agent_links = crate::links::links_for_agent(links, agent_id);
+        if agent_links.is_empty() {
+            return None;
+        }
+
+        let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+            humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
+        let mut superiors = Vec::new();
+        let mut subordinates = Vec::new();
+
+        for link in &agent_links {
+            let is_from = link.from_agent_id == agent_id;
+            let other_id = if is_from {
+                &link.to_agent_id
+            } else {
+                &link.from_agent_id
+            };
+
+            let (name, role) = if let Some(human) = humans_by_id.get(other_id.as_str()) {
+                let name = human
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone())
+            } else {
+                let name = agent_names
+                    .get(other_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| other_id.clone());
+                let role = agent_roles.get(other_id.as_str()).cloned();
+                (name, role)
+            };
+
+            let info = HierarchicalLinkedAgent {
+                name,
+                id: other_id.clone(),
+                role,
+            };
+
+            if link.kind == crate::links::LinkKind::Hierarchical {
+                if is_from {
+                    subordinates.push(info);
+                } else {
+                    superiors.push(info);
+                }
+            }
+        }
+
+        if superiors.is_empty() && subordinates.is_empty() {
+            return None;
+        }
+
+        self.render_hierarchical_rules(HierarchicalRulesContext {
+            has_superiors: !superiors.is_empty(),
+            has_subordinates: !subordinates.is_empty(),
+            superiors,
+            subordinates,
+        })
+        .ok()
+    }
+
     /// Render the projects context fragment listing active projects with repos and worktrees.
     pub fn render_projects_context(&self, projects: Vec<ProjectContext>) -> Result<String> {
         self.render(
@@ -672,6 +840,7 @@ impl PromptEngine {
         available_channels: Option<String>,
         sandbox_enabled: bool,
         org_context: Option<String>,
+        hierarchical_rules: Option<String>,
         adapter_prompt: Option<String>,
         project_context: Option<String>,
         backfill_transcript: Option<String>,
@@ -696,6 +865,7 @@ impl PromptEngine {
                 available_channels => available_channels,
                 sandbox_enabled => sandbox_enabled,
                 org_context => org_context,
+                hierarchical_rules => hierarchical_rules,
                 adapter_prompt => adapter_prompt,
                 project_context => project_context,
                 backfill_transcript => backfill_transcript,
@@ -735,6 +905,23 @@ pub struct LinkedAgent {
     /// style, etc. Loaded from `HUMAN.md` on disk. Only set for humans.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Simplified agent info for hierarchical rules — name, id, and optional role.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HierarchicalLinkedAgent {
+    pub name: String,
+    pub id: String,
+    pub role: Option<String>,
+}
+
+/// Hierarchical rules context for an agent — simplified view of the hierarchy.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HierarchicalRulesContext {
+    pub has_superiors: bool,
+    pub has_subordinates: bool,
+    pub superiors: Vec<HierarchicalLinkedAgent>,
+    pub subordinates: Vec<HierarchicalLinkedAgent>,
 }
 
 /// Information about a skill for template rendering.

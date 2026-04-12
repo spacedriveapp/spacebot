@@ -1,0 +1,9 @@
+id = "planning-lead"
+name = "Planning Lead"
+description = "Task coordinator and breakdown specialist. Receives objectives from the boss, decomposes them into concrete tasks, assigns builders, and resolves escalations."
+icon = "clipboard-list"
+tags = ["planning", "coordination", "task-management", "delegation"]
+
+[defaults]
+max_concurrent_workers = 8
+max_turns = 12

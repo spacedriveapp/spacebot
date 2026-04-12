@@ -616,13 +616,15 @@ impl Channel {
             let has_links =
                 !crate::links::links_for_agent(&deps.links.load(), &deps.agent_id).is_empty();
             if has_links {
-                Some(crate::tools::SendAgentMessageTool::new(
+                let mut tool = crate::tools::SendAgentMessageTool::new(
                     deps.agent_id.clone(),
                     deps.links.clone(),
                     deps.agent_names.clone(),
                     deps.task_store.clone(),
                     ConversationLogger::new(deps.sqlite_pool.clone()),
-                ))
+                );
+                tool = tool.with_originating_channel(id.to_string());
+                Some(tool)
             } else {
                 None
             }
@@ -1683,6 +1685,7 @@ impl Channel {
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
+        let hierarchical_rules = self.build_hierarchical_rules(&prompt_engine);
 
         let adapter_prompt = if self.state.cron_outcome.is_some() {
             prompt_engine.render_channel_adapter_prompt("cron")
@@ -1760,6 +1763,7 @@ impl Channel {
             available_channels,
             sandbox_enabled,
             org_context,
+            hierarchical_rules,
             adapter_prompt,
             project_context,
             self.backfill_transcript.clone(),
@@ -2273,6 +2277,24 @@ impl Channel {
         prompt_engine.render_org_context(org_context).ok()
     }
 
+    /// Build pre-rendered hierarchical rules for prompt injection.
+    ///
+    /// Calls `PromptEngine::build_hierarchical_rules_for_agent` with the agent's
+    /// links, humans, and agent names. Returns `None` if no hierarchical links
+    /// exist or if rendering fails.
+    fn build_hierarchical_rules(
+        &self,
+        prompt_engine: &crate::prompts::PromptEngine,
+    ) -> Option<String> {
+        prompt_engine.build_hierarchical_rules_for_agent(
+            &self.deps.agent_id,
+            &self.deps.links.load(),
+            &self.deps.humans.load(),
+            &self.deps.agent_names,
+            &self.deps.agent_roles,
+        )
+    }
+
     /// Build pre-rendered project context for prompt injection.
     ///
     /// Delegates to the standalone `build_project_context` function shared
@@ -2335,6 +2357,7 @@ impl Channel {
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
+        let hierarchical_rules = self.build_hierarchical_rules(&prompt_engine);
 
         let adapter_prompt = if self.state.cron_outcome.is_some() {
             prompt_engine.render_channel_adapter_prompt("cron")
@@ -2416,6 +2439,7 @@ impl Channel {
             available_channels,
             sandbox_enabled,
             org_context,
+            hierarchical_rules,
             adapter_prompt,
             project_context,
             self.backfill_transcript.clone(),

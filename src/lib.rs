@@ -412,6 +412,8 @@ pub struct AgentDeps {
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Map of all agent IDs to their roles, for org context in prompts.
+    pub agent_roles: Arc<std::collections::HashMap<String, String>>,
     /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
     /// to surface human display names, roles, and descriptions in agent prompts.
     pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
