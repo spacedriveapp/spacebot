@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { api, type CodeGraphProject, type CodeGraphIndexStatus } from "@/api/client";
+import { api, type CodeGraphProject, type CodeGraphIndexStatus, type DirEntry } from "@/api/client";
 import { Badge, Button } from "@/ui";
 import {
 	Dialog,
@@ -14,6 +14,7 @@ import {
 import { Input, Label } from "@/ui/Input";
 import { clsx } from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
+import { useServer } from "@/hooks/useServer";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -80,10 +81,16 @@ function ProjectCard({ project }: { project: CodeGraphProject }) {
 			{/* Stats */}
 			{project.last_index_stats && (
 				<div className="mt-3 flex gap-4 text-xs text-ink-dull">
-					<span>{formatNumber(project.last_index_stats.nodes_created)} symbols</span>
+					<span>{formatNumber(project.last_index_stats.nodes_created)} nodes</span>
 					<span>{formatNumber(project.last_index_stats.communities_detected)} communities</span>
 					<span>{formatNumber(project.last_index_stats.files_found)} files</span>
 				</div>
+			)}
+
+			{project.status === "error" && project.error_message && (
+				<p className="mt-2 truncate text-xs text-red-400/80" title={project.error_message}>
+					{project.error_message}
+				</p>
 			)}
 
 			{project.primary_language && (
@@ -107,6 +114,113 @@ function ProjectCard({ project }: { project: CodeGraphProject }) {
 }
 
 // ---------------------------------------------------------------------------
+// Native OS folder dialog (Tauri only)
+// ---------------------------------------------------------------------------
+
+async function openNativeFolderDialog(): Promise<string | null> {
+	try {
+		const { open } = await import("@tauri-apps/plugin-dialog");
+		const selected = await open({
+			directory: true,
+			multiple: false,
+			title: "Select Project Directory",
+		});
+		return typeof selected === "string" ? selected : null;
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Web fallback directory browser
+// ---------------------------------------------------------------------------
+
+function DirectoryBrowser({
+	onSelect,
+	onClose,
+}: {
+	onSelect: (path: string) => void;
+	onClose: () => void;
+}) {
+	const [currentPath, setCurrentPath] = useState<string>("");
+	const [entries, setEntries] = useState<DirEntry[]>([]);
+	const [parentPath, setParentPath] = useState<string | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+
+	const loadDir = useCallback(async (path?: string) => {
+		setLoading(true);
+		setError(null);
+		try {
+			const result = await api.listDir(path);
+			setCurrentPath(result.path);
+			setParentPath(result.parent);
+			setEntries(result.entries.filter((e) => e.is_dir));
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Failed to load directory");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		loadDir();
+	}, [loadDir]);
+
+	return (
+		<div className="rounded-lg border border-app-line bg-app-darkBox">
+			<div className="flex items-center gap-2 border-b border-app-line px-3 py-2">
+				<button
+					type="button"
+					onClick={() => parentPath && loadDir(parentPath)}
+					disabled={!parentPath}
+					className="rounded px-1.5 py-0.5 text-xs text-ink-dull hover:bg-app-hover/40 disabled:opacity-30"
+				>
+					..
+				</button>
+				<span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-dull">
+					{currentPath}
+				</span>
+				<Button type="button" size="sm" onClick={() => onSelect(currentPath)}>
+					Select
+				</Button>
+				<button
+					type="button"
+					onClick={onClose}
+					className="rounded px-1.5 py-0.5 text-xs text-ink-faint hover:text-ink"
+				>
+					&times;
+				</button>
+			</div>
+			<div className="max-h-48 overflow-y-auto">
+				{loading && (
+					<div className="px-3 py-4 text-center text-xs text-ink-faint">Loading...</div>
+				)}
+				{error && (
+					<div className="px-3 py-4 text-center text-xs text-red-400">{error}</div>
+				)}
+				{!loading && !error && entries.length === 0 && (
+					<div className="px-3 py-4 text-center text-xs text-ink-faint">No subdirectories</div>
+				)}
+				{!loading &&
+					!error &&
+					entries.map((entry) => (
+						<button
+							key={entry.path}
+							type="button"
+							onClick={() => loadDir(entry.path)}
+							className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-ink hover:bg-app-hover/40"
+						>
+							<span className="text-xs text-accent">&#128193;</span>
+							<span className="truncate">{entry.name}</span>
+						</button>
+					))}
+			</div>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Create Project Dialog
 // ---------------------------------------------------------------------------
 
@@ -118,18 +232,33 @@ function CreateProjectDialog({
 	onOpenChange: (open: boolean) => void;
 }) {
 	const queryClient = useQueryClient();
+	const { isTauri } = useServer();
 	const [name, setName] = useState("");
 	const [rootPath, setRootPath] = useState("");
+	const [showBrowser, setShowBrowser] = useState(false);
 
 	const mutation = useMutation({
 		mutationFn: () => api.codegraphCreateProject(name, rootPath),
+		onError: (err) => {
+			console.error("Failed to create codegraph project:", err);
+		},
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["codegraph-projects"] });
 			onOpenChange(false);
 			setName("");
 			setRootPath("");
+			setShowBrowser(false);
 		},
 	});
+
+	const handleBrowse = async () => {
+		if (isTauri) {
+			const selected = await openNativeFolderDialog();
+			if (selected) setRootPath(selected);
+		} else {
+			setShowBrowser((prev) => !prev);
+		}
+	};
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
@@ -152,14 +281,41 @@ function CreateProjectDialog({
 					</div>
 					<div>
 						<Label htmlFor="root-path">Root Path</Label>
-						<Input
-							id="root-path"
-							value={rootPath}
-							onChange={(e) => setRootPath(e.target.value)}
-							placeholder="/path/to/project"
-						/>
+						<div className="flex gap-2">
+							<Input
+								id="root-path"
+								value={rootPath}
+								onChange={(e) => setRootPath(e.target.value)}
+								placeholder="/path/to/project"
+								className="flex-1 font-mono"
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								onClick={handleBrowse}
+								title="Browse for directory"
+							>
+								Browse
+							</Button>
+						</div>
+						{showBrowser && !isTauri && (
+							<div className="mt-2">
+								<DirectoryBrowser
+									onSelect={(path) => {
+										setRootPath(path);
+										setShowBrowser(false);
+									}}
+									onClose={() => setShowBrowser(false)}
+								/>
+							</div>
+						)}
 					</div>
 				</div>
+				{mutation.isError && (
+					<p className="text-sm text-red-400">
+						Error: {mutation.error instanceof Error ? mutation.error.message : "Failed to create project"}
+					</p>
+				)}
 				<DialogFooter>
 					<Button
 						variant="ghost"
@@ -190,7 +346,10 @@ export function GlobalProjects() {
 	const { data, isLoading } = useQuery({
 		queryKey: ["codegraph-projects"],
 		queryFn: () => api.codegraphProjects(),
-		refetchInterval: 10_000,
+		refetchInterval: (query) => {
+			const hasIndexing = query.state.data?.projects?.some((p) => p.status === "indexing");
+			return hasIndexing ? 2_000 : 10_000;
+		},
 	});
 
 	const projects = data?.projects ?? [];
