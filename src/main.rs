@@ -2743,14 +2743,6 @@ async fn initialize_agents(
             .collect(),
     );
 
-    // Build agent role map for org context in prompts
-    let agent_role_map: Arc<std::collections::HashMap<String, String>> = Arc::new(
-        resolved_agents
-            .iter()
-            .filter_map(|a| a.role.as_ref().map(|r| (a.id.clone(), r.clone())))
-            .collect(),
-    );
-
     for agent_config in &resolved_agents {
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
 

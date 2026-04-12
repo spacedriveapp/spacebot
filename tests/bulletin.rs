@@ -122,6 +122,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        agent_roles: Arc::new(std::collections::HashMap::new()),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         process_control_registry: Arc::new(
             spacebot::agent::process_control::ProcessControlRegistry::new(),
