@@ -208,7 +208,16 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 		staleTime: 10_000,
 	});
 
+	const {data: integrationsData} = useQuery({
+		queryKey: ["integrations"],
+		queryFn: api.integrations,
+		staleTime: 10_000,
+	});
+
 	const companyName = globalSettings?.company_name ?? "My Company";
+	const spacedriveEnabled = integrationsData?.integrations.find(
+		(i) => i.id === "spacedrive",
+	)?.enabled;
 
 	const {data: agentsData} = useQuery({
 		queryKey: ["agents"],
@@ -472,7 +481,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 			<div className="flex shrink-0 items-center justify-between border-t border-app-line/30 px-3 py-2">
 				<div className="flex items-center gap-2">
 					<WorkersPanelButton />
-					{globalSettings?.spacedrive?.enabled && (
+					{spacedriveEnabled && (
 						<Link to="/spacedrive">
 							<CircleButton
 								icon={FilesIcon}

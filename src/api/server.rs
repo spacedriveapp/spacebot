@@ -3,8 +3,9 @@
 use super::state::ApiState;
 use super::{
     activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
-    links, mcp, memories, messaging, models, notifications, opencode_proxy, portal, projects,
-    providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki, workers,
+    integrations, links, mcp, memories, messaging, models, notifications, opencode_proxy, portal,
+    projects, providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki,
+    workers,
 };
 
 use axum::Json;
@@ -232,6 +233,9 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(settings::update_check, settings::update_check_now))
         .routes(routes!(settings::update_apply))
         .routes(routes!(settings::changelog))
+        // Integration routes
+        .routes(routes!(integrations::get_integrations))
+        .routes(routes!(integrations::update_integration))
         // SSH routes
         .routes(routes!(ssh::set_authorized_key))
         .routes(routes!(ssh::ssh_status))

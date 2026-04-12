@@ -70,6 +70,25 @@ impl SpacedriveIntegrationConfig {
     }
 }
 
+/// Voicebox (voice input + TTS output) integration configuration.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceboxConfig {
+    /// Master switch.
+    pub enabled: bool,
+    /// HTTP base URL of the Voicebox service.
+    pub url: Option<String>,
+    /// Profile ID for voice selection.
+    pub profile_id: Option<String>,
+}
+
+/// All third-party integration configs, accessible via `config.integrations.*`.
+#[derive(Debug, Clone, Default)]
+pub struct IntegrationsConfig {
+    pub opencode: OpenCodeConfig,
+    pub spacedrive: SpacedriveIntegrationConfig,
+    pub voicebox: VoiceboxConfig,
+}
+
 /// Top-level Spacebot configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -97,8 +116,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
-    /// Spacedrive integration (paired node + embedded web Explorer).
-    pub spacedrive: SpacedriveIntegrationConfig,
+    /// Third-party integrations (OpenCode, Spacedrive, Voicebox).
+    pub integrations: IntegrationsConfig,
 }
 
 impl Config {

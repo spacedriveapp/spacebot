@@ -108,6 +108,8 @@ impl RuntimeConfig {
         skills: crate::skills::SkillSet,
     ) -> Self {
         let opencode_config = &defaults.opencode;
+        // Note: opencode config in defaults is kept in sync with integrations.opencode
+        // during config loading, so this path works for both new and legacy configs.
         let server_pool = crate::opencode::OpenCodeServerPool::new(
             opencode_config.path.clone(),
             opencode_config.permissions.clone(),
@@ -286,7 +288,7 @@ impl RuntimeConfig {
         self.projects.store(Arc::new(resolved.projects.clone()));
 
         let old_opencode = self.opencode.load().as_ref().clone();
-        let new_opencode = config.defaults.opencode.clone();
+        let new_opencode = config.integrations.opencode.clone();
         self.opencode.store(Arc::new(new_opencode.clone()));
 
         let should_rebuild_opencode_pool = old_opencode.path != new_opencode.path

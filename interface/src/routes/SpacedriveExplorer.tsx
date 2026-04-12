@@ -3,13 +3,14 @@ import {api} from "@/api/client";
 
 export function SpacedriveExplorer() {
 	const {data} = useQuery({
-		queryKey: ["global-settings"],
-		queryFn: api.globalSettings,
+		queryKey: ["integrations"],
+		queryFn: api.integrations,
 		staleTime: 10_000,
 	});
 
-	const enabled = data?.spacedrive?.enabled ?? false;
-	const url = data?.spacedrive?.web_url ?? null;
+	const spacedrive = data?.integrations.find((i) => i.id === "spacedrive");
+	const enabled = spacedrive?.enabled ?? false;
+	const url = (spacedrive?.config?.web_url as string) || null;
 
 	if (!enabled) {
 		return (

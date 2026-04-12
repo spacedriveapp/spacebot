@@ -38,10 +38,10 @@ export const SECTIONS = [
 		description: "API server configuration",
 	},
 	{
-		id: "opencode" as const,
-		label: "OpenCode",
+		id: "integrations" as const,
+		label: "Integrations",
 		group: "system" as const,
-		description: "OpenCode worker integration",
+		description: "External service integrations",
 	},
 	{
 		id: "worker-logs" as const,

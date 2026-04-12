@@ -177,7 +177,10 @@ pub(super) async fn get_global_settings(
             .unwrap_or("errors_only")
             .to_string();
 
-        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+        let opencode_table = doc
+            .get("integrations")
+            .and_then(|i| i.get("opencode"))
+            .or_else(|| doc.get("defaults").and_then(|d| d.get("opencode")));
         let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
         let opencode = OpenCodeSettingsResponse {
             enabled: opencode_table
@@ -229,7 +232,10 @@ pub(super) async fn get_global_settings(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let spacedrive_table = doc.get("spacedrive");
+        let spacedrive_table = doc
+            .get("integrations")
+            .and_then(|i| i.get("spacedrive"))
+            .or_else(|| doc.get("spacedrive"));
         let spacedrive = SpacedriveStatusResponse {
             enabled: spacedrive_table
                 .and_then(|s| s.get("enabled"))
@@ -382,42 +388,44 @@ pub(super) async fn update_global_settings(
     }
 
     if let Some(opencode) = request.opencode {
-        if doc.get("defaults").is_none() {
-            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+        if doc.get("integrations").is_none() {
+            doc["integrations"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        if doc["defaults"].get("opencode").is_none() {
-            doc["defaults"]["opencode"] = toml_edit::Item::Table(toml_edit::Table::new());
+        if doc["integrations"].get("opencode").is_none() {
+            doc["integrations"]["opencode"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
 
         if let Some(enabled) = opencode.enabled {
-            doc["defaults"]["opencode"]["enabled"] = toml_edit::value(enabled);
+            doc["integrations"]["opencode"]["enabled"] = toml_edit::value(enabled);
         }
         if let Some(path) = opencode.path {
-            doc["defaults"]["opencode"]["path"] = toml_edit::value(path);
+            doc["integrations"]["opencode"]["path"] = toml_edit::value(path);
         }
         if let Some(max_servers) = opencode.max_servers {
-            doc["defaults"]["opencode"]["max_servers"] = toml_edit::value(max_servers as i64);
+            doc["integrations"]["opencode"]["max_servers"] = toml_edit::value(max_servers as i64);
         }
         if let Some(timeout) = opencode.server_startup_timeout_secs {
-            doc["defaults"]["opencode"]["server_startup_timeout_secs"] =
+            doc["integrations"]["opencode"]["server_startup_timeout_secs"] =
                 toml_edit::value(timeout as i64);
         }
         if let Some(retries) = opencode.max_restart_retries {
-            doc["defaults"]["opencode"]["max_restart_retries"] = toml_edit::value(retries as i64);
+            doc["integrations"]["opencode"]["max_restart_retries"] =
+                toml_edit::value(retries as i64);
         }
         if let Some(permissions) = opencode.permissions {
-            if doc["defaults"]["opencode"].get("permissions").is_none() {
-                doc["defaults"]["opencode"]["permissions"] =
+            if doc["integrations"]["opencode"].get("permissions").is_none() {
+                doc["integrations"]["opencode"]["permissions"] =
                     toml_edit::Item::Table(toml_edit::Table::new());
             }
             if let Some(edit) = permissions.edit {
-                doc["defaults"]["opencode"]["permissions"]["edit"] = toml_edit::value(edit);
+                doc["integrations"]["opencode"]["permissions"]["edit"] = toml_edit::value(edit);
             }
             if let Some(bash) = permissions.bash {
-                doc["defaults"]["opencode"]["permissions"]["bash"] = toml_edit::value(bash);
+                doc["integrations"]["opencode"]["permissions"]["bash"] = toml_edit::value(bash);
             }
             if let Some(webfetch) = permissions.webfetch {
-                doc["defaults"]["opencode"]["permissions"]["webfetch"] = toml_edit::value(webfetch);
+                doc["integrations"]["opencode"]["permissions"]["webfetch"] =
+                    toml_edit::value(webfetch);
             }
         }
     }

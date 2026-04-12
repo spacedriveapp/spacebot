@@ -14,12 +14,13 @@ use super::{
     AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
-    LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
-    ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, SpacedriveIntegrationConfig, TelegramConfig, TelegramInstanceConfig,
-    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
-    normalize_adapter, validate_named_messaging_adapters,
+    IntegrationsConfig, LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig,
+    McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig, MetricsConfig,
+    OpenCodeConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, SpacedriveIntegrationConfig,
+    TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig,
+    VoiceboxConfig, WarmupConfig, WebhookConfig, normalize_adapter,
+    validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -80,6 +81,8 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "api",
     "metrics",
     "telemetry",
+    "integrations",
+    "spacedrive",
 ];
 
 /// Pre-parse check that warns about unrecognised top-level keys in a config
@@ -977,7 +980,7 @@ impl Config {
                     .unwrap_or_else(|_| "spacebot".into()),
                 sample_rate: 1.0,
             },
-            spacedrive: SpacedriveIntegrationConfig::default(),
+            integrations: IntegrationsConfig::default(),
         })
     }
 
@@ -1518,7 +1521,7 @@ impl Config {
         } else {
             base_defaults.routing.clone()
         };
-        let defaults = DefaultsConfig {
+        let mut defaults = DefaultsConfig {
             routing: resolve_routing(toml.defaults.routing, &base_routing),
             max_concurrent_branches: toml
                 .defaults
@@ -2599,14 +2602,64 @@ impl Config {
             }
         }
 
+        // Build spacedrive config: prefer [integrations.spacedrive], fall back to legacy [spacedrive]
+        let spacedrive_toml = toml.integrations.spacedrive.unwrap_or(toml.spacedrive);
         let spacedrive = SpacedriveIntegrationConfig {
-            enabled: toml.spacedrive.enabled,
-            api_url: toml.spacedrive.api_url,
-            api_key: toml.spacedrive.api_key,
-            web_url: toml.spacedrive.web_url,
-            library_id: toml.spacedrive.library_id,
-            device_id: toml.spacedrive.device_id,
+            enabled: spacedrive_toml.enabled,
+            api_url: spacedrive_toml.api_url,
+            api_key: spacedrive_toml.api_key,
+            web_url: spacedrive_toml.web_url,
+            library_id: spacedrive_toml.library_id,
+            device_id: spacedrive_toml.device_id,
         };
+
+        // Build voicebox config from [integrations.voicebox]
+        let voicebox = toml
+            .integrations
+            .voicebox
+            .map(|vb| VoiceboxConfig {
+                enabled: vb.enabled,
+                url: vb.url,
+                profile_id: vb.profile_id,
+            })
+            .unwrap_or_default();
+
+        // Build opencode config: prefer [integrations.opencode] over already-resolved defaults.opencode
+        let opencode = if let Some(oc) = toml.integrations.opencode {
+            let base = &defaults.opencode;
+            let path_raw = oc.path.unwrap_or_else(|| base.path.clone());
+            let resolved_path = resolve_env_value(&path_raw).unwrap_or_else(|| base.path.clone());
+            OpenCodeConfig {
+                enabled: oc.enabled.unwrap_or(base.enabled),
+                path: resolved_path,
+                max_servers: oc.max_servers.unwrap_or(base.max_servers),
+                server_startup_timeout_secs: oc
+                    .server_startup_timeout_secs
+                    .unwrap_or(base.server_startup_timeout_secs),
+                max_restart_retries: oc.max_restart_retries.unwrap_or(base.max_restart_retries),
+                permissions: oc
+                    .permissions
+                    .map(|p| crate::opencode::OpenCodePermissions {
+                        edit: p.edit.unwrap_or_else(|| base.permissions.edit.clone()),
+                        bash: p.bash.unwrap_or_else(|| base.permissions.bash.clone()),
+                        webfetch: p
+                            .webfetch
+                            .unwrap_or_else(|| base.permissions.webfetch.clone()),
+                    })
+                    .unwrap_or_else(|| base.permissions.clone()),
+            }
+        } else {
+            defaults.opencode.clone()
+        };
+
+        let integrations = IntegrationsConfig {
+            opencode: opencode.clone(),
+            spacedrive,
+            voicebox,
+        };
+
+        // Keep defaults.opencode in sync with integrations.opencode
+        defaults.opencode = opencode;
 
         Ok(Config {
             instance_dir,
@@ -2621,7 +2674,7 @@ impl Config {
             api,
             metrics,
             telemetry,
-            spacedrive,
+            integrations,
         })
     }
 }

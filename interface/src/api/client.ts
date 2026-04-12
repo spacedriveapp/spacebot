@@ -2634,6 +2634,19 @@ export const api = {
 		const query = qs.toString();
 		return fetchJson<ActivityResponse>(`/activity${query ? `?${query}` : ""}`);
 	},
+
+	// Integrations API
+	integrations: () => fetchJson<IntegrationsResponse>("/integrations"),
+
+	updateIntegration: async (id: string, config: Record<string, unknown>) => {
+		const response = await fetch(`${getApiBase()}/integrations/${encodeURIComponent(id)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ config }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<IntegrationUpdateResponse>;
+	},
 }
 
 export interface UsageTotals {
@@ -2778,4 +2791,23 @@ export interface EditWikiPageRequest {
 	edit_summary?: string;
 	author_id?: string;
 	author_type?: string;
+}
+
+// Integrations types
+export interface IntegrationEntry {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	status: string;
+	config: Record<string, unknown>;
+}
+
+export interface IntegrationsResponse {
+	integrations: IntegrationEntry[];
+}
+
+export interface IntegrationUpdateResponse {
+	success: boolean;
+	message: string;
 }

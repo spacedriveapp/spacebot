@@ -31,6 +31,8 @@ pub(super) struct TomlConfig {
     pub(super) telemetry: TomlTelemetryConfig,
     #[serde(default)]
     pub(super) spacedrive: TomlSpacedriveConfig,
+    #[serde(default)]
+    pub(super) integrations: TomlIntegrationsConfig,
 }
 
 #[derive(Deserialize, Default)]
@@ -42,6 +44,21 @@ pub(super) struct TomlSpacedriveConfig {
     pub(super) web_url: Option<String>,
     pub(super) library_id: Option<String>,
     pub(super) device_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct TomlVoiceboxConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) url: Option<String>,
+    pub(super) profile_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct TomlIntegrationsConfig {
+    pub(super) opencode: Option<TomlOpenCodeConfig>,
+    pub(super) spacedrive: Option<TomlSpacedriveConfig>,
+    pub(super) voicebox: Option<TomlVoiceboxConfig>,
 }
 
 #[derive(Deserialize)]

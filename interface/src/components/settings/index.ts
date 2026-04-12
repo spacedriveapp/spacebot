@@ -6,6 +6,7 @@ export {ApiKeysSection} from "./ApiKeysSection";
 export {ServerSection} from "./ServerSection";
 export {WorkerLogsSection} from "./WorkerLogsSection";
 export {OpenCodeSection} from "./OpenCodeSection";
+export {IntegrationsSection} from "./IntegrationsSection";
 export {UpdatesSection} from "./UpdatesSection";
 export {ChangelogSection} from "./ChangelogSection";
 export {ConfigFileSection} from "./ConfigFileSection";

@@ -14,6 +14,7 @@ mod cortex;
 mod cron;
 mod factory;
 mod ingest;
+mod integrations;
 mod links;
 mod mcp;
 mod memories;

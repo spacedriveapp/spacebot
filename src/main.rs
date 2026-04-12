@@ -3155,12 +3155,12 @@ async fn initialize_agents(
         }
     }
 
-    if config.spacedrive.enabled {
-        let web_url = config.spacedrive.resolved_web_url();
+    if config.integrations.spacedrive.enabled {
+        let web_url = config.integrations.spacedrive.resolved_web_url();
         tracing::info!(
-            api_url = ?config.spacedrive.api_url,
+            api_url = ?config.integrations.spacedrive.api_url,
             web_url = ?web_url,
-            library_id = ?config.spacedrive.library_id,
+            library_id = ?config.integrations.spacedrive.library_id,
             "spacedrive integration enabled"
         );
         if web_url.is_none() {

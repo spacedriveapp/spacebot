@@ -22,7 +22,7 @@ import {
 	ApiKeysSection,
 	ServerSection,
 	WorkerLogsSection,
-	OpenCodeSection,
+	IntegrationsSection,
 	UpdatesSection,
 	ChangelogSection,
 	ConfigFileSection,
@@ -99,7 +99,6 @@ export function Settings() {
 			activeSection === "instance" ||
 			activeSection === "api-keys" ||
 			activeSection === "server" ||
-			activeSection === "opencode" ||
 			activeSection === "worker-logs",
 	});
 
@@ -703,11 +702,8 @@ export function Settings() {
 							settings={globalSettings}
 							isLoading={globalSettingsLoading}
 						/>
-					) : activeSection === "opencode" ? (
-						<OpenCodeSection
-							settings={globalSettings}
-							isLoading={globalSettingsLoading}
-						/>
+					) : activeSection === "integrations" ? (
+						<IntegrationsSection />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection
 							settings={globalSettings}
