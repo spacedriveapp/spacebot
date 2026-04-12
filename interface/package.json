@@ -9,6 +9,11 @@
 		"preview": "vite preview"
 	},
 	"dependencies": {
+		"@codemirror/lang-cpp": "^6.0.3",
+		"@codemirror/lang-go": "^6.0.1",
+		"@codemirror/lang-javascript": "^6.2.5",
+		"@codemirror/lang-python": "^6.2.1",
+		"@codemirror/lang-rust": "^6.0.2",
 		"@codemirror/language": "^6.12.1",
 		"@codemirror/legacy-modes": "^6.5.2",
 		"@codemirror/state": "^6.5.4",

@@ -27,14 +27,20 @@ test-integration-compile:
 gate-pr: preflight
     ./scripts/gate-pr.sh
 
+# Regenerate interface/src/api/schema.d.ts from the live OpenAPI spec.
+# Uses target/ (gitignored) as the temp dir so it works on Windows without
+# Git Bash / MSYS, and builds before running so cargo's progress messages
+# can't leak into the stdout capture.
 typegen:
-    cargo run --bin openapi-spec > /tmp/spacebot-openapi.json
-    cd interface && bunx openapi-typescript /tmp/spacebot-openapi.json -o src/api/schema.d.ts
+    cargo build --quiet --bin openapi-spec
+    ./target/debug/openapi-spec > target/spacebot-openapi.json
+    cd interface && bunx openapi-typescript ../target/spacebot-openapi.json -o src/api/schema.d.ts
 
 check-typegen:
-    cargo run --bin openapi-spec > /tmp/spacebot-openapi-check.json
-    cd interface && bunx openapi-typescript /tmp/spacebot-openapi-check.json -o /tmp/spacebot-schema-check.d.ts
-    diff interface/src/api/schema.d.ts /tmp/spacebot-schema-check.d.ts
+    cargo build --quiet --bin openapi-spec
+    ./target/debug/openapi-spec > target/spacebot-openapi-check.json
+    cd interface && bunx openapi-typescript ../target/spacebot-openapi-check.json -o ../target/spacebot-schema-check.d.ts
+    diff interface/src/api/schema.d.ts target/spacebot-schema-check.d.ts
 
 gate-pr-ci: preflight-ci
     ./scripts/gate-pr.sh --ci

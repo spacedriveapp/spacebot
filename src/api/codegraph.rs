@@ -11,9 +11,11 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use crate::codegraph::{
     CodeGraphManager, CommunityInfo, ProcessInfo,
-    RegisteredProject, GraphSearchResult, IndexLogEntry, ProjectMemory,
+    RegisteredProject, GraphSearchResult, IndexLogEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,46 @@ fn default_limit() -> usize {
 pub(super) struct CreateProjectRequest {
     name: String,
     root_path: String,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(super) struct NodeListQuery {
+    /// Filter by node label (e.g. "Function", "Class").
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_node_limit")]
+    limit: usize,
+}
+
+fn default_node_limit() -> usize {
+    50
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(super) struct NodeDetailQuery {
+    /// Label hint for efficient lookup (avoids scanning all tables).
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(super) struct EdgeListQuery {
+    /// Direction: "outgoing", "incoming", or "both" (default).
+    #[serde(default = "default_direction")]
+    direction: String,
+    /// Filter by edge type (e.g. "CALLS", "IMPORTS").
+    #[serde(default)]
+    edge_type: Option<String>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_node_limit")]
+    limit: usize,
+}
+
+fn default_direction() -> String {
+    "both".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -81,22 +123,132 @@ pub(super) struct IndexLogResponse {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct ProjectMemoriesResponse {
-    memories: Vec<ProjectMemory>,
-    total: usize,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RemoveInfoResponse {
     node_count: u64,
     edge_count: u64,
-    memory_count: u64,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ActionResponse {
     success: bool,
     message: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct NodeListResponse {
+    nodes: Vec<NodeSummary>,
+    total: usize,
+    offset: usize,
+    limit: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct NodeSummary {
+    id: i64,
+    qualified_name: String,
+    name: String,
+    label: String,
+    source_file: Option<String>,
+    line_start: Option<u32>,
+    line_end: Option<u32>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct NodeDetailResponse {
+    node: NodeFull,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct NodeFull {
+    id: i64,
+    qualified_name: String,
+    name: String,
+    label: String,
+    source_file: Option<String>,
+    line_start: Option<u32>,
+    line_end: Option<u32>,
+    source: Option<String>,
+    written_by: Option<String>,
+    properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct EdgeListResponse {
+    edges: Vec<EdgeSummary>,
+    total: usize,
+    offset: usize,
+    limit: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct EdgeSummary {
+    from_id: i64,
+    from_name: String,
+    from_label: String,
+    to_id: i64,
+    to_name: String,
+    to_label: String,
+    edge_type: String,
+    confidence: f64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct GraphStatsResponse {
+    total_nodes: u64,
+    total_edges: u64,
+    nodes_by_label: Vec<LabelCount>,
+    edges_by_type: Vec<TypeCount>,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(super) struct BulkGraphQuery {
+    /// When true, include Parameter/Variable/Decorator/Import nodes and
+    /// their edges. Defaults to false to keep the graph canvas readable.
+    #[serde(default)]
+    include_noise: bool,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct BulkNodesResponse {
+    nodes: Vec<NodeSummary>,
+    /// True when the server truncated the result to stay under the node cap.
+    truncated: bool,
+    /// Total number of nodes that would have been returned without the cap.
+    total_available: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct BulkEdgesResponse {
+    edges: Vec<BulkEdgeSummary>,
+}
+
+/// Edge shape for the bulk endpoint. Uses `qualified_name` for source/target
+/// instead of `id(n)` (which LadybugDB returns as 0 for all nodes).
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct BulkEdgeSummary {
+    from_qname: String,
+    from_label: String,
+    to_qname: String,
+    to_label: String,
+    edge_type: String,
+    confidence: f64,
+}
+
+/// Hard cap on the number of nodes returned by the bulk endpoint. Sigma +
+/// ForceAtlas2 handle 15k comfortably; bigger payloads slow the client
+/// layout to a crawl.
+const BULK_GRAPH_MAX_NODES: usize = 15_000;
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct LabelCount {
+    label: String,
+    count: u64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TypeCount {
+    edge_type: String,
+    count: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,16 +433,23 @@ pub(super) async fn reindex_project(
 )]
 pub(super) async fn get_communities(
     State(state): State<Arc<ApiState>>,
-    Path(_project_id): Path<String>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<CommunitiesResponse>, StatusCode> {
-    let _manager = get_manager(&state)?;
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Will query the graph database for community nodes.
-    // Stub: return empty.
-    Ok(Json(CommunitiesResponse {
-        communities: Vec::new(),
-        total: 0,
-    }))
+    let communities = crate::codegraph::graph_queries::query_communities(&db, &project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to query communities");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let total = communities.len();
+    Ok(Json(CommunitiesResponse { communities, total }))
 }
 
 /// GET /codegraph/projects/:project_id/graph/processes — List entry points.
@@ -305,14 +464,23 @@ pub(super) async fn get_communities(
 )]
 pub(super) async fn get_processes(
     State(state): State<Arc<ApiState>>,
-    Path(_project_id): Path<String>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<ProcessesResponse>, StatusCode> {
-    let _manager = get_manager(&state)?;
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    Ok(Json(ProcessesResponse {
-        processes: Vec::new(),
-        total: 0,
-    }))
+    let processes = crate::codegraph::graph_queries::query_processes(&db, &project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to query processes");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let total = processes.len();
+    Ok(Json(ProcessesResponse { processes, total }))
 }
 
 /// GET /codegraph/projects/:project_id/graph/search — Hybrid search.
@@ -347,7 +515,10 @@ pub(super) async fn search_graph(
         &db,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(%e, "hybrid search failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let total = results.len();
     Ok(Json(SearchResponse { results, total }))
@@ -365,35 +536,19 @@ pub(super) async fn search_graph(
 )]
 pub(super) async fn get_index_log(
     State(state): State<Arc<ApiState>>,
-    Path(_project_id): Path<String>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<IndexLogResponse>, StatusCode> {
-    let _manager = get_manager(&state)?;
+    let manager = get_manager(&state)?;
 
-    Ok(Json(IndexLogResponse {
-        entries: Vec::new(),
-    }))
-}
+    let entries = manager
+        .get_index_log(&project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to get index log");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-/// GET /codegraph/projects/:project_id/memories — Project memories.
-#[utoipa::path(
-    get,
-    path = "/codegraph/projects/{project_id}/memories",
-    params(("project_id" = String, Path, description = "Project ID")),
-    responses(
-        (status = 200, description = "Project memories", body = ProjectMemoriesResponse),
-    ),
-    tag = "codegraph"
-)]
-pub(super) async fn get_project_memories(
-    State(state): State<Arc<ApiState>>,
-    Path(_project_id): Path<String>,
-) -> Result<Json<ProjectMemoriesResponse>, StatusCode> {
-    let _manager = get_manager(&state)?;
-
-    Ok(Json(ProjectMemoriesResponse {
-        memories: Vec::new(),
-        total: 0,
-    }))
+    Ok(Json(IndexLogResponse { entries }))
 }
 
 /// GET /codegraph/projects/:project_id/remove-info — Get cascade delete info.
@@ -426,8 +581,369 @@ pub(super) async fn get_remove_info(
     Ok(Json(RemoveInfoResponse {
         node_count,
         edge_count,
-        memory_count: 0, // Will be queried from centralized memory store.
     }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/nodes — List/browse nodes.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/nodes",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        NodeListQuery,
+    ),
+    responses(
+        (status = 200, description = "Node list", body = NodeListResponse),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn list_nodes(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<NodeListQuery>,
+) -> Result<Json<NodeListResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let (nodes, total) = crate::codegraph::graph_queries::query_nodes(
+        &db,
+        &project_id,
+        query.label.as_deref(),
+        query.offset,
+        query.limit,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to query nodes");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let nodes = nodes
+        .into_iter()
+        .map(|n| NodeSummary {
+            id: n.id,
+            qualified_name: n.qualified_name,
+            name: n.name,
+            label: n.label,
+            source_file: n.source_file,
+            line_start: n.line_start,
+            line_end: n.line_end,
+        })
+        .collect();
+
+    Ok(Json(NodeListResponse {
+        nodes,
+        total,
+        offset: query.offset,
+        limit: query.limit,
+    }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/nodes/:node_id — Node detail.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/nodes/{node_id}",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("node_id" = i64, Path, description = "Node ID"),
+        NodeDetailQuery,
+    ),
+    responses(
+        (status = 200, description = "Node detail", body = NodeDetailResponse),
+        (status = 404, description = "Node not found"),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_node(
+    State(state): State<Arc<ApiState>>,
+    Path((project_id, node_id)): Path<(String, i64)>,
+    Query(query): Query<NodeDetailQuery>,
+) -> Result<Json<NodeDetailResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let node = crate::codegraph::graph_queries::query_node_by_id(
+        &db,
+        &project_id,
+        node_id,
+        query.label.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to query node");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(NodeDetailResponse {
+        node: NodeFull {
+            id: node.id,
+            qualified_name: node.qualified_name,
+            name: node.name,
+            label: node.label,
+            source_file: node.source_file,
+            line_start: node.line_start,
+            line_end: node.line_end,
+            source: node.source,
+            written_by: node.written_by,
+            properties: node.properties,
+        },
+    }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/nodes/:node_id/edges — Node edges.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/nodes/{node_id}/edges",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("node_id" = i64, Path, description = "Node ID"),
+        EdgeListQuery,
+    ),
+    responses(
+        (status = 200, description = "Edge list", body = EdgeListResponse),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_node_edges(
+    State(state): State<Arc<ApiState>>,
+    Path((project_id, node_id)): Path<(String, i64)>,
+    Query(query): Query<EdgeListQuery>,
+) -> Result<Json<EdgeListResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // First resolve the node's label so edge queries know which table to use.
+    let node = crate::codegraph::graph_queries::query_node_by_id(
+        &db,
+        &project_id,
+        node_id,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to resolve node for edge query");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (edges, total) = crate::codegraph::graph_queries::query_node_edges(
+        &db,
+        &project_id,
+        node_id,
+        &node.label,
+        &query.direction,
+        query.edge_type.as_deref(),
+        query.offset,
+        query.limit,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to query node edges");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let edges = edges
+        .into_iter()
+        .map(|e| EdgeSummary {
+            from_id: e.from_id,
+            from_name: e.from_name,
+            from_label: e.from_label,
+            to_id: e.to_id,
+            to_name: e.to_name,
+            to_label: e.to_label,
+            edge_type: e.edge_type,
+            confidence: e.confidence,
+        })
+        .collect();
+
+    Ok(Json(EdgeListResponse {
+        edges,
+        total,
+        offset: query.offset,
+        limit: query.limit,
+    }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/stats — Graph statistics.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/stats",
+    params(("project_id" = String, Path, description = "Project ID")),
+    responses(
+        (status = 200, description = "Graph statistics", body = GraphStatsResponse),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_graph_stats(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<GraphStatsResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let stats = crate::codegraph::graph_queries::query_graph_stats(&db, &project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to query graph stats");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(GraphStatsResponse {
+        total_nodes: stats.total_nodes,
+        total_edges: stats.total_edges,
+        nodes_by_label: stats
+            .nodes_by_label
+            .into_iter()
+            .map(|(label, count)| LabelCount { label, count })
+            .collect(),
+        edges_by_type: stats
+            .edges_by_type
+            .into_iter()
+            .map(|(edge_type, count)| TypeCount { edge_type, count })
+            .collect(),
+    }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/bulk-nodes — all nodes.
+///
+/// Returns every node in the project for the interactive graph canvas.
+/// Drops Parameter/Variable/Decorator/Import by default; set
+/// `include_noise=true` to include them. Hard-capped at 15k nodes with
+/// label-priority truncation.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/bulk-nodes",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        BulkGraphQuery,
+    ),
+    responses(
+        (status = 200, description = "Bulk node list", body = BulkNodesResponse),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_bulk_nodes(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<BulkGraphQuery>,
+) -> Result<Json<BulkNodesResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let (queried, truncated, total_available) = crate::codegraph::graph_queries::query_bulk_nodes(
+        &db,
+        &project_id,
+        query.include_noise,
+        BULK_GRAPH_MAX_NODES,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to query bulk nodes");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let nodes = queried
+        .into_iter()
+        .map(|n| NodeSummary {
+            id: n.id,
+            qualified_name: n.qualified_name,
+            name: n.name,
+            label: n.label,
+            source_file: n.source_file,
+            line_start: n.line_start,
+            line_end: n.line_end,
+        })
+        .collect();
+
+    Ok(Json(BulkNodesResponse {
+        nodes,
+        truncated,
+        total_available,
+    }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/bulk-edges — all edges.
+///
+/// Returns every edge whose endpoints are in the bulk node set. Must be
+/// called with the same `include_noise` value as the bulk-nodes request so
+/// the edge endpoints line up.
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/bulk-edges",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        BulkGraphQuery,
+    ),
+    responses(
+        (status = 200, description = "Bulk edge list", body = BulkEdgesResponse),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_bulk_edges(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<BulkGraphQuery>,
+) -> Result<Json<BulkEdgesResponse>, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Re-resolve the node id set the bulk-nodes call would have returned
+    // so the two endpoints share a consistent view. Cheap because the node
+    // query is a handful of MATCH ... RETURN id(n) calls.
+    let (queried_nodes, _truncated, _total) = crate::codegraph::graph_queries::query_bulk_nodes(
+        &db,
+        &project_id,
+        query.include_noise,
+        BULK_GRAPH_MAX_NODES,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "failed to query bulk node id set for edges");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let node_qnames: std::collections::HashSet<String> =
+        queried_nodes.iter().map(|n| n.qualified_name.clone()).collect();
+
+    let queried = crate::codegraph::graph_queries::query_bulk_edges(&db, &project_id, &node_qnames)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to query bulk edges");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let edges = queried
+        .into_iter()
+        .map(|e| BulkEdgeSummary {
+            from_qname: e.from_name,  // query_bulk_edges returns qualified_name in the name field
+            from_label: e.from_label,
+            to_qname: e.to_name,
+            to_label: e.to_label,
+            edge_type: e.edge_type,
+            confidence: e.confidence,
+        })
+        .collect();
+
+    Ok(Json(BulkEdgesResponse { edges }))
 }
 
 // ---------------------------------------------------------------------------

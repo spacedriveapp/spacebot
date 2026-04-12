@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { api, type CodeGraphProject } from "@/api/client";
@@ -14,8 +14,6 @@ import {
 import { useSetTopBar } from "@/components/TopBar";
 import { clsx } from "clsx";
 import { CodeGraphTab } from "@/components/projects/CodeGraphTab";
-import { ProjectMemoryTab } from "@/components/projects/ProjectMemoryTab";
-import { ProjectSettingsTab } from "@/components/projects/ProjectSettingsTab";
 
 // ---------------------------------------------------------------------------
 // Sub-tab definitions
@@ -24,8 +22,6 @@ import { ProjectSettingsTab } from "@/components/projects/ProjectSettingsTab";
 const TABS = [
 	{ key: "overview", label: "Overview" },
 	{ key: "code-graph", label: "Code Graph" },
-	{ key: "memory", label: "Project Memory" },
-	{ key: "settings", label: "Settings" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -72,7 +68,6 @@ function RemoveProjectDialog({
 					{removeInfo && (
 						<>
 							<p>Code graph index ({removeInfo.node_count.toLocaleString()} nodes, {removeInfo.edge_count.toLocaleString()} edges)</p>
-							<p>{removeInfo.memory_count.toLocaleString()} project memories</p>
 							<p>All index history and logs</p>
 						</>
 					)}
@@ -99,8 +94,244 @@ function RemoveProjectDialog({
 // Overview Tab
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Pipeline Phase Display
+// ---------------------------------------------------------------------------
+
+const PIPELINE_PHASES = [
+	"extracting",
+	"structure",
+	"parsing",
+	"imports",
+	"calls",
+	"heritage",
+	"communities",
+	"processes",
+	"enriching",
+	"complete",
+] as const;
+
+const PHASE_LABELS: Record<string, string> = {
+	extracting: "Extracting Files",
+	structure: "Building Structure",
+	parsing: "Parsing Source",
+	imports: "Resolving Imports",
+	calls: "Resolving Calls",
+	heritage: "Resolving Inheritance",
+	communities: "Detecting Communities",
+	processes: "Tracing Processes",
+	enriching: "Enriching",
+	complete: "Complete",
+};
+
+function AnimatedNumber({ value, duration = 500 }: { value: number; duration?: number }) {
+	const [display, setDisplay] = useState(value);
+	const prevRef = useRef(value);
+
+	useEffect(() => {
+		const from = prevRef.current;
+		const to = value;
+		prevRef.current = value;
+
+		if (from === to) return;
+
+		const start = performance.now();
+		let raf: number;
+
+		const tick = (now: number) => {
+			const elapsed = now - start;
+			const t = Math.min(elapsed / duration, 1);
+			const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+			setDisplay(Math.round(from + (to - from) * eased));
+			if (t < 1) {
+				raf = requestAnimationFrame(tick);
+			}
+		};
+
+		raf = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(raf);
+	}, [value, duration]);
+
+	return <>{display.toLocaleString()}</>;
+}
+
+function IndexingProgress({ project }: { project: CodeGraphProject }) {
+	const progress = project.progress;
+
+	// Cache the last non-null progress so animation can finish even if the
+	// backend clears the progress field before we're done animating.
+	const cachedProgressRef = useRef(progress);
+	if (progress) cachedProgressRef.current = progress;
+	const effectiveProgress = progress ?? cachedProgressRef.current;
+
+	// Actual phase index from the API (0-based).
+	const actualPhaseIdx = effectiveProgress
+		? PIPELINE_PHASES.indexOf(effectiveProgress.phase as typeof PIPELINE_PHASES[number])
+		: -1;
+
+	// Animated display phase: steps through one at a time so the user sees
+	// every phase even when the backend blows through stubs instantly.
+	const [displayPhaseIdx, setDisplayPhaseIdx] = useState(() => Math.max(0, actualPhaseIdx));
+
+	// Detect when a NEW indexing run starts (status transitions TO "indexing").
+	// This is more reliable than checking for a specific phase, since fast
+	// pipelines can blow through "extracting" before the first poll lands.
+	const wasIndexingRef = useRef(project.status === "indexing");
+	useEffect(() => {
+		const isNowIndexing = project.status === "indexing";
+		if (isNowIndexing && !wasIndexingRef.current) {
+			// New indexing run — full reset
+			setDisplayPhaseIdx(0);
+			cachedProgressRef.current = undefined;
+		}
+		wasIndexingRef.current = isNowIndexing;
+	}, [project.status]);
+
+	// Step forward one phase at a time with a 400ms delay.
+	useEffect(() => {
+		if (actualPhaseIdx > displayPhaseIdx) {
+			const timer = setTimeout(() => {
+				setDisplayPhaseIdx((prev) => prev + 1);
+			}, 400);
+			return () => clearTimeout(timer);
+		}
+	}, [actualPhaseIdx, displayPhaseIdx]);
+
+	if (!effectiveProgress) {
+		return (
+			<div className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-5">
+				<div className="flex items-center gap-3">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+					<p className="text-sm font-medium text-blue-400">Preparing to index...</p>
+				</div>
+			</div>
+		);
+	}
+
+	const showIdx = Math.max(0, Math.min(displayPhaseIdx, PIPELINE_PHASES.length - 1));
+	const isAnimComplete = showIdx === PIPELINE_PHASES.length - 1 && project.status === "indexed";
+
+	// Use actual phase_progress if we're on the same phase the API reports,
+	// otherwise treat earlier phases as fully complete (1.0).
+	const phaseProgress =
+		showIdx === actualPhaseIdx ? (effectiveProgress.phase_progress ?? 1.0) : 1.0;
+
+	const overallProgress = isAnimComplete
+		? 100
+		: ((showIdx + phaseProgress) / PIPELINE_PHASES.length) * 100;
+
+	const borderColor = isAnimComplete ? "border-emerald-500/30" : "border-blue-500/30";
+	const bgColor = isAnimComplete ? "bg-emerald-500/5" : "bg-blue-500/5";
+	const accentColor = isAnimComplete ? "bg-emerald-500" : "bg-blue-500";
+	const textColor = isAnimComplete ? "text-emerald-400" : "text-blue-400";
+
+	return (
+		<div className={clsx("rounded-xl border p-5 transition-colors duration-500", borderColor, bgColor)}>
+			{/* Header */}
+			<div className="mb-4 flex items-center justify-between">
+				<div className="flex items-center gap-3">
+					<div className={clsx(
+						"h-2 w-2 rounded-full",
+						isAnimComplete ? "bg-emerald-500" : "animate-pulse bg-blue-500",
+					)} />
+					<p className={clsx("text-sm font-semibold", textColor)}>
+						{isAnimComplete
+							? "Indexing Complete"
+							: `Indexing — Phase ${showIdx + 1}/${PIPELINE_PHASES.length}`
+						}
+					</p>
+				</div>
+				<span className="text-xs text-ink-faint">{Math.round(overallProgress)}%</span>
+			</div>
+
+			{/* Overall progress bar */}
+			<div className="mb-4 h-2 overflow-hidden rounded-full bg-app-box">
+				<div
+					className={clsx("h-full rounded-full transition-all duration-500", accentColor)}
+					style={{ width: `${overallProgress}%` }}
+				/>
+			</div>
+
+			{/* Phase steps */}
+			<div className="mb-4 grid grid-cols-5 gap-1">
+				{PIPELINE_PHASES.map((phase, i) => {
+					const isCurrent = !isAnimComplete && i === showIdx;
+					const isDone = isAnimComplete || i < showIdx;
+					return (
+						<div key={phase} className="flex flex-col items-center gap-1">
+							<div
+								className={clsx(
+									"h-1.5 w-full rounded-full transition-colors duration-300",
+									isDone && "bg-emerald-500",
+									isCurrent && "bg-blue-500",
+									!isDone && !isCurrent && "bg-app-line",
+								)}
+							/>
+							<span
+								className={clsx(
+									"text-[10px] leading-tight",
+									isCurrent ? "font-medium text-blue-400" : isDone ? "text-emerald-400/70" : "text-ink-faint/50",
+								)}
+							>
+								{PHASE_LABELS[phase]?.split(" ")[0]}
+							</span>
+						</div>
+					);
+				})}
+			</div>
+
+			{/* Current message — show the phase label while animating through skipped phases */}
+			<p className="mb-3 text-xs text-ink-dull">
+				{showIdx < actualPhaseIdx
+					? PHASE_LABELS[PIPELINE_PHASES[showIdx]]
+					: effectiveProgress.message}
+			</p>
+
+			{/* Live stats */}
+			<div className="grid grid-cols-4 gap-3 sm:grid-cols-7">
+				{[
+					["Files", effectiveProgress.stats.files_found],
+					["Parsed", effectiveProgress.stats.files_parsed],
+					["Skipped", effectiveProgress.stats.files_skipped ?? 0],
+					["Nodes", effectiveProgress.stats.nodes_created],
+					["Edges", effectiveProgress.stats.edges_created],
+					["Communities", effectiveProgress.stats.communities_detected],
+					["Processes", effectiveProgress.stats.processes_traced],
+				].map(([label, value]) => (
+					<div key={label as string} className="text-center">
+						<p className="text-sm font-semibold text-ink">
+							<AnimatedNumber value={value as number} />
+						</p>
+						<p className="text-[10px] text-ink-faint">{label as string}</p>
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Overview Tab
+// ---------------------------------------------------------------------------
+
 function OverviewTab({ project }: { project: CodeGraphProject }) {
 	const queryClient = useQueryClient();
+	const prevStatusRef = useRef(project.status);
+	const [showComplete, setShowComplete] = useState(false);
+
+	// Detect indexing → indexed transition to keep the progress banner visible
+	// long enough for the phase animation to finish + show the "Complete" state.
+	useEffect(() => {
+		if (prevStatusRef.current === "indexing" && project.status === "indexed") {
+			setShowComplete(true);
+			const timer = setTimeout(() => setShowComplete(false), 10_000);
+			return () => clearTimeout(timer);
+		}
+		if (project.status === "indexing") {
+			setShowComplete(false);
+		}
+		prevStatusRef.current = project.status;
+	}, [project.status]);
 
 	const reindexMutation = useMutation({
 		mutationFn: () => api.codegraphReindex(project.project_id),
@@ -109,8 +340,53 @@ function OverviewTab({ project }: { project: CodeGraphProject }) {
 		},
 	});
 
+	const showProgress =
+		project.status === "indexing" ||
+		showComplete ||
+		(project.status === "indexed" && !!project.progress);
+
 	return (
 		<div className="flex flex-col gap-6">
+			{/* Live indexing progress — stays visible during animation + after completion */}
+			{showProgress && <IndexingProgress project={project} />}
+
+			{/* Status banner — shown when not actively indexing */}
+			{!showProgress && (project.status === "indexed" || project.status === "error") && (
+				<div
+					className={clsx(
+						"flex items-center gap-3 rounded-xl border p-4",
+						project.status === "indexed"
+							? "border-emerald-500/30 bg-emerald-500/5"
+							: "border-red-500/30 bg-red-500/5",
+					)}
+				>
+					<div
+						className={clsx(
+							"h-2.5 w-2.5 rounded-full",
+							project.status === "indexed" ? "bg-emerald-500" : "bg-red-500",
+						)}
+					/>
+					<div className="flex flex-col gap-1">
+						<p
+							className={clsx(
+								"text-sm font-semibold",
+								project.status === "indexed" ? "text-emerald-400" : "text-red-400",
+							)}
+						>
+							{project.status === "indexed" ? "Index Completed" : "Index Failed"}
+						</p>
+						{project.status === "error" && project.error_message && (
+							<p className="text-xs text-red-300/80">{project.error_message}</p>
+						)}
+					</div>
+					{project.status === "indexed" && project.last_indexed_at && (
+						<span className="ml-auto text-xs text-ink-faint">
+							{new Date(project.last_indexed_at).toLocaleString()}
+						</span>
+					)}
+				</div>
+			)}
+
 			{/* Basic info */}
 			<div className="rounded-xl border border-app-line bg-app-darkBox p-5">
 				<h3 className="mb-3 font-plex text-sm font-semibold text-ink">Project Info</h3>
@@ -125,7 +401,30 @@ function OverviewTab({ project }: { project: CodeGraphProject }) {
 					</div>
 					<div>
 						<dt className="text-ink-faint">Status</dt>
-						<dd className="text-ink">{project.status}</dd>
+						<dd>
+							<span
+								className={clsx(
+									"inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium",
+									project.status === "indexed" && "bg-emerald-500/10 text-emerald-400",
+									project.status === "indexing" && "bg-blue-500/10 text-blue-400",
+									project.status === "error" && "bg-red-500/10 text-red-400",
+									project.status === "pending" && "bg-yellow-500/10 text-yellow-400",
+									project.status === "stale" && "bg-orange-500/10 text-orange-400",
+								)}
+							>
+								<span
+									className={clsx(
+										"h-1.5 w-1.5 rounded-full",
+										project.status === "indexed" && "bg-emerald-500",
+										project.status === "indexing" && "animate-pulse bg-blue-500",
+										project.status === "error" && "bg-red-500",
+										project.status === "pending" && "bg-yellow-500",
+										project.status === "stale" && "bg-orange-500",
+									)}
+								/>
+								{project.status === "indexed" ? "Indexed" : project.status === "error" ? "Failed" : project.status}
+							</span>
+						</dd>
 					</div>
 					<div>
 						<dt className="text-ink-faint">Language</dt>
@@ -145,14 +444,15 @@ function OverviewTab({ project }: { project: CodeGraphProject }) {
 			</div>
 
 			{/* Stats */}
-			{project.last_index_stats && (
+			{project.last_index_stats && project.status !== "indexing" && (
 				<div className="rounded-xl border border-app-line bg-app-darkBox p-5">
 					<h3 className="mb-3 font-plex text-sm font-semibold text-ink">Index Stats</h3>
-					<div className="grid grid-cols-3 gap-4">
+					<div className="grid grid-cols-4 gap-4 sm:grid-cols-7">
 						{[
 							["Files", project.last_index_stats.files_found],
 							["Parsed", project.last_index_stats.files_parsed],
-							["Symbols", project.last_index_stats.nodes_created],
+							["Skipped", project.last_index_stats.files_skipped ?? 0],
+							["Nodes", project.last_index_stats.nodes_created],
 							["Edges", project.last_index_stats.edges_created],
 							["Communities", project.last_index_stats.communities_detected],
 							["Processes", project.last_index_stats.processes_traced],
@@ -190,7 +490,14 @@ export function ProjectDetail({ projectId, initialTab }: { projectId: string; in
 	const { data, isLoading } = useQuery({
 		queryKey: ["codegraph-project", projectId],
 		queryFn: () => api.codegraphProject(projectId),
-		refetchInterval: 5_000,
+		refetchInterval: (query) => {
+			const project = query.state.data?.project;
+			// Poll fast during indexing so stats animate in real-time,
+			// and briefly after completion for the transition.
+			if (project?.status === "indexing") return 1_000;
+			if (project?.status === "indexed" && project?.progress) return 2_000;
+			return 10_000;
+		},
 	});
 
 	const project = data?.project;
@@ -245,12 +552,16 @@ export function ProjectDetail({ projectId, initialTab }: { projectId: string; in
 				</Button>
 			</div>
 
-			{/* Tab content */}
-			<div className="flex-1 overflow-y-auto p-6">
+			{/* Tab content — Overview is scroll+padded, Code Graph owns its own layout */}
+			<div
+				className={clsx(
+					"min-h-0 flex-1",
+					activeTab === "overview" && "overflow-y-auto p-6",
+					activeTab === "code-graph" && "flex overflow-hidden",
+				)}
+			>
 				{activeTab === "overview" && <OverviewTab project={project} />}
 				{activeTab === "code-graph" && <CodeGraphTab projectId={projectId} />}
-				{activeTab === "memory" && <ProjectMemoryTab projectId={projectId} />}
-				{activeTab === "settings" && <ProjectSettingsTab projectId={projectId} />}
 			</div>
 
 			<RemoveProjectDialog

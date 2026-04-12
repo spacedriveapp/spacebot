@@ -1358,6 +1358,7 @@ export interface CodeGraphProject {
 		message: string;
 		stats: CodeGraphPipelineStats;
 	};
+	error_message?: string;
 	last_index_stats?: CodeGraphPipelineStats;
 	last_indexed_at?: string;
 	primary_language?: string;
@@ -1369,6 +1370,7 @@ export interface CodeGraphProject {
 export interface CodeGraphPipelineStats {
 	files_found: number;
 	files_parsed: number;
+	files_skipped: number;
 	nodes_created: number;
 	edges_created: number;
 	communities_detected: number;
@@ -1445,32 +1447,121 @@ export interface CodeGraphIndexLogResponse {
 	entries: CodeGraphIndexLogEntry[];
 }
 
-export interface CodeGraphProjectMemory {
-	id: string;
-	project_id: string;
-	memory_type: string;
-	content: string;
-	tags: string[];
-	created_at: string;
-	last_verified_at: string;
-	relevance_score: number;
-	source: string;
-}
-
-export interface CodeGraphProjectMemoriesResponse {
-	memories: CodeGraphProjectMemory[];
-	total: number;
-}
-
 export interface CodeGraphRemoveInfoResponse {
 	node_count: number;
 	edge_count: number;
-	memory_count: number;
 }
 
 export interface CodeGraphActionResponse {
 	success: boolean;
 	message: string;
+}
+
+// -- Node / Edge types for the graph explorer --
+
+export type CodeGraphNodeLabel =
+	| "project" | "package" | "module" | "folder" | "file"
+	| "class" | "function" | "method" | "variable" | "parameter"
+	| "interface" | "enum" | "decorator" | "import" | "type"
+	| "struct" | "macro" | "trait" | "impl" | "namespace"
+	| "type_alias" | "const" | "record" | "template"
+	| "community" | "process" | "section" | "test" | "route";
+
+export type CodeGraphEdgeType =
+	| "CONTAINS" | "DEFINES" | "CALLS" | "IMPORTS" | "EXTENDS"
+	| "IMPLEMENTS" | "OVERRIDES" | "HAS_METHOD" | "HAS_PROPERTY"
+	| "ACCESSES" | "USES" | "HAS_PARAMETER" | "DECORATES"
+	| "MEMBER_OF" | "STEP_IN_PROCESS" | "TESTED_BY"
+	| "ENTRY_POINT_OF" | "HANDLES_ROUTE" | "FETCHES" | "QUERIES"
+	| "HANDLES_TOOL";
+
+export interface CodeGraphNodeSummary {
+	id: number;
+	qualified_name: string;
+	name: string;
+	label: string;
+	source_file?: string;
+	line_start?: number;
+	line_end?: number;
+}
+
+export interface CodeGraphNodeFull extends CodeGraphNodeSummary {
+	source?: string;
+	written_by?: string;
+	properties: Record<string, unknown>;
+}
+
+export interface CodeGraphEdgeSummary {
+	from_id: number;
+	from_name: string;
+	from_label: string;
+	to_id: number;
+	to_name: string;
+	to_label: string;
+	edge_type: string;
+	confidence: number;
+}
+
+export interface CodeGraphLabelCount {
+	label: string;
+	count: number;
+}
+
+export interface CodeGraphTypeCount {
+	edge_type: string;
+	count: number;
+}
+
+export interface CodeGraphNodeListResponse {
+	nodes: CodeGraphNodeSummary[];
+	total: number;
+	offset: number;
+	limit: number;
+}
+
+export interface CodeGraphNodeDetailResponse {
+	node: CodeGraphNodeFull;
+}
+
+export interface CodeGraphEdgeListResponse {
+	edges: CodeGraphEdgeSummary[];
+	total: number;
+	offset: number;
+	limit: number;
+}
+
+export interface CodeGraphStatsResponse {
+	total_nodes: number;
+	total_edges: number;
+	nodes_by_label: CodeGraphLabelCount[];
+	edges_by_type: CodeGraphTypeCount[];
+}
+
+export interface CodeGraphBulkNodesResponse {
+	nodes: CodeGraphNodeSummary[];
+	truncated: boolean;
+	total_available: number;
+}
+
+export interface CodeGraphBulkEdgeSummary {
+	from_qname: string;
+	from_label: string;
+	to_qname: string;
+	to_label: string;
+	edge_type: string;
+	confidence: number;
+}
+
+export interface CodeGraphBulkEdgesResponse {
+	edges: CodeGraphBulkEdgeSummary[];
+}
+
+export interface FsReadFileResponse {
+	path: string;
+	content: string;
+	start_line: number;
+	total_lines: number;
+	language: string;
 }
 
 export const api = {
@@ -1773,7 +1864,7 @@ export const api = {
 	},
 	claudeCliStatus: () => fetchJson<ClaudeCliStatusResponse>("/providers/anthropic/oauth/cli-status"),
 	startAnthropicOAuth: async (params: { model: string; mode?: string }) => {
-		const response = await fetch(`${API_BASE}/providers/anthropic/oauth/start`, {
+		const response = await fetch(`${getApiBase()}/providers/anthropic/oauth/start`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(params),
@@ -1784,7 +1875,7 @@ export const api = {
 		return response.json() as Promise<AnthropicOAuthStartResponse>;
 	},
 	exchangeAnthropicOAuth: async (params: { code: string; state: string }) => {
-		const response = await fetch(`${API_BASE}/providers/anthropic/oauth/exchange`, {
+		const response = await fetch(`${getApiBase()}/providers/anthropic/oauth/exchange`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(params),
@@ -2523,9 +2614,59 @@ export const api = {
 	codegraphIndexLog: (projectId: string) =>
 		fetchJson<CodeGraphIndexLogResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/index-log`),
 
-	codegraphMemories: (projectId: string) =>
-		fetchJson<CodeGraphProjectMemoriesResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/memories`),
-
 	codegraphRemoveInfo: (projectId: string) =>
 		fetchJson<CodeGraphRemoveInfoResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/remove-info`),
+
+	codegraphNodes: (projectId: string, params?: { label?: string; offset?: number; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.label) search.set("label", params.label);
+		if (params?.offset != null) search.set("offset", String(params.offset));
+		if (params?.limit != null) search.set("limit", String(params.limit));
+		const qs = search.toString();
+		return fetchJson<CodeGraphNodeListResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/nodes${qs ? `?${qs}` : ""}`
+		);
+	},
+
+	codegraphNode: (projectId: string, nodeId: number, label?: string) => {
+		const qs = label ? `?label=${encodeURIComponent(label)}` : "";
+		return fetchJson<CodeGraphNodeDetailResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/nodes/${nodeId}${qs}`
+		);
+	},
+
+	codegraphNodeEdges: (projectId: string, nodeId: number, params?: { direction?: string; edge_type?: string; offset?: number; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.direction) search.set("direction", params.direction);
+		if (params?.edge_type) search.set("edge_type", params.edge_type);
+		if (params?.offset != null) search.set("offset", String(params.offset));
+		if (params?.limit != null) search.set("limit", String(params.limit));
+		const qs = search.toString();
+		return fetchJson<CodeGraphEdgeListResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/nodes/${nodeId}/edges${qs ? `?${qs}` : ""}`
+		);
+	},
+
+	codegraphStats: (projectId: string) =>
+		fetchJson<CodeGraphStatsResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/stats`),
+
+	codegraphBulkNodes: (projectId: string, includeNoise = false) =>
+		fetchJson<CodeGraphBulkNodesResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-nodes?include_noise=${includeNoise}`,
+		),
+
+	codegraphBulkEdges: (projectId: string, includeNoise = false) =>
+		fetchJson<CodeGraphBulkEdgesResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-edges?include_noise=${includeNoise}`,
+		),
+
+	fsReadFile: (params: { projectId: string; path: string; startLine?: number; endLine?: number }) => {
+		const qs = new URLSearchParams({
+			project_id: params.projectId,
+			path: params.path,
+		});
+		if (params.startLine !== undefined) qs.set("start_line", String(params.startLine));
+		if (params.endLine !== undefined) qs.set("end_line", String(params.endLine));
+		return fetchJson<FsReadFileResponse>(`/fs/read-file?${qs.toString()}`);
+	},
 };
