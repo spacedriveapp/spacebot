@@ -3568,8 +3568,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                 .await;
 
                                 // Auto-complete parent task if this child task has a parent.
-                                if let Some(parent_num) = task.metadata.get("parent_task_number").and_then(|v| v.as_i64()) {
-                                    let parent_summary = format!("Sub-task #{} completed: {}", task.task_number, task.title);
+                                if let Some(parent_num) = task.metadata.get("parent task_number").and_then(|v| v.as_i64()) {
                                     tracing::info!(
                                         parent_task = parent_num,
                                         child_task = task.task_number,
