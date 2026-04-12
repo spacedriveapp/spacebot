@@ -3344,10 +3344,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     // hierarchical links — not just delegated workers. This ensures workers
     // from hierarchical agents see delegation rules even when the agent
     // spawns them directly instead of delegating.
-    let has_hierarchical_links = crate::links::links_for_agent(
-        &deps.links.load(),
-        &deps.agent_id,
-    ).iter().any(|l| l.kind == crate::links::LinkKind::Hierarchical);
+    let has_hierarchical_links = crate::links::links_for_agent(&deps.links.load(), &deps.agent_id)
+        .iter()
+        .any(|l| l.kind == crate::links::LinkKind::Hierarchical);
 
     let system_prompt = if has_hierarchical_links {
         let mut enhanced = system_prompt;
@@ -3568,16 +3567,25 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                 .await;
 
                                 // Auto-complete parent task if this child task has a parent.
-                                if let Some(parent_num) = task.metadata.get("parent task_number").and_then(|v| v.as_i64()) {
+                                if let Some(parent_num) = task
+                                    .metadata
+                                    .get("parent task_number")
+                                    .and_then(|v| v.as_i64())
+                                {
                                     tracing::info!(
                                         parent_task = parent_num,
                                         child_task = task.task_number,
                                         "auto-completing parent task after child completion"
                                     );
-                                    let _ = task_store.update(parent_num, UpdateTaskInput {
-                                        status: Some(TaskStatus::Done),
-                                        ..Default::default()
-                                    }).await;
+                                    let _ = task_store
+                                        .update(
+                                            parent_num,
+                                            UpdateTaskInput {
+                                                status: Some(TaskStatus::Done),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await;
                                     let _ = event_tx.send(ProcessEvent::TaskUpdated {
                                         agent_id: Arc::from(agent_id.as_str()),
                                         task_number: parent_num,
@@ -4020,7 +4028,8 @@ async fn notify_delegation_completion(
         let boundary = result_summary.floor_char_boundary(3000);
         format!(
             "{}... [result truncated to 3000 chars. Use `task_get` on task #{} to read the full result.]",
-            &result_summary[..boundary], task.task_number
+            &result_summary[..boundary],
+            task.task_number
         )
     } else {
         result_summary.to_string()
@@ -4068,12 +4077,20 @@ async fn notify_delegation_completion(
     }
 
     // Auto-complete parent task if this child was spawned from a parent task.
-    if let Some(parent_num) = task.metadata.get("parent_task_number").and_then(|v| v.as_i64()) {
+    if let Some(parent_num) = task
+        .metadata
+        .get("parent_task_number")
+        .and_then(|v| v.as_i64())
+    {
         if let Err(error) = task_store
             .update(
                 parent_num,
                 UpdateTaskInput {
-                    status: Some(if success { TaskStatus::Done } else { TaskStatus::Backlog }),
+                    status: Some(if success {
+                        TaskStatus::Done
+                    } else {
+                        TaskStatus::Backlog
+                    }),
                     ..Default::default()
                 },
             )

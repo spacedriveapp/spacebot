@@ -4,8 +4,8 @@
 //! including description, metadata, status, and any output/findings. Access
 //! is restricted to tasks owned by or created by the calling agent.
 
-use crate::tasks::TaskStore;
 use crate::AgentId;
+use crate::tasks::TaskStore;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -88,8 +88,8 @@ impl Tool for TaskGetTool {
         // or is assigned to this agent.
         let agent_id_str = self.agent_id.to_string();
         let is_owner = task.owner_agent_id == agent_id_str;
-        let is_creator = task.created_by == agent_id_str
-            || task.created_by == format!("agent:{agent_id_str}");
+        let is_creator =
+            task.created_by == agent_id_str || task.created_by == format!("agent:{agent_id_str}");
         let is_assignee = task.assigned_agent_id == agent_id_str;
 
         if !is_owner && !is_creator && !is_assignee {

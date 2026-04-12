@@ -4,8 +4,8 @@
 //! tool once and it blocks internally until the task completes, fails, or
 //! times out. This eliminates the 15+ polling calls observed in practice.
 
-use crate::tasks::TaskStore;
 use crate::AgentId;
+use crate::tasks::TaskStore;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -94,10 +94,7 @@ impl Tool for WaitForTaskTool {
                 .map_err(|e| WaitForTaskError(format!("{e}")))?;
 
             let Some(task) = task else {
-                return Err(WaitForTaskError(format!(
-                    "task #{} not found",
-                    task_number
-                )));
+                return Err(WaitForTaskError(format!("task #{} not found", task_number)));
             };
 
             // Access control: same as task_get
@@ -122,7 +119,10 @@ impl Tool for WaitForTaskTool {
                 return Ok(WaitForTaskOutput {
                     success: true,
                     task: Some(task),
-                    message: format!("Task #{} completed with status: {}", task_number, task_status),
+                    message: format!(
+                        "Task #{} completed with status: {}",
+                        task_number, task_status
+                    ),
                 });
             }
 

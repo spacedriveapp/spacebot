@@ -337,17 +337,25 @@ impl Worker {
 
         // Build delegation config from task metadata if this worker was
         // delegated by a superior agent.
-        let delegation_config = self.task_metadata.as_ref()
+        let delegation_config = self
+            .task_metadata
+            .as_ref()
             .and_then(|m| m.get("delegated_by"))
             .map(|_| crate::tools::DelegationConfig {
                 links: self.deps.links.clone(),
                 agent_names: self.deps.agent_names.clone(),
-                conversation_logger: crate::conversation::history::ConversationLogger::new(self.deps.sqlite_pool.clone()),
-                originating_channel: self.task_metadata.as_ref()
+                conversation_logger: crate::conversation::history::ConversationLogger::new(
+                    self.deps.sqlite_pool.clone(),
+                ),
+                originating_channel: self
+                    .task_metadata
+                    .as_ref()
                     .and_then(|m| m.get("originating_channel"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                parent_task_number: self.task_metadata.as_ref()
+                parent_task_number: self
+                    .task_metadata
+                    .as_ref()
                     .and_then(|m| m.get("task_number"))
                     .and_then(|v| v.as_i64()),
             });

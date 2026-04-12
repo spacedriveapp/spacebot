@@ -918,7 +918,9 @@ pub async fn create_agent_internal(
                 .filter_map(|c| c.role.as_ref().map(|r| (c.id.clone(), r.clone())))
                 .collect();
             if let Some(role) = request.role.as_ref() {
-                roles.entry(agent_id.clone()).or_insert_with(|| role.clone());
+                roles
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| role.clone());
             }
             Arc::new(roles)
         },

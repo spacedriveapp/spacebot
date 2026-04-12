@@ -744,9 +744,18 @@ pub fn create_worker_tool_server(
             send_tool = send_tool.with_parent_task_number(parent_task);
         }
         server = server.tool(send_tool);
-        server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));
-        server = server.tool(TaskGetTool::new(task_store.clone(), agent_id_for_delegation.clone()));
-        server = server.tool(WaitForTaskTool::new(task_store.clone(), agent_id_for_delegation.clone()));
+        server = server.tool(TaskListTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.to_string(),
+        ));
+        server = server.tool(TaskGetTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.clone(),
+        ));
+        server = server.tool(WaitForTaskTool::new(
+            task_store.clone(),
+            agent_id_for_delegation.clone(),
+        ));
         server = server.tool(TaskUpdateTool::for_worker(
             task_store.clone(),
             agent_id_for_delegation.clone(),

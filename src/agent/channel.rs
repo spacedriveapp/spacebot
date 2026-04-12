@@ -2154,7 +2154,10 @@ impl Channel {
     /// Calls `PromptEngine::build_hierarchical_rules_for_agent` with the agent's
     /// links, humans, and agent names. Returns `None` if no hierarchical links
     /// exist or if rendering fails.
-    fn build_hierarchical_rules(&self, prompt_engine: &crate::prompts::PromptEngine) -> Option<String> {
+    fn build_hierarchical_rules(
+        &self,
+        prompt_engine: &crate::prompts::PromptEngine,
+    ) -> Option<String> {
         prompt_engine.build_hierarchical_rules_for_agent(
             &self.deps.agent_id,
             &self.deps.links.load(),
