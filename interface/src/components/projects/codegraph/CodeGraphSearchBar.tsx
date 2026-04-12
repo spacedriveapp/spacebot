@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon, RefreshIcon } from "@hugeicons/core-free-icons";
-import { NODE_COLORS, type NodeLabel } from "./constants";
+import { getNodeColor } from "./graphAdapter";
 import type { BulkNode } from "./types";
 
 interface Props {
@@ -18,6 +18,7 @@ interface Props {
 	onSelectNode: (node: BulkNode) => void;
 	onReindex?: () => void;
 	isReindexing?: boolean;
+	colorOverrides?: Record<string, string>;
 }
 
 const MAX_RESULTS = 12;
@@ -31,6 +32,7 @@ export function CodeGraphSearchBar({
 	onSelectNode,
 	onReindex,
 	isReindexing,
+	colorOverrides,
 }: Props) {
 	const [query, setQuery] = useState("");
 	const [open, setOpen] = useState(false);
@@ -135,7 +137,7 @@ export function CodeGraphSearchBar({
 						) : (
 							<div className="max-h-80 overflow-y-auto">
 								{results.map((node, i) => {
-									const color = NODE_COLORS[node.label as NodeLabel] ?? "#6b7280";
+									const color = getNodeColor(node.label, colorOverrides);
 									return (
 										<button
 											key={node.id}

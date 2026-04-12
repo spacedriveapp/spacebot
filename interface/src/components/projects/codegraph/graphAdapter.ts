@@ -128,9 +128,17 @@ const ekTgt = (e: BulkEdge): string => e.to_qname;
 // Main conversion
 // ---------------------------------------------------------------------------
 
+/** Resolve a node's display color, respecting user overrides. */
+export const getNodeColor = (
+	label: string,
+	colorOverrides?: Record<string, string>,
+): string =>
+	colorOverrides?.[label] ?? NODE_COLORS[label as NodeLabel] ?? "#6b7280";
+
 export const buildGraph = (
 	bulkNodes: BulkNode[],
 	bulkEdges: BulkEdge[],
+	colorOverrides?: Record<string, string>,
 ): Graph<SigmaNodeAttributes, SigmaEdgeAttributes> => {
 	const graph = new Graph<SigmaNodeAttributes, SigmaEdgeAttributes>();
 	const nodeCount = bulkNodes.length;
@@ -214,10 +222,10 @@ export const buildGraph = (
 		const scaledSize = isInvisible ? 0 : getScaledNodeSize(baseSize, nodeCount);
 
 		const community = memberCommunity.get(id);
-		const useCommunityColor = community !== undefined && SYMBOL_LABELS.has(label);
+		const useCommunityColor = community !== undefined && SYMBOL_LABELS.has(label) && !colorOverrides?.[label];
 		const color = useCommunityColor
 			? getCommunityColor(community!)
-			: NODE_COLORS[label] ?? "#9ca3af";
+			: getNodeColor(label, colorOverrides);
 
 		graph.addNode(id, {
 			x,

@@ -9,7 +9,7 @@
 // All state is kept in local useState bags and prop-drilled down. No
 // context is needed since this component is not reused elsewhere.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { CodeGraphSearchBar } from "./codegraph/CodeGraphSearchBar";
@@ -33,6 +33,29 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 	const [visibleEdgeTypes, setVisibleEdgeTypes] = useState<EdgeType[]>(DEFAULT_VISIBLE_EDGES);
 	const [depthFilter, setDepthFilter] = useState<number | null>(null);
 	const [isLayoutRunning, setIsLayoutRunning] = useState(false);
+	const [colorOverrides, setColorOverrides] = useState<Record<string, string>>(() => {
+		try {
+			const saved = localStorage.getItem("spacebot.codegraph.colorOverrides");
+			return saved ? JSON.parse(saved) : {};
+		} catch {
+			return {};
+		}
+	});
+
+	const handleColorChange = useCallback((label: NodeLabel, color: string | null) => {
+		setColorOverrides((prev) => {
+			const next = { ...prev };
+			if (color === null) {
+				delete next[label];
+			} else {
+				next[label] = color;
+			}
+			try {
+				localStorage.setItem("spacebot.codegraph.colorOverrides", JSON.stringify(next));
+			} catch { /* ignore */ }
+			return next;
+		});
+	}, []);
 
 	const canvasRef = useRef<GraphCanvasHandle>(null);
 	const queryClient = useQueryClient();
@@ -88,7 +111,7 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 	// Build the graphology graph once both payloads land.
 	const graph = useMemo(() => {
 		if (!nodesQuery.data || !edgesQuery.data) return null;
-		return buildGraph(nodes, edges);
+		return buildGraph(nodes, edges, colorOverrides);
 	}, [nodesQuery.data, edgesQuery.data, nodes, edges]);
 
 	const handleToggleLabel = (label: NodeLabel) => {
@@ -160,6 +183,7 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 				onSelectNode={handleSelectAndFocus}
 				onReindex={() => reindexMutation.mutate()}
 				isReindexing={reindexMutation.isPending}
+				colorOverrides={colorOverrides}
 			/>
 
 			<div className="flex min-h-0 flex-1">
@@ -175,6 +199,8 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 					onToggleEdge={handleToggleEdge}
 					depthFilter={depthFilter}
 					onChangeDepthFilter={setDepthFilter}
+					colorOverrides={colorOverrides}
+					onColorChange={handleColorChange}
 				/>
 
 				<div className="relative min-w-0 flex-1">
@@ -187,6 +213,7 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 						visibleLabels={visibleLabels}
 						visibleEdgeTypes={visibleEdgeTypes}
 						depthFilter={depthFilter}
+						colorOverrides={colorOverrides}
 						onLayoutRunningChange={setIsLayoutRunning}
 					/>
 				</div>
@@ -196,6 +223,7 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 						projectId={projectId}
 						selectedNode={selectedNode}
 						onClose={() => setSelectedNode(null)}
+						colorOverrides={colorOverrides}
 					/>
 				)}
 			</div>

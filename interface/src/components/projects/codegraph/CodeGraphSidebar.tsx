@@ -19,6 +19,7 @@ import {
 	Target02Icon,
 	LeftToRightListBulletIcon,
 } from "@hugeicons/core-free-icons";
+import * as Popover from "@radix-ui/react-popover";
 import {
 	NODE_COLORS,
 	FILTERABLE_LABELS,
@@ -27,6 +28,7 @@ import {
 	type NodeLabel,
 	type EdgeType,
 } from "./constants";
+import { getNodeColor } from "./graphAdapter";
 import type { BulkNode } from "./types";
 import { GraphStatsView } from "../GraphStatsView";
 
@@ -104,6 +106,9 @@ function TreeItem({
 	const isExpanded = expandedPaths.has(node.path);
 	const isSelected = selectedPath === node.path;
 	const hasChildren = node.children.length > 0;
+	const [isHovered, setIsHovered] = useState(false);
+	const nodeColor =
+		node.type === "folder" ? NODE_COLORS.Folder : NODE_COLORS.File;
 
 	const filteredChildren = useMemo(() => {
 		if (!searchQuery) return node.children;
@@ -125,14 +130,24 @@ function TreeItem({
 		<div>
 			<button
 				onClick={handleClick}
+				onMouseEnter={() => setIsHovered(true)}
+				onMouseLeave={() => setIsHovered(false)}
 				className={clsx(
-					"relative flex w-full items-center gap-1.5 rounded border-l-2 px-2 py-1 text-left text-sm transition-colors hover:bg-app-hover",
+					"relative flex w-full items-center gap-1.5 rounded border-l-2 px-2 py-1 text-left text-sm transition-colors",
 					isSelected
 						? "border-accent bg-accent/15 text-accent"
 						: "border-transparent text-ink-dull hover:text-ink",
 					nameMatches && !isSelected && "bg-accent/10",
 				)}
-				style={{ paddingLeft: `${depth * 12 + 8}px` }}
+				style={{
+					paddingLeft: `${depth * 12 + 8}px`,
+					backgroundColor:
+						isHovered && !isSelected
+							? `${nodeColor}20`
+							: undefined,
+					borderLeftColor:
+						isHovered && !isSelected ? nodeColor : undefined,
+				}}
 			>
 				{hasChildren ? (
 					isExpanded ? (
@@ -197,6 +212,8 @@ interface Props {
 	onToggleEdge: (edge: EdgeType) => void;
 	depthFilter: number | null;
 	onChangeDepthFilter: (depth: number | null) => void;
+	colorOverrides: Record<string, string>;
+	onColorChange: (label: NodeLabel, color: string | null) => void;
 }
 
 export function CodeGraphSidebar({
@@ -211,6 +228,8 @@ export function CodeGraphSidebar({
 	onToggleEdge,
 	depthFilter,
 	onChangeDepthFilter,
+	colorOverrides,
+	onColorChange,
 }: Props) {
 	const [isCollapsed, setIsCollapsed] = useState(false);
 	const [activeTab, setActiveTab] = useState<"files" | "filters">("files");
@@ -396,41 +415,79 @@ export function CodeGraphSidebar({
 			{activeTab === "filters" && (
 				<div className="flex-1 overflow-y-auto p-3">
 					{/* Node type toggles */}
-					<Section title="Node Types" subtitle="Toggle label visibility on the canvas">
+					<Section title="Node Types" subtitle="Click color to change, click name to toggle">
 						<div className="flex flex-col gap-1">
 							{FILTERABLE_LABELS.map((label) => {
 								const isVisible = visibleLabels.includes(label);
+								const color = getNodeColor(label, colorOverrides);
 								return (
-									<button
+									<div
 										key={label}
-										onClick={() => onToggleLabel(label)}
 										className={clsx(
-											"flex items-center gap-2.5 rounded px-2 py-1.5 text-left transition-colors",
+											"group flex items-center gap-2.5 rounded px-2 py-1.5 transition-colors",
 											isVisible
 												? "bg-app text-ink"
 												: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
 										)}
 									>
+										{/* Color dot — static indicator */}
 										<div
 											className={clsx(
-												"flex h-5 w-5 items-center justify-center rounded",
+												"flex h-5 w-5 shrink-0 items-center justify-center rounded",
 												!isVisible && "opacity-40",
 											)}
-											style={{ backgroundColor: `${NODE_COLORS[label]}20` }}
+											style={{ backgroundColor: `${color}20` }}
 										>
 											<div
 												className="h-2.5 w-2.5 rounded-full"
-												style={{ backgroundColor: NODE_COLORS[label] }}
+												style={{ backgroundColor: color }}
 											/>
 										</div>
-										<span className="flex-1 text-xs">{label}</span>
+
+										{/* Label name — click to toggle visibility */}
+										<button
+											className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
+											onClick={() => onToggleLabel(label)}
+										>
+											<span className="flex-1 text-left text-xs">{label}</span>
+										</button>
+
+										{/* Color picker icon — visible on hover */}
+										<Popover.Root>
+											<Popover.Trigger asChild>
+												<button
+													className="shrink-0 rounded p-0.5 text-ink-faint/0 transition-all group-hover:text-ink-faint hover:!text-ink hover:!bg-app-hover"
+													title="Change node color"
+												>
+													<svg viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+														<path d="M13.4 1.6a2.1 2.1 0 0 0-3 0L3.3 8.7a1 1 0 0 0-.2.4l-1 3.5a.5.5 0 0 0 .6.6l3.5-1a1 1 0 0 0 .4-.2l7.1-7.1a2.1 2.1 0 0 0 0-3ZM11 3.2l1.8 1.8-5.7 5.7-2.3.6.6-2.3Z"/>
+													</svg>
+												</button>
+											</Popover.Trigger>
+											<Popover.Portal>
+												<Popover.Content
+													side="right"
+													sideOffset={8}
+													className="z-50 rounded-lg border border-app-line bg-app-darkBox p-2 shadow-xl"
+												>
+													<NodeColorPicker
+														currentColor={color}
+														defaultColor={NODE_COLORS[label]}
+														onSelect={(c) => onColorChange(label, c)}
+														onReset={() => onColorChange(label, null)}
+													/>
+												</Popover.Content>
+											</Popover.Portal>
+										</Popover.Root>
+
+										{/* Visibility toggle dot */}
 										<div
 											className={clsx(
-												"h-2 w-2 rounded-full transition-colors",
+												"h-2 w-2 shrink-0 rounded-full transition-colors",
 												isVisible ? "bg-accent" : "bg-app-line",
 											)}
 										/>
-									</button>
+									</div>
 								);
 							})}
 						</div>
@@ -516,6 +573,78 @@ export function CodeGraphSidebar({
 					</Section>
 				</div>
 			)}
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Color picker popover content
+// ---------------------------------------------------------------------------
+
+const COLOR_PRESETS = [
+	"#ef4444", "#f97316", "#eab308", "#22c55e",
+	"#06b6d4", "#3b82f6", "#8b5cf6", "#d946ef",
+	"#ec4899", "#f43f5e", "#14b8a6", "#84cc16",
+	"#64748b", "#e2e8f0", "#a78bfa", "#fb923c",
+];
+
+function NodeColorPicker({
+	currentColor,
+	defaultColor,
+	onSelect,
+	onReset,
+}: {
+	currentColor: string;
+	defaultColor: string;
+	onSelect: (color: string) => void;
+	onReset: () => void;
+}) {
+	const isCustom = currentColor !== defaultColor;
+	return (
+		<div className="flex flex-col gap-2">
+			<div className="grid grid-cols-4 gap-1.5">
+				{COLOR_PRESETS.map((c) => (
+					<Popover.Close asChild key={c}>
+						<button
+							onClick={() => onSelect(c)}
+							className={clsx(
+								"h-6 w-6 rounded-full border-2 transition-transform hover:scale-110",
+								c.toLowerCase() === currentColor.toLowerCase()
+									? "border-white scale-110"
+									: "border-transparent",
+							)}
+							style={{ backgroundColor: c }}
+							title={c}
+						/>
+					</Popover.Close>
+				))}
+			</div>
+			<div className="flex items-center gap-2 border-t border-app-line pt-2">
+				<label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-ink-faint">
+					Custom
+					<input
+						type="color"
+						defaultValue={currentColor}
+						ref={(el) => {
+							if (!el) return;
+							// Use the native change event (fires once on picker close)
+							// instead of React's onChange which fires on every drag.
+							el.onchange = () => onSelect(el.value);
+						}}
+						className="h-5 w-5 cursor-pointer rounded border-0 bg-transparent p-0"
+					/>
+				</label>
+				{isCustom && (
+					<Popover.Close asChild>
+						<button
+							onClick={onReset}
+							className="ml-auto rounded px-2 py-0.5 text-[10px] text-ink-faint transition-colors hover:bg-app-hover hover:text-ink"
+						>
+							Reset
+						</button>
+					</Popover.Close>
+				)}
+			</div>
 		</div>
 	);
 }

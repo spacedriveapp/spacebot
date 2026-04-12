@@ -17,7 +17,7 @@ import {
 	Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { useSigma } from "./useSigma";
-import { filterGraphByDepth, type SigmaNodeAttributes, type SigmaEdgeAttributes } from "./graphAdapter";
+import { filterGraphByDepth, getNodeColor, type SigmaNodeAttributes, type SigmaEdgeAttributes } from "./graphAdapter";
 import type { BulkNode } from "./types";
 import type { EdgeType, NodeLabel } from "./constants";
 import { nodeKey } from "./graphAdapter";
@@ -35,6 +35,7 @@ interface Props {
 	visibleLabels: NodeLabel[];
 	visibleEdgeTypes: EdgeType[];
 	depthFilter: number | null;
+	colorOverrides?: Record<string, string>;
 	/** Notified whenever the FA2 worker starts or stops running. */
 	onLayoutRunningChange?: (running: boolean) => void;
 }
@@ -48,11 +49,12 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 		visibleLabels,
 		visibleEdgeTypes,
 		depthFilter,
+		colorOverrides,
 		onLayoutRunningChange,
 	},
 	ref,
 ) {
-	const [hoveredName, setHoveredName] = useState<string | null>(null);
+	const [hoveredNode, setHoveredNode] = useState<{ name: string; color: string } | null>(null);
 
 	const handleNodeClick = useCallback(
 		(gKey: string) => {
@@ -65,11 +67,11 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 	const handleNodeHover = useCallback(
 		(gKey: string | null) => {
 			if (!gKey || !graph) {
-				setHoveredName(null);
+				setHoveredNode(null);
 				return;
 			}
 			const attrs = graph.getNodeAttributes(gKey);
-			setHoveredName(attrs.label ?? null);
+			setHoveredNode(attrs.label ? { name: attrs.label, color: attrs.color } : null);
 		},
 		[graph],
 	);
@@ -114,6 +116,22 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 	useEffect(() => {
 		setSigmaSelected(selectedNode ? nodeKey(selectedNode) : null);
 	}, [selectedNode, setSigmaSelected]);
+
+	// Update node colors in-place when user changes colors via the picker.
+	useEffect(() => {
+		const sigma = sigmaRef.current;
+		if (!sigma || !graph || !colorOverrides) return;
+		const g = sigma.getGraph() as Graph<SigmaNodeAttributes, SigmaEdgeAttributes>;
+		if (g.order === 0) return;
+		g.forEachNode((id, attrs) => {
+			const newColor = getNodeColor(attrs.nodeType, colorOverrides);
+			if (attrs.color !== newColor) {
+				g.setNodeAttribute(id, "color", newColor);
+			}
+		});
+		sigma.refresh();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [colorOverrides]);
 
 	// Re-filter when labels/edges/depth change. We call directly into the
 	// sigma graph instead of relying on the reducer because label
@@ -176,9 +194,15 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 			/>
 
 			{/* Hover tooltip — only when nothing is selected */}
-			{hoveredName && !selectedNode && (
-				<div className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-lg border border-app-line bg-app-darkBox/95 px-3 py-1.5 backdrop-blur-sm">
-					<span className="font-mono text-sm text-ink">{hoveredName}</span>
+			{hoveredNode && !selectedNode && (
+				<div
+					className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-lg border px-3 py-1.5 backdrop-blur-sm"
+					style={{
+						backgroundColor: `${hoveredNode.color}30`,
+						borderColor: `${hoveredNode.color}60`,
+					}}
+				>
+					<span className="font-mono text-sm text-ink">{hoveredNode.name}</span>
 				</div>
 			)}
 

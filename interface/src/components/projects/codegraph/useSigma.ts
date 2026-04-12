@@ -176,38 +176,49 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
 			hideEdgesOnMove: true,
 			zIndex: true,
 
-			// Custom dark hover label — GitNexus parity.
+			// Custom hover label — pill background tinted with the node's color.
 			defaultDrawNodeHover: (context, data, settings) => {
 				const label = data.label;
 				if (!label) return;
 				const size = settings.labelSize || 11;
 				const font = settings.labelFont || "JetBrains Mono, monospace";
 				const weight = settings.labelWeight || "500";
+				const nodeColor = data.color || "#6366f1";
 				context.font = `${weight} ${size}px ${font}`;
 				const textWidth = context.measureText(label).width;
 				const nodeSize = data.size || 8;
 				const x = data.x;
-				const y = data.y - nodeSize - 10;
-				const paddingX = 8;
-				const paddingY = 5;
+				const y = data.y - nodeSize - 12;
+				const paddingX = 10;
+				const paddingY = 6;
 				const height = size + paddingY * 2;
 				const width = textWidth + paddingX * 2;
-				const radius = 4;
-				context.fillStyle = "#12121c";
+				const radius = 6;
+				// Tinted background — node color at 35% over dark base
+				const rgb = hexToRgb(nodeColor);
+				const bg = { r: 12, g: 12, b: 18 };
+				const mix = 0.35;
+				context.fillStyle = rgbToHex(
+					bg.r + (rgb.r - bg.r) * mix,
+					bg.g + (rgb.g - bg.g) * mix,
+					bg.b + (rgb.b - bg.b) * mix,
+				);
 				context.beginPath();
 				context.roundRect(x - width / 2, y - height / 2, width, height, radius);
 				context.fill();
-				context.strokeStyle = data.color || "#6366f1";
-				context.lineWidth = 2;
+				// Colored border
+				context.strokeStyle = nodeColor;
+				context.lineWidth = 1.5;
 				context.stroke();
+				// Label text
 				context.fillStyle = "#f5f5f7";
 				context.textAlign = "center";
 				context.textBaseline = "middle";
 				context.fillText(label, x, y);
-				// Glow ring around the node itself
+				// Glow ring around the node
 				context.beginPath();
 				context.arc(data.x, data.y, nodeSize + 4, 0, Math.PI * 2);
-				context.strokeStyle = data.color || "#6366f1";
+				context.strokeStyle = nodeColor;
 				context.lineWidth = 2;
 				context.globalAlpha = 0.5;
 				context.stroke();

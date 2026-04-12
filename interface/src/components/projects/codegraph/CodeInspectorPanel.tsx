@@ -13,7 +13,8 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { CodeIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { api } from "@/api/client";
 import { CodeViewer } from "./CodeViewer";
-import { NODE_COLORS, type NodeLabel } from "./constants";
+import { type NodeLabel } from "./constants";
+import { getNodeColor } from "./graphAdapter";
 import type { BulkNode } from "./types";
 
 // Labels that should NOT trigger the code viewer — they have no source
@@ -29,6 +30,7 @@ const NON_INSPECTABLE_LABELS = new Set<NodeLabel>([
 interface Props {
 	projectId: string;
 	selectedNode: BulkNode;
+	colorOverrides?: Record<string, string>;
 	onClose: () => void;
 }
 
@@ -37,7 +39,7 @@ const MAX_WIDTH = 900;
 const DEFAULT_WIDTH = 560;
 const STORAGE_KEY = "spacebot.codegraph.inspectorWidth";
 
-export function CodeInspectorPanel({ projectId, selectedNode, onClose }: Props) {
+export function CodeInspectorPanel({ projectId, selectedNode, onClose, colorOverrides }: Props) {
 	const label = selectedNode.label as NodeLabel;
 	const filePath = selectedNode.source_file ?? null;
 
@@ -129,7 +131,7 @@ export function CodeInspectorPanel({ projectId, selectedNode, onClose }: Props) 
 				style={{ width }}
 			>
 				<ResizeHandle onMouseDown={startResize} />
-				<Header node={selectedNode} onClose={onClose} />
+				<Header node={selectedNode} onClose={onClose} colorOverrides={colorOverrides} />
 				<div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-ink-faint">
 					{label === "Folder"
 						? "Folder nodes don't have source code. Expand it in the Explorer tab to see its files."
@@ -148,7 +150,7 @@ export function CodeInspectorPanel({ projectId, selectedNode, onClose }: Props) 
 		>
 			<ResizeHandle onMouseDown={startResize} />
 
-			<Header node={selectedNode} onClose={onClose} />
+			<Header node={selectedNode} onClose={onClose} colorOverrides={colorOverrides} />
 
 			<div className="flex min-h-0 flex-1 flex-col">
 				{fileQuery.isLoading && (
@@ -179,9 +181,9 @@ export function CodeInspectorPanel({ projectId, selectedNode, onClose }: Props) 
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function Header({ node, onClose }: { node: BulkNode; onClose: () => void }) {
+function Header({ node, onClose, colorOverrides }: { node: BulkNode; onClose: () => void; colorOverrides?: Record<string, string> }) {
 	const label = node.label as NodeLabel;
-	const color = NODE_COLORS[label] ?? "#6b7280";
+	const color = getNodeColor(label, colorOverrides);
 	const fileName = node.source_file?.split("/").pop() ?? node.name;
 	return (
 		<div className="flex items-center gap-2 border-b border-app-line bg-app/50 px-3 py-2.5">
