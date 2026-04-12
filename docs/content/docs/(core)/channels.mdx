@@ -178,6 +178,24 @@ You can send messages to these channels using the `send_message_to_another_chann
 
 When no other channels are active, the section is omitted entirely.
 
+## Channel Settings
+
+Each channel can be configured independently with per-channel settings: response mode, model overrides, memory mode, delegation mode, and worker context. Settings are stored in the `channel_settings` table and resolved at runtime with a priority chain: per-conversation > per-channel > binding defaults > system defaults.
+
+See [Configuring Channels](/docs/configuring-channels) for the full settings reference and UI guide.
+
+### Settings Resolution
+
+```
+ConversationSettings::resolve(conversation, channel, agent_default)
+  → per-conversation overrides (portal settings panel, slash commands)
+  → per-channel overrides (channel_settings table, cog icon in UI)
+  → binding defaults (binding.settings in config)
+  → system defaults (Active, Full memory, Standard delegation)
+```
+
+Implementation: `src/conversation/settings.rs` — `ResolvedConversationSettings::resolve()`, `src/conversation/channel_settings.rs` — per-channel persistence.
+
 ## Reserved Columns
 
 Two columns exist in the schema but aren't populated yet:

@@ -85,8 +85,11 @@ struct CronJobWithStats {
     run_once: bool,
     active_hours: Option<(u8, u8)>,
     timeout_secs: Option<u64>,
-    success_count: u64,
-    failure_count: u64,
+    execution_success_count: u64,
+    execution_failure_count: u64,
+    delivery_success_count: u64,
+    delivery_failure_count: u64,
+    delivery_skipped_count: u64,
     last_executed_at: Option<String>,
 }
 
@@ -154,8 +157,11 @@ pub(super) async fn list_cron_jobs(
             run_once: config.run_once,
             active_hours: config.active_hours,
             timeout_secs: config.timeout_secs,
-            success_count: stats.success_count,
-            failure_count: stats.failure_count,
+            execution_success_count: stats.execution_success_count,
+            execution_failure_count: stats.execution_failure_count,
+            delivery_success_count: stats.delivery_success_count,
+            delivery_failure_count: stats.delivery_failure_count,
+            delivery_skipped_count: stats.delivery_skipped_count,
             last_executed_at: stats.last_executed_at,
         });
     }
@@ -372,6 +378,7 @@ pub(super) async fn create_or_update_cron(
         active_hours,
         enabled: request.enabled,
         run_once: request.run_once,
+        next_run_at: None,
         timeout_secs: request.timeout_secs,
     };
 

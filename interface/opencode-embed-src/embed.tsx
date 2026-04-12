@@ -22,6 +22,12 @@ import { MetaProvider } from "@solidjs/meta"
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router"
 import { ErrorBoundary, lazy, onMount, type ParentProps, Show, Suspense } from "solid-js"
 import { render } from "solid-js/web"
+// Theme overrides use `var(--color-*)` SpaceUI tokens rather than static hex,
+// so the embed tracks whichever Spacebot theme class is on <html> (dark,
+// midnight, noir, slate, nord, mocha, vanilla). CSS custom properties
+// inherit across Shadow DOM boundaries, so the embed picks them up even
+// though it mounts into a shadow root. Seeds stay hex — OpenCode's theme
+// engine tints/shades them in TypeScript at registration time.
 import spacebotTheme from "./spacebot-theme.json"
 import { CommandProvider } from "@/context/command"
 import { CommentsProvider } from "@/context/comments"

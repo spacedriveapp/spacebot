@@ -23,16 +23,24 @@ pub struct Compactor {
     pub history: Arc<RwLock<Vec<Message>>>,
     /// Is a compaction currently running.
     is_compacting: Arc<RwLock<bool>>,
+    /// Model override from conversation settings.
+    model_override: Option<String>,
 }
 
 impl Compactor {
     /// Create a new compactor for a channel.
-    pub fn new(channel_id: ChannelId, deps: AgentDeps, history: Arc<RwLock<Vec<Message>>>) -> Self {
+    pub fn new(
+        channel_id: ChannelId,
+        deps: AgentDeps,
+        history: Arc<RwLock<Vec<Message>>>,
+        model_override: Option<String>,
+    ) -> Self {
         Self {
             channel_id,
             deps,
             history,
             is_compacting: Arc::new(RwLock::new(false)),
+            model_override,
         }
     }
 
@@ -124,9 +132,12 @@ impl Compactor {
         let is_compacting = self.is_compacting.clone();
         let channel_id = self.channel_id.clone();
         let deps = self.deps.clone();
+        let model_override = self.model_override.clone();
         let prompt_engine = deps.runtime_config.prompts.load();
+        // The compactor is a toolless agent (summary-only), so tool-use
+        // enforcement is skipped — there are no tools to enforce.
         let compactor_prompt = match prompt_engine.render_static("compactor") {
-            Ok(p) => p,
+            Ok(prompt) => prompt,
             Err(error) => {
                 tracing::error!(%error, "failed to render compactor prompt");
                 let mut flag = is_compacting.write().await;
@@ -136,8 +147,15 @@ impl Compactor {
         };
 
         tokio::spawn(async move {
-            let result =
-                run_compaction(&deps, &compactor_prompt, &history, &channel_id, fraction).await;
+            let result = run_compaction(
+                &deps,
+                &compactor_prompt,
+                &history,
+                &channel_id,
+                fraction,
+                model_override,
+            )
+            .await;
 
             match result {
                 Ok(turns_compacted) => {
@@ -201,6 +219,7 @@ async fn run_compaction(
     history: &Arc<RwLock<Vec<Message>>>,
     channel_id: &ChannelId,
     fraction: f32,
+    model_override: Option<String>,
 ) -> Result<usize> {
     // 1. Read and remove the oldest messages from history
     let (removed_messages, remove_count) = {
@@ -221,7 +240,10 @@ async fn run_compaction(
 
     // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
-    let model_name = routing.resolve(ProcessType::Compactor, None).to_string();
+    let model_name = match model_override {
+        Some(ref m) => m.clone(),
+        None => routing.resolve(ProcessType::Compactor, None).to_string(),
+    };
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "compactor")
         .with_routing((**routing).clone());

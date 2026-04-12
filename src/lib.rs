@@ -18,6 +18,7 @@ pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod messaging;
+pub mod notifications;
 pub mod openai_auth;
 pub mod opencode;
 pub mod projects;
@@ -32,6 +33,7 @@ pub mod tasks;
 pub mod telemetry;
 pub mod tools;
 pub mod update;
+pub mod wiki;
 
 pub use error::{Error, Result};
 
@@ -316,6 +318,12 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         text: String,
     },
+    /// Conversation settings were updated via API. The channel should
+    /// re-load its settings from the database.
+    SettingsUpdated {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.
@@ -413,6 +421,10 @@ pub struct AgentDeps {
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
     /// Working memory event log for temporal situational awareness.
     pub working_memory: Arc<memory::WorkingMemoryStore>,
+    /// Optional API state for tools that need to emit notifications/SSE events.
+    pub api_state: Option<Arc<api::ApiState>>,
+    /// Instance-wide wiki store.
+    pub wiki_store: Option<Arc<wiki::WikiStore>>,
 }
 
 impl AgentDeps {
@@ -592,6 +604,11 @@ pub struct Attachment {
     /// Excluded from serialization to prevent credential leakage.
     #[serde(skip)]
     pub auth_header: Option<String>,
+    /// ID of a pre-saved attachment in `saved_attachments`. When set, the file
+    /// is already on disk — skip download and DB insert. The actual path is
+    /// re-derived from the DB row + workspace `saved/` dir at read time.
+    #[serde(skip)]
+    pub pre_saved_id: Option<String>,
 }
 
 /// An outbound response paired with the inbound message that triggered it.

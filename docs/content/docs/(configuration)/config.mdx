@@ -376,6 +376,11 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `mistral_key` | string | None | Mistral API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `opencode_zen_key` | string | None | OpenCode Zen API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `opencode_go_key` | string | None | OpenCode Go API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `gemini_key` | string | None | Gemini API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `nvidia_key` | string | None | NVIDIA API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `minimax_key` | string | None | MiniMax API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `moonshot_key` | string | None | Moonshot API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `github_copilot_key` | string | None | GitHub Copilot PAT (`secret:NAME`, `env:VAR_NAME`, or literal) |
 
 #### Custom Providers
 
@@ -391,10 +396,12 @@ name = "My Provider"            # Optional - friendly name for display
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_type` | string | Yes | API protocol type. One of: `anthropic`, `openai_completions`, `openai_chat_completions`, `openai_responses`, `gemini`, or `kilo_gateway` |
-| `base_url` | string | Yes | Base URL of the API endpoint. Must be a valid URL (including protocol) |
+| `api_type` | string | Yes | API protocol type. One of: `anthropic`, `openai_completions`, `openai_chat_completions`, `openai_responses`, `gemini`, `kilo_gateway`, or `azure` |
+| `base_url` | string | Yes | Base URL of the API endpoint. Must be a valid URL (including protocol). For Azure, must end with `.openai.azure.com` |
 | `api_key` | string | Yes | API key for authentication. Supports `secret:NAME` and `env:VAR_NAME` syntax |
 | `name` | string | No | Optional friendly name for the provider (displayed in logs and UI) |
+| `api_version` | string | Azure only | Azure API version (format: `YYYY-MM-DD` or `YYYY-MM-DD-preview`) |
+| `deployment` | string | Azure only | Azure deployment name (alphanumeric, hyphens, and dots allowed) |
 
 > Note:
 > - For `openai_completions`, `openai_chat_completions`, and `openai_responses`, configure `base_url` as the provider root URL (usually without a trailing `/v1`).
@@ -421,14 +428,22 @@ api_key = "env:CUSTOM_ANTHROPIC_KEY"
 name = "Anthropic EU"
 ```
 
-**OpenAI Chat Completions provider:**
+**Azure OpenAI provider:**
 ```toml
-[llm.provider.azure_openai]
-api_type = "openai_responses"
-base_url = "https://my-azure-openai.openai.azure.com"
-api_key = "env:AZURE_OPENAI_KEY"
-name = "Azure OpenAI GPT-4"
+[llm.provider.azure]
+api_type = "azure"
+base_url = "https://my-resource.openai.azure.com"
+api_key = "env:AZURE_API_KEY"
+api_version = "2024-02-15"  # Required for Azure
+deployment = "gpt-4o"        # Required for Azure (deployment name)
+name = "Azure OpenAI"
 ```
+
+> **Azure Requirements:**
+> - `base_url` must end with `.openai.azure.com`
+> - `api_version` must match format: `YYYY-MM-DD` or `YYYY-MM-DD-preview`
+> - `deployment` can contain alphanumeric characters, hyphens, and dots (e.g., `gpt-4o`, `gpt-5.2`)
+> - Model names in routing should use the format: `azure/<deployment-name>`
 
 **OpenAI Completions provider:**
 ```toml

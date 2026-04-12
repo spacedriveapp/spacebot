@@ -774,17 +774,53 @@ pub struct CortexEvent {
 #[derive(Debug, Clone)]
 pub struct CortexLogger {
     pool: SqlitePool,
+    /// Optional notification store for emitting dashboard inbox entries.
+    notification_store: Option<std::sync::Arc<crate::notifications::NotificationStore>>,
+    /// Agent id, recorded in notifications for filtering.
+    agent_id: Option<String>,
 }
+
+// TODO: re-enable once notifications have proper action_url
+// const NOTIFY_EVENT_TYPES: &[&str] = &["circuit_breaker_tripped", "worker_killed"];
 
 impl CortexLogger {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            notification_store: None,
+            agent_id: None,
+        }
+    }
+
+    /// Attach a notification store so high-signal events surface in the inbox.
+    pub fn with_notifications(
+        mut self,
+        store: std::sync::Arc<crate::notifications::NotificationStore>,
+        agent_id: String,
+    ) -> Self {
+        self.notification_store = Some(store);
+        self.agent_id = Some(agent_id);
+        self
     }
 
     /// Log a cortex action. Fire-and-forget.
     pub fn log(&self, event_type: &str, summary: &str, details: Option<serde_json::Value>) {
         let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
+
+        // TODO: re-enable once action_url points somewhere useful
+        // let should_notify =
+        //     self.notification_store.is_some() && NOTIFY_EVENT_TYPES.contains(&event_type);
+        // let notif_data = should_notify.then(|| {
+        //     (
+        //         self.notification_store.clone().unwrap(),
+        //         self.agent_id.clone(),
+        //         summary.to_string(),
+        //         details.clone(),
+        //         id.clone(),
+        //     )
+        // });
+
         let event_type = event_type.to_string();
         let summary = summary.to_string();
         let details_json = details.map(|d| d.to_string());
@@ -803,6 +839,26 @@ impl CortexLogger {
                 tracing::warn!(%error, "failed to persist cortex event");
             }
         });
+
+        // TODO: re-enable once action_url points somewhere useful
+        // if let Some((store, agent_id, title, details, entity_id)) = notif_data {
+        //     tokio::spawn(async move {
+        //         let n = crate::notifications::NewNotification {
+        //             kind: crate::notifications::NotificationKind::CortexObservation,
+        //             severity: crate::notifications::NotificationSeverity::Warn,
+        //             title,
+        //             body: details.as_ref().map(|d| d.to_string()),
+        //             agent_id,
+        //             related_entity_type: Some("cortex_event".to_string()),
+        //             related_entity_id: Some(entity_id),
+        //             action_url: None,
+        //             metadata: None,
+        //         };
+        //         if let Err(error) = store.insert(n).await {
+        //             tracing::warn!(%error, "failed to insert cortex observation notification");
+        //         }
+        //     });
+        // }
     }
 
     /// Load cortex events with optional type filter, newest first.
@@ -1143,19 +1199,24 @@ impl Cortex {
             }
         }
 
-        logger.log(
-            "health_check",
-            "Cortex supervision health tick completed",
-            Some(serde_json::json!({
-                "kill_skipped_due_to_lag": false,
-                "kill_budget": kill_budget,
-                "kill_attempts": kill_attempts,
-                "kill_actions": kill_actions,
-                "worker_timeout_secs": worker_timeout.as_secs(),
-                "branch_timeout_secs": branch_timeout.as_secs(),
-                "pruned_dead_channels": pruned_dead_channels,
-            })),
-        );
+        // Only log health ticks when something actually happened.
+        if kill_actions > 0 || pruned_dead_channels > 0 {
+            logger.log(
+                "health_check",
+                &format!(
+                    "Cortex supervision: killed {} processes, pruned {} dead channels",
+                    kill_actions, pruned_dead_channels
+                ),
+                Some(serde_json::json!({
+                    "kill_budget": kill_budget,
+                    "kill_attempts": kill_attempts,
+                    "kill_actions": kill_actions,
+                    "worker_timeout_secs": worker_timeout.as_secs(),
+                    "branch_timeout_secs": branch_timeout.as_secs(),
+                    "pruned_dead_channels": pruned_dead_channels,
+                })),
+            );
+        }
 
         Ok(())
     }
@@ -1349,7 +1410,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::WorkerInitialResult { .. }
         | ProcessEvent::WorkerText { .. }
-        | ProcessEvent::CortexChatUpdate { .. } => return None,
+        | ProcessEvent::CortexChatUpdate { .. }
+        | ProcessEvent::SettingsUpdated { .. } => return None,
     })
 }
 
@@ -1496,8 +1558,21 @@ fn handle_cortex_receiver_result(
 pub fn spawn_cortex_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let prompt_engine = deps.runtime_config.prompts.load();
+        let routing = deps.runtime_config.routing.load();
+        let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+        let tool_use_enforcement = deps.runtime_config.tool_use_enforcement.load();
         let system_prompt = match prompt_engine.render_static("cortex") {
-            Ok(prompt) => prompt,
+            Ok(prompt) => match prompt_engine.maybe_append_tool_use_enforcement(
+                prompt.clone(),
+                tool_use_enforcement.as_ref(),
+                &model_name,
+            ) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to append tool-use enforcement, using base cortex prompt");
+                    prompt
+                }
+            },
             Err(error) => {
                 tracing::warn!(%error, "failed to render cortex prompt, using empty preamble");
                 String::new()
@@ -2407,9 +2482,13 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
-        .with_routing((**routing).clone());
+        .with_routing((**routing).clone())
+        .with_accumulator(usage_accumulator.clone());
 
     // No tools needed — the LLM just synthesizes the pre-gathered data.
     // Attach CortexHook so observation/termination semantics stay consistent
@@ -2429,7 +2508,18 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         }
     };
 
-    match agent.prompt(&synthesis_prompt).await {
+    let result = agent.prompt(&synthesis_prompt).await;
+    // Flush cortex token usage.
+    let acc = usage_accumulator.lock().await;
+    if let Err(error) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
+        tracing::warn!(%error, "failed to flush cortex token usage");
+    }
+    drop(acc);
+
+    match result {
         Ok(bulletin) => {
             let word_count = bulletin.split_whitespace().count();
             let duration_ms = started.elapsed().as_millis() as u64;
@@ -2573,9 +2663,13 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
-        .with_routing((**routing).clone());
+        .with_routing((**routing).clone())
+        .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
         .preamble(&synthesis_preamble)
@@ -2591,7 +2685,17 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
         }
     };
 
-    match agent.prompt(&user_prompt).await {
+    let result = agent.prompt(&user_prompt).await;
+    let acc = usage_accumulator.lock().await;
+    if let Err(error) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
+        tracing::warn!(%error, "failed to flush cortex token usage");
+    }
+    drop(acc);
+
+    match result {
         Ok(synthesis) => {
             let word_count = synthesis.split_whitespace().count();
             let duration_ms = started.elapsed().as_millis() as u64;
@@ -2823,16 +2927,29 @@ pub async fn maybe_synthesize_intraday_batch(
     // Use a short one-shot LLM call — no tools, no hooks.
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
-        .with_routing((**routing).clone());
+        .with_routing((**routing).clone())
+        .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
         .preamble("You are a concise narrative summarizer. Output only the summary paragraph, nothing else.")
         .hook(CortexHook::new())
         .build();
 
-    let synthesis = agent.prompt(&prompt).await?;
+    let synthesis = agent.prompt(&prompt).await;
+    let acc = usage_accumulator.lock().await;
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
+        tracing::warn!(error = %e, "failed to flush cortex token usage");
+    }
+    drop(acc);
+    let synthesis = synthesis?;
 
     // Store the synthesis.
     wm.save_intraday_synthesis(
@@ -2965,16 +3082,29 @@ pub async fn maybe_synthesize_daily_summary(
     // One-shot LLM call.
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
-        .with_routing((**routing).clone());
+        .with_routing((**routing).clone())
+        .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
         .preamble("You are a daily activity summarizer. Output only the summary, nothing else.")
         .hook(CortexHook::new())
         .build();
 
-    let summary = agent.prompt(&prompt).await?;
+    let summary = agent.prompt(&prompt).await;
+    let acc = usage_accumulator.lock().await;
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
+        tracing::warn!(error = %e, "failed to flush cortex token usage");
+    }
+    drop(acc);
+    let summary = summary?;
 
     wm.save_daily_summary(&yesterday, &summary, total_events)
         .await?;
@@ -3116,19 +3246,32 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
-        .with_routing((**routing).clone());
+        .with_routing((**routing).clone())
+        .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
         .preamble(&profile_prompt)
         .hook(CortexHook::new())
         .build();
 
-    match agent
+    let result = agent
         .prompt_typed::<ProfileLlmResponse>(&synthesis_prompt)
+        .await;
+    let acc = usage_accumulator.lock().await;
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
         .await
     {
+        tracing::warn!(error = %e, "failed to flush cortex token usage");
+    }
+    drop(acc);
+
+    match result {
         Ok(profile_data) => {
             let duration_ms = started.elapsed().as_millis() as u64;
             let agent_id = &deps.agent_id;
@@ -3275,6 +3418,11 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let current_time_line = temporal_context.current_time_line();
     let worker_status_text = Some(system_info.render_for_worker(&current_time_line));
 
+    let routing = deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Worker, None).to_string();
+    let tool_use_enforcement = deps.runtime_config.tool_use_enforcement.load();
+    let project_context =
+        crate::agent::channel_dispatch::build_project_context(deps, &prompt_engine).await;
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &deps.runtime_config.instance_dir.display().to_string(),
@@ -3286,8 +3434,34 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &tool_secret_names,
             browser_config.persist_session,
             worker_status_text,
+            deps.wiki_store.is_some(),
+            project_context,
         )
         .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
+
+    // Append skills listing so task workers can discover and read_skill relevant
+    // skills (e.g. wiki-writing). No suggested skills — the worker decides based
+    // on the task description.
+    let skills = deps.runtime_config.skills.load();
+    let worker_system_prompt = match skills.render_worker_skills(&[], &prompt_engine) {
+        Ok(skills_prompt) if !skills_prompt.is_empty() => {
+            format!("{worker_system_prompt}\n\n{skills_prompt}")
+        }
+        Ok(_) => worker_system_prompt,
+        Err(error) => {
+            tracing::warn!(%error, "failed to render worker skills listing for task pickup");
+            worker_system_prompt
+        }
+    };
+
+    // Tool-use enforcement must be the last instruction appended.
+    let worker_system_prompt = prompt_engine
+        .maybe_append_tool_use_enforcement(
+            worker_system_prompt,
+            tool_use_enforcement.as_ref(),
+            &model_name,
+        )
+        .map_err(|error| anyhow::anyhow!("failed to append tool-use enforcement: {error}"))?;
 
     let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
     if let Some(description) = &task.description {
@@ -3329,6 +3503,10 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         screenshot_dir,
         brave_search_key,
         logs_dir,
+        Vec::new(), // no initial history for cortex task workers
+        crate::conversation::settings::WorkerMemoryMode::None,
+        deps.wiki_store.is_some(),
+        None, // No model override for cortex workers
     );
 
     // Detached workers are not channel-owned, so injection senders are not

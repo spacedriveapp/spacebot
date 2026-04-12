@@ -1,5 +1,7 @@
 // -- TOML deserialization types --
 
+use super::types::ToolUseEnforcement;
+
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 
@@ -152,6 +154,10 @@ pub(super) struct TomlProviderConfig {
     pub(super) base_url: String,
     pub(super) api_key: String,
     pub(super) name: Option<String>,
+    #[serde(default)]
+    pub(super) api_version: Option<String>,
+    #[serde(default)]
+    pub(super) deployment: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -278,6 +284,7 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) max_turns: Option<usize>,
     pub(super) branch_max_turns: Option<usize>,
     pub(super) context_window: Option<usize>,
+    pub(super) tool_use_enforcement: Option<ToolUseEnforcement>,
     pub(super) compaction: Option<TomlCompactionConfig>,
     pub(super) memory_persistence: Option<TomlMemoryPersistenceConfig>,
     pub(super) coalesce: Option<TomlCoalesceConfig>,
@@ -390,6 +397,7 @@ pub(super) struct TomlBrowserConfig {
 #[derive(Deserialize)]
 pub(super) struct TomlChannelConfig {
     pub(super) listen_only_mode: Option<bool>,
+    pub(super) response_mode: Option<String>,
     pub(super) save_attachments: Option<bool>,
 }
 
@@ -456,6 +464,7 @@ pub(super) struct TomlAgentConfig {
     pub(super) max_turns: Option<usize>,
     pub(super) branch_max_turns: Option<usize>,
     pub(super) context_window: Option<usize>,
+    pub(super) tool_use_enforcement: Option<ToolUseEnforcement>,
     pub(super) compaction: Option<TomlCompactionConfig>,
     pub(super) memory_persistence: Option<TomlMemoryPersistenceConfig>,
     pub(super) coalesce: Option<TomlCoalesceConfig>,
@@ -774,6 +783,16 @@ pub(super) fn default_email_max_attachment_bytes() -> usize {
     10 * 1024 * 1024
 }
 
+/// Conversation settings that can be set on a binding as defaults for matched channels.
+#[derive(Deserialize, Default)]
+pub(super) struct TomlConversationSettings {
+    pub(super) model: Option<String>,
+    pub(super) memory: Option<String>,
+    pub(super) delegation: Option<String>,
+    pub(super) response_mode: Option<String>,
+    pub(super) save_attachments: Option<bool>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct TomlBinding {
     pub(super) agent_id: String,
@@ -791,6 +810,8 @@ pub(super) struct TomlBinding {
     pub(super) require_mention: bool,
     #[serde(default)]
     pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) settings: Option<TomlConversationSettings>,
 }
 
 #[derive(Deserialize)]

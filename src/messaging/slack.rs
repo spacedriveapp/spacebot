@@ -1393,6 +1393,7 @@ fn extract_message_content(
                     url: url.to_string(),
                     size_bytes: None,
                     auth_header: Some(format!("Bearer {}", bot_token)),
+                    pre_saved_id: None,
                 })
             })
             .collect();

@@ -2,6 +2,7 @@
 
 use crate::agent::compactor::estimate_history_tokens;
 use crate::config::BrowserConfig;
+use crate::conversation::settings::WorkerMemoryMode;
 use crate::error::Result;
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
@@ -90,6 +91,12 @@ pub struct Worker {
     pub status_rx: watch::Receiver<String>,
     /// Prior conversation history for resumed workers (set by `resume_interactive`).
     pub prior_history: Option<Vec<rig::message::Message>>,
+    /// Worker memory mode controlling what memory tools this worker gets.
+    pub worker_memory_mode: WorkerMemoryMode,
+    /// Whether this worker has wiki write tools.
+    pub wiki_write: bool,
+    /// Model override from conversation settings (per-process or blanket).
+    pub model_override: Option<String>,
 }
 
 impl Worker {
@@ -104,6 +111,10 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
         input_rx: Option<mpsc::Receiver<String>>,
+        initial_history: Vec<rig::message::Message>,
+        worker_memory_mode: WorkerMemoryMode,
+        wiki_write: bool,
+        model_override: Option<String>,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -134,7 +145,14 @@ impl Worker {
                 logs_dir,
                 status_tx,
                 status_rx,
-                prior_history: None,
+                prior_history: if initial_history.is_empty() {
+                    None
+                } else {
+                    Some(initial_history)
+                },
+                worker_memory_mode,
+                wiki_write,
+                model_override,
             },
             inject_tx,
         )
@@ -155,6 +173,10 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
+        initial_history: Vec<rig::message::Message>,
+        worker_memory_mode: WorkerMemoryMode,
+        wiki_write: bool,
+        model_override: Option<String>,
     ) -> (Self, mpsc::Sender<String>) {
         Self::build(
             channel_id,
@@ -166,6 +188,10 @@ impl Worker {
             brave_search_key,
             logs_dir,
             None,
+            initial_history,
+            worker_memory_mode,
+            wiki_write,
+            model_override,
         )
     }
 
@@ -184,6 +210,10 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
+        initial_history: Vec<rig::message::Message>,
+        worker_memory_mode: WorkerMemoryMode,
+        wiki_write: bool,
+        model_override: Option<String>,
     ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
         let (worker, inject_tx) = Self::build(
@@ -196,6 +226,10 @@ impl Worker {
             brave_search_key,
             logs_dir,
             Some(input_rx),
+            initial_history,
+            worker_memory_mode,
+            wiki_write,
+            model_override,
         );
 
         (worker, input_tx, inject_tx)
@@ -220,6 +254,7 @@ impl Worker {
         prior_history: Vec<rig::message::Message>,
     ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
+        let wiki_write = deps.wiki_store.is_some();
         let (mut worker, inject_tx) = Self::build(
             channel_id,
             task,
@@ -230,6 +265,10 @@ impl Worker {
             brave_search_key,
             logs_dir,
             Some(input_rx),
+            Vec::new(), // initial_history - will be replaced by prior_history below
+            WorkerMemoryMode::None, // Resumed workers don't have context settings
+            wiki_write,
+            None, // Resumed workers don't have model override
         );
         // Reuse the original worker ID so DB row stays linked.
         worker.id = existing_id;
@@ -311,14 +350,26 @@ impl Worker {
             self.deps.sandbox.clone(),
             mcp_tools,
             self.deps.runtime_config.clone(),
+            self.worker_memory_mode,
+            self.deps.memory_search.clone(),
+            self.wiki_write,
+            self.deps.wiki_store.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();
-        let model_name = routing.resolve(ProcessType::Worker, None).to_string();
+        let model_name = self
+            .model_override
+            .as_deref()
+            .unwrap_or_else(|| routing.resolve(ProcessType::Worker, None))
+            .to_string();
+        let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::llm::usage::UsageAccumulator::new(),
+        ));
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")
             .with_worker_type("builtin")
-            .with_routing((**routing).clone());
+            .with_routing((**routing).clone())
+            .with_accumulator(usage_accumulator.clone());
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
@@ -683,6 +734,20 @@ impl Worker {
 
         // Persist transcript blob
         self.persist_transcript(&compacted_history, &history).await;
+
+        // Flush accumulated token usage.
+        let acc = usage_accumulator.lock().await;
+        if let Err(error) = acc
+            .flush(
+                &self.deps.sqlite_pool,
+                &self.deps.agent_id,
+                "worker",
+                self.channel_id.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to flush worker token usage");
+        }
 
         tracing::info!(worker_id = %self.id, "worker completed");
         Ok(result)

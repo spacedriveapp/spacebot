@@ -5,6 +5,7 @@ import { generateId } from "@/lib/id";
 import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useServer } from "@/hooks/useServer";
+import { NOTIFICATIONS_QUERY_KEY } from "@/hooks/useNotifications";
 
 interface LiveContextValue {
 	liveStates: Record<string, ChannelLiveState>;
@@ -261,6 +262,14 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		window.dispatchEvent(new CustomEvent("cortex-chat-message", { detail: data }));
 	}, []);
 
+	const handleNotificationCreated = useCallback(() => {
+		queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_QUERY_KEY });
+	}, [queryClient]);
+
+	const handleNotificationUpdated = useCallback(() => {
+		queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_QUERY_KEY });
+	}, [queryClient]);
+
 	// Merge channel handlers with agent message + task handlers
 	const handlers = useMemo(
 		() => ({
@@ -277,8 +286,10 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			agent_message_received: handleAgentMessage,
 			task_updated: bumpTaskVersion,
 			cortex_chat_message: handleCortexChatMessage,
+			notification_created: handleNotificationCreated,
+			notification_updated: handleNotificationUpdated,
 		}),
-		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleWorkerText, handleAgentMessage, bumpTaskVersion, handleCortexChatMessage],
+		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleWorkerText, handleAgentMessage, bumpTaskVersion, handleCortexChatMessage, handleNotificationCreated, handleNotificationUpdated],
 	);
 
 	const onReconnect = useCallback(() => {
@@ -287,6 +298,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		queryClient.invalidateQueries({ queryKey: ["status"] });
 		queryClient.invalidateQueries({ queryKey: ["agents"] });
 		queryClient.invalidateQueries({ queryKey: ["tasks"] });
+		queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_QUERY_KEY });
 		// Bump task version so any mounted task views refetch immediately.
 		bumpTaskVersion();
 	}, [syncStatusSnapshot, queryClient, bumpTaskVersion]);

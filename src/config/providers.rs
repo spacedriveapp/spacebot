@@ -61,6 +61,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "openai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -69,6 +71,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "openrouter" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -77,6 +81,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: openrouter_extra_headers(),
+            api_version: None,
+            deployment: None,
         },
         "kilo" => ProviderConfig {
             api_type: ApiType::KiloGateway,
@@ -85,6 +91,8 @@ pub(crate) fn default_provider_config(
             name: Some("Kilo Gateway".to_string()),
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "zhipu" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -93,6 +101,8 @@ pub(crate) fn default_provider_config(
             name: Some("Z.AI (GLM)".to_string()),
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "groq" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -101,6 +111,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "together" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -109,6 +121,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "fireworks" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -117,6 +131,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "deepseek" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -125,6 +141,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "xai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -133,6 +151,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "mistral" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -141,6 +161,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "gemini" => ProviderConfig {
             api_type: ApiType::Gemini,
@@ -149,6 +171,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "ollama" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -157,6 +181,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "opencode-zen" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -165,6 +191,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "opencode-go" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -173,6 +201,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "nvidia" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -181,6 +211,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "minimax" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -189,6 +221,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "minimax-cn" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -197,6 +231,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "moonshot" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -205,6 +241,8 @@ pub(crate) fn default_provider_config(
             name: None,
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         "zai-coding-plan" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -213,6 +251,8 @@ pub(crate) fn default_provider_config(
             name: Some("Z.AI Coding Plan".to_string()),
             use_bearer_auth: false,
             extra_headers: vec![],
+            api_version: None,
+            deployment: None,
         },
         // GitHub Copilot requires token exchange and dynamic base URL derivation.
         // The test path should use LlmManager::get_github_copilot_provider() instead.
@@ -240,6 +280,8 @@ pub(super) fn add_shorthand_provider(
                 name: name.map(str::to_string),
                 use_bearer_auth,
                 extra_headers: vec![],
+                api_version: None,
+                deployment: None,
             });
     }
 }

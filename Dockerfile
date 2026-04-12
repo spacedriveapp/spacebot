@@ -27,7 +27,8 @@ WORKDIR /build
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
-RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
+    && echo "fn main() {}" > src/bin/openapi_spec.rs \
     && cargo build --release --features metrics \
     && rm -rf src
 

@@ -474,10 +474,14 @@ async fn process_chunk(
     deps: &AgentDeps,
 ) -> anyhow::Result<()> {
     let prompt_engine = deps.runtime_config.prompts.load();
-    let ingestion_prompt = prompt_engine.render_static("ingestion")?;
-
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+    let tool_use_enforcement = deps.runtime_config.tool_use_enforcement.load();
+    let ingestion_prompt = prompt_engine.maybe_append_tool_use_enforcement(
+        prompt_engine.render_static("ingestion")?,
+        tool_use_enforcement.as_ref(),
+        &model_name,
+    )?;
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "branch")
         .with_worker_type("ingestion")
@@ -502,6 +506,9 @@ async fn process_chunk(
             working_memory: Some(deps.working_memory.clone()),
             channel_id: None,
         },
+        deps.api_state.clone(),
+        deps.wiki_store.clone(),
+        deps.sandbox.clone(),
     );
 
     let agent = AgentBuilder::new(model)
@@ -526,11 +533,9 @@ async fn process_chunk(
     classify_chunk_prompt_result(result, filename, chunk_number, total_chunks)?;
 
     if !contract_state.has_terminal_outcome() {
-        tracing::warn!(
-            file = %filename,
-            chunk = %format!("{chunk_number}/{total_chunks}"),
-            "ingestion chunk completed without memory_persistence_complete signal"
-        );
+        return Err(anyhow::anyhow!(
+            "ingestion chunk {chunk_number}/{total_chunks} for {filename} completed without memory_persistence_complete signal"
+        ));
     }
 
     Ok(())

@@ -26,6 +26,10 @@ branch = "anthropic/claude-sonnet-4-20250514"
 worker = "anthropic/claude-haiku-4.5-20250514"
 compactor = "anthropic/claude-haiku-4.5-20250514"
 cortex = "anthropic/claude-haiku-4.5-20250514"
+
+# Azure example:
+# channel = "azure/gpt-4o"
+# worker = "azure/gpt-4o-mini"
 ```
 
 | Process | Why this model tier |
@@ -35,6 +39,11 @@ cortex = "anthropic/claude-haiku-4.5-20250514"
 | Worker | Executes specific tasks. Cheaper model with strong tool use is sufficient. |
 | Compactor | Summarization and memory extraction. Fast and cheap. No personality needed. |
 | Cortex | System-level observation. Small context, simple signal processing. Cheapest tier. |
+
+**Model Format:**
+- Standard providers: `<provider>/<model-name>` (e.g., `anthropic/claude-sonnet-4-20250514`, `openai/gpt-4o`)
+- Azure: `azure/<deployment-name>` (e.g., `azure/gpt-4o`, `azure/gpt-5.2`)
+- Custom providers: `<provider-id>/<model-name>` (e.g., `my_anthropic/claude-3.5-sonnet`)
 
 ### Level 2: Task-Type Overrides
 

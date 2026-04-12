@@ -1,6 +1,11 @@
-import { useMemo, useState } from "react";
-import { Link, useMatchRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import {useMemo, useState} from "react";
+import {
+	Link,
+	useMatchRoute,
+	useNavigate,
+	useLocation,
+} from "@tanstack/react-router";
+import {useQuery} from "@tanstack/react-query";
 import {
 	DndContext,
 	closestCenter,
@@ -17,18 +22,56 @@ import {
 	useSortable,
 	verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { api } from "@/api/client";
-import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
-import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { DashboardSquare01Icon, Settings01Icon, LeftToRightListBulletIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { CreateAgentDialog } from "@/components/CreateAgentDialog";
-import { ProfileAvatar } from "@/components/ProfileAvatar";
+import {CSS} from "@dnd-kit/utilities";
+import {api, getApiBase} from "@/api/client";
+import type {ChannelLiveState} from "@/hooks/useChannelLiveState";
+import {useAgentOrder} from "@/hooks/useAgentOrder";
+import {
+	House,
+	TreeStructure,
+	Wrench,
+	CheckSquare,
+	GearSix,
+	DotsThree,
+	ChatCircleDots,
+	Broadcast,
+	Brain,
+	Lightning,
+	CalendarDots,
+	SlidersHorizontal,
+	BookBookmark,
+} from "@phosphor-icons/react";
+import {
+	CircleButton,
+	SelectPill,
+	Popover,
+	OptionList,
+	OptionListItem,
+	DialogRoot,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
+	DialogDescription,
+	DialogFooter,
+	Button,
+} from "@spacedrive/primitives";
+import {CreateAgentDialog} from "@/components/CreateAgentDialog";
+import {ProfileAvatar} from "@/components/ProfileAvatar";
+import {WorkersPanelButton} from "@/components/WorkersPanel";
+import {IS_DESKTOP, IS_MACOS} from "@/platform";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
 }
+
+const agentSubItems = [
+	{path: "chat", icon: ChatCircleDots, label: "Chat"},
+	{path: "channels", icon: Broadcast, label: "Channels"},
+	{path: "memories", icon: Brain, label: "Memory"},
+	{path: "skills", icon: Lightning, label: "Skills"},
+	{path: "cron", icon: CalendarDots, label: "Schedule"},
+	{path: "config", icon: SlidersHorizontal, label: "Config"},
+] as const;
 
 interface SortableAgentItemProps {
 	agentId: string;
@@ -36,65 +79,152 @@ interface SortableAgentItemProps {
 	gradientStart?: string | null | undefined;
 	gradientEnd?: string | null | undefined;
 	isActive: boolean;
+	isExpanded: boolean;
+	onToggle: () => void;
 }
 
-function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, isActive }: SortableAgentItemProps) {
-	const {
-		attributes,
-		listeners,
-		setNodeRef,
-		transform,
-		transition,
-		isDragging,
-	} = useSortable({ id: agentId });
+function SortableAgentItem({
+	agentId,
+	displayName,
+	gradientStart,
+	gradientEnd,
+	isActive,
+	isExpanded,
+	onToggle,
+}: SortableAgentItemProps) {
+	const {attributes, listeners, setNodeRef, transform, transition, isDragging} =
+		useSortable({id: agentId});
+
+	const matchRoute = useMatchRoute();
+	const isAgentRoot = !!matchRoute({to: "/agents/$agentId", params: {agentId}});
 
 	const style = {
 		transform: CSS.Transform.toString(transform),
 		transition,
 		opacity: isDragging ? 0.5 : 1,
-		cursor: isDragging ? 'grabbing' : 'grab',
+		cursor: isDragging ? "grabbing" : "grab",
 	};
 
+	const name = displayName ?? agentId;
+
 	return (
-		<div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+		<div ref={setNodeRef} style={style}>
 			<Link
 				to="/agents/$agentId"
-				params={{ agentId }}
-				className="flex h-8 w-8 items-center justify-center"
-				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
-				title={displayName ?? agentId}
+				params={{agentId}}
+				onClick={() => {
+					onToggle();
+				}}
+				className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+					isAgentRoot
+						? "bg-sidebar-selected/40 text-sidebar-ink"
+						: isActive
+							? "text-sidebar-ink"
+							: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+				}`}
+				style={{pointerEvents: isDragging ? "none" : "auto"}}
+				{...attributes}
+				{...listeners}
 			>
 				<ProfileAvatar
 					seed={agentId}
-					name={displayName ?? agentId}
-					size={28}
-					className={`rounded-full ${isActive ? "ring-2 ring-sidebar-line" : "opacity-70 hover:opacity-100"}`}
+					name={name}
+					size={22}
+					className="shrink-0 rounded-full"
 					gradientStart={gradientStart}
 					gradientEnd={gradientEnd}
 				/>
+				<span className="truncate text-sm font-medium">{name}</span>
 			</Link>
+			{isExpanded && (
+				<div className="mt-0.5 mb-1 space-y-0.5 pl-4">
+					{agentSubItems.map((item) => {
+						const subActive = !!matchRoute({
+							to: `/agents/$agentId/${item.path}`,
+							params: {agentId},
+							fuzzy: true,
+						});
+						const Icon = item.icon;
+						return (
+							<Link
+								key={item.path}
+								to={`/agents/$agentId/${item.path}`}
+								params={{agentId}}
+								className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm font-medium tracking-wide transition-colors ${
+									subActive
+										? "bg-sidebar-selected/40 text-sidebar-ink"
+										: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+								}`}
+							>
+								<div className="flex size-[22px] shrink-0 items-center justify-center">
+									<Icon className="size-4" weight="bold" />
+								</div>
+								<span>{item.label}</span>
+							</Link>
+						);
+					})}
+				</div>
+			)}
 		</div>
 	);
 }
 
-export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
-	const [createOpen, setCreateOpen] = useState(false);
+const navItems = [
+	{to: "/dashboard", icon: House, label: "Dashboard", exact: true},
+	{to: "/", icon: TreeStructure, label: "Org Chart", exact: true},
+	{to: "/workbench", icon: Wrench, label: "Workbench", exact: true},
+	{to: "/tasks", icon: CheckSquare, label: "Tasks", exact: true},
+	{to: "/wiki", icon: BookBookmark, label: "Wiki", exact: true},
+] as const;
 
-	const { data: agentsData } = useQuery({
+// Narrows the loosely-typed search params from `useLocation` to the `/projects`
+// route shape and extracts the selected project id, if any.
+function readProjectId(search: unknown): string | null {
+	if (typeof search !== "object" || search === null) return null;
+	const id = (search as {id?: unknown}).id;
+	return typeof id === "string" ? id : null;
+}
+
+export function Sidebar({liveStates: _liveStates}: SidebarProps) {
+	const navigate = useNavigate();
+	const [createOpen, setCreateOpen] = useState(false);
+	const [userExpandedAgent, setUserExpandedAgent] = useState<string | null>(
+		null,
+	);
+	const [switcherOpen, setSwitcherOpen] = useState(false);
+	const [comingSoonOpen, setComingSoonOpen] = useState(false);
+	const [scrollTop, setScrollTop] = useState(0);
+
+	const {data: globalSettings} = useQuery({
+		queryKey: ["global-settings"],
+		queryFn: api.globalSettings,
+		staleTime: 10_000,
+	});
+
+	const companyName = globalSettings?.company_name ?? "My Company";
+
+	const {data: agentsData} = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,
 		refetchInterval: 30_000,
 	});
 
-	const { data: providersData } = useQuery({
+	const {data: providersData} = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
 		staleTime: 10_000,
 	});
 
+	const {data: projectsData} = useQuery({
+		queryKey: ["projects"],
+		queryFn: () => api.listProjects("active"),
+		staleTime: 30_000,
+	});
+
 	const hasProvider = providersData?.has_any ?? false;
 
 	const agents = agentsData?.agents ?? [];
+	const projects = projectsData?.projects ?? [];
 
 	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
 	const agentDisplayNames = useMemo(() => {
@@ -103,17 +233,23 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 		return map;
 	}, [agents]);
 	const agentGradients = useMemo(() => {
-		const map: Record<string, { start?: string | null | undefined; end?: string | null | undefined }> = {};
-		for (const a of agents) map[a.id] = { start: a.gradient_start, end: a.gradient_end };
+		const map: Record<
+			string,
+			{start?: string | null | undefined; end?: string | null | undefined}
+		> = {};
+		for (const a of agents)
+			map[a.id] = {start: a.gradient_start, end: a.gradient_end};
 		return map;
 	}, [agents]);
 	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
 
+	// Default-expand the first agent until the user explicitly picks another.
+	const expandedAgent = userExpandedAgent ?? agentOrder[0] ?? null;
+
 	const matchRoute = useMatchRoute();
-	const isOverview = matchRoute({ to: "/" });
-	const isTasks = matchRoute({ to: "/tasks" });
-	const isSettings = matchRoute({ to: "/settings" });
-	const isOrchestrate = matchRoute({ to: "/orchestrate" });
+	const location = useLocation();
+	const activeProjectId =
+		location.pathname === "/projects" ? readProjectId(location.search) : null;
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -124,11 +260,11 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 		}),
 		useSensor(KeyboardSensor, {
 			coordinateGetter: sortableKeyboardCoordinates,
-		})
+		}),
 	);
 
 	const handleDragEnd = (event: DragEndEvent) => {
-		const { active, over } = event;
+		const {active, over} = event;
 		if (over && active.id !== over.id) {
 			const oldIndex = agentOrder.indexOf(active.id as string);
 			const newIndex = agentOrder.indexOf(over.id as string);
@@ -137,84 +273,234 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	};
 
 	return (
-		<nav className="flex w-14 shrink-0 flex-col items-center overflow-hidden border-r border-sidebar-line bg-sidebar">
-			{/* Icon nav */}
-			<div className="flex flex-col items-center gap-1 pt-2">
-				<Link
-					to="/"
-					className={`flex h-8 w-8 items-center justify-center rounded-md ${
-						isOverview ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-					}`}
-					title="Dashboard"
-				>
-					<HugeiconsIcon icon={DashboardSquare01Icon} className="h-4 w-4" />
-				</Link>
-				<Link
-					to="/orchestrate"
-					className={`flex h-8 w-8 items-center justify-center rounded-md ${
-						isOrchestrate ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-					}`}
-					title="Orchestrate"
-				>
-					<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-						<rect x="1" y="2" width="4" height="12" rx="1" />
-						<rect x="6" y="2" width="4" height="12" rx="1" />
-						<rect x="11" y="2" width="4" height="12" rx="1" />
-					</svg>
-				</Link>
-				<Link
-					to="/tasks"
-					className={`flex h-8 w-8 items-center justify-center rounded-md ${
-						isTasks ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-					}`}
-					title="Tasks"
-				>
-					<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-4 w-4" />
-				</Link>
-				<Link
-					to="/settings"
-					className={`flex h-8 w-8 items-center justify-center rounded-md ${
-						isSettings ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-					}`}
-					title="Settings"
-				>
-					<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
-				</Link>
-				<div className="my-1 h-px w-5 bg-sidebar-line" />
-				<DndContext
-					sensors={sensors}
-					collisionDetection={closestCenter}
-					onDragEnd={handleDragEnd}
-				>
-					<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
-						{agentOrder.map((agentId) => {
-							const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
-							return (
-								<SortableAgentItem
-									key={agentId}
-									agentId={agentId}
-									displayName={agentDisplayNames[agentId]}
-									gradientStart={agentGradients[agentId]?.start}
-									gradientEnd={agentGradients[agentId]?.end}
-									isActive={isActive}
-								/>
-							);
-						})}
-					</SortableContext>
-				</DndContext>
-				{hasProvider && (
-					<button
-						onClick={() => setCreateOpen(true)}
-						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
-						title="New Agent"
+		<aside className="flex w-[220px] shrink-0 flex-col bg-sidebar">
+			{/* Company switcher */}
+			<div className={`px-3 ${IS_DESKTOP && IS_MACOS ? "pt-[50px]" : "pt-3"}`}>
+				<Popover.Root open={switcherOpen} onOpenChange={setSwitcherOpen}>
+					<Popover.Trigger asChild>
+						<SelectPill variant="sidebar" size="md" className="w-full">
+							<span className="font-semibold">{companyName}</span>
+						</SelectPill>
+					</Popover.Trigger>
+					<Popover.Content
+						align="start"
+						sideOffset={8}
+						className="min-w-[200px] p-2"
 					>
-						+
-					</button>
-				)}
+						<OptionList>
+							<OptionListItem selected>{companyName}</OptionListItem>
+						</OptionList>
+						<div className="my-2 h-px bg-app-line" />
+						<OptionList>
+							<OptionListItem
+								onClick={() => {
+									setSwitcherOpen(false);
+									setComingSoonOpen(true);
+								}}
+							>
+								<span>Add Instance</span>
+							</OptionListItem>
+							<OptionListItem
+								onClick={() => {
+									setSwitcherOpen(false);
+									navigate({to: "/settings", search: {tab: "instance"}});
+								}}
+							>
+								<span>Edit</span>
+							</OptionListItem>
+						</OptionList>
+					</Popover.Content>
+				</Popover.Root>
 			</div>
+
+			{/* Scrollable area: primary nav + sections */}
+			<div className="relative flex-1 overflow-hidden">
+				<div className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-sidebar to-transparent transition-opacity duration-150 ${scrollTop > 0 ? "opacity-100" : "opacity-0"}`} />
+			<div className="h-full overflow-y-auto px-3 pb-4" onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
+			{/* Primary nav */}
+			<nav className="space-y-0.5 py-3">
+				{navItems.map((item) => {
+					const Icon = item.icon;
+					const isActive = item.exact
+						? !!matchRoute({to: item.to})
+						: !!matchRoute({to: item.to, fuzzy: true});
+					return (
+						<Link
+							key={item.label}
+							to={item.to}
+							className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm font-medium tracking-wide outline-none ring-inset ring-transparent transition-colors focus:ring-1 focus:ring-accent ${
+								isActive
+									? "bg-sidebar-selected/40 text-sidebar-ink"
+									: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+							}`}
+						>
+							<div className="flex size-[22px] shrink-0 items-center justify-center">
+								<Icon className="size-4" weight="bold" />
+							</div>
+							<span className="truncate">{item.label}</span>
+						</Link>
+					);
+				})}
+			</nav>
+				{/* Projects section */}
+				{projects.length > 0 && (
+					<section className="mb-4">
+						<div className="mb-2 flex items-center justify-between px-2">
+							<div className="text-sidebar-inkDull text-[11px] font-semibold uppercase tracking-[0.16em]">
+								Projects
+							</div>
+							<Link to="/projects">
+								<CircleButton icon={DotsThree} size="sm" title="All Projects" />
+							</Link>
+						</div>
+						<div className="space-y-0.5">
+							{projects.slice(0, 5).map((project) => {
+								const logoUrl = project.logo_path
+									? `${getApiBase()}/agents/projects/${encodeURIComponent(project.id)}/logo`
+									: null;
+								const fallback =
+									project.icon || project.name.slice(0, 1).toUpperCase();
+								return (
+									<Link
+										key={project.id}
+										to="/projects"
+										search={{id: project.id}}
+										className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+											activeProjectId === project.id
+												? "bg-sidebar-selected/40 text-sidebar-ink"
+												: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+										}`}
+									>
+										{logoUrl ? (
+											<img
+												src={logoUrl}
+												alt=""
+												className="size-[22px] shrink-0 rounded-md object-contain"
+												draggable={false}
+											/>
+										) : (
+											<div className="flex size-[22px] shrink-0 items-center justify-center rounded-md bg-sidebar-selected/40 text-[10px] font-semibold text-sidebar-ink">
+												{fallback}
+											</div>
+										)}
+										<div className="min-w-0">
+											<div className="text-sidebar-ink truncate text-sm font-medium">
+												{project.name}
+											</div>
+											{project.description && (
+												<div className="text-ink-faint truncate text-[11px]">
+													{project.description}
+												</div>
+											)}
+										</div>
+									</Link>
+								);
+							})}
+							{projects.length > 5 && (
+								<Link
+									to="/projects"
+									className="flex w-full items-center px-2 py-1"
+								>
+									<span className="text-[11px] text-ink-faint">
+										{projects.length - 5} more project{projects.length - 5 !== 1 ? "s" : ""}
+									</span>
+								</Link>
+							)}
+						</div>
+					</section>
+				)}
+
+				{/* Agents section */}
+				<section>
+					<div className="mb-2 flex items-center justify-between px-2">
+						<div className="text-sidebar-inkDull text-[11px] font-semibold uppercase tracking-[0.16em]">
+							Agents
+						</div>
+						{hasProvider && (
+							<CircleButton
+								icon={DotsThree}
+								size="sm"
+								onClick={() => setCreateOpen(true)}
+								title="New Agent"
+							/>
+						)}
+					</div>
+					<div className="space-y-0.5">
+						<DndContext
+							sensors={sensors}
+							collisionDetection={closestCenter}
+							onDragEnd={handleDragEnd}
+						>
+							<SortableContext
+								items={agentOrder}
+								strategy={verticalListSortingStrategy}
+							>
+								{agentOrder.map((agentId) => {
+									const isActive = !!matchRoute({
+										to: "/agents/$agentId",
+										params: {agentId},
+										fuzzy: true,
+									});
+									return (
+										<SortableAgentItem
+											key={agentId}
+											agentId={agentId}
+											displayName={agentDisplayNames[agentId]}
+											gradientStart={agentGradients[agentId]?.start}
+											gradientEnd={agentGradients[agentId]?.end}
+											isActive={isActive}
+											isExpanded={expandedAgent === agentId}
+											onToggle={() => setUserExpandedAgent(agentId)}
+										/>
+									);
+								})}
+							</SortableContext>
+						</DndContext>
+					</div>
+				</section>
+			</div>
+			</div>
+
+			{/* Footer */}
+			<div className="flex shrink-0 items-center justify-between border-t border-app-line/30 px-3 py-2">
+				<WorkersPanelButton />
+				<Link to="/settings">
+					<CircleButton
+						icon={GearSix}
+						title="Settings"
+						variant={
+							!!matchRoute({to: "/settings", fuzzy: true})
+								? "active"
+								: "default"
+						}
+					/>
+				</Link>
+			</div>
+
 			{agents[0] && (
-				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
+				<CreateAgentDialog
+					open={createOpen}
+					onOpenChange={setCreateOpen}
+					agentId={agents[0].id}
+				/>
 			)}
-		</nav>
+
+			<DialogRoot open={comingSoonOpen} onOpenChange={setComingSoonOpen}>
+				<DialogContent className="max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Add Instance</DialogTitle>
+						<DialogDescription>
+							Multi-instance support is coming soon. You'll be able to connect
+							to additional Spacebot instances from here.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button onClick={() => setComingSoonOpen(false)} size="md">
+							Close
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</DialogRoot>
+		</aside>
 	);
 }

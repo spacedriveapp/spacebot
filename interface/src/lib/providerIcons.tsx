@@ -42,7 +42,7 @@ function NvidiaIcon({ size = 24, className }: IconProps) {
 	);
 }
 
-function OpenCodeZenIcon({ size = 24, className }: IconProps) {
+export function OpenCodeZenIcon({ size = 24, className }: IconProps) {
 	const clipId = useId();
 	const clipPathId = `opencode-zen-clip-${clipId}`;
 	const width = (size * 32) / 40;
@@ -140,6 +140,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		"minimax-cn": Minimax,
 		moonshot: Kimi, // Kimi is Moonshot AI's product brand
 		"github-copilot": GithubCopilot,
+		azure: OpenAI,
 	};
 
 	const IconComponent = iconMap[provider.toLowerCase()];

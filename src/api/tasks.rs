@@ -1,4 +1,5 @@
 use super::state::ApiState;
+use crate::notifications::{NewNotification, NotificationKind, NotificationSeverity};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -41,8 +42,6 @@ pub(super) struct CreateTaskRequest {
     title: String,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
     #[serde(default)]
     priority: Option<String>,
     #[serde(default)]
@@ -154,6 +153,24 @@ fn emit_task_event(state: &ApiState, task: &crate::tasks::Task, action: &str) {
         .ok();
 }
 
+/// Emit a task_approval notification when a task enters the pending_approval state.
+fn maybe_emit_approval_notification(state: &ApiState, task: &crate::tasks::Task) {
+    if task.status != crate::tasks::TaskStatus::PendingApproval {
+        return;
+    }
+    state.emit_notification(NewNotification {
+        kind: NotificationKind::TaskApproval,
+        severity: NotificationSeverity::Info,
+        title: task.title.clone(),
+        body: task.description.clone(),
+        agent_id: Some(task.assigned_agent_id.clone()),
+        related_entity_type: Some("task".to_string()),
+        related_entity_id: Some(task.task_number.to_string()),
+        action_url: Some(format!("/tasks/{}", task.task_number)),
+        metadata: None,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -247,8 +264,7 @@ pub(super) async fn create_task(
 ) -> Result<Json<TaskResponse>, StatusCode> {
     let store = get_task_store(&state)?;
 
-    let status =
-        parse_status(request.status.as_deref())?.unwrap_or(crate::tasks::TaskStatus::Backlog);
+    let status = crate::tasks::TaskStatus::PendingApproval;
     let priority =
         parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
 
@@ -276,6 +292,7 @@ pub(super) async fn create_task(
         })?;
 
     emit_task_event(&state, &task, "created");
+    maybe_emit_approval_notification(&state, &task);
     Ok(Json(TaskResponse { task }))
 }
 
@@ -330,6 +347,7 @@ pub(super) async fn update_task(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     emit_task_event(&state, &task, "updated");
+    maybe_emit_approval_notification(&state, &task);
     Ok(Json(TaskResponse { task }))
 }
 
@@ -427,6 +445,14 @@ pub(super) async fn approve_task(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     emit_task_event(&state, &task, "updated");
+    // Auto-dismiss any pending task_approval notification for this task.
+    if let Some(store) = state.notification_store.load().as_ref().clone()
+        && let Err(error) = store
+            .dismiss_by_entity("task_approval", "task", &number.to_string())
+            .await
+    {
+        tracing::warn!(%error, task_number = number, "failed to auto-dismiss approval notification");
+    }
     Ok(Json(TaskResponse { task }))
 }
 

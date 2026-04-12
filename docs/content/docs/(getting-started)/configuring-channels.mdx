@@ -1,0 +1,122 @@
+---
+title: Configuring Channels
+description: Per-channel settings for response modes, models, memory, delegation, and worker context.
+---
+
+# Configuring Channels
+
+Every channel — Discord, Slack, Telegram, portal conversations — can be configured independently. You can set the model, control when the agent responds, tune memory behavior, and decide how workers get context. Settings are applied per-channel and persist across restarts.
+
+## Accessing Channel Settings
+
+In the Spacebot UI, navigate to your **Agent**, then open the **Channels** tab. Each channel has a **cog icon** in the top-left corner — click it to open the settings panel.
+
+For portal conversations, the settings panel is accessible from the same cog icon in the chat header.
+
+## Settings Reference
+
+### Response Mode
+
+Controls when the agent responds to messages.
+
+| Mode | Behavior |
+|------|----------|
+| **Active** (default) | Responds to all messages normally. |
+| **Observe** | Learns from the conversation passively — never responds, even when mentioned. All messages are ingested into context and memory. Use this for channels the agent should monitor without participating. |
+| **Mention Only** | Messages are still visible to the agent for context, but it only responds when @mentioned, replied to, or given a command. Memory capture continues passively. |
+
+#### Mention Only vs. Binding-Level Require Mention
+
+These are two different features that control mention filtering at different layers:
+
+| | Binding-level `require_mention` | Channel-level Mention Only |
+|---|---|---|
+| **Where configured** | Binding settings (when adding a platform connection) | Channel settings (cog icon on any channel) |
+| **What happens to unmentioned messages** | Blocked at the routing layer — the agent never sees them | Ingested into history and context — the agent sees them but doesn't respond |
+| **Memory capture** | No (message never arrives) | Yes (passive memory persistence continues) |
+| **Use case** | High-traffic channels where the agent shouldn't process anything unless directly addressed | Channels where the agent should stay context-aware but only respond when asked |
+
+If you want the agent to follow a conversation silently and have full context when eventually mentioned, use **Mention Only** in channel settings. If you want to completely ignore unrelated messages (e.g. a busy server with hundreds of channels), use **require mention** on the binding.
+
+### Model
+
+Override the model used for this channel. When set, this takes priority over the agent's routing config. Leave blank to use the agent default.
+
+You can also set per-process model overrides:
+
+| Process | What it controls |
+|---------|-----------------|
+| **Channel** | The main conversation model |
+| **Branch** | Model used for memory recall and background research |
+| **Worker** | Model used for task execution (shell, files, browser) |
+| **Compactor** | Model used for context compaction when history grows large |
+
+### Memory
+
+Controls how the agent's memory system interacts with this channel.
+
+| Mode | Context Injected | Auto-Persistence | Memory Tools |
+|------|-----------------|-------------------|--------------|
+| **Full** (default) | Knowledge synthesis + working memory + channel activity | Yes | Yes (via branches) |
+| **Ambient** | Same context injected | No | No |
+| **Off** | None | No | No |
+
+Use **Ambient** for channels where the agent should be aware of its memories but shouldn't create new ones from the conversation. Use **Off** for ephemeral or test channels.
+
+### Delegation
+
+Controls how the agent accesses tools.
+
+| Mode | Description |
+|------|-------------|
+| **Standard** (default) | Agent delegates work through branches and workers. The channel itself only has reply, react, skip, and delegation tools. |
+| **Direct** | Agent gets direct access to all tools — memory, shell, files, browser, web search — plus delegation tools. No need to spawn workers for simple tasks. |
+
+**Direct** mode is useful for power-user conversations where you want the agent to execute commands immediately rather than spawning background workers.
+
+### Worker Context
+
+Controls what context workers receive when spawned from this channel.
+
+**History:**
+
+| Mode | What the worker sees |
+|------|---------------------|
+| **None** (default) | Only the task description |
+| **Summary** | LLM-generated summary of recent conversation |
+| **Recent** | Last 20 messages from the conversation |
+| **Full** | Complete conversation history (branch-style) |
+
+**Memory:**
+
+| Mode | What the worker gets |
+|------|---------------------|
+| **None** (default) | No memory context |
+| **Ambient** | Knowledge synthesis + working memory in system prompt (read-only) |
+| **Tools** | Ambient context + memory recall tool (read-only) |
+| **Full** | Ambient context + full memory tools (recall, save, delete) |
+
+## Settings Resolution
+
+Settings are resolved in priority order:
+
+```
+1. Per-conversation settings (highest priority)
+2. Per-channel settings
+3. Binding defaults
+4. System defaults
+```
+
+A channel setting overrides the binding default. A per-conversation setting (e.g. set via the portal settings panel) overrides the channel setting. If nothing is set, system defaults apply (Active response mode, Full memory, Standard delegation).
+
+## Slash Commands
+
+Some settings can be toggled at runtime via slash commands in chat:
+
+| Command | Effect |
+|---------|--------|
+| `/active` | Switch to Active response mode |
+| `/observe` | Switch to Observe response mode |
+| `/mention-only` | Switch to Mention Only response mode |
+
+These persist to the channel's settings and survive restarts.
