@@ -605,12 +605,10 @@ pub struct Attachment {
     #[serde(skip)]
     pub auth_header: Option<String>,
     /// ID of a pre-saved attachment in `saved_attachments`. When set, the file
-    /// is already on disk at `disk_path` — skip download and DB insert.
+    /// is already on disk — skip download and DB insert. The actual path is
+    /// re-derived from the DB row + workspace `saved/` dir at read time.
     #[serde(skip)]
     pub pre_saved_id: Option<String>,
-    /// Disk path for pre-saved attachments. Set alongside `pre_saved_id`.
-    #[serde(skip)]
-    pub disk_path: Option<std::path::PathBuf>,
 }
 
 /// An outbound response paired with the inbound message that triggered it.

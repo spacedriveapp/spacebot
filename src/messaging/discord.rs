@@ -836,7 +836,6 @@ fn extract_content(message: &Message) -> MessageContent {
                 size_bytes: Some(attachment.size as u64),
                 auth_header: None,
                 pre_saved_id: None,
-                disk_path: None,
             })
             .collect();
 

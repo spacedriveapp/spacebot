@@ -526,32 +526,24 @@ pub(crate) async fn save_channel_attachments(
     let mut results = Vec::with_capacity(attachments.len());
 
     for attachment in attachments {
-        // Pre-saved: file is already on disk from a portal upload — read bytes
-        // and return the existing record without re-downloading or re-inserting.
-        if let (Some(id), Some(path)) = (&attachment.pre_saved_id, &attachment.disk_path) {
-            match tokio::fs::read(path).await {
-                Ok(bytes) => {
-                    let saved_filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&attachment.filename)
-                        .to_string();
-                    results.push((
-                        SavedAttachmentMeta {
-                            id: id.clone(),
-                            filename: attachment.filename.clone(),
-                            saved_filename,
-                            mime_type: attachment.mime_type.clone(),
-                            size_bytes: attachment.size_bytes.unwrap_or(bytes.len() as u64),
-                        },
-                        bytes,
-                    ));
+        // Pre-saved: file is already on disk from a portal upload — look up the
+        // DB record by id + channel_id and re-derive the path from saved_dir
+        // instead of trusting struct fields.
+        if let Some(ref pre_saved_id) = attachment.pre_saved_id {
+            match lookup_pre_saved(pool, pre_saved_id, channel_id, saved_dir).await {
+                Ok(Some(pair)) => results.push(pair),
+                Ok(None) => {
+                    tracing::warn!(
+                        attachment_id = %pre_saved_id,
+                        channel_id,
+                        "pre-saved attachment not found or wrong channel"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
                         %error,
-                        attachment_id = %id,
-                        "failed to read pre-saved attachment from disk"
+                        attachment_id = %pre_saved_id,
+                        "failed to load pre-saved attachment"
                     );
                 }
             }
@@ -828,6 +820,60 @@ async fn filename_taken(pool: &sqlx::SqlitePool, saved_dir: &Path, filename: &st
 
     // Also check filesystem in case of orphaned files
     saved_dir.join(filename).exists()
+}
+
+// ---------------------------------------------------------------------------
+// Pre-saved attachment lookup
+// ---------------------------------------------------------------------------
+
+/// Look up a pre-saved attachment by id + channel_id and read its bytes from
+/// disk. Returns `None` if the row doesn't exist or the channel doesn't match.
+/// The path is re-derived from `saved_dir` + the `saved_filename` column to
+/// avoid trusting the `disk_path` column.
+async fn lookup_pre_saved(
+    pool: &sqlx::SqlitePool,
+    attachment_id: &str,
+    channel_id: &str,
+    saved_dir: &Path,
+) -> anyhow::Result<Option<(SavedAttachmentMeta, Vec<u8>)>> {
+    use sqlx::Row as _;
+
+    let row = sqlx::query(
+        "SELECT id, original_filename, saved_filename, mime_type, size_bytes \
+         FROM saved_attachments WHERE id = ? AND channel_id = ?",
+    )
+    .bind(attachment_id)
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let id: String = row.try_get("id")?;
+    let original_filename: String = row.try_get("original_filename")?;
+    let saved_filename: String = row.try_get("saved_filename")?;
+    let mime_type: String = row.try_get("mime_type")?;
+    let size_bytes: i64 = row.try_get("size_bytes")?;
+
+    let path = saved_dir.join(&saved_filename);
+    if !path.starts_with(saved_dir) {
+        anyhow::bail!("pre-saved attachment path escapes saved dir: {saved_filename}");
+    }
+
+    let bytes = tokio::fs::read(&path).await?;
+
+    Ok(Some((
+        SavedAttachmentMeta {
+            id,
+            filename: original_filename,
+            saved_filename,
+            mime_type,
+            size_bytes: u64::try_from(size_bytes).unwrap_or(0),
+        },
+        bytes,
+    )))
 }
 
 // ---------------------------------------------------------------------------

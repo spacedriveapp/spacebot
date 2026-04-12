@@ -184,11 +184,20 @@ const navItems = [
 	{to: "/wiki", icon: BookBookmark, label: "Wiki", exact: true},
 ] as const;
 
+// Narrows the loosely-typed search params from `useLocation` to the `/projects`
+// route shape and extracts the selected project id, if any.
+function readProjectId(search: unknown): string | null {
+	if (typeof search !== "object" || search === null) return null;
+	const id = (search as {id?: unknown}).id;
+	return typeof id === "string" ? id : null;
+}
+
 export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 	const navigate = useNavigate();
 	const [createOpen, setCreateOpen] = useState(false);
-	const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
-	const [hasDefaulted, setHasDefaulted] = useState(false);
+	const [userExpandedAgent, setUserExpandedAgent] = useState<string | null>(
+		null,
+	);
 	const [switcherOpen, setSwitcherOpen] = useState(false);
 	const [comingSoonOpen, setComingSoonOpen] = useState(false);
 	const [scrollTop, setScrollTop] = useState(0);
@@ -241,19 +250,13 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 	}, [agents]);
 	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
 
-	// Default-expand the first agent once loaded
-	if (!hasDefaulted && agentOrder.length > 0) {
-		setExpandedAgent(agentOrder[0]);
-		setHasDefaulted(true);
-	}
+	// Default-expand the first agent until the user explicitly picks another.
+	const expandedAgent = userExpandedAgent ?? agentOrder[0] ?? null;
 
 	const matchRoute = useMatchRoute();
 	const location = useLocation();
 	const activeProjectId =
-		location.pathname === "/projects" &&
-		typeof (location.search as Record<string, unknown>)?.id === "string"
-			? ((location.search as Record<string, unknown>).id as string)
-			: null;
+		location.pathname === "/projects" ? readProjectId(location.search) : null;
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -454,7 +457,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 											gradientEnd={agentGradients[agentId]?.end}
 											isActive={isActive}
 											isExpanded={expandedAgent === agentId}
-											onToggle={() => setExpandedAgent(agentId)}
+											onToggle={() => setUserExpandedAgent(agentId)}
 										/>
 									);
 								})}

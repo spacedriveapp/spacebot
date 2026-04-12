@@ -229,50 +229,56 @@ pub(super) async fn get_usage(
             q = q.bind(v);
         }
 
-        if let Ok(row) = q.fetch_one(*pool).await {
-            let input: i64 = row.get("input_tokens");
-            let output: i64 = row.get("output_tokens");
-            let cache_read: i64 = row.get("cache_read_tokens");
-            let cache_write: i64 = row.get("cache_write_tokens");
-            let reasoning: i64 = row.get("reasoning_tokens");
-            let requests: i64 = row.get("request_count");
-            let cost: f64 = row.get("estimated_cost_usd");
+        let row = q.fetch_one(*pool).await.map_err(|error| {
+            tracing::error!(%error, agent_id, "failed to query token usage totals");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-            total_input += input;
-            total_output += output;
-            total_cache_read += cache_read;
-            total_cache_write += cache_write;
-            total_reasoning += reasoning;
-            total_requests += requests;
-            total_cost += cost;
+        let input: i64 = row.get("input_tokens");
+        let output: i64 = row.get("output_tokens");
+        let cache_read: i64 = row.get("cache_read_tokens");
+        let cache_write: i64 = row.get("cache_write_tokens");
+        let reasoning: i64 = row.get("reasoning_tokens");
+        let requests: i64 = row.get("request_count");
+        let cost: f64 = row.get("estimated_cost_usd");
 
-            // Check cost status
-            let status_rows =
-                sqlx::query("SELECT DISTINCT cost_status FROM token_usage WHERE recorded_at >= ?")
-                    .bind(&since)
-                    .fetch_all(*pool)
-                    .await
-                    .unwrap_or_default();
-            let status = aggregate_cost_status(&status_rows);
-            if status == "unknown" {
-                has_unknown = true;
-            } else if status == "estimated" {
-                has_estimated = true;
-            }
+        total_input += input;
+        total_output += output;
+        total_cache_read += cache_read;
+        total_cache_write += cache_write;
+        total_reasoning += reasoning;
+        total_requests += requests;
+        total_cost += cost;
 
-            // Collect per-agent data
-            if group_by.contains(&"agent") && requests > 0 {
-                all_by_agent.push(UsageByAgent {
-                    agent_id: agent_id.to_string(),
-                    input_tokens: input,
-                    output_tokens: output,
-                    cache_read_tokens: cache_read,
-                    cache_write_tokens: cache_write,
-                    reasoning_tokens: reasoning,
-                    request_count: requests,
-                    estimated_cost_usd: Some(cost),
-                });
-            }
+        // Check cost status
+        let status_rows =
+            sqlx::query("SELECT DISTINCT cost_status FROM token_usage WHERE recorded_at >= ?")
+                .bind(&since)
+                .fetch_all(*pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, agent_id, "failed to query cost status");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        let status = aggregate_cost_status(&status_rows);
+        if status == "unknown" {
+            has_unknown = true;
+        } else if status == "estimated" {
+            has_estimated = true;
+        }
+
+        // Collect per-agent data
+        if group_by.contains(&"agent") && requests > 0 {
+            all_by_agent.push(UsageByAgent {
+                agent_id: agent_id.to_string(),
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: cache_write,
+                reasoning_tokens: reasoning,
+                request_count: requests,
+                estimated_cost_usd: Some(cost),
+            });
         }
 
         // By model
@@ -298,27 +304,30 @@ pub(super) async fn get_usage(
                 q = q.bind(u);
             }
 
-            if let Ok(rows) = q.fetch_all(*pool).await {
-                for row in rows {
-                    let model: String = row.get("model");
-                    let entry = all_by_model.entry(model.clone()).or_insert(UsageByModel {
-                        model,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_read_tokens: 0,
-                        cache_write_tokens: 0,
-                        reasoning_tokens: 0,
-                        request_count: 0,
-                        estimated_cost_usd: Some(0.0),
-                    });
-                    entry.input_tokens += row.get::<i64, _>("input_tokens");
-                    entry.output_tokens += row.get::<i64, _>("output_tokens");
-                    entry.cache_read_tokens += row.get::<i64, _>("cache_read_tokens");
-                    entry.cache_write_tokens += row.get::<i64, _>("cache_write_tokens");
-                    entry.reasoning_tokens += row.get::<i64, _>("reasoning_tokens");
-                    entry.request_count += row.get::<i64, _>("request_count");
-                    *entry.estimated_cost_usd.as_mut().unwrap() +=
-                        row.get::<f64, _>("estimated_cost_usd");
+            let rows = q.fetch_all(*pool).await.map_err(|error| {
+                tracing::error!(%error, agent_id, "failed to query usage by model");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            for row in rows {
+                let model: String = row.get("model");
+                let entry = all_by_model.entry(model.clone()).or_insert(UsageByModel {
+                    model,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    request_count: 0,
+                    estimated_cost_usd: Some(0.0),
+                });
+                entry.input_tokens += row.get::<i64, _>("input_tokens");
+                entry.output_tokens += row.get::<i64, _>("output_tokens");
+                entry.cache_read_tokens += row.get::<i64, _>("cache_read_tokens");
+                entry.cache_write_tokens += row.get::<i64, _>("cache_write_tokens");
+                entry.reasoning_tokens += row.get::<i64, _>("reasoning_tokens");
+                entry.request_count += row.get::<i64, _>("request_count");
+                if let Some(cost) = entry.estimated_cost_usd.as_mut() {
+                    *cost += row.get::<f64, _>("estimated_cost_usd");
                 }
             }
         }
@@ -346,27 +355,30 @@ pub(super) async fn get_usage(
                 q = q.bind(u);
             }
 
-            if let Ok(rows) = q.fetch_all(*pool).await {
-                for row in rows {
-                    let date: String = row.get("date");
-                    let entry = all_by_day.entry(date.clone()).or_insert(UsageByDay {
-                        date,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_read_tokens: 0,
-                        cache_write_tokens: 0,
-                        reasoning_tokens: 0,
-                        request_count: 0,
-                        estimated_cost_usd: Some(0.0),
-                    });
-                    entry.input_tokens += row.get::<i64, _>("input_tokens");
-                    entry.output_tokens += row.get::<i64, _>("output_tokens");
-                    entry.cache_read_tokens += row.get::<i64, _>("cache_read_tokens");
-                    entry.cache_write_tokens += row.get::<i64, _>("cache_write_tokens");
-                    entry.reasoning_tokens += row.get::<i64, _>("reasoning_tokens");
-                    entry.request_count += row.get::<i64, _>("request_count");
-                    *entry.estimated_cost_usd.as_mut().unwrap() +=
-                        row.get::<f64, _>("estimated_cost_usd");
+            let rows = q.fetch_all(*pool).await.map_err(|error| {
+                tracing::error!(%error, agent_id, "failed to query usage by day");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            for row in rows {
+                let date: String = row.get("date");
+                let entry = all_by_day.entry(date.clone()).or_insert(UsageByDay {
+                    date,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    request_count: 0,
+                    estimated_cost_usd: Some(0.0),
+                });
+                entry.input_tokens += row.get::<i64, _>("input_tokens");
+                entry.output_tokens += row.get::<i64, _>("output_tokens");
+                entry.cache_read_tokens += row.get::<i64, _>("cache_read_tokens");
+                entry.cache_write_tokens += row.get::<i64, _>("cache_write_tokens");
+                entry.reasoning_tokens += row.get::<i64, _>("reasoning_tokens");
+                entry.request_count += row.get::<i64, _>("request_count");
+                if let Some(cost) = entry.estimated_cost_usd.as_mut() {
+                    *cost += row.get::<f64, _>("estimated_cost_usd");
                 }
             }
         }
@@ -471,12 +483,16 @@ pub(super) async fn get_conversation_usage(
         total_requests += row.get::<i64, _>("request_count");
         total_cost += row.get::<f64, _>("estimated_cost_usd");
 
-        let status_rows =
-            sqlx::query("SELECT DISTINCT cost_status FROM token_usage WHERE conversation_id = ?")
-                .bind(&conversation_id)
-                .fetch_all(*pool)
-                .await
-                .unwrap_or_default();
+        let status_rows = sqlx::query(
+            "SELECT DISTINCT cost_status FROM token_usage WHERE conversation_id = ?",
+        )
+        .bind(&conversation_id)
+        .fetch_all(*pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %conversation_id, "failed to query conversation cost status");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         let status = aggregate_cost_status(&status_rows);
         if status == "unknown" {

@@ -446,13 +446,12 @@ pub(super) async fn approve_task(
 
     emit_task_event(&state, &task, "updated");
     // Auto-dismiss any pending task_approval notification for this task.
-    if let Some(store) = state.notification_store.load().as_ref().clone() {
-        if let Err(error) = store
+    if let Some(store) = state.notification_store.load().as_ref().clone()
+        && let Err(error) = store
             .dismiss_by_entity("task_approval", "task", &number.to_string())
             .await
-        {
-            tracing::warn!(%error, task_number = number, "failed to auto-dismiss approval notification");
-        }
+    {
+        tracing::warn!(%error, task_number = number, "failed to auto-dismiss approval notification");
     }
     Ok(Json(TaskResponse { task }))
 }

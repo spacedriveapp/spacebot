@@ -681,7 +681,6 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     size_bytes: Some(largest.file.size as u64),
                     auth_header: None,
                     pre_saved_id: None,
-                    disk_path: None,
                 });
             }
         }
@@ -702,7 +701,6 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                 size_bytes: Some(doc.document.file.size as u64),
                 auth_header: None,
                 pre_saved_id: None,
-                disk_path: None,
             });
         }
         MediaKind::Video(video) => {
@@ -722,7 +720,6 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                 size_bytes: Some(video.video.file.size as u64),
                 auth_header: None,
                 pre_saved_id: None,
-                disk_path: None,
             });
         }
         MediaKind::Voice(voice) => {
@@ -738,7 +735,6 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                 size_bytes: Some(voice.voice.file.size as u64),
                 auth_header: None,
                 pre_saved_id: None,
-                disk_path: None,
             });
         }
         MediaKind::Audio(audio) => {
@@ -758,7 +754,6 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                 size_bytes: Some(audio.audio.file.size as u64),
                 auth_header: None,
                 pre_saved_id: None,
-                disk_path: None,
             });
         }
         _ => {}

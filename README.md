@@ -36,7 +36,7 @@
 > **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord, Slack, Telegram, or Twitch, configure your agent, and go. No self-hosting required.
 
 <p align="center">
-  <img src=".github/spacebot-ui.jpg" alt="Spacebot UI" />
+  <img src=".github/spacebot-ui.webp" alt="Spacebot UI" />
 </p>
 
 ---
@@ -83,7 +83,7 @@ Five process types. Each does one job.
 
 **The Compactor** is a programmatic monitor (not an LLM) that watches context size per channel and triggers compaction before the channel fills up. Compaction workers run alongside without blocking.
 
-**The Cortex** sees across all channels, workers, and branches simultaneously. It generates the memory bulletin, a periodically refreshed briefing of the agent's knowledge injected into every conversation. It supervises processes, maintains the memory graph, detects patterns, and provides an admin chat with full tool access.
+**The Cortex** sees across all channels, workers, and branches simultaneously. It maintains the agent's working memory — a layered context assembly system that gives every conversation structured awareness of what's happening across the agent. Events are recorded as they happen; intra-day synthesis compresses them into narrative; daily summaries roll up at midnight; knowledge synthesis regenerates when the memory graph changes. The cortex supervises processes and maintains the memory graph.
 
 ```
 User sends message
@@ -123,13 +123,13 @@ State lives in tasks. Progress notes go on the task itself. After a crash, the n
 
 ### Memory
 
-Spacebot's memory is a typed, graph-connected knowledge system in SQLite and LanceDB. Every memory has a type, an importance score, and graph edges to related memories. The agent distinguishes facts from decisions, preferences from goals. That structure lets the cortex synthesize a useful briefing rather than dumping raw search results into context.
+Spacebot's memory is a typed, graph-connected knowledge system in SQLite and LanceDB. Every memory has a type, an importance score, and graph edges to related memories. The agent distinguishes facts from decisions, preferences from goals.
 
 - **Eight memory types** — Fact, Preference, Decision, Identity, Event, Observation, Goal, Todo
 - **Graph edges** — RelatedTo, Updates, Contradicts, CausedBy, PartOf
 - **Hybrid recall** — vector similarity + full-text search merged via Reciprocal Rank Fusion
 - **Memory import** — drop files into `ingest/` and Spacebot extracts structured memories automatically. Supports text, markdown, and PDF.
-- **Memory bulletin** — the cortex generates a periodic knowledge briefing injected into every conversation
+- **Working memory** — a five-layer context assembly system. Identity context, a structured event log, cross-channel activity map, participant awareness, and change-driven knowledge synthesis. Most layers are programmatic — no LLM calls to stay current
 
 ### Skills
 
@@ -278,7 +278,7 @@ spacebot status               # show pid and uptime
 spacebot auth login           # authenticate via Anthropic OAuth
 ```
 
-The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/content/docs/(getting-started)/quickstart.mdx) for more detail.
+The binary creates all databases and directories automatically on first run. See the [quickstart guide](<docs/content/docs/(getting-started)/quickstart.mdx>) for more detail.
 
 ### Authentication
 
@@ -310,7 +310,7 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh before each A
 
 | Layer           | Technology                                                                                                      |
 | --------------- | --------------------------------------------------------------------------------------------------------------- |
-| Language        | **Rust** (edition 2024) — single binary, no runtime dependencies, no GC pauses                                 |
+| Language        | **Rust** (edition 2024) — single binary, no runtime dependencies, no GC pauses                                  |
 | Async runtime   | **Tokio**                                                                                                       |
 | LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.31 — agentic loop, tool execution, hooks                     |
 | Relational data | **SQLite** (sqlx) — conversations, memory graph, tasks, goals, cron jobs                                        |
@@ -331,20 +331,20 @@ Single binary, no server dependencies. All data lives in embedded databases in a
 
 ## Documentation
 
-| Doc                                    | Description                                              |
-| -------------------------------------- | -------------------------------------------------------- |
-| [Quick Start](docs/content/docs/(getting-started)/quickstart.mdx) | Setup, config, first run                    |
-| [Config Reference](docs/content/docs/(configuration)/config.mdx) | Full `config.toml` reference                |
-| [Architecture](ARCHITECTURE.md)        | Process types, tool access, memory internals, multi-agent |
-| [Memory](docs/content/docs/(core)/memory.mdx)                    | Memory system design                        |
-| [Tools](docs/content/docs/(features)/tools.mdx)                  | All available LLM tools                     |
-| [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains           |
-| [Secrets](docs/content/docs/(configuration)/secrets.mdx)         | Credential storage, encryption, output scrubbing |
-| [Sandbox](docs/content/docs/(configuration)/sandbox.mdx)         | Process containment and environment sanitization |
-| [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                   |
-| [MCP](docs/content/docs/(features)/mcp.mdx)                      | External tool servers via Model Context Protocol |
-| [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                |
-| [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture and platform setup     |
+| Doc                                                                 | Description                                               |
+| ------------------------------------------------------------------- | --------------------------------------------------------- |
+| [Quick Start](<docs/content/docs/(getting-started)/quickstart.mdx>) | Setup, config, first run                                  |
+| [Config Reference](<docs/content/docs/(configuration)/config.mdx>)  | Full `config.toml` reference                              |
+| [Architecture](ARCHITECTURE.md)                                     | Process types, tool access, memory internals, multi-agent |
+| [Memory](<docs/content/docs/(core)/memory.mdx>)                     | Memory system design                                      |
+| [Tools](<docs/content/docs/(features)/tools.mdx>)                   | All available LLM tools                                   |
+| [Routing](<docs/content/docs/(core)/routing.mdx>)                   | Model routing and fallback chains                         |
+| [Secrets](<docs/content/docs/(configuration)/secrets.mdx>)          | Credential storage, encryption, output scrubbing          |
+| [Sandbox](<docs/content/docs/(configuration)/sandbox.mdx>)          | Process containment and environment sanitization          |
+| [Cron Jobs](<docs/content/docs/(features)/cron.mdx>)                | Scheduled recurring tasks                                 |
+| [MCP](<docs/content/docs/(features)/mcp.mdx>)                       | External tool servers via Model Context Protocol          |
+| [OpenCode](<docs/content/docs/(features)/opencode.mdx>)             | OpenCode as a worker backend                              |
+| [Messaging](<docs/content/docs/(messaging)/messaging.mdx>)          | Adapter architecture and platform setup                   |
 
 ---
 

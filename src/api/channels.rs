@@ -1030,7 +1030,10 @@ pub(super) async fn get_channel_settings(
     channel_store
         .get(&channel_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| {
+            tracing::error!(%error, %channel_id, "failed to load channel for settings fetch");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
@@ -1075,7 +1078,10 @@ pub(super) async fn update_channel_settings(
     channel_store
         .get(&channel_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| {
+            tracing::error!(%error, %channel_id, "failed to load channel for settings update");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());

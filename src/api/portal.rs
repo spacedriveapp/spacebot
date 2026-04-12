@@ -175,11 +175,15 @@ pub(super) async fn portal_send(
         let mut attachment_metas: Vec<crate::agent::channel_attachments::SavedAttachmentMeta> =
             Vec::with_capacity(request.attachment_ids.len());
         for attachment_id in &request.attachment_ids {
+            // Filter by channel_id to prevent cross-conversation attachment
+            // references — a user in conversation A should not be able to
+            // reference an attachment uploaded in conversation B.
             let row = sqlx::query(
-                "SELECT id, original_filename, saved_filename, mime_type, size_bytes, disk_path \
-                 FROM saved_attachments WHERE id = ?",
+                "SELECT id, original_filename, saved_filename, mime_type, size_bytes \
+                 FROM saved_attachments WHERE id = ? AND channel_id = ?",
             )
             .bind(attachment_id)
+            .bind(&conversation_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| {
@@ -188,15 +192,26 @@ pub(super) async fn portal_send(
             })?;
 
             if let Some(row) = row {
-                let disk_path_str: String = row.try_get("disk_path").unwrap_or_default();
-                let id: String = row.try_get("id").unwrap_or_default();
-                let filename: String = row.try_get("original_filename").unwrap_or_default();
-                let saved_filename: String = row.try_get("saved_filename").unwrap_or_default();
-                let mime_type: String = row.try_get("mime_type").unwrap_or_default();
-                let size_bytes: u64 = row
+                let id: String = row.try_get("id").map_err(|error| {
+                    tracing::error!(%error, "saved_attachments row missing id");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let filename: String = row.try_get("original_filename").map_err(|error| {
+                    tracing::error!(%error, "saved_attachments row missing original_filename");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let saved_filename: String = row.try_get("saved_filename").map_err(|error| {
+                    tracing::error!(%error, "saved_attachments row missing saved_filename");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let mime_type: String = row.try_get("mime_type").map_err(|error| {
+                    tracing::error!(%error, "saved_attachments row missing mime_type");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let size_bytes = row
                     .try_get::<i64, _>("size_bytes")
                     .ok()
-                    .map(|n| n as u64)
+                    .and_then(|n| u64::try_from(n).ok())
                     .unwrap_or(0);
                 attachment_metas.push(crate::agent::channel_attachments::SavedAttachmentMeta {
                     id: id.clone(),
@@ -212,7 +227,6 @@ pub(super) async fn portal_send(
                     size_bytes: Some(size_bytes),
                     auth_header: None,
                     pre_saved_id: Some(id),
-                    disk_path: Some(std::path::PathBuf::from(disk_path_str)),
                 });
             }
         }

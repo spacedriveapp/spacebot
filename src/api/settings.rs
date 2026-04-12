@@ -122,12 +122,14 @@ pub(super) async fn get_global_settings(
         ssh_enabled,
         spacedrive,
     ) = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for global settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+            tracing::error!(%error, "failed to parse config.toml for global settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         let company_name = doc
             .get("instance")
@@ -311,16 +313,18 @@ pub(super) async fn update_global_settings(
     let config_path = state.config_path.read().await.clone();
 
     let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for update");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     } else {
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for update");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let mut requires_restart = false;
 
@@ -428,7 +432,10 @@ pub(super) async fn update_global_settings(
 
     tokio::fs::write(&config_path, doc.to_string())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to write config.toml for update");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let reload_path = config_path.clone();
     match tokio::task::spawn_blocking(move || crate::config::Config::load_from_path(&reload_path))

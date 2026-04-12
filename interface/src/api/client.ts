@@ -1,4 +1,10 @@
-export const BASE_PATH: string = (window as any).__SPACEBOT_BASE_PATH || "";
+declare global {
+	interface Window {
+		__SPACEBOT_BASE_PATH?: string;
+	}
+}
+
+export const BASE_PATH: string = window.__SPACEBOT_BASE_PATH || "";
 
 /**
  * Dynamic server URL for the Tauri desktop app. When set, all API
@@ -348,12 +354,45 @@ export interface StatusBlockSnapshot {
 	completed_items: CompletedItemInfo[];
 }
 
+/**
+ * One entry in the prompt history. Mirrors rig's `Message` enum as
+ * serialized to JSON: role plus content that may be a plain string,
+ * a single block, or an array of blocks depending on the LLM provider.
+ */
+export interface PromptHistoryMessage {
+	role: string;
+	content: PromptHistoryContent;
+}
+
+export type PromptHistoryContent =
+	| string
+	| PromptHistoryBlock
+	| PromptHistoryBlock[];
+
+/**
+ * A single content block inside a `PromptHistoryMessage`. Fields are
+ * optional because rig's content variants are structurally different:
+ * text blocks, tool calls, tool results, and reasoning all flow through
+ * the same channel.
+ */
+export interface PromptHistoryBlock {
+	type?: string;
+	text?: string;
+	id?: string;
+	content?: unknown;
+	function?: {
+		name: string;
+		arguments: string | Record<string, unknown>;
+	};
+	reasoning?: string[];
+}
+
 export interface PromptInspectResponse {
 	channel_id: string;
 	system_prompt: string;
 	total_chars: number;
 	history_length: number;
-	history: unknown[];
+	history: PromptHistoryMessage[];
 	capture_enabled: boolean;
 	/** Present when the channel is not active */
 	error?: string;
@@ -378,7 +417,7 @@ export interface PromptSnapshot {
 	user_message: string;
 	system_prompt: string;
 	system_prompt_chars: number;
-	history: unknown;
+	history: PromptHistoryMessage[];
 	history_length: number;
 }
 
@@ -1812,8 +1851,11 @@ export const api = {
 	},
 
 	togglePlatform: async (platform: string, enabled: boolean, adapter?: string) => {
-		const body: Record<string, unknown> = { platform, enabled };
-		if (adapter) body.adapter = adapter;
+		const body: Types.TogglePlatformRequest = {
+			platform,
+			enabled,
+			adapter: adapter ?? null,
+		};
 		const response = await fetch(`${getApiBase()}/messaging/toggle`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1826,8 +1868,10 @@ export const api = {
 	},
 
 	disconnectPlatform: async (platform: string, adapter?: string) => {
-		const body: Record<string, unknown> = { platform };
-		if (adapter) body.adapter = adapter;
+		const body: Types.DisconnectPlatformRequest = {
+			platform,
+			adapter: adapter ?? null,
+		};
 		const response = await fetch(`${getApiBase()}/messaging/disconnect`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1993,7 +2037,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ link: AgentLinkResponse }>;
 	},
 	updateLink: async (from: string, to: string, request: UpdateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
 		const response = await fetch(
@@ -2007,7 +2051,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ link: AgentLinkResponse }>;
 	},
 	deleteLink: async (from: string, to: string): Promise<void> => {
 		const response = await fetch(
@@ -2030,7 +2074,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ group: TopologyGroup }>;
 	},
 	updateGroup: async (name: string, request: UpdateGroupRequest): Promise<{ group: TopologyGroup }> => {
 		const response = await fetch(
@@ -2044,7 +2088,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ group: TopologyGroup }>;
 	},
 	deleteGroup: async (name: string): Promise<void> => {
 		const response = await fetch(
@@ -2067,7 +2111,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ human: TopologyHuman }>;
 	},
 	updateHuman: async (id: string, request: UpdateHumanRequest): Promise<{ human: TopologyHuman }> => {
 		const response = await fetch(
@@ -2081,7 +2125,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ human: TopologyHuman }>;
 	},
 	deleteHuman: async (id: string): Promise<void> => {
 		const response = await fetch(
@@ -2137,27 +2181,59 @@ export const api = {
 	portalHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${getApiBase()}/portal/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
-	listPortalConversations: (agentId: string, includeArchived = false, limit = 100) =>
-		fetch(`${getApiBase()}/portal/conversations?agent_id=${encodeURIComponent(agentId)}&include_archived=${includeArchived}&limit=${limit}`),
+	listPortalConversations: (
+		agentId: string,
+		includeArchived = false,
+		limit = 100,
+	): Promise<Types.PortalConversationsResponse> =>
+		fetchJson<Types.PortalConversationsResponse>(
+			`/portal/conversations?agent_id=${encodeURIComponent(agentId)}&include_archived=${includeArchived}&limit=${limit}`,
+		),
 
-	createPortalConversation: (agentId: string, title?: string, settings?: import("./types").ConversationSettings) =>
-		fetch(`${getApiBase()}/portal/conversations`, {
+	createPortalConversation: async (
+		agentId: string,
+		title?: string,
+		settings?: Types.ConversationSettings,
+	): Promise<Types.PortalConversationResponse> => {
+		const response = await fetch(`${getApiBase()}/portal/conversations`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, title, settings }),
-		}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<Types.PortalConversationResponse>;
+	},
 
-	updatePortalConversation: (agentId: string, sessionId: string, title?: string, archived?: boolean, settings?: import("./types").ConversationSettings) =>
-		fetch(`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}`, {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent_id: agentId, title, archived, settings }),
-		}),
+	updatePortalConversation: async (
+		agentId: string,
+		sessionId: string,
+		title?: string,
+		archived?: boolean,
+		settings?: Types.ConversationSettings,
+	): Promise<Types.PortalConversationResponse> => {
+		const response = await fetch(
+			`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ agent_id: agentId, title, archived, settings }),
+			},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<Types.PortalConversationResponse>;
+	},
 
-	deletePortalConversation: (agentId: string, sessionId: string) =>
-		fetch(`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}?agent_id=${encodeURIComponent(agentId)}`, {
-			method: "DELETE",
-		}),
+	deletePortalConversation: async (
+		agentId: string,
+		sessionId: string,
+	): Promise<{ success: boolean }> => {
+		const response = await fetch(
+			`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return { success: true };
+	},
 
 	getConversationDefaults: (agentId: string) =>
 		fetchJson<Types.ConversationDefaultsResponse>(`/conversation-defaults?agent_id=${encodeURIComponent(agentId)}`),
@@ -2294,7 +2370,7 @@ export const api = {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ state: string; message: string }>;
 	},
 	rotateKey: async (): Promise<{ master_key: string; message: string }> => {
 		const response = await fetch(`${getApiBase()}/secrets/rotate`, { method: "POST" });
@@ -2302,7 +2378,7 @@ export const api = {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ master_key: string; message: string }>;
 	},
 	migrateSecrets: async (): Promise<MigrateResponse> => {
 		const response = await fetch(`${getApiBase()}/secrets/migrate`, { method: "POST" });

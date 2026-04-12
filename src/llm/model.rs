@@ -583,21 +583,21 @@ impl CompletionModel for SpacebotModel {
         }
 
         // Record usage in the accumulator (if attached).
-        if let Some(ref accumulator) = self.usage_accumulator {
-            if let Ok(ref response) = result {
-                let body = &response.raw_response.body;
-                let extended = if self.provider == "anthropic" {
-                    crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
-                } else {
-                    crate::llm::usage::ExtendedUsage::from_openai_body(body)
-                };
-                let cost =
-                    crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
-                accumulator
-                    .lock()
-                    .await
-                    .add(extended, &self.full_model_name, &self.provider, cost);
-            }
+        if let Some(ref accumulator) = self.usage_accumulator
+            && let Ok(ref response) = result
+        {
+            let body = &response.raw_response.body;
+            let extended = if self.provider == "anthropic" {
+                crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+            } else {
+                crate::llm::usage::ExtendedUsage::from_openai_body(body)
+            };
+            let cost =
+                crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
+            accumulator
+                .lock()
+                .await
+                .add(extended, &self.full_model_name, &self.provider, cost);
         }
 
         result
@@ -3709,7 +3709,7 @@ fn parse_openai_responses_sse_response(
     // accumulated SSE events.
     let output_is_empty = response["output"]
         .as_array()
-        .map_or(true, |arr| arr.is_empty());
+        .is_none_or(|arr| arr.is_empty());
 
     if output_is_empty && !output_acc.is_empty() {
         let mut reconstructed: Vec<Value> = Vec::new();

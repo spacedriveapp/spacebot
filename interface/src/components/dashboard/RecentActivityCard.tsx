@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useMemo, useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {CheckSquare, Brain, Robot, Circle} from "@phosphor-icons/react";
 import {
@@ -45,7 +45,10 @@ export function RecentActivityCard() {
 		staleTime: 60_000,
 	});
 
-	const agentIds = (agentsData?.agents ?? []).map((a) => a.id);
+	const agentIds = useMemo(
+		() => (agentsData?.agents ?? []).map((a) => a.id),
+		[agentsData],
+	);
 
 	const {data: tasksData} = useQuery({
 		queryKey: ["tasks"],

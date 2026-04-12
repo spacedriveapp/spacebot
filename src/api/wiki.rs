@@ -1,10 +1,33 @@
 use super::state::ApiState;
+use crate::error::{Error as CrateError, WikiError};
 use crate::wiki::{CreateWikiPageInput, EditWikiPageInput, WikiPageType, WikiStore};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Map a crate-level wiki error to an HTTP status.
+fn wiki_error_status(error: CrateError) -> StatusCode {
+    match error {
+        CrateError::Wiki(wiki) => match *wiki {
+            WikiError::NotFound { .. } | WikiError::VersionNotFound { .. } => StatusCode::NOT_FOUND,
+            WikiError::EditFailed(_) => StatusCode::BAD_REQUEST,
+            WikiError::Database(inner) => {
+                tracing::error!(%inner, "wiki database error");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            WikiError::Other(inner) => {
+                tracing::error!(%inner, "wiki store error");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        },
+        other => {
+            tracing::error!(error = %other, "wiki handler error");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -150,10 +173,7 @@ pub(super) async fn list_pages(
 ) -> Result<Json<WikiListResponse>, StatusCode> {
     let store = get_wiki_store(&state)?;
     let page_type = parse_page_type(query.page_type.as_deref())?;
-    let pages = store
-        .list(page_type)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let pages = store.list(page_type).await.map_err(wiki_error_status)?;
     let total = pages.len();
     Ok(Json(WikiListResponse { pages, total }))
 }
@@ -178,7 +198,7 @@ pub(super) async fn search_pages(
     let pages = store
         .search(&query.query, page_type)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(wiki_error_status)?;
     let total = pages.len();
     Ok(Json(WikiListResponse { pages, total }))
 }
@@ -213,7 +233,7 @@ pub(super) async fn create_page(
             edit_summary: request.edit_summary,
         })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(wiki_error_status)?;
 
     Ok(Json(WikiPageResponse { page }))
 }
@@ -242,7 +262,7 @@ pub(super) async fn get_page(
     let page = store
         .read(&slug, query.version)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(wiki_error_status)?
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(WikiPageResponse { page }))
 }
@@ -278,16 +298,7 @@ pub(super) async fn edit_page(
             author_id: request.author_id,
         })
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                StatusCode::NOT_FOUND
-            } else if msg.contains("wiki_edit failed") {
-                StatusCode::BAD_REQUEST
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        })?;
+        .map_err(wiki_error_status)?;
     Ok(Json(WikiPageResponse { page }))
 }
 
@@ -314,7 +325,7 @@ pub(super) async fn get_history(
     let versions = store
         .history(&slug, query.limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(wiki_error_status)?;
     Ok(Json(WikiHistoryResponse { versions }))
 }
 
@@ -345,13 +356,7 @@ pub(super) async fn restore_version(
             &request.author_id,
         )
         .await
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        })?;
+        .map_err(wiki_error_status)?;
     Ok(Json(WikiPageResponse { page }))
 }
 
@@ -371,10 +376,7 @@ pub(super) async fn archive_page(
     Path(slug): Path<String>,
 ) -> Result<Json<WikiActionResponse>, StatusCode> {
     let store = get_wiki_store(&state)?;
-    store
-        .archive(&slug)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store.archive(&slug).await.map_err(wiki_error_status)?;
     Ok(Json(WikiActionResponse {
         success: true,
         message: format!("Page '{slug}' archived"),

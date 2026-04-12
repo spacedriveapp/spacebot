@@ -14,6 +14,29 @@ import {TagInput} from "@/components/TagInput";
 import {supportsAdaptiveThinking} from "./utils";
 import {SANDBOX_DEFAULTS} from "./constants";
 import type {ConfigSectionEditorProps} from "./types";
+import type {
+	BrowserUpdate,
+	CoalesceUpdate,
+	CompactionUpdate,
+	CortexUpdate,
+	MemoryPersistenceUpdate,
+	ProjectsUpdate,
+	RoutingUpdate,
+	SandboxUpdate,
+	TuningUpdate,
+} from "@/api/client";
+
+// Union of every section's update type. Each instance of the editor renders
+// exactly one section, so the active section decides which fields are present.
+type ConfigValues = RoutingUpdate &
+	TuningUpdate &
+	CompactionUpdate &
+	CortexUpdate &
+	CoalesceUpdate &
+	MemoryPersistenceUpdate &
+	BrowserUpdate &
+	SandboxUpdate &
+	ProjectsUpdate;
 
 export function ConfigSectionEditor({
 	sectionId,
@@ -25,7 +48,6 @@ export function ConfigSectionEditor({
 	saveHandlerRef,
 	onSave,
 }: ConfigSectionEditorProps) {
-	type ConfigValues = Record<string, string | number | boolean | string[]>;
 	const sandbox = config.sandbox ?? SANDBOX_DEFAULTS;
 
 	const [localValues, setLocalValues] = useState<ConfigValues>(() => {
@@ -160,7 +182,11 @@ export function ConfigSectionEditor({
 	const renderFields = () => {
 		switch (sectionId) {
 			case "routing": {
-				const modelSlots = [
+				const modelSlots: Array<{
+					key: "channel" | "branch" | "worker" | "compactor" | "cortex" | "voice";
+					label: string;
+					description: string;
+				}> = [
 					{
 						key: "channel",
 						label: "Channel Model",
@@ -194,48 +220,52 @@ export function ConfigSectionEditor({
 				];
 				return (
 					<div className="grid gap-4">
-						{modelSlots.map(({key, label, description}) => (
-							<div key={key} className="flex flex-col gap-2">
-								<ModelSelect
-									label={label}
-									description={description}
-									value={localValues[key] as string}
-									onChange={(v) => handleChange(key, v)}
-									capability={key === "voice" ? "voice_transcription" : undefined}
-								/>
-								{supportsAdaptiveThinking(localValues[key] as string) && (
-									<div className="ml-4 flex flex-col gap-1">
-										<label className="text-xs font-medium text-ink-dull">
-											Thinking Effort
-										</label>
-										<SelectRoot
-											value={
-												(localValues[`${key}_thinking_effort`] as string) ||
-												"auto"
-											}
-											onValueChange={(value) =>
-												handleChange(`${key}_thinking_effort`, value)
-											}
-										>
-											<SelectTrigger className="border-app-line/50 bg-app-dark-box/30">
-												<SelectValue />
-											</SelectTrigger>
-											<SelectContent>
-												<SelectItem value="auto">Auto</SelectItem>
-												<SelectItem value="max">Max</SelectItem>
-												<SelectItem value="high">High</SelectItem>
-												<SelectItem value="medium">Medium</SelectItem>
-												<SelectItem value="low">Low</SelectItem>
-											</SelectContent>
-										</SelectRoot>
-									</div>
-								)}
-							</div>
-						))}
+						{modelSlots.map(({key, label, description}) => {
+							const modelValue = localValues[key] ?? "";
+							const thinkingKey =
+								key === "voice" ? null : (`${key}_thinking_effort` as const);
+							return (
+								<div key={key} className="flex flex-col gap-2">
+									<ModelSelect
+										label={label}
+										description={description}
+										value={modelValue}
+										onChange={(v) => handleChange(key, v)}
+										capability={
+											key === "voice" ? "voice_transcription" : undefined
+										}
+									/>
+									{thinkingKey && supportsAdaptiveThinking(modelValue) && (
+										<div className="ml-4 flex flex-col gap-1">
+											<label className="text-xs font-medium text-ink-dull">
+												Thinking Effort
+											</label>
+											<SelectRoot
+												value={localValues[thinkingKey] ?? "auto"}
+												onValueChange={(value) =>
+													handleChange(thinkingKey, value)
+												}
+											>
+												<SelectTrigger className="border-app-line/50 bg-app-dark-box/30">
+													<SelectValue />
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="auto">Auto</SelectItem>
+													<SelectItem value="max">Max</SelectItem>
+													<SelectItem value="high">High</SelectItem>
+													<SelectItem value="medium">Medium</SelectItem>
+													<SelectItem value="low">Low</SelectItem>
+												</SelectContent>
+											</SelectRoot>
+										</div>
+									)}
+								</div>
+							);
+						})}
 						<NumberStepper
 							label="Rate Limit Cooldown"
 							description="Seconds to deprioritize rate-limited models"
-							value={localValues.rate_limit_cooldown_secs as number}
+							value={localValues.rate_limit_cooldown_secs ?? 0}
 							onChange={(v) => handleChange("rate_limit_cooldown_secs", v)}
 							min={0}
 							suffix="s"

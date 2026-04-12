@@ -4,6 +4,8 @@ import {
 	api,
 	type PromptInspectResponse,
 	type PromptSnapshotSummary,
+	type PromptHistoryBlock,
+	type PromptHistoryMessage,
 } from "@/api/client";
 import {
 	Button,
@@ -218,8 +220,8 @@ export function PromptInspectModal({
 }
 
 /** Render the message history as raw text, exactly as the model sees it. */
-function renderRawHistory(history: unknown): string {
-	const messages = Array.isArray(history) ? history : [];
+function renderRawHistory(history: PromptHistoryMessage[] | undefined): string {
+	const messages = history ?? [];
 	if (messages.length === 0) return "\n(empty)";
 
 	const lines: string[] = [];
@@ -245,7 +247,7 @@ function renderRawHistory(history: unknown): string {
  * - AssistantContent with `#[serde(untagged)]` -> `{text: "..."}` (no type field),
  *   tool calls are `{id, function: {name, arguments}}`
  */
-function extractTextParts(message: any): string[] {
+function extractTextParts(message: PromptHistoryMessage): string[] {
 	const parts: string[] = [];
 	const content = message.content;
 
@@ -253,48 +255,53 @@ function extractTextParts(message: any): string[] {
 		parts.push(content);
 	} else if (Array.isArray(content)) {
 		for (const block of content) {
-			if (block.type === "text" && typeof block.text === "string") {
-				parts.push(block.text);
-			} else if (!block.type && typeof block.text === "string") {
-				parts.push(block.text);
-			} else if (block.type === "toolresult") {
-				const resultText = formatToolResultText(block.content);
-				parts.push(`[tool_result id=${block.id}] ${resultText}`);
-			} else if (block.function && typeof block.function === "object") {
-				const args =
-					typeof block.function.arguments === "string"
-						? block.function.arguments
-						: JSON.stringify(block.function.arguments);
-				parts.push(`[tool_use ${block.function.name}] ${args}`);
-			} else if (Array.isArray(block.reasoning)) {
-				parts.push(`[thinking] ${block.reasoning.join("\n")}`);
-			}
+			appendBlockText(block, parts);
 		}
 	} else if (content && typeof content === "object") {
-		if (typeof content.text === "string") {
-			parts.push(content.text);
-		} else if (content.function) {
-			const args =
-				typeof content.function.arguments === "string"
-					? content.function.arguments
-					: JSON.stringify(content.function.arguments);
-			parts.push(`[tool_use ${content.function.name}] ${args}`);
-		} else if (content.type === "toolresult") {
-			const resultText = formatToolResultText(content.content);
-			parts.push(`[tool_result id=${content.id}] ${resultText}`);
-		}
+		appendBlockText(content, parts);
 	}
 
 	return parts;
 }
 
-function formatToolResultText(content: any): string {
+function appendBlockText(block: PromptHistoryBlock, parts: string[]): void {
+	if (block.type === "text" && typeof block.text === "string") {
+		parts.push(block.text);
+		return;
+	}
+	if (!block.type && typeof block.text === "string") {
+		parts.push(block.text);
+		return;
+	}
+	if (block.type === "toolresult") {
+		const resultText = formatToolResultText(block.content);
+		parts.push(`[tool_result id=${block.id ?? ""}] ${resultText}`);
+		return;
+	}
+	if (block.function) {
+		const args =
+			typeof block.function.arguments === "string"
+				? block.function.arguments
+				: JSON.stringify(block.function.arguments);
+		parts.push(`[tool_use ${block.function.name}] ${args}`);
+		return;
+	}
+	if (Array.isArray(block.reasoning)) {
+		parts.push(`[thinking] ${block.reasoning.join("\n")}`);
+	}
+}
+
+function formatToolResultText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
 		return content
-			.map((c: any) =>
-				typeof c.text === "string" ? c.text : JSON.stringify(c),
-			)
+			.map((c) => {
+				if (c && typeof c === "object" && "text" in c) {
+					const text = (c as {text: unknown}).text;
+					if (typeof text === "string") return text;
+				}
+				return JSON.stringify(c);
+			})
 			.join(" ");
 	}
 	return JSON.stringify(content);

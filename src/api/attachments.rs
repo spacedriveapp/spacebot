@@ -96,7 +96,7 @@ pub(super) async fn upload_attachment(
     let pool = pools.get(&agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
     // Read the first file field from the multipart body.
-    let field = multipart
+    let mut field = multipart
         .next_field()
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
@@ -113,13 +113,28 @@ pub(super) async fn upload_attachment(
                 .to_string()
         });
 
-    let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Read the body in chunks and abort early if the payload exceeds MAX_SIZE.
+    // Without this, field.bytes() would buffer the entire upload into memory
+    // before we can check the size.
+    let mut bytes = Vec::new();
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > MAX_SIZE {
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read upload chunk");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+    }
 
     if bytes.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
-    }
-    if bytes.len() > MAX_SIZE {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     let meta = persist_attachment_bytes(
@@ -150,7 +165,7 @@ pub(super) async fn upload_attachment(
 
 /// Serve a saved attachment file.
 ///
-/// Streams the file from disk with the correct Content-Type.
+/// Reads the file from disk with the correct Content-Type.
 /// Use `?download=true` to force a download prompt.
 /// Use `?thumbnail=true` to request a thumbnail (currently serves full file).
 #[utoipa::path(
@@ -176,8 +191,12 @@ pub(super) async fn serve_attachment(
     let pools = state.agent_pools.load();
     let pool = pools.get(&agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
+    let workspaces = state.agent_workspaces.load();
+    let workspace = workspaces.get(&agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let saved_dir = workspace.join("saved");
+
     let row = sqlx::query(
-        "SELECT original_filename, saved_filename, mime_type, disk_path \
+        "SELECT original_filename, saved_filename, mime_type \
          FROM saved_attachments WHERE id = ?",
     )
     .bind(&attachment_id)
@@ -189,12 +208,31 @@ pub(super) async fn serve_attachment(
     })?
     .ok_or(StatusCode::NOT_FOUND)?;
 
-    let original_filename: String = row.try_get("original_filename").unwrap_or_default();
-    let mime_type: String = row.try_get("mime_type").unwrap_or_default();
-    let disk_path: String = row.try_get("disk_path").unwrap_or_default();
+    let original_filename: String = row.try_get("original_filename").map_err(|error| {
+        tracing::error!(%error, %attachment_id, "saved_attachments row missing original_filename");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let mime_type: String = row.try_get("mime_type").map_err(|error| {
+        tracing::error!(%error, %attachment_id, "saved_attachments row missing mime_type");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let saved_filename: String = row.try_get("saved_filename").map_err(|error| {
+        tracing::error!(%error, %attachment_id, "saved_attachments row missing saved_filename");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let bytes = tokio::fs::read(&disk_path).await.map_err(|error| {
-        tracing::warn!(%error, path = %disk_path, "attachment file missing from disk");
+    // Re-derive the path from the agent's saved/ directory instead of trusting
+    // the disk_path column, which could read arbitrary files if the row is
+    // corrupted. saved_filename is sanitized on insert but we also reject
+    // anything that escapes saved_dir.
+    let resolved_path = saved_dir.join(&saved_filename);
+    if !resolved_path.starts_with(&saved_dir) {
+        tracing::error!(%attachment_id, %saved_filename, "attachment path escapes saved dir");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let bytes = tokio::fs::read(&resolved_path).await.map_err(|error| {
+        tracing::warn!(%error, path = %resolved_path.display(), "attachment file missing from disk");
         StatusCode::NOT_FOUND
     })?;
 
@@ -215,7 +253,10 @@ pub(super) async fn serve_attachment(
         .header(header::CONTENT_DISPOSITION, &disposition)
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            tracing::error!(%error, "failed to build attachment response");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(response)
 }
@@ -281,21 +322,25 @@ pub(super) async fn list_attachments(
 
     let attachments = rows
         .into_iter()
-        .map(|row| AttachmentInfo {
-            id: row.try_get("id").unwrap_or_default(),
-            original_filename: row.try_get("original_filename").unwrap_or_default(),
-            mime_type: row.try_get("mime_type").unwrap_or_default(),
-            size_bytes: row
-                .try_get::<i64, _>("size_bytes")
-                .ok()
-                .map(|n| n as u64)
-                .unwrap_or(0),
-            created_at: row
-                .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
-                .map(|t| t.to_rfc3339())
-                .unwrap_or_default(),
+        .map(|row| {
+            let id: String = row.try_get("id")?;
+            let original_filename: String = row.try_get("original_filename")?;
+            let mime_type: String = row.try_get("mime_type")?;
+            let size_bytes: i64 = row.try_get("size_bytes")?;
+            let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
+            Ok::<_, sqlx::Error>(AttachmentInfo {
+                id,
+                original_filename,
+                mime_type,
+                size_bytes: u64::try_from(size_bytes).unwrap_or(0),
+                created_at: created_at.to_rfc3339(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            tracing::error!(%error, "saved_attachments row missing expected column");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(AttachmentListResponse { attachments }))
 }

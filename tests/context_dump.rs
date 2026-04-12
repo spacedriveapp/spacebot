@@ -131,6 +131,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
             chrono_tz::Tz::UTC,
         ),
         api_state: None,
+        wiki_store: None,
     };
 
     Ok((deps, config))
@@ -316,7 +317,7 @@ async fn dump_branch_context() {
     let instance_dir = rc.instance_dir.to_string_lossy();
     let workspace_dir = rc.workspace_dir.to_string_lossy();
     let branch_prompt = prompt_engine
-        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .render_branch_prompt(&instance_dir, &workspace_dir, false)
         .expect("failed to render branch prompt");
     print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
     print_stats("System prompt", &branch_prompt);
@@ -338,6 +339,8 @@ async fn dump_branch_context() {
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
         None,
+        None,
+        deps.sandbox.clone(),
     );
 
     let tool_defs = branch_tool_server
@@ -389,6 +392,8 @@ async fn dump_worker_context() {
             &[],
             browser_config.persist_session,
             None,
+            false,
+            None,
         )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
@@ -411,6 +416,8 @@ async fn dump_worker_context() {
         deps.runtime_config.clone(),
         Default::default(),
         deps.memory_search.clone(),
+        false,
+        None,
     );
 
     let tool_defs = worker_tool_server
@@ -540,7 +547,7 @@ async fn dump_all_contexts() {
 
     // ── Branch ──
     let branch_prompt = prompt_engine
-        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .render_branch_prompt(&instance_dir, &workspace_dir, false)
         .expect("failed to render branch prompt");
     let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
@@ -555,6 +562,8 @@ async fn dump_all_contexts() {
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
         None,
+        None,
+        deps.sandbox.clone(),
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -582,6 +591,8 @@ async fn dump_all_contexts() {
             &[],
             browser_config.persist_session,
             None,
+            false,
+            None,
         )
         .expect("failed to render worker prompt");
     let brave_search_key = (**rc.brave_search_key.load()).clone();
@@ -600,6 +611,8 @@ async fn dump_all_contexts() {
         deps.runtime_config.clone(),
         Default::default(),
         deps.memory_search.clone(),
+        false,
+        None,
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

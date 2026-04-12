@@ -31,11 +31,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 	// Fetch conversations list
 	const { data: conversationsData } = useQuery({
 		queryKey: ["portal-conversations", agentId],
-		queryFn: async () => {
-			const response = await api.listPortalConversations(agentId);
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			return response.json();
-		},
+		queryFn: () => api.listPortalConversations(agentId),
 	});
 
 	const conversations = conversationsData?.conversations ?? [];
@@ -49,14 +45,18 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 		if (newest) setActiveConversationId(newest.id);
 	}, [conversationsData, agentId]);
 
-	// Reset settings when switching conversations, hydrating from cached data
+	// Hydrate settings from cached data when switching conversations. The ref
+	// prevents background conversation refetches from clobbering edits the user
+	// has made since we last hydrated.
+	const hydratedSettingsFor = useRef<string | null>(null);
 	useEffect(() => {
-		const activeConv = conversations.find(
-			(c: { id: string; settings?: ConversationSettings }) => c.id === activeConversationId,
-		);
-		setSettings(activeConv?.settings ?? {});
+		if (hydratedSettingsFor.current === activeConversationId) return;
+		const activeConv = conversations.find((c) => c.id === activeConversationId);
+		if (!activeConv) return;
+		setSettings((activeConv.settings ?? {}) as ConversationSettings);
 		setShowSettings(false);
-	}, [activeConversationId, agentId, conversationsData]);
+		hydratedSettingsFor.current = activeConversationId;
+	}, [activeConversationId, conversations]);
 
 	const {
 		data: defaults,
@@ -95,11 +95,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 
 	const createConversationMutation = useMutation({
-		mutationFn: async () => {
-			const response = await api.createPortalConversation(agentId);
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			return response.json();
-		},
+		mutationFn: () => api.createPortalConversation(agentId),
 		onSuccess: (data) => {
 			setActiveConversationId(data.conversation.id);
 			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
@@ -107,11 +103,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 	});
 
 	const deleteConversationMutation = useMutation({
-		mutationFn: async (id: string) => {
-			const response = await api.deletePortalConversation(agentId, id);
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			return response.json();
-		},
+		mutationFn: (id: string) => api.deletePortalConversation(agentId, id),
 		onSuccess: (_, deletedId) => {
 			if (activeConversationId === deletedId) {
 				setActiveConversationId(getPortalSessionId(agentId));
@@ -121,29 +113,22 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 	});
 
 	const archiveConversationMutation = useMutation({
-		mutationFn: async ({ id, archived }: { id: string; archived: boolean }) => {
-			const response = await api.updatePortalConversation(agentId, id, undefined, archived);
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			return response.json();
-		},
+		mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
+			api.updatePortalConversation(agentId, id, undefined, archived),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
 		},
 	});
 
 	const saveSettingsMutation = useMutation({
-		mutationFn: async () => {
-			if (!activeConversationId) return;
-			const response = await api.updatePortalConversation(
+		mutationFn: () =>
+			api.updatePortalConversation(
 				agentId,
 				activeConversationId,
 				undefined,
 				undefined,
 				settings,
-			);
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			return response.json();
-		},
+			),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
 			setShowSettings(false);

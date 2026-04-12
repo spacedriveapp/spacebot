@@ -1,6 +1,6 @@
 //! Instance-wide wiki storage (SQLite).
 
-use crate::error::Result;
+use crate::error::{Result, WikiError};
 use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -294,11 +294,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
+        row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, cell) in dp[0].iter_mut().enumerate().take(n + 1) {
+        *cell = j;
     }
     for i in 1..=m {
         for j in 1..=n {
@@ -383,15 +383,15 @@ pub fn extract_wiki_links(content: &str) -> Vec<String> {
     let mut chars = content.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         // Look for ](wiki:
-        if c == ']' {
-            if let Some((_, '(')) = chars.peek().copied() {
-                chars.next();
-                let rest = &content[i + 2..];
-                if let Some(end) = rest.find(')') {
-                    let href = &rest[..end];
-                    if let Some(slug) = href.strip_prefix("wiki:") {
-                        slugs.push(slug.to_string());
-                    }
+        if c == ']'
+            && let Some((_, '(')) = chars.peek().copied()
+        {
+            chars.next();
+            let rest = &content[i + 2..];
+            if let Some(end) = rest.find(')') {
+                let href = &rest[..end];
+                if let Some(slug) = href.strip_prefix("wiki:") {
+                    slugs.push(slug.to_string());
                 }
             }
         }
@@ -481,7 +481,9 @@ impl WikiStore {
         let page = self
             .load_by_slug(&input.slug)
             .await?
-            .context(format!("wiki page '{}' not found", input.slug))?;
+            .ok_or_else(|| WikiError::NotFound {
+                slug: input.slug.clone(),
+            })?;
 
         let new_content = tolerant_replace(
             &page.content,
@@ -489,7 +491,7 @@ impl WikiStore {
             &input.new_string,
             input.replace_all,
         )
-        .map_err(|e| anyhow::anyhow!("wiki_edit failed: {e}"))?;
+        .map_err(|e| WikiError::EditFailed(e.to_string()))?;
 
         let new_version = page.version + 1;
 
@@ -524,7 +526,7 @@ impl WikiStore {
 
         self.load_by_id(&page.id)
             .await?
-            .context("page not found after edit")
+            .ok_or_else(|| WikiError::Other(anyhow::anyhow!("page not found after edit")))
             .map_err(crate::error::Error::from)
     }
 
@@ -600,7 +602,10 @@ impl WikiStore {
         query: &str,
         page_type: Option<WikiPageType>,
     ) -> Result<Vec<WikiPageSummary>> {
-        let fts_query = format!("{query}*");
+        let fts_query = sanitize_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         let rows = if let Some(pt) = page_type {
             sqlx::query(
                 r#"SELECT p.id, p.slug, p.title, p.page_type, p.version, p.updated_at, p.updated_by
@@ -684,27 +689,22 @@ impl WikiStore {
         let content = self
             .read(slug, Some(version))
             .await?
-            .context(format!("wiki page '{slug}' version {version} not found"))?
+            .ok_or_else(|| WikiError::VersionNotFound {
+                slug: slug.to_string(),
+                version,
+            })?
             .content;
 
-        let edit_input = EditWikiPageInput {
-            slug: slug.to_string(),
-            old_string: self
-                .load_by_slug(slug)
-                .await?
-                .context("page not found")?
-                .content,
-            new_string: content,
-            replace_all: false,
-            edit_summary: Some(format!("Restored to version {version}")),
-            author_type: author_type.to_string(),
-            author_id: author_id.to_string(),
-        };
+        let page = self
+            .load_by_slug(slug)
+            .await?
+            .ok_or_else(|| WikiError::NotFound {
+                slug: slug.to_string(),
+            })?;
 
-        // Use direct update since we're replacing the whole content
-        let page = self.load_by_slug(slug).await?.context("page not found")?;
+        let edit_summary = format!("Restored to version {version}");
+        let restored_content = content;
         let new_version = page.version + 1;
-        let restored_content = edit_input.new_string.clone();
 
         sqlx::query(
             r#"UPDATE wiki_pages SET content = ?, version = ?, updated_by = ?,
@@ -728,7 +728,7 @@ impl WikiStore {
         .bind(&page.id)
         .bind(new_version)
         .bind(&restored_content)
-        .bind(edit_input.edit_summary)
+        .bind(&edit_summary)
         .bind(author_type)
         .bind(author_id)
         .execute(&self.pool)
@@ -737,7 +737,7 @@ impl WikiStore {
 
         self.load_by_id(&page.id)
             .await?
-            .context("page not found after restore")
+            .ok_or_else(|| WikiError::Other(anyhow::anyhow!("page not found after restore")))
             .map_err(crate::error::Error::from)
     }
 
@@ -828,4 +828,58 @@ fn parse_wiki_page(row: sqlx::sqlite::SqliteRow) -> Result<WikiPage> {
 
 fn lower_hex_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// Escape user input for use as an FTS5 MATCH query.
+///
+/// FTS5 treats characters like `"`, `*`, `:`, `(`, `)` and bareword operators
+/// (`AND`, `OR`, `NOT`, `NEAR`) as syntax. We strip the input down to
+/// alphanumeric tokens (plus `_` and `-`) and append `*` to the last token for
+/// prefix matching. Returns an empty string when no usable tokens remain, in
+/// which case the caller should short-circuit instead of issuing the query.
+fn sanitize_fts_query(input: &str) -> String {
+    let tokens: Vec<String> = input
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    let mut parts: Vec<String> = tokens
+        .iter()
+        .take(tokens.len() - 1)
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    let last = tokens.last().expect("tokens is non-empty");
+    parts.push(format!("\"{last}\"*"));
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_fts_query;
+
+    #[test]
+    fn sanitizes_fts_operators() {
+        assert_eq!(sanitize_fts_query("hello"), "\"hello\"*");
+        assert_eq!(sanitize_fts_query("hello world"), "\"hello\" \"world\"*");
+        assert_eq!(sanitize_fts_query(""), "");
+        assert_eq!(sanitize_fts_query("   "), "");
+        // Special characters are stripped so they cannot break the query.
+        assert_eq!(
+            sanitize_fts_query("foo AND bar"),
+            "\"foo\" \"AND\" \"bar\"*"
+        );
+        assert_eq!(sanitize_fts_query("col:val"), "\"colval\"*");
+        assert_eq!(sanitize_fts_query("\"phrase\""), "\"phrase\"*");
+        assert_eq!(sanitize_fts_query("a*b"), "\"ab\"*");
+    }
 }

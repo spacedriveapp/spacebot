@@ -1391,7 +1391,6 @@ fn extract_message_content(
                     size_bytes: None,
                     auth_header: Some(format!("Bearer {}", bot_token)),
                     pre_saved_id: None,
-                    disk_path: None,
                 })
             })
             .collect();

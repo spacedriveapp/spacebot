@@ -924,24 +924,22 @@ pub fn create_worker_tool_server(
     }
 
     // Conditionally add wiki tools when wiki_write is enabled.
-    if wiki_write {
-        if let Some(store) = wiki_store {
-            server = server
-                .tool(WikiCreateTool::new(
-                    store.clone(),
-                    "agent".to_string(),
-                    agent_id.to_string(),
-                ))
-                .tool(WikiEditTool::new(
-                    store.clone(),
-                    "agent".to_string(),
-                    agent_id.to_string(),
-                ))
-                .tool(WikiReadTool::new(store.clone()))
-                .tool(WikiListTool::new(store.clone()))
-                .tool(WikiSearchTool::new(store.clone()))
-                .tool(WikiHistoryTool::new(store));
-        }
+    if wiki_write && let Some(store) = wiki_store {
+        server = server
+            .tool(WikiCreateTool::new(
+                store.clone(),
+                "agent".to_string(),
+                agent_id.to_string(),
+            ))
+            .tool(WikiEditTool::new(
+                store.clone(),
+                "agent".to_string(),
+                agent_id.to_string(),
+            ))
+            .tool(WikiReadTool::new(store.clone()))
+            .tool(WikiListTool::new(store.clone()))
+            .tool(WikiSearchTool::new(store.clone()))
+            .tool(WikiHistoryTool::new(store));
     }
 
     for mcp_tool in mcp_tools {

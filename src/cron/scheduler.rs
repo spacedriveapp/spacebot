@@ -1636,7 +1636,7 @@ enum CronResponseWaitOutcome {
 #[cfg(test)]
 async fn await_cron_delivery_response(
     cron_id: &str,
-    response_rx: &mut mpsc::Receiver<RoutedResponse>,
+    response_rx: &mut tokio::sync::mpsc::Receiver<RoutedResponse>,
     timeout: Duration,
 ) -> CronResponseWaitOutcome {
     let deadline = tokio::time::Instant::now() + timeout;

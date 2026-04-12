@@ -67,10 +67,11 @@ impl ExtendedUsage {
 }
 
 /// Cost classification for a usage record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostStatus {
     Estimated,
+    #[default]
     Included,
     Unknown,
 }
@@ -104,7 +105,7 @@ impl std::fmt::Display for CostStatus {
 /// Accumulates token usage across multiple API calls within a single process
 /// invocation. Thread-safe interior mutability via the `Mutex` wrapper on the
 /// caller side.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct UsageAccumulator {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -122,18 +123,7 @@ pub struct UsageAccumulator {
 
 impl UsageAccumulator {
     pub fn new() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
-            request_count: 0,
-            estimated_cost_usd: 0.0,
-            cost_status: CostStatus::Included, // most optimistic default
-            model_requests: std::collections::HashMap::new(),
-            provider: None,
-        }
+        Self::default()
     }
 
     /// Record one API call's usage.

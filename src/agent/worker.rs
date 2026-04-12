@@ -268,7 +268,7 @@ impl Worker {
             Vec::new(), // initial_history - will be replaced by prior_history below
             WorkerMemoryMode::None, // Resumed workers don't have context settings
             wiki_write,
-            None,       // Resumed workers don't have model override
+            None, // Resumed workers don't have model override
         );
         // Reuse the original worker ID so DB row stays linked.
         worker.id = existing_id;

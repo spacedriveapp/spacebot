@@ -121,7 +121,7 @@ async function loadPersistedUrl(): Promise<string | null> {
  */
 function isSameOriginMode(): boolean {
 	// Hosted deployment with a base path prefix
-	if ((window as any).__SPACEBOT_BASE_PATH) return true;
+	if (window.__SPACEBOT_BASE_PATH) return true;
 	// Not running in the desktop host, and served from a normal HTTP origin (not a dev server
 	// with a Vite proxy). In production the spacebot binary embeds the
 	// SPA at the same origin, so relative API paths just work.

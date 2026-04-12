@@ -1,4 +1,4 @@
-import {useCallback, useMemo, useRef, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {MagnifyingGlassMinus, MagnifyingGlassPlus, CornersOut} from "@phosphor-icons/react";
 import {CircleButton} from "@spacedrive/primitives";
 import {
@@ -146,48 +146,44 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 	const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
 	const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-	// Sync when topology data or agent profiles change
-	const prevDataRef = useRef(data);
-	const prevProfilesRef = useRef(agentProfiles);
-	if (
-		data !== prevDataRef.current ||
-		agentProfiles !== prevProfilesRef.current
-	) {
-		prevDataRef.current = data;
-		prevProfilesRef.current = agentProfiles;
-		if (data) {
-			const {initialNodes: newNodes, initialEdges: newEdges} = buildGraph(
-				data,
-				activeEdges,
-				agentProfiles,
-				agentInfoMap,
-			);
+	// Holds the latest activeEdges for the topology-sync effect so we do not
+	// have to rebuild the whole graph every time edge activity flickers.
+	const activeEdgesRef = useRef(activeEdges);
 
-			// Preserve existing node positions
-			const positionMap = new Map(nodes.map((n) => [n.id, n.position]));
-			const mergedNodes = patchEditCallbacks(
+	// Sync when topology data or agent profiles change. Uses the functional
+	// updater form of setNodes so the effect does not need `nodes` in its deps,
+	// which would cause an infinite loop.
+	useEffect(() => {
+		if (!data) return;
+		const {initialNodes: newNodes, initialEdges: newEdges} = buildGraph(
+			data,
+			activeEdgesRef.current,
+			agentProfiles,
+			agentInfoMap,
+		);
+		setNodes((prevNodes) => {
+			const positionMap = new Map(prevNodes.map((n) => [n.id, n.position]));
+			return patchEditCallbacks(
 				newNodes.map((n) => ({
 					...n,
 					position: positionMap.get(n.id) ?? n.position,
 				})),
 			);
+		});
+		setEdges(newEdges);
+	}, [data, agentProfiles, agentInfoMap, patchEditCallbacks, setNodes, setEdges]);
 
-			setNodes(mergedNodes);
-			setEdges(newEdges);
-		}
-	}
-
-	// Update edge activity state when activeEdges changes
-	const prevActiveRef = useRef(activeEdges);
-	if (activeEdges !== prevActiveRef.current) {
-		prevActiveRef.current = activeEdges;
+	// Update edge activity state when activeEdges changes, without rebuilding
+	// the entire node graph.
+	useEffect(() => {
+		activeEdgesRef.current = activeEdges;
 		setEdges((eds) =>
 			eds.map((e) => ({
 				...e,
 				data: {...e.data, active: activeEdges.has(e.id)},
 			})),
 		);
-	}
+	}, [activeEdges, setEdges]);
 
 	// -- Mutations --
 
@@ -265,6 +261,19 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 		onSuccess: () => {
 			queryClient.invalidateQueries({queryKey: ["topology"]});
 			setSelectedGroup(null);
+		},
+	});
+
+	// Updates only the membership of a group, used by the drag-to-group
+	// gesture. Separate from `updateGroup` so it does not clear selection.
+	const assignGroupMembership = useMutation({
+		mutationFn: (params: {groupName: string; agentIds: string[]}) =>
+			api.updateGroup(params.groupName, {agent_ids: params.agentIds}),
+		onSuccess: () => {
+			queryClient.invalidateQueries({queryKey: ["topology"]});
+		},
+		onError: (error) => {
+			console.error("failed to update group membership", error);
 		},
 	});
 
@@ -522,43 +531,31 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 					}
 
 					if (targetGroup && !targetGroup.agent_ids.includes(agentId)) {
-						// Add to target group
 						const newIds = [...targetGroup.agent_ids, agentId];
-						// Remove from current group if any
 						if (currentGroup && currentGroup.name !== targetGroup.name) {
-							api
-								.updateGroup(currentGroup.name, {
-									agent_ids: currentGroup.agent_ids.filter(
-										(id) => id !== agentId,
-									),
-								})
-								.then(() =>
-									queryClient.invalidateQueries({queryKey: ["topology"]}),
-								);
-						}
-						api
-							.updateGroup(targetGroup.name, {
-								agent_ids: newIds,
-							})
-							.then(() =>
-								queryClient.invalidateQueries({queryKey: ["topology"]}),
-							);
-					} else if (!targetGroup && currentGroup) {
-						// Dragged out of a group
-						api
-							.updateGroup(currentGroup.name, {
-								agent_ids: currentGroup.agent_ids.filter(
+							assignGroupMembership.mutate({
+								groupName: currentGroup.name,
+								agentIds: currentGroup.agent_ids.filter(
 									(id) => id !== agentId,
 								),
-							})
-							.then(() =>
-								queryClient.invalidateQueries({queryKey: ["topology"]}),
-							);
+							});
+						}
+						assignGroupMembership.mutate({
+							groupName: targetGroup.name,
+							agentIds: newIds,
+						});
+					} else if (!targetGroup && currentGroup) {
+						assignGroupMembership.mutate({
+							groupName: currentGroup.name,
+							agentIds: currentGroup.agent_ids.filter(
+								(id) => id !== agentId,
+							),
+						});
 					}
 				}
 			}
 		},
-		[onNodesChange, nodes, groups, queryClient, setNodes],
+		[onNodesChange, nodes, groups, setNodes, assignGroupMembership],
 	);
 
 	if (isLoading) {

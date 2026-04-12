@@ -1,5 +1,5 @@
 -- Token usage tracking: one row per process invocation.
-CREATE TABLE token_usage (
+CREATE TABLE IF NOT EXISTS token_usage (
     id                  TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     agent_id            TEXT NOT NULL,
     process_type        TEXT NOT NULL,
@@ -17,6 +17,6 @@ CREATE TABLE token_usage (
     recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-CREATE INDEX token_usage_agent    ON token_usage(agent_id, recorded_at DESC);
-CREATE INDEX token_usage_conv     ON token_usage(conversation_id) WHERE conversation_id IS NOT NULL;
-CREATE INDEX token_usage_recorded ON token_usage(recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_agent    ON token_usage(agent_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_conv     ON token_usage(conversation_id) WHERE conversation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_token_usage_recorded ON token_usage(recorded_at DESC);

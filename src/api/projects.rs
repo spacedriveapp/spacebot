@@ -419,10 +419,10 @@ pub(super) async fn create_project(
             let auto_discover = request.auto_discover;
             tokio::spawn(async move {
                 // Detect and set project logo.
-                if let Some(logo) = crate::projects::detect_logo(&root) {
-                    if let Err(error) = store.set_logo_path(&project_id, Some(&logo)).await {
-                        tracing::warn!(%error, "failed to set detected logo path");
-                    }
+                if let Some(logo) = crate::projects::detect_logo(&root)
+                    && let Err(error) = store.set_logo_path(&project_id, Some(&logo)).await
+                {
+                    tracing::warn!(%error, "failed to set detected logo path");
                 }
 
                 if auto_discover {

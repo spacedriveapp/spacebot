@@ -646,15 +646,14 @@ impl ApiState {
                                 // Complete channel-level tool call in memory (FIFO).
                                 if let ProcessId::Channel(ch_id) = process_id {
                                     let mut guard = live_channel_tools.write().await;
-                                    if let Some(calls) = guard.get_mut(&ch_id.to_string()) {
-                                        if let Some(entry) = calls.iter_mut().find(|c| {
+                                    if let Some(calls) = guard.get_mut(&ch_id.to_string())
+                                        && let Some(entry) = calls.iter_mut().find(|c| {
                                             c.tool_name == *tool_name && c.status == "running"
-                                        }) {
-                                            entry.result = Some(result.clone());
-                                            entry.status = "completed".into();
-                                            entry.completed_at =
-                                                Some(chrono::Utc::now().to_rfc3339());
-                                        }
+                                        })
+                                    {
+                                        entry.result = Some(result.clone());
+                                        entry.status = "completed".into();
+                                        entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
                                     }
                                 }
                                 api_tx
