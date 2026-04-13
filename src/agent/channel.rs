@@ -1534,11 +1534,16 @@ impl Channel {
                 .metadata
                 .get(crate::metadata_keys::CHANNEL_NAME)
                 .and_then(|v| v.as_str());
+            let channel_topic = first
+                .metadata
+                .get(crate::metadata_keys::CHANNEL_TOPIC)
+                .and_then(|v| v.as_str());
             self.conversation_context = Some(prompt_engine.render_conversation_context(
                 &first.source,
                 server_name,
                 channel_name,
                 self.conversation_id.as_deref(),
+                channel_topic,
             )?);
         }
 
@@ -2033,11 +2038,16 @@ impl Channel {
                 .metadata
                 .get(crate::metadata_keys::CHANNEL_NAME)
                 .and_then(|v| v.as_str());
+            let channel_topic = message
+                .metadata
+                .get(crate::metadata_keys::CHANNEL_TOPIC)
+                .and_then(|v| v.as_str());
             self.conversation_context = Some(prompt_engine.render_conversation_context(
                 &message.source,
                 server_name,
                 channel_name,
                 self.conversation_id.as_deref(),
+                channel_topic,
             )?);
         }
 

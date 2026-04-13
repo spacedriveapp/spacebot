@@ -563,12 +563,18 @@ pub(super) async fn inspect_prompt(
                         .or_else(|| meta.get("slack_workspace_id"))
                 })
                 .and_then(|v| v.as_str());
+            let channel_topic = info
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get(crate::metadata_keys::CHANNEL_TOPIC))
+                .and_then(|v| v.as_str());
             prompt_engine
                 .render_conversation_context(
                     &info.platform,
                     server_name,
                     info.display_name.as_deref(),
                     Some(&info.id),
+                    channel_topic,
                 )
                 .ok()
         }

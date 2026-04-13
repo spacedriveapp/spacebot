@@ -458,6 +458,8 @@ pub mod metadata_keys {
     pub const SERVER_NAME: &str = "server_name";
     /// Channel / conversation name within the server.
     pub const CHANNEL_NAME: &str = "channel_name";
+    /// Channel topic/description text.
+    pub const CHANNEL_TOPIC: &str = "channel_topic";
     /// Platform message ID (stringified). Used for reply threading.
     pub const MESSAGE_ID: &str = "message_id";
     /// Reply target message ID for outbound reply threading.
