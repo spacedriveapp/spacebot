@@ -23,6 +23,8 @@ pub struct SandboxConfig {
     pub mode: SandboxMode,
     #[serde(default)]
     pub writable_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub readable_paths: Vec<PathBuf>,
     /// Environment variable names to forward from the parent process into worker
     /// subprocesses. This is the escape hatch for self-hosted users who set env
     /// vars in Docker/systemd but don't configure a secret store. When the secret
@@ -41,6 +43,7 @@ impl Default for SandboxConfig {
         Self {
             mode: SandboxMode::Enabled,
             writable_paths: Vec::new(),
+            readable_paths: Vec::new(),
             passthrough_env: Vec::new(),
             project_paths: Vec::new(),
         }
@@ -285,7 +288,7 @@ impl Sandbox {
     }
 
     /// Check whether a canonical path falls within the workspace or any
-    /// allowed writable path (user-configured or project-injected).
+    /// allowed path (workspace, writable paths, or readable paths).
     ///
     /// Used by shell/file tools to relax the workspace boundary when
     /// project paths are registered.
@@ -294,17 +297,54 @@ impl Sandbox {
             .workspace
             .canonicalize()
             .unwrap_or_else(|_| self.workspace.clone());
+        let data_dir_canonical = self
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.data_dir.clone());
+
+        if canonical.starts_with(&data_dir_canonical) {
+            return false;
+        }
+
         if canonical.starts_with(&workspace_canonical) {
             return true;
         }
+
         let config = self.config.load();
         for path in config.all_writable_paths() {
             let allowed = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if allowed.starts_with(&data_dir_canonical) {
+                continue;
+            }
             if canonical.starts_with(&allowed) {
                 return true;
             }
         }
+        for path in &config.readable_paths {
+            let allowed = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if allowed.starts_with(&data_dir_canonical) {
+                continue;
+            }
+            if canonical.starts_with(&allowed) {
+                return !canonical.starts_with(&data_dir_canonical);
+            }
+        }
         false
+    }
+
+    /// Check whether a canonical path is writable under sandbox policy.
+    pub fn is_path_writable(&self, canonical: &Path) -> bool {
+        if !self.is_path_allowed(canonical) {
+            return false;
+        }
+        let config = self.config.load();
+        for path in &config.readable_paths {
+            let allowed = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if canonical.starts_with(&allowed) {
+                return false;
+            }
+        }
+        true
     }
 
     /// True when OS-level containment is currently active.
@@ -345,6 +385,12 @@ impl Sandbox {
                         push_unique_path(&mut paths, canonical);
                     }
                 }
+
+                for path in &config.readable_paths {
+                    if let Ok(canonical) = path.canonicalize() {
+                        push_unique_path(&mut paths, canonical);
+                    }
+                }
             }
             InternalBackend::SandboxExec => {
                 for system_path in MACOS_READ_ONLY_SYSTEM_PATHS {
@@ -361,6 +407,10 @@ impl Sandbox {
                 push_unique_path(&mut paths, canonicalize_or_self(&self.workspace));
 
                 for path in config.all_writable_paths() {
+                    push_unique_path(&mut paths, canonicalize_or_self(path));
+                }
+
+                for path in &config.readable_paths {
                     push_unique_path(&mut paths, canonicalize_or_self(path));
                 }
             }
@@ -545,32 +595,48 @@ impl Sandbox {
             }
         }
 
-        // 7. Mask agent data dir with an empty tmpfs to prevent reads/writes,
+        // 7. User-configured read-only paths
+        for path in &config.readable_paths {
+            match path.canonicalize() {
+                Ok(canonical) => {
+                    cmd.arg("--ro-bind").arg(&canonical).arg(&canonical);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        %error,
+                        "skipping readable_path (does not exist or is unresolvable)"
+                    );
+                }
+            }
+        }
+
+        // 8. Mask agent data dir with an empty tmpfs to prevent reads/writes,
         // even when it overlaps with workspace-related paths.
         cmd.arg("--tmpfs").arg(&self.data_dir);
 
-        // 8. Isolation flags
+        // 9. Isolation flags
         cmd.arg("--unshare-pid");
         cmd.arg("--new-session");
         cmd.arg("--die-with-parent");
 
-        // 9. Clear all inherited environment variables. Workers must not see
+        // 10. Clear all inherited environment variables. Workers must not see
         // system secrets (LLM API keys, messaging tokens) or SPACEBOT_* internals.
         cmd.arg("--clearenv");
 
-        // 10. Working directory
+        // 11. Working directory
         cmd.arg("--chdir").arg(working_dir);
 
-        // 11. Set PATH inside the sandbox
+        // 12. Set PATH inside the sandbox
         cmd.arg("--setenv").arg("PATH").arg(path_env);
 
-        // 12. Set deterministic sandbox-local home/temp paths.
+        // 13. Set deterministic sandbox-local home/temp paths.
         cmd.arg("--setenv")
             .arg("HOME")
             .arg(self.workspace.to_string_lossy().into_owned());
         cmd.arg("--setenv").arg("TMPDIR").arg("/tmp");
 
-        // 12a. Suppress interactive prompts. CI=true prevents npm/npx/yarn
+        // 13a. Suppress interactive prompts. CI=true prevents npm/npx/yarn
         // from prompting; DEBIAN_FRONTEND=noninteractive prevents apt-get.
         // Shell tool runs without stdin, so interactive prompts always hang.
         cmd.arg("--setenv").arg("CI").arg("true");
@@ -578,14 +644,14 @@ impl Sandbox {
             .arg("DEBIAN_FRONTEND")
             .arg("noninteractive");
 
-        // 13. Re-inject safe environment variables for basic process operation
+        // 14. Re-inject safe environment variables for basic process operation
         for var_name in SAFE_ENV_VARS {
             if let Ok(value) = std::env::var(var_name) {
                 cmd.arg("--setenv").arg(var_name).arg(value);
             }
         }
 
-        // 13. Re-inject tool secrets from the secret store.
+        // 15. Re-inject tool secrets from the secret store.
         // Only tool-category secrets are injected; system secrets (LLM API keys,
         // messaging tokens) never enter subprocess environments.
         for (name, value) in tool_secrets {
@@ -596,7 +662,7 @@ impl Sandbox {
             cmd.arg("--setenv").arg(name).arg(value);
         }
 
-        // 14. Re-inject passthrough env vars (user-configured forwarding),
+        // 16. Re-inject passthrough env vars (user-configured forwarding),
         // skipping any that would override hardened defaults.
         for var_name in &config.passthrough_env {
             if is_reserved_env_var(var_name) {
@@ -608,7 +674,7 @@ impl Sandbox {
             }
         }
 
-        // 15. Per-command env vars from tool caller (e.g. shell tool `env`).
+        // 17. Per-command env vars from tool caller (e.g. shell tool `env`).
         // Injected via --setenv so they reach the inner sandboxed process.
         for (name, value) in command_env {
             if is_reserved_env_var(name) {
@@ -622,7 +688,7 @@ impl Sandbox {
             cmd.arg("--setenv").arg(name).arg(value);
         }
 
-        // 16. Worker keyring isolation (Linux) — give the child a fresh empty
+        // 18. Worker keyring isolation (Linux) — give the child a fresh empty
         // session keyring so it cannot access the parent's keyring (which holds
         // the master key for secret store encryption).
         #[cfg(target_os = "linux")]
@@ -635,7 +701,7 @@ impl Sandbox {
             }
         }
 
-        // 17. The actual command
+        // 19. The actual command
         cmd.arg("--").arg(program);
         for arg in args {
             cmd.arg(arg);
@@ -856,6 +922,15 @@ impl Sandbox {
             ));
         }
 
+        for (index, path) in config.readable_paths.iter().enumerate() {
+            let canonical = canonicalize_or_self(path);
+            profile.push_str(&format!(
+                "; readable path {index}\n(allow file-read* (subpath \"{}\"))\n(deny file-write* (subpath \"{}\"))\n",
+                escape_sbpl_path(&canonical),
+                escape_sbpl_path(&canonical)
+            ));
+        }
+
         // /tmp writable
         let tmp = canonicalize_or_self(Path::new("/tmp"));
         profile.push_str(&format!(
@@ -996,12 +1071,39 @@ fn detect_sandbox_exec() -> InternalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+
+    fn sandbox_for_path_tests(
+        workspace: PathBuf,
+        data_dir: PathBuf,
+        readable_paths: Vec<PathBuf>,
+        writable_paths: Vec<PathBuf>,
+    ) -> Sandbox {
+        let config = Arc::new(ArcSwap::from_pointee(SandboxConfig {
+            mode: SandboxMode::Enabled,
+            readable_paths,
+            writable_paths,
+            passthrough_env: Vec::new(),
+            project_paths: Vec::new(),
+        }));
+
+        Sandbox {
+            workspace,
+            data_dir,
+            backend: InternalBackend::None,
+            config,
+            tools_bin: PathBuf::from("/nonexistent/tools-bin"),
+            secrets_store: ArcSwap::from_pointee(None),
+        }
+    }
 
     #[test]
     fn test_sandbox_config_defaults() {
         let config = SandboxConfig::default();
         assert_eq!(config.mode, SandboxMode::Enabled);
         assert!(config.writable_paths.is_empty());
+        assert!(config.readable_paths.is_empty());
         assert!(config.project_paths.is_empty());
         assert!(config.passthrough_env.is_empty());
     }
@@ -1042,5 +1144,55 @@ mod tests {
                 mode: SandboxMode::Disabled
             }
         );
+    }
+
+    #[test]
+    fn readable_paths_are_allowed_for_reads_but_not_writes() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let readable = temp_dir.path().join("readonly");
+        let data_dir = temp_dir.path().join("data");
+
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&readable).expect("create readable");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+        let sandbox = sandbox_for_path_tests(
+            workspace,
+            data_dir,
+            vec![readable.clone()],
+            Vec::new(),
+        );
+
+        let readable_file = readable.join("doc.txt");
+        std::fs::write(&readable_file, "hello").expect("write readable file");
+        let canonical = readable_file.canonicalize().expect("canonicalize readable file");
+
+        assert!(sandbox.is_path_allowed(&canonical));
+        assert!(!sandbox.is_path_writable(&canonical));
+    }
+
+    #[test]
+    fn readable_paths_do_not_override_data_dir_protection() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let data_dir = temp_dir.path().join("agent-data");
+
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+        let sandbox = sandbox_for_path_tests(
+            workspace,
+            data_dir.clone(),
+            vec![temp_dir.path().to_path_buf()],
+            Vec::new(),
+        );
+
+        let secret = data_dir.join("secret.txt");
+        std::fs::write(&secret, "secret").expect("write secret file");
+        let canonical = secret.canonicalize().expect("canonicalize secret file");
+
+        assert!(!sandbox.is_path_allowed(&canonical));
+        assert!(!sandbox.is_path_writable(&canonical));
     }
 }
