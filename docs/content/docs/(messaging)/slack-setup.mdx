@@ -145,19 +145,23 @@ The workspace ID is the `T`-prefixed string in your Slack URL: `https://app.slac
 
 ### DM filtering
 
-By default, all DMs are ignored. To allow specific users, add their Slack user IDs.
+By default, all DMs are ignored. To allow specific users, add their Slack user IDs. To allow **all users** to message the bot via DM, use the wildcard `*`.
 
 <Tabs items={["Spacebot UI", "TOML Config"]}>
 <Tab value="Spacebot UI">
 
-Go to **Settings** → **Messaging Platforms** → Slack card and add user IDs to the **DM Allowed Users** list.
+Go to **Settings** → **Messaging Platforms** → Slack card and add user IDs to the **DM Allowed Users** list. To allow all users, add `*` as a user ID.
 
 </Tab>
 <Tab value="TOML Config">
 
 ```toml
 [messaging.slack]
+# Allow specific users
 dm_allowed_users = ["U01234", "U56789"]
+
+# Or allow all users with wildcard
+dm_allowed_users = ["*"]
 ```
 
 Permission changes hot-reload within a couple seconds — no restart needed.
