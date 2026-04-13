@@ -7,11 +7,8 @@
     "core:default",
     "core:window:allow-start-dragging",
     "shell:allow-open",
-    "shell:allow-spawn",
-    "shell:allow-stdin-write",
-    "shell:allow-kill",
     {
-      "identifier": "shell:allow-execute",
+      "identifier": "shell:allow-spawn",
       "allow": [
         {
           "name": "binaries/spacebot",
@@ -19,6 +16,8 @@
           "args": ["start", "--foreground"]
         }
       ]
-    }
+    },
+    "shell:allow-stdin-write",
+    "shell:allow-kill"
   ]
 }
