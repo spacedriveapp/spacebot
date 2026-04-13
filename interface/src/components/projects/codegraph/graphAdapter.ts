@@ -442,7 +442,7 @@ export const filterGraphByDepth = (
 // Layout modes — reposition nodes without rebuilding the graph.
 // ---------------------------------------------------------------------------
 
-export type LayoutMode = "force" | "solar" | "cluster" | "tree";
+export type LayoutMode = "force" | "solar" | "radial" | "hierarchy" | "mermaid";
 
 // Ring assignments for Solar layout. Inner rings = structural, outer = symbols.
 const SOLAR_RING: Record<string, number> = {
@@ -480,133 +480,106 @@ export const applySolarLayout = (
 	}
 };
 
-/** Cluster layout — nodes grouped by community in a grid of clusters. */
-export const applyClusterLayout = (
+/** Radial layout — each File is a spoke radiating from center with
+ *  its symbols fanning out along the spoke. Starburst / firework look. */
+export const applyRadialLayout = (
 	graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
 ): void => {
-	// Group visible nodes by community.
-	const clusters = new Map<number, string[]>();
-	const unclustered: string[] = [];
+	// Group symbols by their source file.
+	const fileNodes: string[] = [];
+	const byFile = new Map<string, string[]>();
+	const orphans: string[] = [];
 
 	graph.forEachNode((nodeId, attrs) => {
 		if (attrs.hidden) return;
-		if (attrs.community !== undefined && attrs.community !== null) {
-			if (!clusters.has(attrs.community)) clusters.set(attrs.community, []);
-			clusters.get(attrs.community)!.push(nodeId);
-		} else {
-			unclustered.push(nodeId);
+		if (attrs.nodeType === "File") {
+			fileNodes.push(nodeId);
+			if (!byFile.has(nodeId)) byFile.set(nodeId, []);
+		} else if (attrs.nodeType === "Folder" || attrs.nodeType === "Project" ||
+			attrs.nodeType === "Package" || attrs.nodeType === "Module" || attrs.nodeType === "Namespace") {
+			orphans.push(nodeId);
 		}
 	});
 
-	const clusterCount = clusters.size + (unclustered.length > 0 ? 1 : 0);
-	const spread = Math.sqrt(graph.order) * 12;
-	const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+	// Assign symbols to their file's spoke via DEFINES edges.
+	graph.forEachEdge((_edge, attrs, source, target) => {
+		if (attrs.relationType === "DEFINES" && byFile.has(source)) {
+			byFile.get(source)!.push(target);
+		}
+	});
 
-	// Position each cluster in a spiral.
-	let clusterIdx = 0;
-	const positionCluster = (nodes: string[]) => {
-		const angle = clusterIdx * goldenAngle;
-		const radius = spread * Math.sqrt((clusterIdx + 1) / Math.max(clusterCount, 1));
-		const cx = radius * Math.cos(angle);
-		const cy = radius * Math.sin(angle);
-		const clusterRadius = Math.sqrt(nodes.length) * 4;
-		nodes.forEach((nodeId, i) => {
-			const a = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
-			const r = clusterRadius * Math.sqrt((i + 1) / nodes.length);
-			graph.setNodeAttribute(nodeId, "x", cx + r * Math.cos(a));
-			graph.setNodeAttribute(nodeId, "y", cy + r * Math.sin(a));
+	// Any visible nodes not assigned to a file spoke.
+	const assigned = new Set<string>(fileNodes);
+	for (const syms of byFile.values()) syms.forEach((s) => assigned.add(s));
+	graph.forEachNode((nodeId, attrs) => {
+		if (!attrs.hidden && !assigned.has(nodeId) && !orphans.includes(nodeId)) {
+			orphans.push(nodeId);
+		}
+	});
+
+	const spokeCount = fileNodes.length || 1;
+	const baseRadius = Math.sqrt(graph.order) * 6;
+
+	fileNodes.forEach((fileId, i) => {
+		const spokeAngle = (i / spokeCount) * Math.PI * 2;
+		// File node sits at the spoke's base.
+		graph.setNodeAttribute(fileId, "x", baseRadius * 0.4 * Math.cos(spokeAngle));
+		graph.setNodeAttribute(fileId, "y", baseRadius * 0.4 * Math.sin(spokeAngle));
+		// Symbols fan out along the spoke.
+		const symbols = byFile.get(fileId) ?? [];
+		symbols.forEach((symId, j) => {
+			const r = baseRadius * (0.5 + 0.8 * ((j + 1) / Math.max(symbols.length, 1)));
+			const spread = 0.15; // angular spread for the fan
+			const symAngle = spokeAngle + (j - symbols.length / 2) * (spread / Math.max(symbols.length, 1));
+			graph.setNodeAttribute(symId, "x", r * Math.cos(symAngle));
+			graph.setNodeAttribute(symId, "y", r * Math.sin(symAngle));
 		});
-		clusterIdx++;
-	};
+	});
 
-	for (const nodes of clusters.values()) {
-		positionCluster(nodes);
-	}
-	if (unclustered.length > 0) {
-		positionCluster(unclustered);
-	}
+	// Structural/orphan nodes cluster at center.
+	orphans.forEach((nodeId, i) => {
+		const a = (i / Math.max(orphans.length, 1)) * Math.PI * 2;
+		const r = baseRadius * 0.15;
+		graph.setNodeAttribute(nodeId, "x", r * Math.cos(a));
+		graph.setNodeAttribute(nodeId, "y", r * Math.sin(a));
+	});
 };
 
-/** Tree layout — hierarchical top-down by CONTAINS/DEFINES edges. */
-export const applyTreeLayout = (
+/** Hierarchy layout — horizontal swim lanes by label type. Folders at
+ *  top, Files below, Classes/Structs next, Functions/Methods at bottom.
+ *  Within each lane nodes are sorted by source file path. */
+export const applyHierarchyLayout = (
 	graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
 ): void => {
-	// Build parent → children from hierarchy edges.
-	const children = new Map<string, string[]>();
-	const hasParent = new Set<string>();
-
-	graph.forEachEdge((_edge, attrs, source, target) => {
-		const rel = attrs.relationType;
-		if (rel === "CONTAINS" || rel === "DEFINES") {
-			if (!children.has(source)) children.set(source, []);
-			children.get(source)!.push(target);
-			hasParent.add(target);
-		}
-	});
-
-	// Find roots (nodes with no parent in the hierarchy).
-	const roots: string[] = [];
-	graph.forEachNode((nodeId, attrs) => {
-		if (!attrs.hidden && !hasParent.has(nodeId)) {
-			roots.push(nodeId);
-		}
-	});
-
-	const levelSpacing = 80;
-	const leafSpacing = 8;
-	let leafIndex = 0;
-
-	// BFS to assign depth and horizontal position.
-	const visited = new Set<string>();
-	const queue: { id: string; depth: number }[] = roots.map((id) => ({ id, depth: 0 }));
-
-	while (queue.length > 0) {
-		const { id, depth } = queue.shift()!;
-		if (visited.has(id)) continue;
-		visited.add(id);
-
-		const kids = children.get(id) ?? [];
-		const hasKids = kids.length > 0;
-
-		// Leaf nodes get sequential x positions; branch nodes will be
-		// centered over their children after the traversal.
-		if (!hasKids) {
-			graph.setNodeAttribute(id, "x", leafIndex * leafSpacing);
-			graph.setNodeAttribute(id, "y", depth * levelSpacing);
-			leafIndex++;
-		} else {
-			// Placeholder — will center after children are placed.
-			graph.setNodeAttribute(id, "y", depth * levelSpacing);
-			for (const kid of kids) {
-				if (!visited.has(kid)) {
-					queue.push({ id: kid, depth: depth + 1 });
-				}
-			}
-		}
-	}
-
-	// Second pass: center branch nodes over their children (bottom-up).
-	const centerParents = (nodeId: string): number => {
-		const kids = (children.get(nodeId) ?? []).filter((k) => visited.has(k));
-		if (kids.length === 0) {
-			return graph.getNodeAttribute(nodeId, "x") as number;
-		}
-		const childXs = kids.map((k) => centerParents(k));
-		const cx = childXs.reduce((a, b) => a + b, 0) / childXs.length;
-		graph.setNodeAttribute(nodeId, "x", cx);
-		return cx;
+	// Assign each label to a lane.
+	const LANE: Record<string, number> = {
+		Project: 0, Package: 0, Module: 0, Namespace: 0,
+		Folder: 1,
+		File: 2,
+		Class: 3, Interface: 3, Struct: 3, Trait: 3, Enum: 3, Record: 3,
+		Function: 4, Method: 4, Impl: 4, Const: 4, MacroDef: 4,
 	};
 
-	for (const root of roots) {
-		centerParents(root);
-	}
+	const lanes: { id: string; path: string }[][] = [[], [], [], [], [], []];
+	graph.forEachNode((nodeId, attrs) => {
+		if (attrs.hidden) return;
+		const lane = LANE[attrs.nodeType] ?? 5;
+		lanes[lane].push({ id: nodeId, path: attrs.sourceFile ?? attrs.label ?? "" });
+	});
 
-	// Place any orphan nodes not reached by the tree walk.
-	graph.forEachNode((nodeId) => {
-		if (!visited.has(nodeId)) {
-			graph.setNodeAttribute(nodeId, "x", leafIndex * leafSpacing);
-			graph.setNodeAttribute(nodeId, "y", 0);
-			leafIndex++;
-		}
+	// Sort within each lane by file path for locality.
+	lanes.forEach((lane) => lane.sort((a, b) => a.path.localeCompare(b.path)));
+
+	const xSpacing = 10;
+	const ySpacing = Math.sqrt(graph.order) * 8;
+
+	lanes.forEach((lane, laneIdx) => {
+		const y = laneIdx * ySpacing;
+		const totalWidth = lane.length * xSpacing;
+		const offsetX = -totalWidth / 2;
+		lane.forEach((node, i) => {
+			graph.setNodeAttribute(node.id, "x", offsetX + i * xSpacing);
+			graph.setNodeAttribute(node.id, "y", y);
+		});
 	});
 };

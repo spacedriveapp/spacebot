@@ -17,6 +17,7 @@ import { CodeGraphSidebar } from "./codegraph/CodeGraphSidebar";
 import { GraphCanvas, type GraphCanvasHandle } from "./codegraph/GraphCanvas";
 import { CodeInspectorPanel } from "./codegraph/CodeInspectorPanel";
 import { CodeGraphStatusBar } from "./codegraph/CodeGraphStatusBar";
+import { MermaidView } from "./codegraph/MermaidView";
 import { buildGraph } from "./codegraph/graphAdapter";
 import {
 	DEFAULT_VISIBLE_LABELS,
@@ -266,19 +267,23 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 				/>
 
 				<div className="relative min-w-0 flex-1">
-					<GraphCanvas
-						ref={canvasRef}
-						graph={graph}
-						nodesByKey={nodesByKey}
-						selectedNode={selectedNode}
-						onSelectNode={setSelectedNode}
-						visibleLabels={visibleLabels}
-						visibleEdgeTypes={visibleEdgeTypes}
-						depthFilter={depthFilter}
-						colorOverrides={colorOverrides}
-						layoutMode={layoutMode}
-						onLayoutRunningChange={setIsLayoutRunning}
-					/>
+					{layoutMode === "mermaid" ? (
+						<MermaidView nodes={nodes} edges={edges} />
+					) : (
+						<GraphCanvas
+							ref={canvasRef}
+							graph={graph}
+							nodesByKey={nodesByKey}
+							selectedNode={selectedNode}
+							onSelectNode={setSelectedNode}
+							visibleLabels={visibleLabels}
+							visibleEdgeTypes={visibleEdgeTypes}
+							depthFilter={depthFilter}
+							colorOverrides={colorOverrides}
+							layoutMode={layoutMode}
+							onLayoutRunningChange={setIsLayoutRunning}
+						/>
+					)}
 				</div>
 
 				{selectedNode && (

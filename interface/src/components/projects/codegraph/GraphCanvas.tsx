@@ -18,13 +18,26 @@ import {
 } from "@hugeicons/core-free-icons";
 import { useSigma } from "./useSigma";
 import {
-	filterGraphByDepth, getNodeColor, applySolarLayout, applyClusterLayout, applyTreeLayout,
+	filterGraphByDepth, getNodeColor,
+	applySolarLayout, applyRadialLayout, applyHierarchyLayout,
 	type SigmaNodeAttributes, type SigmaEdgeAttributes, type LayoutMode,
 } from "./graphAdapter";
 import type { BulkNode } from "./types";
 import type { EdgeType, NodeLabel } from "./constants";
 import { nodeKey } from "./graphAdapter";
 import type Graph from "graphology";
+
+/** Apply a non-force layout to the graph by repositioning all nodes. */
+function applyLayout(
+	mode: LayoutMode,
+	graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
+) {
+	switch (mode) {
+		case "solar": applySolarLayout(graph); break;
+		case "radial": applyRadialLayout(graph); break;
+		case "hierarchy": applyHierarchyLayout(graph); break;
+	}
+}
 
 export interface GraphCanvasHandle {
 	focusNode: (node: BulkNode) => void;
@@ -114,9 +127,7 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 			stopLayout();
 			const sigmaGraph = sigmaRef.current?.getGraph() as Graph<SigmaNodeAttributes, SigmaEdgeAttributes> | undefined;
 			if (sigmaGraph && sigmaGraph.order > 0) {
-				if (layoutMode === "solar") applySolarLayout(sigmaGraph);
-				else if (layoutMode === "cluster") applyClusterLayout(sigmaGraph);
-				else if (layoutMode === "tree") applyTreeLayout(sigmaGraph);
+				applyLayout(layoutMode, sigmaGraph);
 				sigmaRef.current?.refresh();
 				sigmaRef.current?.getCamera().animate({ x: 0.5, y: 0.5, ratio: 0.6, angle: 0 }, { duration: 300 });
 			}
@@ -138,9 +149,7 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
 			startLayout();
 		} else {
 			stopLayout();
-			if (layoutMode === "solar") applySolarLayout(g);
-			else if (layoutMode === "cluster") applyClusterLayout(g);
-			else if (layoutMode === "tree") applyTreeLayout(g);
+			applyLayout(layoutMode, g);
 			sigma.refresh();
 			sigma.getCamera().animate({ x: 0.5, y: 0.5, ratio: 0.6, angle: 0 }, { duration: 400 });
 		}

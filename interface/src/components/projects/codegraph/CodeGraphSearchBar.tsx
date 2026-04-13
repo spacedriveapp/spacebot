@@ -26,8 +26,9 @@ interface Props {
 const LAYOUT_MODES: { key: LayoutMode; label: string }[] = [
 	{ key: "force", label: "Force" },
 	{ key: "solar", label: "Solar" },
-	{ key: "cluster", label: "Cluster" },
-	{ key: "tree", label: "Tree" },
+	{ key: "radial", label: "Radial" },
+	{ key: "hierarchy", label: "Hierarchy" },
+	{ key: "mermaid", label: "Mermaid" },
 ];
 
 const MAX_RESULTS = 12;
