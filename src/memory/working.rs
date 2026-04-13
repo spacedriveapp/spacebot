@@ -43,6 +43,14 @@ pub enum WorkingMemoryEventType {
     UserCorrection,
     /// A prior decision was revised.
     DecisionRevised,
+    /// A concrete deadline or due date was set.
+    DeadlineSet,
+    /// Progress is currently blocked on an external dependency or prerequisite.
+    BlockedOn,
+    /// An explicit constraint was stated.
+    Constraint,
+    /// A task or branch reached a terminal result.
+    Outcome,
     /// An error or failure occurred.
     Error,
     /// A task was created or updated.
@@ -68,6 +76,10 @@ impl WorkingMemoryEventType {
             Self::Decision => "decision",
             Self::UserCorrection => "user_correction",
             Self::DecisionRevised => "decision_revised",
+            Self::DeadlineSet => "deadline_set",
+            Self::BlockedOn => "blocked_on",
+            Self::Constraint => "constraint",
+            Self::Outcome => "outcome",
             Self::Error => "error",
             Self::TaskUpdate => "task_update",
             Self::AgentMessage => "agent_message",
@@ -87,6 +99,10 @@ impl WorkingMemoryEventType {
             "decision" => Some(Self::Decision),
             "user_correction" => Some(Self::UserCorrection),
             "decision_revised" => Some(Self::DecisionRevised),
+            "deadline_set" => Some(Self::DeadlineSet),
+            "blocked_on" => Some(Self::BlockedOn),
+            "constraint" => Some(Self::Constraint),
+            "outcome" => Some(Self::Outcome),
             "error" => Some(Self::Error),
             "task_update" => Some(Self::TaskUpdate),
             "agent_message" => Some(Self::AgentMessage),
@@ -828,6 +844,10 @@ fn format_event_line(event: &WorkingMemoryEvent, current_channel_id: &str) -> St
         WorkingMemoryEventType::Decision => "Decision",
         WorkingMemoryEventType::UserCorrection => "User correction",
         WorkingMemoryEventType::DecisionRevised => "Decision revised",
+        WorkingMemoryEventType::DeadlineSet => "Deadline set",
+        WorkingMemoryEventType::BlockedOn => "Blocked on",
+        WorkingMemoryEventType::Constraint => "Constraint",
+        WorkingMemoryEventType::Outcome => "Outcome",
         WorkingMemoryEventType::Error => "Error",
         WorkingMemoryEventType::TaskUpdate => "Task update",
         WorkingMemoryEventType::AgentMessage => "Agent message",
@@ -1159,7 +1179,7 @@ mod tests {
         let store = setup_test_store().await;
         let today = store.today();
 
-        for event_type in [
+        let inserted = [
             WorkingMemoryEventType::BranchCompleted,
             WorkingMemoryEventType::WorkerSpawned,
             WorkingMemoryEventType::WorkerCompleted,
@@ -1168,13 +1188,19 @@ mod tests {
             WorkingMemoryEventType::Decision,
             WorkingMemoryEventType::UserCorrection,
             WorkingMemoryEventType::DecisionRevised,
+            WorkingMemoryEventType::DeadlineSet,
+            WorkingMemoryEventType::BlockedOn,
+            WorkingMemoryEventType::Constraint,
+            WorkingMemoryEventType::Outcome,
             WorkingMemoryEventType::Error,
             WorkingMemoryEventType::TaskUpdate,
             WorkingMemoryEventType::AgentMessage,
             WorkingMemoryEventType::System,
             WorkingMemoryEventType::MemoryPromoted,
             WorkingMemoryEventType::MemoryDemoted,
-        ] {
+        ];
+
+        for event_type in inserted {
             let event = WorkingMemoryEvent {
                 id: Uuid::new_v4().to_string(),
                 event_type,
@@ -1190,7 +1216,7 @@ mod tests {
         }
 
         let events = store.get_events_for_day(&today).await.unwrap();
-        assert_eq!(events.len(), 14);
+        assert_eq!(events.len(), inserted.len());
 
         // Verify all types survived the roundtrip.
         let types: Vec<WorkingMemoryEventType> = events.iter().map(|e| e.event_type).collect();

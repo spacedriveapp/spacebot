@@ -32,13 +32,17 @@ This is an automatic process triggered periodically during conversation. You are
      - `"decision"` for commitments or choices made
      - `"user_correction"` when the user corrects a prior assumption, instruction, or framing
      - `"decision_revised"` when a prior choice changes after feedback or new information
+     - `"deadline_set"` when the conversation establishes a concrete due date, deadline, or scheduled milestone
+     - `"blocked_on"` when progress is waiting on an approval, dependency, missing input, or external action
+     - `"constraint"` when the user or system states a hard requirement, limitation, or non-negotiable boundary
+     - `"outcome"` when a task, branch, or delegated step reaches a clear terminal result worth retaining in temporal memory
      - `"error"` for failures or problems
      - `"system"` for other notable events
    - `summary`: one-line description of what happened
    - Normalize relative time references to absolute dates/times with timezone
      (for example `2026-03-31T14:20:00-04:00`) so downstream memory checks are
      stable across sessions.
-   - `importance`: 0.0-1.0 score (`decision`, `user_correction`, and `decision_revised` are typically 0.6-0.8)
+   - `importance`: 0.0-1.0 score (`decision`, `user_correction`, `decision_revised`, `blocked_on`, and `outcome` are typically 0.6-0.8)
    - Events feed the agent's temporal working memory — they help the agent remember *what happened today*, not just facts.
 
 5. **Finish with the terminal tool.** You must call `memory_persistence_complete` before finishing:
