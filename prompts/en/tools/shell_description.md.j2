@@ -1,4 +1,4 @@
-Execute a shell command. Use this for file operations, running scripts, building projects, git commands, running subprocesses, and any system-level operations. Be careful with destructive operations. The command runs with a 60 second timeout by default.
+Execute a shell command. Use this for file operations, running scripts, building projects, git commands, running subprocesses, and any system-level operations. Commands are analyzed before execution, and destructive or suspicious patterns may be rejected pending confirmation. The command runs with a 60 second timeout by default.
 
 Use the optional `env` parameter to set per-command environment variables (e.g. `[{"key": "RUST_LOG", "value": "debug"}]`). Dangerous variables that enable library injection (LD_PRELOAD, NODE_OPTIONS, etc.) are blocked.
 
