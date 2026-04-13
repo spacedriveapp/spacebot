@@ -28,6 +28,7 @@ import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Workbench} from "@/routes/Workbench";
 import {SpacedriveExplorer} from "@/routes/SpacedriveExplorer";
+import {Overlay} from "@/routes/Overlay";
 import {useLiveContext} from "@/hooks/useLiveContext";
 
 // ── Root layout ──────────────────────────────────────────────────────────
@@ -39,6 +40,12 @@ function RootLayout() {
 		location.pathname.startsWith("/workbench") ||
 		location.pathname.startsWith("/dashboard") ||
 		location.pathname.startsWith("/spacedrive");
+	const isOverlay = window.location.pathname.endsWith("/overlay");
+
+	// The overlay route renders without any chrome (no sidebar, top bar, etc.)
+	if (isOverlay) {
+		return <Outlet />;
+	}
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">
@@ -134,6 +141,15 @@ const spacedriveRoute = createRoute({
 	path: "/spacedrive",
 	component: SpacedriveExplorer,
 });
+
+const overlayRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/overlay",
+	component: function OverlayPage() {
+		return <Overlay />;
+	},
+});
+
 
 const agentRoute = createRoute({
 	getParentRoute: () => rootRoute,
@@ -276,6 +292,7 @@ const routeTree = rootRoute.addChildren([
 	tasksRoute,
 	wikiRoute,
 	spacedriveRoute,
+	overlayRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,

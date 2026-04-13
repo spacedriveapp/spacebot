@@ -111,6 +111,17 @@ impl ConversationLogger {
         self.log_bot_message_with_metadata(channel_id, content, sender_name, None);
     }
 
+    /// Log a bot (assistant) message with a caller-provided message id.
+    pub fn log_bot_message_with_name_and_id(
+        &self,
+        channel_id: &ChannelId,
+        id: String,
+        content: &str,
+        sender_name: Option<&str>,
+    ) {
+        self.log_bot_message_inner(channel_id, id, content, sender_name, None);
+    }
+
     /// Log a bot message with optional tool calls packed into metadata. Fire-and-forget.
     pub fn log_bot_message_with_metadata(
         &self,
@@ -119,8 +130,19 @@ impl ConversationLogger {
         sender_name: Option<&str>,
         tool_calls_json: Option<String>,
     ) {
-        let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
+        self.log_bot_message_inner(channel_id, id, content, sender_name, tool_calls_json);
+    }
+
+    fn log_bot_message_inner(
+        &self,
+        channel_id: &ChannelId,
+        id: String,
+        content: &str,
+        sender_name: Option<&str>,
+        tool_calls_json: Option<String>,
+    ) {
+        let pool = self.pool.clone();
         let channel_id = channel_id.to_string();
         let content = content.to_string();
         let sender_name = sender_name.map(String::from);

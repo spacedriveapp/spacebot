@@ -96,7 +96,7 @@ pub fn spawn_file_watcher(
                     tracing::warn!(%error, path = %path.display(), "failed to watch agent skills dir");
                 }
             }
-            // Watch the agent root (identity_dir) for SOUL.md/IDENTITY.md/ROLE.md changes.
+            // Watch the agent root (identity_dir) for SOUL.md/IDENTITY.md/ROLE.md/SPEECH.md changes.
             // Identity files live outside the workspace, in the agent root directory.
             if let Err(error) = watcher.watch(identity_dir, RecursiveMode::NonRecursive) {
                 tracing::warn!(%error, path = %identity_dir.display(), "failed to watch identity dir");
@@ -129,7 +129,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md" | "SPEECH.md")
             });
             let skills_changed = changed_paths
                 .iter()

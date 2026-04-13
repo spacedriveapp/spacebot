@@ -5,6 +5,7 @@
 //! - `SOUL.md` — personality, voice, values, boundaries
 //! - `IDENTITY.md` — what the agent is, what it does, scope
 //! - `ROLE.md` — behavioral rules, delegation, escalation
+//! - `SPEECH.md` — spoken response style and anti-repetition guidance
 
 use rust_embed::Embed;
 
@@ -44,6 +45,7 @@ pub struct Preset {
     pub soul: String,
     pub identity: String,
     pub role: String,
+    pub speech: Option<String>,
 }
 
 /// Registry for accessing embedded preset archetypes.
@@ -74,12 +76,14 @@ impl PresetRegistry {
         let soul = Self::load_file(id, "SOUL.md")?;
         let identity = Self::load_file(id, "IDENTITY.md")?;
         let role = Self::load_file(id, "ROLE.md")?;
+        let speech = Self::load_optional_file(id, "SPEECH.md");
 
         Some(Preset {
             meta,
             soul,
             identity,
             role,
+            speech,
         })
     }
 
@@ -98,6 +102,13 @@ impl PresetRegistry {
 
     /// Load a single file from a preset directory.
     fn load_file(preset_id: &str, filename: &str) -> Option<String> {
+        let path = format!("{preset_id}/{filename}");
+        let file = PresetAssets::get(&path)?;
+        let content = std::str::from_utf8(file.data.as_ref()).ok()?;
+        Some(content.to_string())
+    }
+
+    fn load_optional_file(preset_id: &str, filename: &str) -> Option<String> {
         let path = format!("{preset_id}/{filename}");
         let file = PresetAssets::get(&path)?;
         let content = std::str::from_utf8(file.data.as_ref()).ok()?;

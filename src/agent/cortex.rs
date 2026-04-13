@@ -1411,7 +1411,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::WorkerInitialResult { .. }
         | ProcessEvent::WorkerText { .. }
         | ProcessEvent::CortexChatUpdate { .. }
-        | ProcessEvent::SettingsUpdated { .. } => return None,
+        | ProcessEvent::SettingsUpdated { .. }
+        | ProcessEvent::SpokenResponse { .. } => return None,
     })
 }
 

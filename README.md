@@ -345,6 +345,7 @@ Single binary, no server dependencies. All data lives in embedded databases in a
 | [MCP](<docs/content/docs/(features)/mcp.mdx>)                       | External tool servers via Model Context Protocol          |
 | [OpenCode](<docs/content/docs/(features)/opencode.mdx>)             | OpenCode as a worker backend                              |
 | [Messaging](<docs/content/docs/(messaging)/messaging.mdx>)          | Adapter architecture and platform setup                   |
+| [Desktop App](<docs/content/docs/(getting-started)/desktop.mdx>)    | Native app, connection screen, and voice overlay          |
 
 ---
 

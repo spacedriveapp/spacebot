@@ -121,6 +121,7 @@ export interface OutboundMessageEvent {
 	type: "outbound_message";
 	agent_id: string;
 	channel_id: string;
+	message_id?: string | null;
 	text: string;
 }
 
@@ -254,6 +255,21 @@ export interface CortexChatMessageEvent {
 	tool_calls?: Types.CortexChatToolCall[];
 }
 
+export interface SpokenResponseEvent {
+	type: "spoken_response";
+	agent_id: string;
+	channel_id: string;
+	message_id: string;
+	spoken_text: string;
+	full_text: string;
+}
+
+export interface TtsProfile {
+	id: string;
+	name?: string | null;
+	default_engine?: string | null;
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -269,7 +285,8 @@ export type ApiEvent =
 	| ToolCompletedEvent
 	| OpenCodePartUpdatedEvent
 	| WorkerTextEvent
-	| CortexChatMessageEvent;
+	| CortexChatMessageEvent
+	| SpokenResponseEvent;
 
 // -- Timeline types (discriminated union parts) --
 
@@ -571,6 +588,21 @@ export interface PresetMeta {
 
 export interface PresetsResponse {
 	presets: PresetMeta[];
+}
+
+export interface IdentityFiles {
+	soul: string | null;
+	identity: string | null;
+	role: string | null;
+	speech: string | null;
+}
+
+export interface IdentityUpdateRequest {
+	agent_id: string;
+	soul?: string | null;
+	identity?: string | null;
+	role?: string | null;
+	speech?: string | null;
 }
 
 // -- Config types with frontend-specific extensions --
@@ -2178,6 +2210,38 @@ export const api = {
 			}),
 		}),
 
+	portalSendAudio: (agentId: string, sessionId: string, audioBlob: Blob, senderName?: string) => {
+		const formData = new FormData();
+		formData.append("agent_id", agentId);
+		formData.append("session_id", sessionId);
+		formData.append("sender_name", senderName ?? "user");
+		formData.append("audio", audioBlob, "voice.webm");
+		return fetch(`${getApiBase()}/portal/send-audio`, {
+			method: "POST",
+			body: formData,
+		});
+	},
+
+	ttsGenerate: async (text: string, options?: { profileId?: string; engine?: string; agentId?: string }): Promise<ArrayBuffer> => {
+		const response = await fetch(`${getApiBase()}/tts/generate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				text,
+				profile_id: options?.profileId,
+				engine: options?.engine,
+				agent_id: options?.agentId,
+			}),
+		});
+		if (!response.ok) throw new Error(`TTS error: ${response.status}`);
+		return response.arrayBuffer();
+	},
+
+	ttsProfiles: (agentId?: string) =>
+		fetchJson<TtsProfile[]>(
+			`/tts/profiles${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`,
+		),
+
 	portalHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${getApiBase()}/portal/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
@@ -2490,18 +2554,6 @@ export const api = {
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
-	},
-
-	// TTS / Voice overlay methods (stubs)
-	ttsProfiles: async (_agentId: string): Promise<{ id: string; name: string }[]> => {
-		// TODO: Implement actual TTS profiles endpoint
-		return [];
-	},
-
-	portalSendAudio: async (agentId: string, _sessionId: string, _blob: Blob): Promise<Response> => {
-		// TODO: Implement actual audio sending endpoint
-		console.warn("portalSendAudio not implemented", agentId);
-		return new Response(null, { status: 501 });
 	},
 
 	// -- Notifications --

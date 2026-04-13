@@ -47,6 +47,7 @@ pub struct FactoryLoadPresetOutput {
     pub soul: String,
     pub identity: String,
     pub role: String,
+    pub speech: Option<String>,
 }
 
 impl Tool for FactoryLoadPresetTool {
@@ -97,6 +98,7 @@ impl Tool for FactoryLoadPresetTool {
             soul: preset.soul,
             identity: preset.identity,
             role: preset.role,
+            speech: preset.speech,
         })
     }
 }

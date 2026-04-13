@@ -77,6 +77,9 @@ pub struct FactoryCreateAgentArgs {
     pub identity_content: String,
     /// Content for ROLE.md — behavioral rules, delegation, escalation.
     pub role_content: String,
+    /// Optional content for SPEECH.md — spoken reply tone, cadence, and variety rules.
+    #[serde(default)]
+    pub speech_content: Option<String>,
     /// Links to create between the new agent and existing agents/humans.
     #[serde(default)]
     pub links: Vec<LinkSpec>,
@@ -132,6 +135,10 @@ impl Tool for FactoryCreateAgentTool {
                         "type": "string",
                         "description": "Full markdown content for ROLE.md."
                     },
+                    "speech_content": {
+                        "type": "string",
+                        "description": "Optional markdown content for SPEECH.md, used to shape spoken response style."
+                    },
                     "links": {
                         "type": "array",
                         "description": "Links to create between the new agent and existing agents/humans.",
@@ -185,6 +192,14 @@ impl Tool for FactoryCreateAgentTool {
             }
         }
 
+        if let Some(speech_content) = &args.speech_content
+            && speech_content.trim().is_empty()
+        {
+            return Err(FactoryCreateAgentError(
+                "speech_content cannot be empty or whitespace-only".into(),
+            ));
+        }
+
         // Validate agent doesn't already exist
         {
             let existing = self.state.agent_configs.load();
@@ -235,6 +250,15 @@ impl Tool for FactoryCreateAgentTool {
             if let Err(error) = tokio::fs::write(&path, content).await {
                 let message = format!("failed to write {filename}: {error}");
                 tracing::error!(agent_id = %agent_id, %error, filename, "identity file write failed");
+                identity_errors.push(message);
+            }
+        }
+
+        if let Some(speech_content) = &args.speech_content {
+            let path = identity_dir.join("SPEECH.md");
+            if let Err(error) = tokio::fs::write(&path, speech_content).await {
+                let message = format!("failed to write SPEECH.md: {error}");
+                tracing::error!(agent_id = %agent_id, %error, "speech identity file write failed");
                 identity_errors.push(message);
             }
         }

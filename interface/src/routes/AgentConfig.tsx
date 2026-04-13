@@ -88,7 +88,7 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 
 	const identityMutation = useMutation({
 		mutationFn: (update: {
-			field: "soul" | "identity" | "role";
+			field: "soul" | "identity" | "role" | "speech";
 			content: string;
 		}) =>
 			api.updateIdentity({

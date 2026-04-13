@@ -58,8 +58,8 @@ Five process types, each implemented as a Rig `Agent<SpacebotModel, SpacebotHook
 ├─────────────────────────────────────────────────────────┤
 │                       Cortex                            │
 │  System-level observer. Sees across all channels.       │
-│  Generates the memory bulletin — an LLM-curated         │
-│  briefing injected into every channel's prompt.         │
+│  Maintains knowledge synthesis and working memory       │
+│  context injected into every channel's prompt.          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -102,6 +102,7 @@ This split keeps high-volume memory writes off the control bus so channel contro
 | `ToolStarted` | Hook | Channel, UI | Tool call in progress |
 | `ToolCompleted` | Hook | Channel, UI | Tool call finished |
 | `MemorySaved` | Branch, Cortex | Cortex | New memory telemetry for signal buffer |
+| `SpokenResponse` | Channel | UI | Short spoken rewrite for TTS playback |
 | `CompactionTriggered` | Compactor | Channel | Context compacted |
 | `StatusUpdate` | Various | UI (SSE) | Typing indicators, lifecycle |
 | `TaskUpdated` | Branch, Worker | UI | Task board change |
@@ -155,12 +156,13 @@ The primary database. Stores everything that benefits from relational queries:
 | `memories` | Memory content, types, importance scores, timestamps |
 | `associations` | Graph edges between memories (weighted, typed) |
 | `conversation_messages` | Persistent conversation history per channel |
+| `working_memory_events` / synthesis tables | Temporal event log and compressed daily / intra-day summaries |
 | `channels` | Active channel registry with platform metadata |
 | `cron_jobs` | Scheduled task definitions |
 | `cron_executions` | Execution history for cron jobs |
 | `worker_runs` | Worker execution history with transcripts |
 | `branch_runs` | Branch execution history |
-| `cortex_events` | Cortex action log (bulletin generations, maintenance) |
+| `cortex_events` | Cortex action log (knowledge synthesis, maintenance, supervision) |
 | `cortex_chat_messages` | Persistent admin chat with cortex |
 | `tasks` | Structured task board (backlog → in_progress → done) |
 | `ingestion_progress` | Chunk-level progress for file ingestion |
@@ -198,7 +200,7 @@ The embedding model runs locally via FastEmbed -- no external API calls for embe
 Embedded key-value stores for configuration, settings, and secrets.
 
 - **config.redb** — key-value pairs (UI preferences, feature flags)
-- **settings.redb** — runtime settings (worker_log_mode, etc.)
+- **settings.redb** — runtime settings (worker_log_mode, spoken-response history, other per-channel runtime state)
 - **secrets.redb** — per-agent credential storage with categories (system/tool), optional AES-256-GCM encryption at rest. See [Secret Store](/docs/secrets).
 
 Separated from SQLite so credentials can be managed and backed up independently.
@@ -237,7 +239,18 @@ Portal ──┘                                              Channel.handle_mes
 2. Each channel has an outbound routing task that receives responses via `mpsc::channel`
 3. The routing task determines the platform from the channel ID prefix (`discord:`, `slack:`, `telegram:`, etc.)
 4. `MessagingManager::broadcast()` delivers the response to the correct platform adapter
-5. Responses are also forwarded to SSE clients (WebChat, dashboard) for real-time UI updates
+5. Responses are also forwarded to SSE clients (WebChat, dashboard, desktop voice overlay) for real-time UI updates
+
+### Voice Interaction Path
+
+The voice UI is layered on top of the same messaging and SSE pipeline rather than being a separate agent mode.
+
+1. The overlay captures microphone audio and uploads it through the WebChat audio API
+2. The channel handles the resulting user turn normally
+3. After a reply is sent, the channel optionally generates a shorter spoken rewrite when `voicebox_url` is configured
+4. `SPEECH.md` guidance and the last 15 spoken rewrites are injected into that speech-generation prompt to reduce repetition
+5. A `SpokenResponse` SSE event is emitted with a stable message ID so the UI can pair the spoken rewrite with the exact outbound assistant message
+6. The overlay or WebChat UI sends the spoken text to Voicebox for playback while rendering live FFT-driven branded waves
 
 ### Message Bindings
 
@@ -316,7 +329,7 @@ Rig defaults to 0 (single call). Spacebot sets explicit limits per process type:
 | Branch | 10 | A few iterations to think, recall, and conclude. |
 | Worker | 50 | Many iterations for complex tasks. Segmented into 25-turn blocks. |
 | Compactor | 10 | Summarize and extract memories. Bounded. |
-| Cortex | 10 | Bulletin generation. Single-pass with tool calls. |
+| Cortex | 10 | Knowledge synthesis, maintenance, and system observation. |
 
 ## Control API
 
@@ -329,7 +342,7 @@ An embedded Axum HTTP server provides the control API for the dashboard and exte
 | Agents | `/api/agents` | CRUD for agent definitions |
 | Channels | `/api/channels` | Channel listing, history, settings, deletion |
 | Workers | `/api/workers` | Worker status, history, timeline |
-| Cortex | `/api/cortex` | Bulletin, profile, cortex chat |
+| Cortex | `/api/cortex` | Knowledge synthesis, profile, cortex chat |
 | Memory | `/api/memories` | Memory CRUD, graph queries |
 | Config | `/api/config` | Runtime configuration read/write |
 | Providers | `/api/providers` | LLM provider key management |
@@ -350,7 +363,7 @@ The dashboard UI is a React SPA embedded in the binary via `rust-embed` and serv
 
 ### Real-Time Updates
 
-The API supports Server-Sent Events (SSE) for real-time streaming to connected clients. Status updates, tool call progress, worker lifecycle events, and memory changes are all pushed via SSE, giving the dashboard and WebChat live visibility into agent activity.
+The API supports Server-Sent Events (SSE) for real-time streaming to connected clients. Status updates, tool call progress, worker lifecycle events, spoken-response events, and memory changes are all pushed via SSE, giving the dashboard, WebChat, and voice overlay live visibility into agent activity.
 
 ## Startup Sequence
 
@@ -372,7 +385,7 @@ CLI (clap) → parse args
     → Best-effort startup warmup pass (bounded wait)
     → Initialize MessagingManager (start all platform adapters)
     → Initialize CronScheduler
-    → Start Cortex loops (warmup, bulletin fallback, association, ready-task)
+    → Start Cortex loops (warmup, knowledge synthesis, working memory maintenance, association, ready-task)
         → Register agent in active agents map
     → Enter main event loop (tokio::select!)
         → Inbound messages → route to Channel instances
@@ -436,7 +449,7 @@ src/
 
 **The compactor is not an LLM.** It's a programmatic monitor that watches a number and spawns workers. The LLM work happens in the workers it spawns.
 
-**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, ROLE.md) live in the agent root directory — outside the workspace sandbox — so worker file tools cannot access them.
+**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`, `SPEECH.md`) live in the agent root directory — outside the workspace sandbox — so worker file tools cannot access them.
 
 **Three databases, three purposes.** SQLite for relational queries, LanceDB for vector search, redb for key-value config. Each doing what it's best at.
 

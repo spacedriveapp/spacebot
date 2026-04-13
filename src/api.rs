@@ -34,6 +34,7 @@ mod state;
 mod system;
 mod tasks;
 mod tools;
+mod tts;
 mod usage;
 mod wiki;
 mod workers;

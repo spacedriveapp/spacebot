@@ -105,6 +105,7 @@ pub(super) struct IdentityResponse {
     soul: Option<String>,
     identity: Option<String>,
     role: Option<String>,
+    speech: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -118,6 +119,7 @@ pub(super) struct IdentityUpdateRequest {
     soul: Option<String>,
     identity: Option<String>,
     role: Option<String>,
+    speech: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1740,7 +1742,7 @@ pub(super) async fn get_agent_profile(
     Ok(Json(AgentProfileResponse { profile }))
 }
 
-/// Get identity files (SOUL.md, IDENTITY.md, ROLE.md) for an agent.
+/// Get identity files (SOUL.md, IDENTITY.md, ROLE.md, SPEECH.md) for an agent.
 #[utoipa::path(
     get,
     path = "/agents/identity",
@@ -1768,6 +1770,7 @@ pub(super) async fn get_identity(
         soul: identity.soul,
         identity: identity.identity,
         role: identity.role,
+        speech: identity.speech,
     }))
 }
 
@@ -1820,12 +1823,22 @@ pub(super) async fn update_identity(
             })?;
     }
 
+    if let Some(speech) = &request.speech {
+        tokio::fs::write(identity_dir.join("SPEECH.md"), speech)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "failed to write SPEECH.md");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
+
     let updated = crate::identity::Identity::load(identity_dir).await;
 
     Ok(Json(IdentityResponse {
         soul: updated.soul,
         identity: updated.identity,
         role: updated.role,
+        speech: updated.speech,
     }))
 }
 

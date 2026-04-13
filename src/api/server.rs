@@ -4,7 +4,7 @@ use super::state::ApiState;
 use super::{
     activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
     integrations, links, mcp, memories, messaging, models, notifications, opencode_proxy, portal,
-    projects, providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki,
+    projects, providers, secrets, settings, skills, ssh, system, tasks, tools, tts, usage, wiki,
     workers,
 };
 
@@ -310,6 +310,9 @@ pub async fn start_http_server(
         )
         .route("/api/opencode/{port}", any(opencode_proxy::opencode_proxy))
         .route("/api/opencode/{port}/", any(opencode_proxy::opencode_proxy))
+        // TTS proxy routes (not yet utoipa-annotated)
+        .route("/api/tts/generate", axum::routing::post(tts::tts_generate))
+        .route("/api/tts/profiles", axum::routing::get(tts::tts_profiles))
         // Apply auth middleware to all protected routes
         .layer(middleware::from_fn_with_state(
             state.clone(),

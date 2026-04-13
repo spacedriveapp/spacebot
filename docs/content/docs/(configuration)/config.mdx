@@ -115,6 +115,23 @@ eager_embedding_load = true
 refresh_secs = 900
 startup_delay_secs = 5
 
+# Working memory (temporal context rendered into channel prompts).
+[defaults.working_memory]
+enabled = true
+intraday_batch_threshold = 15
+intraday_time_fallback_secs = 14400
+today_max_unsynthesized_events = 10
+context_token_budget = 1500
+channel_map_token_budget = 300
+channel_map_max_channels = 10
+channel_map_inactive_hours = 24
+min_importance_under_pressure = 0.5
+event_retention_days = 30
+daily_summary_max_words = 300
+persistence_message_threshold = 20
+persistence_time_threshold_secs = 900
+persistence_event_density_threshold = 5
+
 # Browser automation for workers.
 [defaults.browser]
 enabled = true
@@ -138,6 +155,10 @@ user_timezone = "America/Los_Angeles"  # optional per-agent timezone override fo
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
 channel = "anthropic/claude-opus-4-20250514"
+
+# Optional voice output integration for spoken replies.
+[agents.voice]
+voicebox_url = "http://localhost:9990"
 
 # Per-agent sandbox configuration.
 [agents.sandbox]
@@ -263,7 +284,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
-| Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
+| Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity and speech style |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
 | Discord/Slack permissions | Yes | Next message checks new permission rules |
@@ -284,7 +305,7 @@ A file watcher (via the `notify` crate) monitors:
 
 - `~/.spacebot/config.toml`
 - `~/.spacebot/skills/` (instance-level skills)
-- Each agent's root directory (identity files: SOUL.md, IDENTITY.md, ROLE.md)
+- Each agent's root directory (identity files: SOUL.md, IDENTITY.md, ROLE.md, SPEECH.md)
 - Each agent's `workspace/skills/` (workspace-level skills)
 
 On file change, Spacebot re-reads the changed files and atomically swaps the new values into the live `RuntimeConfig` using `arc-swap`. All consumers (channels, branches, workers, compactors, cron jobs) read from `RuntimeConfig` on every use, so they pick up changes immediately.
@@ -318,6 +339,7 @@ System prompts (channel, branch, worker, compactor, cortex, etc.) are Jinja2 tem
         ├── SOUL.md                # personality (hot-reloaded)
         ├── IDENTITY.md            # name and nature (hot-reloaded)
         ├── ROLE.md                # responsibilities, scope (hot-reloaded)
+        ├── SPEECH.md              # spoken reply style (hot-reloaded)
         ├── workspace/             # sandbox boundary for worker file tools
         │   ├── skills/            # workspace-level skills (hot-reloaded)
         │   └── ingest/            # drop files here for memory ingestion
@@ -332,6 +354,37 @@ System prompts (channel, branch, worker, compactor, cortex, etc.) are Jinja2 tem
 ```
 
 ## Sections Reference
+
+### `defaults.working_memory`
+
+Controls the temporal context layer injected into channel prompts.
+
+| Field | Type | Default | Description |
+|------|------|---------|-------------|
+| `enabled` | bool | `true` | Enables working-memory rendering in channel prompts. |
+| `intraday_batch_threshold` | int | `15` | Number of unsynthesized events before an intra-day synthesis pass is triggered. |
+| `intraday_time_fallback_secs` | int | `14400` | Time-based fallback for synthesis when event volume is low. |
+| `today_max_unsynthesized_events` | int | `10` | Raw event tail preserved alongside synthesized narrative. |
+| `context_token_budget` | int | `1500` | Token budget for the full working-memory section. |
+| `channel_map_token_budget` | int | `300` | Token budget for the cross-channel activity map. |
+| `channel_map_max_channels` | int | `10` | Maximum channels included in the activity map. |
+| `channel_map_inactive_hours` | int | `24` | Hide inactive channels after this many hours. |
+| `min_importance_under_pressure` | float | `0.5` | Importance cutoff when the section is under token pressure. |
+| `event_retention_days` | int | `30` | Retention window for raw working-memory events. |
+| `daily_summary_max_words` | int | `300` | Word budget for daily rollup summaries. |
+| `persistence_message_threshold` | int | `20` | Trigger memory persistence after this many messages. |
+| `persistence_time_threshold_secs` | int | `900` | Time-based persistence trigger. |
+| `persistence_event_density_threshold` | int | `5` | Trigger persistence when enough high-signal events accumulate. |
+
+### `agents.voice`
+
+Voice output is optional and configured per agent.
+
+| Field | Type | Default | Description |
+|------|------|---------|-------------|
+| `voicebox_url` | string | empty | Base URL for the Voicebox server used for TTS profile lookup and spoken reply generation. When unset, text chat still works and no spoken-response events are emitted. |
+
+When voice output is enabled, Spacebot generates a shorter spoken rewrite for outbound assistant messages, applies `SPEECH.md` guidance, injects the last 15 spoken rewrites into the speech-generation prompt to reduce repetition, and emits `spoken_response` SSE events for the web/desktop voice UI.
 
 ### Migration from Legacy Keys
 

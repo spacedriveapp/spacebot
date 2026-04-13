@@ -828,15 +828,16 @@ function IdentitySection({
 	identity,
 }: {
 	agentId: string;
-	identity: {soul: string | null; identity: string | null; role: string | null};
+	identity: {soul: string | null; identity: string | null; role: string | null; speech: string | null};
 }) {
-	const hasContent = identity.soul || identity.identity || identity.role;
+	const hasContent = identity.soul || identity.identity || identity.role || identity.speech;
 	if (!hasContent) return null;
 
 	const files = [
 		{label: "SOUL.md", tab: "soul", content: identity.soul},
 		{label: "IDENTITY.md", tab: "identity", content: identity.identity},
 		{label: "ROLE.md", tab: "role", content: identity.role},
+		{label: "SPEECH.md", tab: "speech", content: identity.speech},
 	].filter(
 		(f) =>
 			f.content && f.content.trim().length > 0 && !f.content.startsWith("<!--"),

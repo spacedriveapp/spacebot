@@ -7,6 +7,8 @@ description: Run Spacebot as a native desktop application with the Tauri-based d
 
 The Spacebot desktop app is a native application that provides the full Spacebot dashboard experience. It connects to any running Spacebot instance over HTTP and can optionally start a bundled local server with one click.
 
+It also hosts the voice overlay experience: a transparent floating window with the official Spacebot ball + orb mark, a Siri-style live waveform, and push-to-talk / spoken-reply playback support.
+
 ## How It Works
 
 The desktop app is a Tauri 2 shell wrapping the same React interface used by the web dashboard. Unlike the web version (which loads from the server's embedded static files), the desktop app bundles the frontend locally and connects to any Spacebot server via its HTTP API.
@@ -34,6 +36,8 @@ On launch, the desktop app checks if a Spacebot server is reachable at the confi
 
 - **Edit the server URL** and click Connect to point at any running instance
 - **Start a local server** using the bundled Spacebot binary (one click)
+
+The connection screen uses the same official branded ball + orb treatment as the voice overlay so the desktop app feels visually consistent from boot to conversation.
 
 Once connected, the app transitions to the normal dashboard. The server URL is persisted between sessions.
 
@@ -137,5 +141,6 @@ When the desktop app loads from `tauri://localhost` and makes requests to `http:
 The desktop app includes platform-specific enhancements:
 
 - **macOS**: Transparent titlebar with traffic light integration, sidebar vibrancy effect, dark theme lock
-- **Window management**: 1200x800 default size, 900x600 minimum, overlay titlebar style
+- **Window management**: 1200x800 default size, 900x600 minimum, overlay titlebar style, transparent voice overlay window
+- **Voice overlay**: push-to-talk surface with the official Spacebot ball + orb mark, live blue/purple FFT-driven wave rendering, and spoken-reply playback through Voicebox
 - **Tauri plugins**: Shell (sidecar management, opening external links)

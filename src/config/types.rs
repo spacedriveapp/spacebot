@@ -1395,7 +1395,7 @@ pub struct ResolvedAgentConfig {
     pub gradient_end: Option<String>,
     pub workspace: PathBuf,
     /// Agent root directory (parent of workspace). Identity files (SOUL.md,
-    /// IDENTITY.md, ROLE.md) live here — outside the workspace sandbox.
+    /// IDENTITY.md, ROLE.md, SPEECH.md) live here — outside the workspace sandbox.
     pub identity_dir: PathBuf,
     pub data_dir: PathBuf,
     pub archives_dir: PathBuf,
