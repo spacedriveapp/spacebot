@@ -675,3 +675,181 @@ impl Tool for CodeGraphRenameTool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// codegraph_route_map — show API route → handler mappings
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct CodeGraphRouteMapTool {
+    manager: Arc<CodeGraphManager>,
+}
+
+impl CodeGraphRouteMapTool {
+    pub fn new(manager: Arc<CodeGraphManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("codegraph_route_map failed: {0}")]
+pub struct CodeGraphRouteMapError(String);
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodeGraphRouteMapArgs {
+    /// Project ID to search within.
+    pub project_id: String,
+    /// Optional route path filter (e.g. "/api/graph"). Omit for all routes.
+    pub route: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodeGraphRouteMapOutput {
+    pub result: Value,
+}
+
+impl Tool for CodeGraphRouteMapTool {
+    const NAME: &'static str = "codegraph_route_map";
+    type Error = CodeGraphRouteMapError;
+    type Args = CodeGraphRouteMapArgs;
+    type Output = CodeGraphRouteMapOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Show API route mappings: which functions handle which HTTP endpoints. Returns route path, HTTP method, handler function name, and file location. Use to understand the API surface of a project.".to_string(),
+            parameters: schemars::schema_for!(CodeGraphRouteMapArgs).to_value(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let db = self.manager.get_db(&args.project_id).await
+            .ok_or_else(|| CodeGraphRouteMapError(format!("project '{}' not found", args.project_id)))?;
+        let result = cg_tools::route_map(&db, &args.project_id, args.route.as_deref()).await
+            .map_err(|e| CodeGraphRouteMapError(e.to_string()))?;
+        Ok(CodeGraphRouteMapOutput { result: serde_json::to_value(result).unwrap_or_default() })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// codegraph_tool_map — show tool/MCP definitions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct CodeGraphToolMapTool {
+    manager: Arc<CodeGraphManager>,
+}
+
+impl CodeGraphToolMapTool {
+    pub fn new(manager: Arc<CodeGraphManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("codegraph_tool_map failed: {0}")]
+pub struct CodeGraphToolMapError(String);
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodeGraphToolMapArgs {
+    /// Project ID to search within.
+    pub project_id: String,
+    /// Optional tool name filter. Omit for all tools.
+    pub tool: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodeGraphToolMapOutput {
+    pub result: Value,
+}
+
+impl Tool for CodeGraphToolMapTool {
+    const NAME: &'static str = "codegraph_tool_map";
+    type Error = CodeGraphToolMapError;
+    type Args = CodeGraphToolMapArgs;
+    type Output = CodeGraphToolMapOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Show MCP/RPC tool definitions: which functions handle which tools, and where they're defined. Returns tool name, handler function, and file location.".to_string(),
+            parameters: schemars::schema_for!(CodeGraphToolMapArgs).to_value(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let db = self.manager.get_db(&args.project_id).await
+            .ok_or_else(|| CodeGraphToolMapError(format!("project '{}' not found", args.project_id)))?;
+        let result = cg_tools::tool_map(&db, &args.project_id, args.tool.as_deref()).await
+            .map_err(|e| CodeGraphToolMapError(e.to_string()))?;
+        Ok(CodeGraphToolMapOutput { result: serde_json::to_value(result).unwrap_or_default() })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// codegraph_api_impact — pre-change impact report for a route
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct CodeGraphApiImpactTool {
+    manager: Arc<CodeGraphManager>,
+}
+
+impl CodeGraphApiImpactTool {
+    pub fn new(manager: Arc<CodeGraphManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("codegraph_api_impact failed: {0}")]
+pub struct CodeGraphApiImpactError(String);
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodeGraphApiImpactArgs {
+    /// Project ID to analyze.
+    pub project_id: String,
+    /// Route path to analyze (e.g. "/api/graph/stats").
+    pub route: Option<String>,
+    /// Handler file path (alternative to route for lookup).
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodeGraphApiImpactOutput {
+    pub found: bool,
+    pub result: Value,
+}
+
+impl Tool for CodeGraphApiImpactTool {
+    const NAME: &'static str = "codegraph_api_impact";
+    type Error = CodeGraphApiImpactError;
+    type Args = CodeGraphApiImpactArgs;
+    type Output = CodeGraphApiImpactOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Pre-change impact report for an API route handler. Combines route mapping with blast-radius analysis to show: the handler function, what calls it, what processes are affected, and the risk level. Use before modifying an API endpoint.".to_string(),
+            parameters: schemars::schema_for!(CodeGraphApiImpactArgs).to_value(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let db = self.manager.get_db(&args.project_id).await
+            .ok_or_else(|| CodeGraphApiImpactError(format!("project '{}' not found", args.project_id)))?;
+        let result = cg_tools::api_impact(
+            &db, &args.project_id, args.route.as_deref(), args.file.as_deref(),
+        ).await.map_err(|e| CodeGraphApiImpactError(e.to_string()))?;
+        match result {
+            Some(r) => Ok(CodeGraphApiImpactOutput {
+                found: true,
+                result: serde_json::to_value(r).unwrap_or_default(),
+            }),
+            None => Ok(CodeGraphApiImpactOutput {
+                found: false,
+                result: serde_json::json!({"error": "No matching route found"}),
+            }),
+        }
+    }
+}

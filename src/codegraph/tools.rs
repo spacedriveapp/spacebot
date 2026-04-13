@@ -767,3 +767,197 @@ pub async fn rename_symbol(
 
     Ok(Some(result))
 }
+
+// ---------------------------------------------------------------------------
+// 6. Route Map — show API route → handler mappings
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteMapping {
+    pub method: String,
+    pub path: String,
+    pub handler_name: String,
+    pub handler_file: Option<String>,
+    pub handler_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteMapResult {
+    pub routes: Vec<RouteMapping>,
+    pub total: usize,
+}
+
+pub async fn route_map(
+    db: &SharedCodeGraphDb,
+    project_id: &str,
+    route_filter: Option<&str>,
+) -> Result<RouteMapResult> {
+    let pid = esc(project_id);
+    let mut routes = Vec::new();
+
+    // Route nodes have name = "METHOD /path" (e.g. "GET /api/health").
+    // HANDLES_ROUTE edges go from Function/Method → Route.
+    for &handler_label in &["Function", "Method"] {
+        let rows = db
+            .query(&format!(
+                "MATCH (f:{handler_label})-[r:CodeRelation]->(rt:Route) \
+                 WHERE rt.project_id = '{pid}' AND r.type = 'HANDLES_ROUTE' \
+                 RETURN rt.name, f.name, f.source_file, f.line_start"
+            ))
+            .await;
+        if let Ok(rows) = rows {
+            for row in &rows {
+                let route_name = val_str(row.first());
+                let parts: Vec<&str> = route_name.splitn(2, ' ').collect();
+                let (method, path) = if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    ("*".to_string(), route_name.clone())
+                };
+
+                if let Some(filter) = route_filter {
+                    if !path.contains(filter) {
+                        continue;
+                    }
+                }
+
+                routes.push(RouteMapping {
+                    method,
+                    path,
+                    handler_name: val_str(row.get(1)),
+                    handler_file: val_str_opt(row.get(2)),
+                    handler_line: row.get(3).and_then(|v| match v {
+                        lbug::Value::Int32(n) if *n > 0 => Some(*n as u32),
+                        _ => None,
+                    }),
+                });
+            }
+        }
+    }
+
+    routes.sort_by(|a, b| a.path.cmp(&b.path));
+    let total = routes.len();
+    Ok(RouteMapResult { routes, total })
+}
+
+// ---------------------------------------------------------------------------
+// 7. Tool Map — show tool/MCP definitions and handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolMapping {
+    pub tool_name: String,
+    pub handler_name: String,
+    pub handler_file: Option<String>,
+    pub handler_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolMapResult {
+    pub tools: Vec<ToolMapping>,
+    pub total: usize,
+}
+
+pub async fn tool_map(
+    db: &SharedCodeGraphDb,
+    project_id: &str,
+    tool_filter: Option<&str>,
+) -> Result<ToolMapResult> {
+    let pid = esc(project_id);
+    let mut tools = Vec::new();
+
+    // HANDLES_TOOL edges are self-loops on Function/Method nodes.
+    // The tool name is stored in r.reason.
+    for &label in &["Function", "Method"] {
+        let rows = db
+            .query(&format!(
+                "MATCH (f:{label})-[r:CodeRelation]->(f) \
+                 WHERE f.project_id = '{pid}' AND r.type = 'HANDLES_TOOL' \
+                 RETURN r.reason, f.name, f.source_file, f.line_start"
+            ))
+            .await;
+        if let Ok(rows) = rows {
+            for row in &rows {
+                let tool_name = val_str(row.first());
+                if tool_name.is_empty() {
+                    continue;
+                }
+
+                if let Some(filter) = tool_filter {
+                    if !tool_name.contains(filter) {
+                        continue;
+                    }
+                }
+
+                tools.push(ToolMapping {
+                    tool_name,
+                    handler_name: val_str(row.get(1)),
+                    handler_file: val_str_opt(row.get(2)),
+                    handler_line: row.get(3).and_then(|v| match v {
+                        lbug::Value::Int32(n) if *n > 0 => Some(*n as u32),
+                        _ => None,
+                    }),
+                });
+            }
+        }
+    }
+
+    tools.sort_by(|a, b| a.tool_name.cmp(&b.tool_name));
+    let total = tools.len();
+    Ok(ToolMapResult { tools, total })
+}
+
+// ---------------------------------------------------------------------------
+// 8. API Impact — pre-change impact report for a route
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiImpactResult {
+    pub route: RouteMapping,
+    pub handler_impact: Option<ImpactResult>,
+    pub risk: String,
+}
+
+/// Combine route lookup with blast-radius analysis on the handler.
+pub async fn api_impact(
+    db: &SharedCodeGraphDb,
+    project_id: &str,
+    route_path: Option<&str>,
+    handler_file: Option<&str>,
+) -> Result<Option<ApiImpactResult>> {
+    // Find the route.
+    let map = route_map(db, project_id, route_path).await?;
+    let route = if let Some(file) = handler_file {
+        map.routes
+            .iter()
+            .find(|r| r.handler_file.as_deref() == Some(file))
+    } else {
+        map.routes.first()
+    };
+
+    let route = match route {
+        Some(r) => r.clone(),
+        None => return Ok(None),
+    };
+
+    // Run impact analysis on the handler function.
+    let impact = impact_analysis(
+        db,
+        project_id,
+        &route.handler_name,
+        "upstream",
+        3,
+    )
+    .await?;
+
+    let risk = impact
+        .as_ref()
+        .map(|i| i.risk.clone())
+        .unwrap_or_else(|| "LOW".to_string());
+
+    Ok(Some(ApiImpactResult {
+        route,
+        handler_impact: impact,
+        risk,
+    }))
+}

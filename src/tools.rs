@@ -82,9 +82,10 @@ pub use browser::{
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use codegraph::{
-    CodeGraphContextTool, CodeGraphCypherTool, CodeGraphDetectChangesTool,
-    CodeGraphGetFilesForTaskTool, CodeGraphImpactTool, CodeGraphListProjectsTool,
-    CodeGraphQueryTool, CodeGraphRenameTool,
+    CodeGraphApiImpactTool, CodeGraphContextTool, CodeGraphCypherTool,
+    CodeGraphDetectChangesTool, CodeGraphGetFilesForTaskTool, CodeGraphImpactTool,
+    CodeGraphListProjectsTool, CodeGraphQueryTool, CodeGraphRenameTool,
+    CodeGraphRouteMapTool, CodeGraphToolMapTool,
 };
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
@@ -445,6 +446,15 @@ pub async fn add_channel_tools(
         handle
             .add_tool(CodeGraphRenameTool::new(cg_manager.clone()))
             .await?;
+        handle
+            .add_tool(CodeGraphRouteMapTool::new(cg_manager.clone()))
+            .await?;
+        handle
+            .add_tool(CodeGraphToolMapTool::new(cg_manager.clone()))
+            .await?;
+        handle
+            .add_tool(CodeGraphApiImpactTool::new(cg_manager.clone()))
+            .await?;
     }
     // Add attachment recall tool when save_attachments is enabled
     if state
@@ -676,7 +686,10 @@ pub fn create_worker_tool_server(
             .tool(CodeGraphImpactTool::new(cg.clone()))
             .tool(CodeGraphDetectChangesTool::new(cg.clone()))
             .tool(CodeGraphCypherTool::new(cg.clone()))
-            .tool(CodeGraphRenameTool::new(cg.clone()));
+            .tool(CodeGraphRenameTool::new(cg.clone()))
+            .tool(CodeGraphRouteMapTool::new(cg.clone()))
+            .tool(CodeGraphToolMapTool::new(cg.clone()))
+            .tool(CodeGraphApiImpactTool::new(cg.clone()));
     }
 
     for mcp_tool in mcp_tools {
@@ -790,7 +803,10 @@ pub fn create_cortex_chat_tool_server(
             .tool(CodeGraphImpactTool::new(cg.clone()))
             .tool(CodeGraphDetectChangesTool::new(cg.clone()))
             .tool(CodeGraphCypherTool::new(cg.clone()))
-            .tool(CodeGraphRenameTool::new(cg.clone()));
+            .tool(CodeGraphRenameTool::new(cg.clone()))
+            .tool(CodeGraphRouteMapTool::new(cg.clone()))
+            .tool(CodeGraphToolMapTool::new(cg.clone()))
+            .tool(CodeGraphApiImpactTool::new(cg.clone()));
     }
 
     server.run()
