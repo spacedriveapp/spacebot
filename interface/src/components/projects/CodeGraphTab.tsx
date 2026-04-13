@@ -140,34 +140,64 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 
 	// Wait for the project to finish indexing before trying to load the graph.
 	if (projectStatus === "indexing" || projectStatus === "pending") {
+		const progress = projectQuery.data?.project.progress;
+		const pct = progress
+			? Math.round(((progress.stats?.files_parsed ?? 0) / Math.max(progress.stats?.files_found ?? 1, 1)) * 100)
+			: 0;
 		return (
-			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-ink-faint">Project is still indexing — the graph will load when the index completes.</p>
+			<div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-4 bg-app">
+				<div className="h-8 w-8 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+				<p className="text-lg font-semibold text-ink">Indexing Project</p>
+				<p className="text-sm text-ink-dull">{progress?.message ?? "Preparing..."}</p>
+				<div className="mt-2 h-1.5 w-64 overflow-hidden rounded-full bg-app-line">
+					<div
+						className="h-full rounded-full bg-accent transition-all duration-500"
+						style={{ width: `${Math.max(2, pct)}%` }}
+					/>
+				</div>
+				<p className="text-xs text-ink-faint">{pct}% complete</p>
 			</div>
 		);
 	}
 
 	if (projectStatus === "error") {
 		return (
-			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-red-400">Indexing failed. Re-index the project from the Overview tab.</p>
+			<div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-3 bg-app">
+				<div className="h-3 w-3 rounded-full bg-red-500" />
+				<p className="text-lg font-semibold text-red-400">Indexing Failed</p>
+				<p className="text-sm text-ink-dull">Re-index the project from the Overview tab.</p>
 			</div>
 		);
 	}
 
 	if (nodesQuery.isError || edgesQuery.isError) {
 		return (
-			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-red-400">Failed to load code graph.</p>
+			<div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-3 bg-app">
+				<div className="h-3 w-3 rounded-full bg-red-500" />
+				<p className="text-lg font-semibold text-red-400">Failed to Load Graph</p>
+				<p className="text-sm text-ink-dull">Check the server logs for details.</p>
 			</div>
 		);
 	}
 
-	// Initial loading state — graph hasn't been built yet.
+	// Loading state — fetching nodes and edges.
 	if (nodesQuery.isLoading || edgesQuery.isLoading || !graph) {
+		const nodesPct = nodesQuery.data ? 50 : 0;
+		const edgesPct = edgesQuery.data ? 100 : nodesPct;
 		return (
-			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-ink-faint">Loading code graph...</p>
+			<div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-4 bg-app">
+				<div className="h-8 w-8 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+				<p className="text-lg font-semibold text-ink">Loading Code Graph</p>
+				<p className="text-sm text-ink-dull">
+					{!nodesQuery.data ? "Fetching nodes..." : !edgesQuery.data ? "Fetching edges..." : "Building graph..."}
+				</p>
+				<div className="mt-2 h-1.5 w-64 overflow-hidden rounded-full bg-app-line">
+					<div
+						className="h-full rounded-full bg-accent transition-all duration-500"
+						style={{ width: `${Math.max(2, edgesPct)}%` }}
+					/>
+				</div>
+				<p className="text-xs text-ink-faint">{edgesPct}%</p>
 			</div>
 		);
 	}

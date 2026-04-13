@@ -124,6 +124,20 @@ const PHASE_LABELS: Record<string, string> = {
 	complete: "Complete",
 };
 
+// Each phase gets a color — segments fill in left-to-right as phases complete.
+const PHASE_SEGMENT_COLORS: Record<string, string> = {
+	extracting: "bg-emerald-500",
+	structure: "bg-emerald-400",
+	parsing: "bg-teal-500",
+	imports: "bg-blue-500",
+	calls: "bg-blue-400",
+	heritage: "bg-indigo-500",
+	communities: "bg-violet-500",
+	processes: "bg-purple-500",
+	enriching: "bg-amber-500",
+	complete: "bg-emerald-500",
+};
+
 function AnimatedNumber({ value, duration = 500 }: { value: number; duration?: number }) {
 	const [display, setDisplay] = useState(value);
 	const prevRef = useRef(value);
@@ -209,12 +223,15 @@ function IndexingProgress({ project }: { project: CodeGraphProject }) {
 	}
 
 	const showIdx = Math.max(0, Math.min(displayPhaseIdx, PIPELINE_PHASES.length - 1));
-	const isAnimComplete = showIdx === PIPELINE_PHASES.length - 1 && project.status === "indexed";
+	// Only show as complete when the backend says "indexed" AND we've
+	// animated through to the final phase. The "complete" phase is index 9
+	// but "enriching" is 8 — don't mark done until status flips.
+	const isAnimComplete = project.status === "indexed";
 
 	// Use actual phase_progress if we're on the same phase the API reports,
 	// otherwise treat earlier phases as fully complete (1.0).
 	const phaseProgress =
-		showIdx === actualPhaseIdx ? (effectiveProgress.phase_progress ?? 1.0) : 1.0;
+		showIdx === actualPhaseIdx ? (effectiveProgress.phase_progress ?? 0) : 1.0;
 
 	const overallProgress = isAnimComplete
 		? 100
@@ -222,7 +239,6 @@ function IndexingProgress({ project }: { project: CodeGraphProject }) {
 
 	const borderColor = isAnimComplete ? "border-emerald-500/30" : "border-blue-500/30";
 	const bgColor = isAnimComplete ? "bg-emerald-500/5" : "bg-blue-500/5";
-	const accentColor = isAnimComplete ? "bg-emerald-500" : "bg-blue-500";
 	const textColor = isAnimComplete ? "text-emerald-400" : "text-blue-400";
 
 	return (
@@ -244,29 +260,37 @@ function IndexingProgress({ project }: { project: CodeGraphProject }) {
 				<span className="text-xs text-ink-faint">{Math.round(overallProgress)}%</span>
 			</div>
 
-			{/* Overall progress bar */}
-			<div className="mb-4 h-2 overflow-hidden rounded-full bg-app-box">
-				<div
-					className={clsx("h-full rounded-full transition-all duration-500", accentColor)}
-					style={{ width: `${overallProgress}%` }}
-				/>
+			{/* Segmented progress bar — each phase is a colored segment.
+			    The full bar is visible as a gray track; segments fill in
+			    with their phase color as they complete. */}
+			<div className="mb-4 flex h-2 gap-0.5 overflow-hidden rounded-full">
+				{PIPELINE_PHASES.map((phase, i) => {
+					const isDone = isAnimComplete || i < showIdx;
+					const isCurrent = !isAnimComplete && i === showIdx;
+					// Current phase fills partially based on phase_progress.
+					const fillPct = isDone ? 100 : isCurrent ? Math.round(phaseProgress * 100) : 0;
+					const segColor = PHASE_SEGMENT_COLORS[phase] ?? "bg-accent";
+					return (
+						<div key={phase} className="relative flex-1 overflow-hidden rounded-full bg-app-line">
+							<div
+								className={clsx(
+									"absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out",
+									segColor,
+								)}
+								style={{ width: `${fillPct}%` }}
+							/>
+						</div>
+					);
+				})}
 			</div>
 
-			{/* Phase steps */}
+			{/* Phase labels */}
 			<div className="mb-4 grid grid-cols-5 gap-1">
 				{PIPELINE_PHASES.map((phase, i) => {
 					const isCurrent = !isAnimComplete && i === showIdx;
 					const isDone = isAnimComplete || i < showIdx;
 					return (
-						<div key={phase} className="flex flex-col items-center gap-1">
-							<div
-								className={clsx(
-									"h-1.5 w-full rounded-full transition-colors duration-300",
-									isDone && "bg-emerald-500",
-									isCurrent && "bg-blue-500",
-									!isDone && !isCurrent && "bg-app-line",
-								)}
-							/>
+						<div key={phase} className="flex flex-col items-center">
 							<span
 								className={clsx(
 									"text-[10px] leading-tight",
@@ -280,7 +304,7 @@ function IndexingProgress({ project }: { project: CodeGraphProject }) {
 				})}
 			</div>
 
-			{/* Current message — show the phase label while animating through skipped phases */}
+			{/* Current message */}
 			<p className="mb-3 text-xs text-ink-dull">
 				{showIdx < actualPhaseIdx
 					? PHASE_LABELS[PIPELINE_PHASES[showIdx]]

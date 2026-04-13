@@ -22,6 +22,21 @@ pub const ALL_NODE_LABELS: &[&str] = &[
     "Record", "Template", "Test", "Community", "Process", "Section", "Route",
 ];
 
+/// Node labels for display, stats, and graph queries. Excludes the 4
+/// "pipeline-only" labels (Variable, Import, Parameter, Decorator) that
+/// are created temporarily for resolution and deleted before finalization.
+pub const DISPLAY_NODE_LABELS: &[&str] = &[
+    "Project", "Package", "Module", "Folder", "File", "Class", "Function",
+    "Method", "Interface", "Enum", "Type",
+    "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
+    "Record", "Template", "Test", "Community", "Process", "Section", "Route",
+];
+
+/// Labels that exist only during pipeline execution and are deleted before
+/// the final graph is committed. They're needed for import resolution,
+/// call resolution, and type inference.
+pub const PIPELINE_ONLY_LABELS: &[&str] = &["Variable", "Import", "Parameter", "Decorator"];
+
 /// Generate DROP statements for all tables so the schema can be rebuilt
 /// from scratch when the version changes. Rel table must be dropped
 /// before node tables because LadybugDB rejects dropping a node table

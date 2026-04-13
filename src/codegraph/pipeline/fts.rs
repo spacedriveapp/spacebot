@@ -60,10 +60,11 @@ pub async fn build_fts_index(
     .await?;
 
     let pid = project_id.replace('\\', "\\\\").replace('\'', "\\'");
+    // Only index labels that survive the pipeline cleanup. Variable,
+    // Import, Parameter, and Decorator are deleted before this runs.
     let searchable_labels = &[
         "Function", "Method", "Class", "Interface", "Struct", "Trait",
-        "Enum", "Variable", "TypeAlias", "Const", "Module", "Import",
-        "Decorator", "Route",
+        "Enum", "TypeAlias", "Const", "Module", "Route",
     ];
 
     let mut total_indexed = 0u64;

@@ -397,6 +397,59 @@ async fn run_pipeline(
     if let Err(err) = embeddings::generate_embeddings(&project_id, &root_path, &db).await {
         tracing::warn!(%err, "embeddings pass failed, continuing");
     }
+    update_progress(PipelinePhase::Enriching, 0.8, "Cleaning up temporary nodes", &stats);
+
+    // ── Cleanup pipeline-only nodes ────────────────────────────────────
+    // Variable, Import, Parameter, and Decorator nodes were needed for
+    // resolution (imports, calls, type inference, decorator edges) but
+    // don't belong in the final graph — matching GitNexus's schema.
+    // DETACH DELETE removes the nodes and all their connected edges.
+    {
+        let pid = project_id.replace('\\', "\\\\").replace('\'', "\\'");
+        let mut nodes_removed: u64 = 0;
+        for &label in super::schema::PIPELINE_ONLY_LABELS {
+            let count = db
+                .query_scalar_i64(&format!(
+                    "MATCH (n:{label}) WHERE n.project_id = '{pid}' RETURN count(n)"
+                ))
+                .await
+                .unwrap_or(Some(0))
+                .unwrap_or(0);
+            if count > 0 {
+                db.execute(&format!(
+                    "MATCH (n:{label}) WHERE n.project_id = '{pid}' DETACH DELETE n"
+                ))
+                .await
+                .ok();
+                nodes_removed += count as u64;
+                tracing::debug!(label, count, "deleted pipeline-only nodes");
+            }
+        }
+        if nodes_removed > 0 {
+            stats.nodes_created = stats.nodes_created.saturating_sub(nodes_removed);
+            // Recount edges since DETACH DELETE removed connected edges too.
+            let mut total_edges: u64 = 0;
+            for &from_label in super::schema::DISPLAY_NODE_LABELS {
+                let edge_count = db
+                    .query_scalar_i64(&format!(
+                        "MATCH (a:{from_label})-[r:CodeRelation]->() \
+                         WHERE a.project_id = '{pid}' RETURN count(r)"
+                    ))
+                    .await
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0);
+                total_edges += edge_count as u64;
+            }
+            stats.edges_created = total_edges;
+            tracing::info!(
+                nodes_removed,
+                final_nodes = stats.nodes_created,
+                final_edges = stats.edges_created,
+                "pipeline-only nodes cleaned up"
+            );
+        }
+    }
+
     update_progress(PipelinePhase::Enriching, 1.0, "Enrichment complete", &stats);
     phase_timings.insert("enriching".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();

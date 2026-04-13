@@ -119,6 +119,79 @@ impl CodeGraphManager {
         Ok(())
     }
 
+    /// Detect the primary language(s) of a project by querying File nodes
+    /// and counting extensions. Returns a human-readable string like
+    /// "Rust, TypeScript" or `None` if no files were indexed.
+    async fn detect_languages(
+        db: &super::db::SharedCodeGraphDb,
+        project_id: &str,
+    ) -> Option<String> {
+        let pid = project_id.replace('\\', "\\\\").replace('\'', "\\'");
+        let rows = db
+            .query(&format!(
+                "MATCH (n:File) WHERE n.project_id = '{pid}' RETURN n.source_file"
+            ))
+            .await
+            .ok()?;
+
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for row in &rows {
+            if let Some(lbug::Value::String(path)) = row.first() {
+                let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+                let lang = match ext.as_str() {
+                    "rs" => "Rust",
+                    "ts" | "tsx" => "TypeScript",
+                    "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
+                    "py" | "pyi" => "Python",
+                    "go" => "Go",
+                    "c" | "h" => "C",
+                    "cpp" | "cc" | "cxx" | "hpp" => "C++",
+                    "java" => "Java",
+                    "rb" => "Ruby",
+                    "swift" => "Swift",
+                    "kt" | "kts" => "Kotlin",
+                    "cs" => "C#",
+                    "php" => "PHP",
+                    "scala" => "Scala",
+                    "dart" => "Dart",
+                    "zig" => "Zig",
+                    "ex" | "exs" => "Elixir",
+                    "html" | "htm" => "HTML",
+                    "css" | "scss" | "sass" => "CSS",
+                    "json" => "JSON",
+                    "toml" => "TOML",
+                    "yaml" | "yml" => "YAML",
+                    "md" | "markdown" => "Markdown",
+                    "sql" => "SQL",
+                    "sh" | "bash" | "zsh" => "Shell",
+                    _ => continue,
+                };
+                *counts.entry(lang.to_string()).or_default() += 1;
+            }
+        }
+
+        if counts.is_empty() {
+            return None;
+        }
+
+        // Sort by count descending, take the top 3.
+        let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let top: Vec<String> = sorted
+            .into_iter()
+            .take(3)
+            .filter(|(_, count)| *count > 0)
+            .map(|(lang, _)| lang)
+            .collect();
+
+        if top.is_empty() {
+            None
+        } else {
+            Some(top.join(", "))
+        }
+    }
+
     /// Persist the registry to disk.
     async fn save_registry_inner(inner: &Inner) -> Result<()> {
         let registry_dir = inner.base_path.join("codegraph");
@@ -336,6 +409,10 @@ impl CodeGraphManager {
                         "pipeline completed successfully"
                     );
 
+                    // Detect primary language(s) from the indexed File
+                    // nodes' extensions.
+                    let primary_language = Self::detect_languages(&db, &project_id_owned).await;
+
                     // Update registry — keep progress visible so the
                     // frontend can display the finished state before
                     // transitioning to the overview.
@@ -344,6 +421,7 @@ impl CodeGraphManager {
                         if let Some(project) = reg.get_mut(&project_id_owned) {
                             project.status = IndexStatus::Indexed;
                             project.error_message = None;
+                            project.primary_language = primary_language;
                             project.progress = Some(super::types::PipelineProgress {
                                 phase: super::types::PipelinePhase::Complete,
                                 phase_progress: 1.0,

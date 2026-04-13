@@ -8,7 +8,12 @@ interface Props {
 	truncated: boolean;
 }
 
-export function CodeGraphStatusBar({ nodeCount, edgeCount, isLayoutRunning, truncated }: Props) {
+export function CodeGraphStatusBar({
+	nodeCount,
+	edgeCount,
+	isLayoutRunning,
+	truncated,
+}: Props) {
 	return (
 		<div className="flex shrink-0 items-center justify-between border-t border-app-line bg-app-darkBox px-4 py-1.5 text-[11px] text-ink-faint">
 			<div className="flex items-center gap-4">
@@ -19,7 +24,7 @@ export function CodeGraphStatusBar({ nodeCount, edgeCount, isLayoutRunning, trun
 					<span className="text-ink-dull">{edgeCount.toLocaleString()}</span> edges
 				</span>
 				{truncated && (
-					<span className="text-amber-400">truncated — use filters to show more</span>
+					<span className="text-amber-400">truncated</span>
 				)}
 			</div>
 			<div className="flex items-center gap-2">

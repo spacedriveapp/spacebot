@@ -19,11 +19,7 @@ export type NodeLabel =
 	| "TypeAlias"
 	| "Function"
 	| "Method"
-	| "Variable"
 	| "Const"
-	| "Parameter"
-	| "Decorator"
-	| "Import"
 	| "MacroDef"
 	| "Record"
 	| "Template"
@@ -42,10 +38,6 @@ export type EdgeType =
 	| "IMPLEMENTS"
 	| "OVERRIDES"
 	| "HAS_METHOD"
-	| "HAS_PROPERTY"
-	| "HAS_PARAMETER"
-	| "ACCESSES"
-	| "DECORATES"
 	| "MEMBER_OF"
 	| "STEP_IN_PROCESS"
 	| "TESTED_BY"
@@ -73,11 +65,7 @@ export const NODE_COLORS: Record<NodeLabel, string> = {
 	TypeAlias: "#a78bfa",
 	Function: "#10b981",
 	Method: "#14b8a6",
-	Variable: "#64748b",
 	Const: "#64748b",
-	Parameter: "#94a3b8",
-	Decorator: "#eab308",
-	Import: "#475569",
 	MacroDef: "#eab308",
 	Record: "#f59e0b",
 	Template: "#a78bfa",
@@ -111,11 +99,7 @@ export const NODE_SIZES: Record<NodeLabel, number> = {
 	TypeAlias: 3,
 	Function: 4,
 	Method: 3,
-	Variable: 2,
 	Const: 2,
-	Parameter: 1.5,
-	Decorator: 2,
-	Import: 1.5,
 	MacroDef: 2,
 	Record: 8,
 	Template: 3,
@@ -148,8 +132,8 @@ export const getCommunityColor = (communityIndex: number): string => {
 
 // ---------------------------------------------------------------------------
 // Default visibility — matches GitNexus's "structural + top-level symbols"
-// default. Parameter/Variable/Decorator/Import are hidden by default and
-// the bulk endpoint doesn't even return them unless `include_noise=true`.
+// default. Pipeline-only labels (Variable, Import, Parameter, Decorator)
+// are deleted before finalization and don't appear in the final graph.
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_VISIBLE_LABELS: NodeLabel[] = [
@@ -198,10 +182,6 @@ export const FILTERABLE_LABELS: NodeLabel[] = [
 	"Test",
 	"Route",
 	"Section",
-	"Decorator",
-	"Variable",
-	"Parameter",
-	"Import",
 ];
 
 // ---------------------------------------------------------------------------
@@ -217,10 +197,6 @@ export const ALL_EDGE_TYPES: EdgeType[] = [
 	"IMPLEMENTS",
 	"OVERRIDES",
 	"HAS_METHOD",
-	"HAS_PROPERTY",
-	"HAS_PARAMETER",
-	"ACCESSES",
-	"DECORATES",
 	"MEMBER_OF",
 	"STEP_IN_PROCESS",
 	"TESTED_BY",
@@ -253,10 +229,6 @@ export const EDGE_INFO: Record<EdgeType, { color: string; label: string }> = {
 	IMPLEMENTS: { color: "#be185d", label: "Implements" },
 	OVERRIDES: { color: "#b45309", label: "Overrides" },
 	HAS_METHOD: { color: "#0891b2", label: "Has Method" },
-	HAS_PROPERTY: { color: "#6b7280", label: "Has Property" },
-	HAS_PARAMETER: { color: "#52525b", label: "Has Parameter" },
-	ACCESSES: { color: "#525b74", label: "Accesses" },
-	DECORATES: { color: "#a16207", label: "Decorates" },
 	MEMBER_OF: { color: "#6366f1", label: "Member Of" },
 	STEP_IN_PROCESS: { color: "#e11d48", label: "Step In Process" },
 	TESTED_BY: { color: "#65a30d", label: "Tested By" },

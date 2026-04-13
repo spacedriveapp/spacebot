@@ -614,7 +614,7 @@ pub async fn query_graph_stats(
     let mut nodes_by_label: Vec<(String, u64)> = Vec::new();
     let mut total_nodes: u64 = 0;
 
-    for &label in ALL_NODE_LABELS {
+    for &label in super::schema::DISPLAY_NODE_LABELS {
         if SKIP_PROJECT_LABELS.contains(&label) {
             continue;
         }
@@ -639,7 +639,7 @@ pub async fn query_graph_stats(
     let mut edge_type_counts: HashMap<String, u64> = HashMap::new();
     let mut total_edges: u64 = 0;
 
-    for &from_label in ALL_NODE_LABELS {
+    for &from_label in super::schema::DISPLAY_NODE_LABELS {
         if SKIP_PROJECT_LABELS.contains(&from_label) {
             continue;
         }
@@ -685,19 +685,13 @@ pub async fn query_graph_stats(
 // Bulk graph queries — for the interactive graph canvas view
 // ---------------------------------------------------------------------------
 
-/// Labels that are excluded from the bulk graph view unless the caller opts
-/// in via `include_noise`. These tend to dominate node counts (parameters,
-/// locals, imports) and add little value to the force-directed layout.
-const NOISE_LABELS: &[&str] = &["Parameter", "Variable", "Decorator", "Import"];
-
 /// Ordering used when the hard cap is exceeded: keep structural and
-/// top-level symbols first, drop leaf/noise labels last.
+/// top-level symbols first, drop leaf labels last.
 const BULK_LABEL_PRIORITY: &[&str] = &[
     "Project", "Package", "Module", "Namespace", "Folder", "File",
     "Class", "Interface", "Struct", "Trait", "Enum", "TypeAlias", "Type",
     "Function", "Method", "Impl", "Record", "Template", "Const", "MacroDef",
     "Test", "Route", "Section", "Process", "Community",
-    "Decorator", "Variable", "Parameter", "Import",
 ];
 
 /// Return a numeric priority for a label — lower = more important.
@@ -716,17 +710,15 @@ fn label_priority(label: &str) -> usize {
 pub async fn query_bulk_nodes(
     db: &SharedCodeGraphDb,
     project_id: &str,
-    include_noise: bool,
     max_nodes: usize,
 ) -> Result<(Vec<QueriedNode>, bool, usize)> {
     let pid = esc(project_id);
     let mut all_nodes: Vec<QueriedNode> = Vec::new();
 
-    for &label in ALL_NODE_LABELS {
+    // Use DISPLAY_NODE_LABELS — pipeline-only labels (Variable, Import,
+    // Parameter, Decorator) are already deleted by the cleanup step.
+    for &label in super::schema::DISPLAY_NODE_LABELS {
         if SKIP_PROJECT_LABELS.contains(&label) {
-            continue;
-        }
-        if !include_noise && NOISE_LABELS.contains(&label) {
             continue;
         }
 
@@ -811,11 +803,11 @@ pub async fn query_bulk_edges(
     let pid = esc(project_id);
     let mut all_edges: Vec<QueriedEdge> = Vec::new();
 
-    for &from_label in ALL_NODE_LABELS {
+    for &from_label in super::schema::DISPLAY_NODE_LABELS {
         if SKIP_PROJECT_LABELS.contains(&from_label) {
             continue;
         }
-        for &to_label in ALL_NODE_LABELS {
+        for &to_label in super::schema::DISPLAY_NODE_LABELS {
             if SKIP_PROJECT_LABELS.contains(&to_label) {
                 continue;
             }

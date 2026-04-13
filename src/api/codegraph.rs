@@ -203,14 +203,6 @@ pub(super) struct GraphStatsResponse {
     edges_by_type: Vec<TypeCount>,
 }
 
-#[derive(Deserialize, utoipa::IntoParams)]
-pub(super) struct BulkGraphQuery {
-    /// When true, include Parameter/Variable/Decorator/Import nodes and
-    /// their edges. Defaults to false to keep the graph canvas readable.
-    #[serde(default)]
-    include_noise: bool,
-}
-
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct BulkNodesResponse {
     nodes: Vec<NodeSummary>,
@@ -824,15 +816,14 @@ pub(super) async fn get_graph_stats(
 /// GET /codegraph/projects/:project_id/graph/bulk-nodes — all nodes.
 ///
 /// Returns every node in the project for the interactive graph canvas.
-/// Drops Parameter/Variable/Decorator/Import by default; set
-/// `include_noise=true` to include them. Hard-capped at 15k nodes with
-/// label-priority truncation.
+/// Pipeline-only labels (Variable, Import, Parameter, Decorator) are
+/// deleted before finalization so this returns only display-worthy nodes.
+/// Hard-capped at 15k nodes with label-priority truncation.
 #[utoipa::path(
     get,
     path = "/codegraph/projects/{project_id}/graph/bulk-nodes",
     params(
         ("project_id" = String, Path, description = "Project ID"),
-        BulkGraphQuery,
     ),
     responses(
         (status = 200, description = "Bulk node list", body = BulkNodesResponse),
@@ -842,7 +833,6 @@ pub(super) async fn get_graph_stats(
 pub(super) async fn get_bulk_nodes(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<BulkGraphQuery>,
 ) -> Result<Json<BulkNodesResponse>, StatusCode> {
     let manager = get_manager(&state)?;
     let db = manager
@@ -853,7 +843,6 @@ pub(super) async fn get_bulk_nodes(
     let (queried, truncated, total_available) = crate::codegraph::graph_queries::query_bulk_nodes(
         &db,
         &project_id,
-        query.include_noise,
         BULK_GRAPH_MAX_NODES,
     )
     .await
@@ -902,15 +891,12 @@ pub(super) async fn get_bulk_nodes(
 
 /// GET /codegraph/projects/:project_id/graph/bulk-edges — all edges.
 ///
-/// Returns every edge whose endpoints are in the bulk node set. Must be
-/// called with the same `include_noise` value as the bulk-nodes request so
-/// the edge endpoints line up.
+/// Returns every edge whose endpoints are in the bulk node set.
 #[utoipa::path(
     get,
     path = "/codegraph/projects/{project_id}/graph/bulk-edges",
     params(
         ("project_id" = String, Path, description = "Project ID"),
-        BulkGraphQuery,
     ),
     responses(
         (status = 200, description = "Bulk edge list", body = BulkEdgesResponse),
@@ -920,7 +906,6 @@ pub(super) async fn get_bulk_nodes(
 pub(super) async fn get_bulk_edges(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<BulkGraphQuery>,
 ) -> Result<Json<BulkEdgesResponse>, StatusCode> {
     let manager = get_manager(&state)?;
     let db = manager
@@ -928,13 +913,9 @@ pub(super) async fn get_bulk_edges(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Re-resolve the node id set the bulk-nodes call would have returned
-    // so the two endpoints share a consistent view. Cheap because the node
-    // query is a handful of MATCH ... RETURN id(n) calls.
     let (queried_nodes, _truncated, _total) = crate::codegraph::graph_queries::query_bulk_nodes(
         &db,
         &project_id,
-        query.include_noise,
         BULK_GRAPH_MAX_NODES,
     )
     .await

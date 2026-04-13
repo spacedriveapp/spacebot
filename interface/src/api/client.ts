@@ -2651,14 +2651,14 @@ export const api = {
 	codegraphStats: (projectId: string) =>
 		fetchJson<CodeGraphStatsResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/stats`),
 
-	codegraphBulkNodes: (projectId: string, includeNoise = false) =>
+	codegraphBulkNodes: (projectId: string) =>
 		fetchJson<CodeGraphBulkNodesResponse>(
-			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-nodes?include_noise=${includeNoise}`,
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-nodes`,
 		),
 
-	codegraphBulkEdges: (projectId: string, includeNoise = false) =>
+	codegraphBulkEdges: (projectId: string) =>
 		fetchJson<CodeGraphBulkEdgesResponse>(
-			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-edges?include_noise=${includeNoise}`,
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/bulk-edges`,
 		),
 
 	fsReadFile: (params: { projectId: string; path: string; startLine?: number; endLine?: number }) => {

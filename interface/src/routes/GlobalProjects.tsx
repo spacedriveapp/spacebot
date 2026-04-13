@@ -54,7 +54,30 @@ function formatNumber(n: number): string {
 // Project Card
 // ---------------------------------------------------------------------------
 
+const PIPELINE_PHASES = [
+	"extracting", "structure", "parsing", "imports", "calls",
+	"heritage", "communities", "processes", "enriching", "complete",
+] as const;
+
+const PHASE_COLORS: Record<string, string> = {
+	extracting: "bg-emerald-500", structure: "bg-emerald-400", parsing: "bg-teal-500",
+	imports: "bg-blue-500", calls: "bg-blue-400", heritage: "bg-indigo-500",
+	communities: "bg-violet-500", processes: "bg-purple-500",
+	enriching: "bg-amber-500", complete: "bg-emerald-500",
+};
+
 function ProjectCard({ project }: { project: CodeGraphProject }) {
+	const isIndexing = project.status === "indexing";
+	const progress = project.progress;
+	const stats = isIndexing ? progress?.stats : project.last_index_stats;
+
+	// Compute overall progress percentage from phase position.
+	const phaseIdx = progress
+		? PIPELINE_PHASES.indexOf(progress.phase as typeof PIPELINE_PHASES[number])
+		: -1;
+	const overallPct = isIndexing && phaseIdx >= 0
+		? Math.round(((phaseIdx + (progress?.phase_progress ?? 0)) / PIPELINE_PHASES.length) * 100)
+		: 0;
 	return (
 		<motion.div
 			layout
@@ -78,12 +101,41 @@ function ProjectCard({ project }: { project: CodeGraphProject }) {
 				<StatusBadge status={project.status} progress={project.progress} />
 			</div>
 
+			{/* Indexing progress bar — segmented by phase */}
+			{isIndexing && progress && (
+				<div className="mt-3">
+					<div className="mb-1.5 flex items-center justify-between text-[10px]">
+						<span className="text-ink-dull">{progress.message}</span>
+						<span className="text-ink-faint">{overallPct}%</span>
+					</div>
+					<div className="flex h-1.5 gap-px overflow-hidden rounded-full">
+						{PIPELINE_PHASES.map((phase, i) => {
+							const isDone = i < phaseIdx;
+							const isCurrent = i === phaseIdx;
+							const fillPct = isDone ? 100 : isCurrent ? Math.round((progress.phase_progress ?? 0) * 100) : 0;
+							return (
+								<div key={phase} className="relative flex-1 overflow-hidden rounded-full bg-app-line">
+									<div
+										className={clsx(
+											"absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out",
+											PHASE_COLORS[phase] ?? "bg-accent",
+										)}
+										style={{ width: `${fillPct}%` }}
+									/>
+								</div>
+							);
+						})}
+					</div>
+				</div>
+			)}
+
 			{/* Stats */}
-			{project.last_index_stats && (
-				<div className="mt-3 flex gap-4 text-xs text-ink-dull">
-					<span>{formatNumber(project.last_index_stats.nodes_created)} nodes</span>
-					<span>{formatNumber(project.last_index_stats.communities_detected)} communities</span>
-					<span>{formatNumber(project.last_index_stats.files_found)} files</span>
+			{stats && (
+				<div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-dull">
+					<span>{formatNumber(stats.nodes_created)} nodes</span>
+					<span>{formatNumber(stats.edges_created)} edges</span>
+					<span>{formatNumber(stats.communities_detected)} communities</span>
+					<span>{formatNumber(stats.files_found ?? stats.files_parsed)} files</span>
 				</div>
 			)}
 
