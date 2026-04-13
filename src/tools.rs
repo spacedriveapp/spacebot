@@ -52,6 +52,7 @@ pub mod secret_set;
 pub mod send_agent_message;
 pub mod send_file;
 pub mod send_message_to_another_channel;
+pub mod set_outcome;
 pub mod set_status;
 pub mod shell;
 pub mod skills_search;
@@ -62,6 +63,12 @@ pub mod task_create;
 pub mod task_list;
 pub mod task_update;
 pub mod web_search;
+pub mod wiki_create;
+pub mod wiki_edit;
+pub mod wiki_history;
+pub mod wiki_list;
+pub mod wiki_read;
+pub mod wiki_search;
 pub mod worker_inspect;
 
 pub mod factory_create_agent;
@@ -116,7 +123,9 @@ pub use project_manage::{
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
-pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
+pub use reply::{
+    RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool, new_replied_flag,
+};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
 pub use secret_set::{SecretSetArgs, SecretSetError, SecretSetOutput, SecretSetTool};
 pub use send_agent_message::{
@@ -126,6 +135,7 @@ pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
     SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
 };
+pub use set_outcome::{SetOutcomeArgs, SetOutcomeError, SetOutcomeOutput, SetOutcomeTool};
 pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
 pub use shell::{EnvVar, ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skills_search::{
@@ -142,6 +152,12 @@ pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCre
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
+pub use wiki_create::{WikiCreateArgs, WikiCreateError, WikiCreateOutput, WikiCreateTool};
+pub use wiki_edit::{WikiEditArgs, WikiEditError, WikiEditOutput, WikiEditTool};
+pub use wiki_history::{WikiHistoryArgs, WikiHistoryError, WikiHistoryOutput, WikiHistoryTool};
+pub use wiki_list::{WikiListArgs, WikiListError, WikiListOutput, WikiListTool};
+pub use wiki_read::{WikiReadArgs, WikiReadError, WikiReadOutput, WikiReadTool};
+pub use wiki_search::{WikiSearchArgs, WikiSearchError, WikiSearchOutput, WikiSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
 };
@@ -352,6 +368,7 @@ pub async fn add_channel_tools(
     handle: &ToolServerHandle,
     state: ChannelState,
     response_tx: RoutedSender,
+    reply_target: ReplyTarget,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
@@ -360,6 +377,7 @@ pub async fn add_channel_tools(
     allow_direct_reply: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
+    cron_outcome: Option<crate::cron::CronOutcome>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -372,12 +390,13 @@ pub async fn add_channel_tools(
             .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(ReplyTool::new(
-                response_tx.clone(),
+                reply_target,
                 conversation_id.clone(),
                 state.conversation_logger.clone(),
                 state.channel_id.clone(),
                 replied_flag.clone(),
                 agent_display_name,
+                state.deps.api_state.clone(),
             ))
             .await?;
     }
@@ -409,10 +428,7 @@ pub async fn add_channel_tools(
         ))
         .await?;
     handle
-        .add_tool(ProjectManageTool::new(
-            state.deps.project_store.clone(),
-            state.deps.agent_id.to_string(),
-        ))
+        .add_tool(ProjectManageTool::new(state.deps.project_store.clone()))
         .await?;
     // Add attachment recall tool when save_attachments is enabled
     if state
@@ -447,6 +463,11 @@ pub async fn add_channel_tools(
         agent_msg = agent_msg.with_skip_flag(skip_flag.clone());
         handle.add_tool(agent_msg).await?;
     }
+    if let Some(outcome) = cron_outcome {
+        handle
+            .add_tool(SetOutcomeTool::new(outcome, conversation_id.clone()))
+            .await?;
+    }
     Ok(())
 }
 
@@ -457,6 +478,7 @@ pub async fn add_direct_mode_tools(
     handle: &ToolServerHandle,
     state: ChannelState,
     response_tx: RoutedSender,
+    reply_target: ReplyTarget,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
@@ -465,12 +487,14 @@ pub async fn add_direct_mode_tools(
     allow_direct_reply: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
+    cron_outcome: Option<crate::cron::CronOutcome>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     // First add all standard channel tools
     add_channel_tools(
         handle,
         state.clone(),
         response_tx.clone(),
+        reply_target,
         conversation_id,
         skip_flag.clone(),
         replied_flag.clone(),
@@ -479,21 +503,145 @@ pub async fn add_direct_mode_tools(
         allow_direct_reply,
         current_adapter.clone(),
         slack_thread_ts,
+        cron_outcome,
     )
     .await?;
 
-    // Then add memory tools (normally only available to branches)
+    // Memory tools (normally only available to branches)
     handle
         .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
         .await?;
-
     handle
         .add_tool(MemorySaveTool::new(state.deps.memory_search.clone()))
         .await?;
 
-    // Add shell and file tools (normally only available to workers)
-    // These need careful implementation - for now, add basic versions
-    // Note: The actual shell/file tools might need adaptation for channel context
+    let rc = &state.deps.runtime_config;
+    let workspace = rc.workspace_dir.clone();
+    let sandbox = state.deps.sandbox.clone();
+
+    // Shell
+    handle
+        .add_tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+        .await?;
+
+    // File tools
+    handle
+        .add_tool(FileReadTool::new(workspace.clone(), sandbox.clone()))
+        .await?;
+    handle
+        .add_tool(FileWriteTool::new(workspace.clone(), sandbox.clone()))
+        .await?;
+    handle
+        .add_tool(FileEditTool::new(workspace.clone(), sandbox.clone()))
+        .await?;
+    handle
+        .add_tool(FileListTool::new(workspace, sandbox))
+        .await?;
+
+    // Browser tools
+    let browser_config = rc.browser_config.load();
+    if browser_config.enabled {
+        let screenshot_dir = state.screenshot_dir.clone();
+        let context = browser::BrowserContext::new(
+            if let Some(shared) = rc
+                .shared_browser
+                .as_ref()
+                .filter(|_| browser_config.persist_session)
+            {
+                shared.clone()
+            } else {
+                browser::new_shared_browser_handle()
+            },
+            BrowserConfig::clone(&browser_config),
+            screenshot_dir,
+            rc.secrets.load().as_ref().as_ref().cloned(),
+        );
+        handle
+            .add_tool(browser::BrowserLaunchTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserNavigateTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserSnapshotTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserClickTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserTypeTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserPressKeyTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserScreenshotTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserEvaluateTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserTabOpenTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserTabListTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserTabCloseTool {
+                context: context.clone(),
+            })
+            .await?;
+        handle
+            .add_tool(browser::BrowserCloseTool { context })
+            .await?;
+    }
+
+    // Web search
+    if let Some(key) = rc.brave_search_key.load().as_ref().clone() {
+        handle.add_tool(WebSearchTool::new(key)).await?;
+    }
+
+    // Skill reader
+    handle.add_tool(ReadSkillTool::new(rc.clone())).await?;
+
+    // Wiki tools
+    if let Some(store) = &state.deps.wiki_store {
+        let author_id = state.deps.agent_id.to_string();
+        handle
+            .add_tool(WikiCreateTool::new(
+                store.clone(),
+                "agent".to_string(),
+                author_id.clone(),
+            ))
+            .await?;
+        handle
+            .add_tool(WikiEditTool::new(store.clone(), "agent", author_id))
+            .await?;
+        handle.add_tool(WikiReadTool::new(store.clone())).await?;
+        handle.add_tool(WikiListTool::new(store.clone())).await?;
+        handle.add_tool(WikiSearchTool::new(store.clone())).await?;
+        handle.add_tool(WikiHistoryTool::new(store.clone())).await?;
+    }
 
     Ok(())
 }
@@ -548,6 +696,57 @@ pub async fn remove_channel_tools(
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
+    let _ = handle.remove_tool(SetOutcomeTool::NAME).await;
+    Ok(())
+}
+
+/// Remove direct-mode tools (channel tools + execution tools) from a running ToolServer.
+pub async fn remove_direct_mode_tools(
+    handle: &ToolServerHandle,
+    allow_direct_reply: bool,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    // Remove standard channel tools first
+    remove_channel_tools(handle, allow_direct_reply).await?;
+
+    // Memory tools
+    let _ = handle.remove_tool(MemoryRecallTool::NAME).await;
+    let _ = handle.remove_tool(MemorySaveTool::NAME).await;
+
+    // Shell + file tools
+    let _ = handle.remove_tool(ShellTool::NAME).await;
+    let _ = handle.remove_tool(FileReadTool::NAME).await;
+    let _ = handle.remove_tool(FileWriteTool::NAME).await;
+    let _ = handle.remove_tool(FileEditTool::NAME).await;
+    let _ = handle.remove_tool(FileListTool::NAME).await;
+
+    // Browser tools (best-effort, may not have been registered)
+    let _ = handle.remove_tool(browser::BrowserLaunchTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserNavigateTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserSnapshotTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserClickTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserTypeTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserPressKeyTool::NAME).await;
+    let _ = handle
+        .remove_tool(browser::BrowserScreenshotTool::NAME)
+        .await;
+    let _ = handle.remove_tool(browser::BrowserEvaluateTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserTabOpenTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserTabListTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserTabCloseTool::NAME).await;
+    let _ = handle.remove_tool(browser::BrowserCloseTool::NAME).await;
+
+    // Web search + skill reader (best-effort)
+    let _ = handle.remove_tool(WebSearchTool::NAME).await;
+    let _ = handle.remove_tool(ReadSkillTool::NAME).await;
+
+    // Wiki tools (best-effort)
+    let _ = handle.remove_tool(WikiCreateTool::NAME).await;
+    let _ = handle.remove_tool(WikiEditTool::NAME).await;
+    let _ = handle.remove_tool(WikiReadTool::NAME).await;
+    let _ = handle.remove_tool(WikiListTool::NAME).await;
+    let _ = handle.remove_tool(WikiSearchTool::NAME).await;
+    let _ = handle.remove_tool(WikiHistoryTool::NAME).await;
+
     Ok(())
 }
 
@@ -581,6 +780,9 @@ pub fn create_branch_tool_server(
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
     profile: BranchToolProfile,
+    api_state: Option<Arc<crate::api::ApiState>>,
+    wiki_store: Option<Arc<crate::wiki::WikiStore>>,
+    sandbox: Arc<crate::sandbox::Sandbox>,
 ) -> ToolServerHandle {
     let mut memory_save = memory_save_with_events(
         memory_search.clone(),
@@ -592,21 +794,41 @@ pub fn create_branch_tool_server(
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
+    let mut task_create = TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "branch");
+    if let Some(ref api) = api_state {
+        task_create = task_create.with_api_state(api.clone());
+    }
+
     let mut server = ToolServer::new()
         .tool(memory_save)
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
-        .tool(EmailSearchTool::new(runtime_config))
+        .tool(EmailSearchTool::new(runtime_config.clone()))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
-        .tool(TaskCreateTool::new(
-            task_store.clone(),
-            agent_id.to_string(),
-            "branch",
-        ))
+        .tool(task_create)
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
-        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
+        .tool(FileReadTool::new(
+            runtime_config.workspace_dir.clone(),
+            sandbox,
+        ));
+
+    if let Some(wiki) = wiki_store {
+        let author_id = agent_id.to_string();
+        server = server
+            .tool(WikiCreateTool::new(
+                wiki.clone(),
+                "agent",
+                author_id.clone(),
+            ))
+            .tool(WikiEditTool::new(wiki.clone(), "agent", author_id.clone()))
+            .tool(WikiReadTool::new(wiki.clone()))
+            .tool(WikiListTool::new(wiki.clone()))
+            .tool(WikiSearchTool::new(wiki.clone()))
+            .tool(WikiHistoryTool::new(wiki));
+    }
 
     if let BranchToolProfile::MemoryPersistence {
         contract_state,
@@ -652,6 +874,8 @@ pub fn create_worker_tool_server(
     runtime_config: Arc<RuntimeConfig>,
     worker_memory_mode: WorkerMemoryMode,
     memory_search: Arc<MemorySearch>,
+    wiki_write: bool,
+    wiki_store: Option<Arc<crate::wiki::WikiStore>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
@@ -692,11 +916,30 @@ pub fn create_worker_tool_server(
         server = server
             .tool(memory_save_with_events(
                 memory_search.clone(),
-                agent_id,
+                agent_id.clone(),
                 event_tx,
                 None,
             ))
             .tool(MemoryDeleteTool::new(memory_search));
+    }
+
+    // Conditionally add wiki tools when wiki_write is enabled.
+    if wiki_write && let Some(store) = wiki_store {
+        server = server
+            .tool(WikiCreateTool::new(
+                store.clone(),
+                "agent".to_string(),
+                agent_id.to_string(),
+            ))
+            .tool(WikiEditTool::new(
+                store.clone(),
+                "agent".to_string(),
+                agent_id.to_string(),
+            ))
+            .tool(WikiReadTool::new(store.clone()))
+            .tool(WikiListTool::new(store.clone()))
+            .tool(WikiSearchTool::new(store.clone()))
+            .tool(WikiHistoryTool::new(store));
     }
 
     for mcp_tool in mcp_tools {
@@ -733,7 +976,14 @@ pub fn create_cortex_tool_server(
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
 /// Adds `config_inspect` for live runtime config introspection and
 /// `spacebot_docs` for embedded docs/changelog retrieval.
+///
+/// **DEPRECATED:** Cortex chat is being replaced by Channel Settings.
+/// Remaining unique tools here (skills_search, install_skill, config_inspect)
+/// need to be ported to channel/worker toolsets before removal.
 #[allow(clippy::too_many_arguments)]
+#[deprecated(
+    note = "Cortex chat is being replaced by Channel Settings. Port remaining tools before removing."
+)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     deps: crate::AgentDeps,
@@ -778,14 +1028,16 @@ pub fn create_cortex_chat_tool_server(
             runtime_config.clone(),
         ))
         .tool(SkillsSearchTool::new(runtime_config.clone()))
-        .tool(InstallSkillTool::new(runtime_config.clone(), api_state))
+        .tool(InstallSkillTool::new(
+            runtime_config.clone(),
+            api_state.clone(),
+        ))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(spawn_tool)
-        .tool(TaskCreateTool::new(
-            task_store.clone(),
-            agent_id.to_string(),
-            "cortex",
-        ))
+        .tool(
+            TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "cortex")
+                .with_api_state(api_state),
+        )
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()));

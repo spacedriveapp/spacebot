@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { cx } from "@/ui/utils";
-import type { TranscriptStep, OpenCodePart } from "@/api/client";
+import {useState} from "react";
+import {cx} from "class-variance-authority";
+import type {TranscriptStep, OpenCodePart} from "@/api/client";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,17 +37,17 @@ export interface ToolCallPair {
  * list of renderable items: text blocks and paired tool calls.
  */
 export type TranscriptItem =
-	| { kind: "text"; text: string }
-	| { kind: "tool"; pair: ToolCallPair };
+	| {kind: "text"; text: string}
+	| {kind: "tool"; pair: ToolCallPair};
 
 export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 	const items: TranscriptItem[] = [];
-	const resultsById = new Map<string, { name: string; text: string }>();
+	const resultsById = new Map<string, {name: string; text: string}>();
 
 	// First pass: index all tool_result steps by call_id
 	for (const step of steps) {
 		if (step.type === "tool_result") {
-			resultsById.set(step.call_id, { name: step.name, text: step.text });
+			resultsById.set(step.call_id, {name: step.name, text: step.text});
 		}
 	}
 
@@ -56,7 +56,7 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 		if (step.type === "action") {
 			for (const content of step.content) {
 				if (content.type === "text") {
-					items.push({ kind: "text", text: content.text });
+					items.push({kind: "text", text: content.text});
 				} else if (content.type === "tool_call") {
 					const result = resultsById.get(content.id);
 					const parsedArgs = tryParseJson(content.args);
@@ -76,11 +76,7 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 							args: parsedArgs,
 							resultRaw: result?.text ?? null,
 							result: parsedResult,
-							status: result
-								? isError
-									? "error"
-									: "completed"
-								: "running",
+							status: result ? (isError ? "error" : "completed") : "running",
 						},
 					});
 				}
@@ -97,16 +93,14 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
  * rendered by the unified ToolCall component.
  */
 export function openCodePartToPair(
-	part: Extract<OpenCodePart, { type: "tool" }>,
+	part: Extract<OpenCodePart, {type: "tool"}>,
 ): ToolCallPair {
 	const input =
 		part.status === "running" || part.status === "completed"
 			? (part as any).input
 			: undefined;
-	const output =
-		part.status === "completed" ? (part as any).output : undefined;
-	const error =
-		part.status === "error" ? (part as any).error : undefined;
+	const output = part.status === "completed" ? (part as any).output : undefined;
+	const error = part.status === "error" ? (part as any).error : undefined;
 	const title =
 		part.status === "running" || part.status === "completed"
 			? (part as any).title
@@ -133,11 +127,15 @@ export function openCodePartToPair(
 	};
 }
 
-function tryParseJson(text: string): Record<string, unknown> | null {
+export function tryParseJson(text: string): Record<string, unknown> | null {
 	if (!text || text.trim().length === 0) return null;
 	try {
 		const parsed = JSON.parse(text);
-		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed)
+		) {
 			return parsed as Record<string, unknown>;
 		}
 		return null;
@@ -146,7 +144,7 @@ function tryParseJson(text: string): Record<string, unknown> | null {
 	}
 }
 
-function isErrorResult(
+export function isErrorResult(
 	text: string,
 	parsed: Record<string, unknown> | null,
 ): boolean {
@@ -154,7 +152,8 @@ function isErrorResult(
 	if (parsed?.status === "error") return true;
 	// Shell structured results: { success: false } or non-zero exit code
 	if (parsed?.success === false) return true;
-	if (typeof parsed?.exit_code === "number" && parsed.exit_code !== 0) return true;
+	if (typeof parsed?.exit_code === "number" && parsed.exit_code !== 0)
+		return true;
 	const lower = text.toLowerCase();
 	return (
 		lower.startsWith("error:") ||
@@ -288,8 +287,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 			if (!pair.resultRaw) return null;
 			// Screenshot results may contain base64 image data or a path
 			if (pair.result?.base64) {
-				const mimeType =
-					(pair.result.mime_type as string) ?? "image/png";
+				const mimeType = (pair.result.mime_type as string) ?? "image/png";
 				return (
 					<div className="px-3 py-2">
 						<img
@@ -307,9 +305,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 	browser_evaluate: {
 		summary(pair) {
 			const expression = pair.args?.expression;
-			return expression
-				? truncate(String(expression), 50)
-				: "Evaluate JS";
+			return expression ? truncate(String(expression), 50) : "Evaluate JS";
 		},
 		argsView(pair) {
 			const expression = pair.args?.expression;
@@ -343,9 +339,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 	browser_tab_close: {
 		summary(pair) {
 			const tabId = pair.args?.tab_id;
-			return tabId !== undefined
-				? `Close tab ${tabId}`
-				: "Close tab";
+			return tabId !== undefined ? `Close tab ${tabId}` : "Close tab";
 		},
 	},
 
@@ -465,9 +459,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">
-								Old
-							</p>
+							<p className="text-tiny font-medium text-red-400/70">Old</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
@@ -475,9 +467,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">
-								New
-							</p>
+							<p className="text-tiny font-medium text-emerald-400/70">New</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
 								{truncate(String(newStr), 500)}
 							</pre>
@@ -645,9 +635,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">
-								Old
-							</p>
+							<p className="text-tiny font-medium text-red-400/70">Old</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
@@ -655,9 +643,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">
-								New
-							</p>
+							<p className="text-tiny font-medium text-emerald-400/70">New</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
 								{truncate(String(newStr), 500)}
 							</pre>
@@ -758,7 +744,11 @@ const toolRenderers: Record<string, ToolRenderer> = {
 		summary(pair) {
 			if (pair.title) return pair.title;
 			const query = pair.args?.query;
-			const resultCount = pair.result?.result_count ?? (Array.isArray(pair.result?.results) ? (pair.result!.results as unknown[]).length : null);
+			const resultCount =
+				pair.result?.result_count ??
+				(Array.isArray(pair.result?.results)
+					? (pair.result!.results as unknown[]).length
+					: null);
 			const queryStr = query ? truncate(String(query), 50) : null;
 			if (queryStr && resultCount != null) {
 				return `${queryStr} (${resultCount} result${resultCount !== 1 ? "s" : ""})`;
@@ -810,9 +800,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 			return (
 				<div className="border-b border-app-line/20 px-3 py-2">
 					{!!docId && (
-						<p className="font-mono text-tiny text-ink-dull">
-							{String(docId)}
-						</p>
+						<p className="font-mono text-tiny text-ink-dull">{String(docId)}</p>
 					)}
 					{!!query && (
 						<p className="mt-0.5 text-tiny text-ink-faint">
@@ -867,13 +855,11 @@ function getRenderer(name: string): ToolRenderer {
 // Shared sub-components
 // ---------------------------------------------------------------------------
 
-function ResultLine({ text }: { text: string }) {
-	return (
-		<p className="px-3 py-2 text-tiny text-ink-dull">{text}</p>
-	);
+function ResultLine({text}: {text: string}) {
+	return <p className="px-3 py-2 text-tiny text-ink-dull">{text}</p>;
 }
 
-function ResultText({ text }: { text: string | null }) {
+function ResultText({text}: {text: string | null}) {
 	if (!text) return null;
 	return (
 		<pre className="max-h-60 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny text-ink-dull">
@@ -907,9 +893,7 @@ function CollapsiblePre({
 					onClick={() => setExpanded(!expanded)}
 					className="w-full border-t border-app-line/20 px-3 py-1 text-center text-tiny text-ink-faint hover:text-ink-dull"
 				>
-					{expanded
-						? "Show less"
-						: `Show all ${lines.length} lines`}
+					{expanded ? "Show less" : `Show all ${lines.length} lines`}
 				</button>
 			)}
 		</div>
@@ -920,7 +904,7 @@ function CollapsiblePre({
 // Shell result rendering
 // ---------------------------------------------------------------------------
 
-function ShellResultView({ pair }: { pair: ToolCallPair }) {
+function ShellResultView({pair}: {pair: ToolCallPair}) {
 	const r = pair.result;
 
 	// If we can't parse structured output, fall back to raw text
@@ -962,17 +946,21 @@ function ShellResultView({ pair }: { pair: ToolCallPair }) {
 			{hasStderr && (
 				<div>
 					<div className="flex items-center gap-1.5 border-b border-app-line/10 px-3 pt-1.5 pb-1">
-						<span className={cx(
-							"text-tiny font-medium",
-							isError ? "text-red-400/70" : "text-yellow-500/70",
-						)}>
+						<span
+							className={cx(
+								"text-tiny font-medium",
+								isError ? "text-red-400/70" : "text-yellow-500/70",
+							)}
+						>
 							stderr
 						</span>
 					</div>
-					<pre className={cx(
-						"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
-						isError ? "text-red-300/60" : "text-yellow-300/50",
-					)}>
+					<pre
+						className={cx(
+							"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
+							isError ? "text-red-300/60" : "text-yellow-300/50",
+						)}
+					>
 						{stderr.replace(/\n$/, "")}
 					</pre>
 				</div>
@@ -986,15 +974,15 @@ function ShellResultView({ pair }: { pair: ToolCallPair }) {
 // ---------------------------------------------------------------------------
 
 const STATUS_ICONS: Record<ToolCallStatus, string> = {
-	running: "\u25B6",   // ▶
+	running: "\u25B6", // ▶
 	completed: "\u2713", // ✓
-	error: "\u2717",     // ✗
+	error: "\u2717", // ✗
 };
 
 const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
-	completed: "text-emerald-500",
-	error: "text-red-400",
+	completed: "text-status-success",
+	error: "text-status-error",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1032,7 +1020,7 @@ function toolCategory(name: string): string | null {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function ToolCall({ pair }: { pair: ToolCallPair }) {
+export function ToolCall({pair}: {pair: ToolCallPair}) {
 	const [expanded, setExpanded] = useState(false);
 	const renderer = getRenderer(pair.name);
 	const summary = renderer.summary(pair);
@@ -1042,10 +1030,8 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 	return (
 		<div
 			className={cx(
-				"rounded-md border bg-app-darkBox/30",
-				pair.status === "error"
-					? "border-red-500/30"
-					: "border-app-line/50",
+				"rounded-md border bg-app-dark-box/30",
+				pair.status === "error" ? "border-status-error/30" : "border-app-line/50",
 			)}
 		>
 			{/* Header — always visible */}
@@ -1062,17 +1048,11 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 					{STATUS_ICONS[pair.status]}
 				</span>
 				{category && (
-					<span className="text-tiny text-ink-faint">
-						{category}
-					</span>
+					<span className="text-tiny text-ink-faint">{category}</span>
 				)}
-				<span className="font-medium text-ink-dull">
-					{displayName}
-				</span>
+				<span className="font-medium text-ink-dull">{displayName}</span>
 				{summary && !expanded && (
-					<span className="flex-1 truncate text-ink-faint">
-						{summary}
-					</span>
+					<span className="flex-1 truncate text-ink-faint">{summary}</span>
 				)}
 				{pair.status === "running" && (
 					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
@@ -1092,7 +1072,10 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 	);
 }
 
-function renderArgs(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode {
+function renderArgs(
+	pair: ToolCallPair,
+	renderer: ToolRenderer,
+): React.ReactNode {
 	// Try custom args view first
 	if (renderer.argsView) {
 		const custom = renderer.argsView(pair);
@@ -1130,7 +1113,10 @@ function renderArgs(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode
 	return null;
 }
 
-function renderResult(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode {
+function renderResult(
+	pair: ToolCallPair,
+	renderer: ToolRenderer,
+): React.ReactNode {
 	if (pair.status === "running") {
 		return (
 			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-ink-faint">

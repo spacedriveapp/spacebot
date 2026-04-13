@@ -24,6 +24,29 @@ test-lib:
 test-integration-compile:
     cargo test --tests --no-run
 
+# Link local SpaceUI packages for development.
+# Expects the spaceui repo cloned adjacent to this repo (../spaceui).
+spaceui-link:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d ../spaceui/packages ]; then
+        echo "Error: ../spaceui not found. Clone it adjacent to this repo:"
+        echo "  git clone https://github.com/spacedriveapp/spaceui ../spaceui"
+        exit 1
+    fi
+    cd ../spaceui
+    bun install && bun run build --filter='@spacedrive/primitives' --filter='@spacedrive/ai' --filter='@spacedrive/forms' --filter='@spacedrive/explorer' --filter='@spacedrive/tokens'
+    for pkg in primitives ai forms explorer tokens; do
+        cd packages/$pkg && bun link && cd ../..
+    done
+    cd "{{justfile_directory()}}/interface"
+    bun link @spacedrive/primitives @spacedrive/ai @spacedrive/forms @spacedrive/explorer @spacedrive/tokens
+    echo "SpaceUI packages linked successfully."
+
+# Unlink SpaceUI packages and restore npm versions.
+spaceui-unlink:
+    cd interface && bun unlink @spacedrive/primitives @spacedrive/ai @spacedrive/forms @spacedrive/explorer @spacedrive/tokens && bun install
+
 gate-pr: preflight
     ./scripts/gate-pr.sh
 
@@ -58,12 +81,12 @@ bundle-sidecar:
     ./scripts/bundle-sidecar.sh --release
 
 # Run the desktop app in development mode.
-# Tauri's beforeDevCommand handles sidecar bundling and Vite automatically.
+# The desktop package script pre-bundles the sidecar, and Tauri starts Vite.
 desktop-dev:
     cd desktop && bun run tauri:dev
 
 # Build the full desktop app (sidecar + frontend + Tauri bundle).
-# Tauri's beforeBuildCommand handles sidecar bundling and frontend build automatically.
+# The desktop package script pre-bundles the sidecar, and Tauri builds the frontend.
 desktop-build:
     cd desktop && bun run tauri:build
 

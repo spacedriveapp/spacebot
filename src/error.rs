@@ -29,6 +29,9 @@ pub enum Error {
     #[error(transparent)]
     Settings(Box<SettingsError>),
 
+    #[error(transparent)]
+    Wiki(Box<WikiError>),
+
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
@@ -72,6 +75,11 @@ impl From<SecretsError> for Error {
 impl From<SettingsError> for Error {
     fn from(e: SettingsError) -> Self {
         Error::Settings(Box::new(e))
+    }
+}
+impl From<WikiError> for Error {
+    fn from(e: WikiError) -> Self {
+        Error::Wiki(Box::new(e))
     }
 }
 
@@ -244,4 +252,23 @@ pub enum SettingsError {
 
     #[error("settings error: {0}")]
     Other(String),
+}
+
+/// Wiki storage and edit errors.
+#[derive(Debug, thiserror::Error)]
+pub enum WikiError {
+    #[error("wiki page '{slug}' not found")]
+    NotFound { slug: String },
+
+    #[error("wiki page version {version} not found for '{slug}'")]
+    VersionNotFound { slug: String, version: i64 },
+
+    #[error("wiki edit failed: {0}")]
+    EditFailed(String),
+
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }

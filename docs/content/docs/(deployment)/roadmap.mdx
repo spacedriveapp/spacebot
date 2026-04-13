@@ -1,136 +1,83 @@
 ---
 title: Roadmap
-description: Development timeline and future plans for Spacebot.
+description: What's shipped, what's next, and what we decided against.
 ---
 
 # Roadmap
 
-Tracking progress from first compile to public launch.
+## Where We Are
 
-## Current State
+Spacebot is a working multi-agent system. Five process types (channel, branch, worker, compactor, cortex) run concurrently with delegation as the core pattern. Six messaging platforms are supported (Discord, Slack, Telegram, Twitch, Email, webhooks). The hosted platform is live at spacebot.sh.
 
-The full message-in → LLM → response-out pipeline is wired end-to-end across Discord, Telegram, Slack, and webhooks. The system starts messaging adapters, routes inbound messages to agent channels via binding resolution, runs real Rig agent loops for channels/branches/workers, and routes outbound responses back through the messaging layer. The hosted platform (spacebot.sh) is deployed with a control plane, dashboard, and marketing site. Config changes hot-reload without restarts.
+The core systems are stable: memory graph with hybrid search, model routing with fallback chains across 14 providers (including Azure OpenAI), OS-level sandboxing, secret store with encryption at rest, per-channel settings with hot-reload, conversation persistence, token-by-token streaming, and a full React dashboard embedded in the binary.
 
-## Completed
+Recent work has focused on expanding what agents can do and how they share knowledge:
 
-- **Project structure** — all modules declared, module root pattern (`src/memory.rs` not `mod.rs`)
-- **Error hierarchy** — thiserror domain enums wrapped by top-level `Error` with `#[from]`
-- **Config** — hierarchical TOML with `Config`, `AgentConfig`, `ResolvedAgentConfig`, `Binding`, `MessagingConfig`. File watcher with event filtering and content hash debounce for hot-reload.
-- **Multi-agent** — per-agent database isolation, `Agent` struct bundles all dependencies
-- **Database connections** — SQLite + LanceDB + redb per-agent, migrations for all tables
-- **LLM** — `SpacebotModel` implements Rig's `CompletionModel`, routes through `LlmManager` via HTTP with retries and fallback chains across 13 providers (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, OpenCode Zen, OpenCode Go)
-- **Model routing** — `RoutingConfig` with process-type defaults, task overrides, fallback chains
-- **Memory** — full stack: types, SQLite store (CRUD + graph), LanceDB (embeddings + vector + FTS), fastembed, hybrid search (RRF fusion). `memory_type` filter wired end-to-end through SearchConfig. `total_cmp` for safe sorting.
-- **Memory maintenance** — decay + prune implemented
-- **Identity** — `Identity` struct loads SOUL.md/IDENTITY.md/ROLE.md from agent root, `Prompts` with fallback chain
-- **Agent loops** — all three process types run real Rig loops:
-  - **Channel** — per-turn tool registration, status injection, `max_turns(5)`
-  - **Branch** — history fork, `max_turns(10)`, memory tools, result injection
-  - **Worker** — fresh history, per-worker ToolServer, `max_turns(50)`, interactive mode with `input_tx` stored in ChannelState
-- **Compactor** — tiered thresholds (80%/85%/95%), LLM summarization, pre-compaction archiving, emergency truncation
-- **Cortex** — signal buffering, bulletin generation on 60min interval, association loop
-- **StatusBlock** — event-driven updates, renders to context string
-- **Hooks** — `SpacebotHook` with tool call/result events, leak detection (11 patterns scanning both tool args and output); `CortexHook` for observation (trace-only)
-- **Messaging** — `Messaging` trait with RPITIT + companion, `MessagingManager` with fan-in/routing
-- **Discord adapter** — full Serenity implementation (message handling, streaming via edit, typing indicators, guild/channel/DM filtering)
-- **Telegram adapter** — full teloxide implementation (long polling, typing indicators, attachment extraction, chat/DM filtering, 4096 char splitting)
-- **Slack adapter** — full slack-morphism implementation (Socket Mode, thread replies, file upload v2, reactions, streaming via edit, workspace/channel/DM filtering via hot-reloadable permissions)
-- **Webhook adapter** — Axum HTTP server (POST /send, GET `/poll/{id}`, GET /health)
-- **Tools** — 20+ tools implement Rig's `Tool` trait with real logic (including task board tools, memory tools, `spacebot_docs`, and `config_inspect` alongside reply/branch/worker/browser/shell primitives)
-- **Workspace containment** — file tool validates paths stay within workspace boundary, shell/exec tools block instance directory traversal, sensitive file access, and secret env var leakage
-- **Conversation persistence** — `ConversationLogger` with fire-and-forget SQLite writes, compaction archiving
-- **Cron** — scheduler with timers, active hours, circuit breaker (3 failures → disable), creates real channels. CronTool wired into channel tool factory.
-- **Message routing** — full event loop with binding resolution, channel lifecycle, outbound routing
-- **Settings store** — redb key-value with WorkerLogMode
-- **OpenClaw skills** — skill format parsing, tool mapping, directory watcher with hot reload, instance + per-agent directories
-- **Embedded UI** — Vite + React + TypeScript SPA, embedded into binary via rust_embed, served as SPA fallback
-- **Bindings API** — hot-creates bindings and starts adapters at runtime without restart via ArcSwap
-- **Hosted platform** — control plane, dashboard, marketing site. Instance provisioning, auth, reverse proxy to private instances over WireGuard mesh.
-- **Ingestion pipeline** — file watcher on `agents/{id}/ingest/`, chunking, per-chunk worker with INGESTION.md prompt, memory extraction, cleanup to `ingest/done/`
-- **Agent CLI** — `spacebot agents list/create/delete`, identity template bootstrapping
+- **[Wiki](/docs/wiki)** — instance-wide knowledge base with versioned pages, FTS search, and 6 LLM tools
+- **[Portal](/docs/portal)** — built-in web chat with conversation persistence, file attachments, and per-conversation settings
+- **[Notifications](/docs/notifications)** — real-time actionable events for task approvals and worker failures
+- **[Projects](/docs/projects)** — instance-level project management with repo/worktree tracking and auto logo detection
+- **[Direct mode](/docs/configuring-channels)** — channels can get full worker-level tools for power-user conversations
+- **Token usage tracking** — per-process usage with cost estimation, wired to the dashboard
+- **Built-in skills** — compiled into the binary, starting with wiki-writing guidelines
+- **Cron expressions** — wall-clock scheduling, persistent cursors, claim-before-run semantics
+
+See the individual feature docs for details.
 
 ## In Progress
 
-- **Cortex consolidation** — `run_consolidation()` is a stub, no actual memory merging or graph optimization
-- **Memory merge** — `merge_similar_memories()` is a no-op placeholder
-- **Cortex observe()** — extracts some event types but hardcodes `memory_type` and `importance` values instead of pulling from actual event data
-- **CortexHook** — all hook methods are trace-only passthrough, no observation logic
-- **Secrets store** — empty struct, no redb/AES-256-GCM integration
+### Cortex Consolidation
+
+The cortex handles bulletin generation, health monitoring, and memory maintenance (decay + prune). The remaining cortex work is deeper cross-system inference:
+
+- `run_consolidation()` — memory merging and graph optimization
+- `merge_similar_memories()` — duplicate detection and atomic merge
+- Cross-channel coherence — shared observations across an agent's conversations
+- Richer signal extraction in `observe()` — pulling real event data instead of hardcoded values
+- CortexHook observation logic — anomaly detection and consolidation triggers
+
+### Budget Enforcement
+
+Token usage tracking is shipped. Remaining: warning thresholds, hard blocks when budgets are exceeded, session/daily/monthly aggregates, and per-model breakdown in the dashboard.
 
 ## Upcoming
 
-### Streaming
-
-`SpacebotModel.stream()` is implemented with provider SSE parsing. Remaining work is wiring stream-native Rig loops (`stream_prompt`) into runtime paths that still use non-streaming `.prompt(...)` calls (for example, cortex chat and channel loops).
-
-### Cortex Consolidation
-
-- Implement `run_consolidation()` — memory merging, decay management, graph optimization
-- Implement `merge_similar_memories()` in maintenance.rs
-- Cross-channel coherence — shared observations across an agent's conversations
-- Wire real values into `observe()` signal extraction
-- Implement CortexHook observation logic (anomaly detection, consolidation triggers)
-
-### ~~Secrets Store~~ ✓ Shipped
-
-Implemented. Per-agent credential storage in `secrets.redb` with two categories (system/tool), `secret:` config resolution, auto-migration from plaintext config, and optional AES-256-GCM encryption at rest with OS keystore integration. See [Secret Store](/docs/secrets).
-
-### Cost Tracking
-
-Per-agent token usage and cost tracking with budget enforcement. Session, daily, and monthly aggregates stored in redb. Per-model breakdown so you can see what's expensive. Warning threshold at configurable percentage, hard block when budget is exceeded — the agent gets a clean error instead of a provider 429. Essential for the hosted platform's pricing model and for self-hosted users who want to cap spend.
-
 ### Hardening
 
-- **Autonomy levels** — readonly, supervised, full modes. Readonly blocks all write tools. Supervised requires confirmation for destructive operations. Full is the current unrestricted mode.
-- **Command allowlisting** — opt-in allowlist mode for shell tool (more secure than the current blocklist approach)
-- **SSRF protection** — block private IP ranges (RFC1918, link-local, loopback), IPv4-mapped IPv6 bypasses, and shared address space in browser and HTTP tools. Require domain allowlists for outbound requests from workers.
-- **Error message sanitization** — scrub API keys and tokens from provider error messages before they hit logs or the UI. Leak detection catches tool output, but provider errors can also contain credentials when auth fails.
-- **Audit logging** — structured JSONL trail of security-relevant events (command execution, file access, policy violations). Rotation by size. Pairs with autonomy levels to give visibility into what the agent did and whether it was approved.
-- Tool nudging — inject "use your tools" in `SpacebotHook.on_completion_response()` when LLM responds with text in early iterations
-- Outbound HTTP leak scanning — block exfiltration via tool output before it reaches external services
-
-### Observability
-
-- OpenTelemetry trace + metrics export (OTLP)
-- Prometheus metrics endpoint on the control API
-- Structured per-agent metrics: token usage, tool call counts, latency percentiles, memory operations
+- **Autonomy levels** — readonly, supervised, full modes. Readonly blocks all write tools. Supervised requires confirmation for destructive operations.
+- **Command allowlisting** — opt-in allowlist for the shell tool
+- **SSRF protection** — block private IP ranges in browser and HTTP tools. Domain allowlists for outbound worker requests.
+- **Error message sanitization** — scrub credentials from provider error messages before they reach logs or UI
+- **Audit logging** — structured JSONL trail of security-relevant events with size-based rotation
 
 ### Additional Channel Adapters
 
-- **WhatsApp** — Meta Cloud API. Hosted instances receive webhooks via the platform proxy. Self-hosted users point the callback URL at their own reverse proxy or Tailscale funnel.
-- **Matrix** — decentralized chat protocol. Bridges to self-hosted Matrix/Element deployments.
-- **iMessage** — macOS-only, AppleScript bridge. Personal use on self-hosted Mac instances.
-- **IRC** — TLS socket connection. Lightweight protocol, maps channels to conversations.
-- **Lark** — Feishu/Lark webhook integration for enterprise teams.
-- **DingTalk** — webhook integration for Chinese enterprise teams.
+- **WhatsApp** — Meta Cloud API
+- **Matrix** — decentralized chat protocol
+- **iMessage** — macOS-only, AppleScript bridge
+- **IRC** — TLS socket connection
+- **Lark / DingTalk** — enterprise webhook integrations
 
 ### Onboarding CLI
 
 - `spacebot setup --quick --provider openrouter --key sk-...` — non-interactive fast path for scripted deploys
 - `spacebot setup --channels-only` — add channels to an existing instance
 
+## Post-Launch
+
+- **Hot reload agent topology** — adding/removing agents without restart
+- **Agent templates** — pre-built configurations for common use cases
+- **JsonSchema-derived tool definitions** — replace hand-written JSON schemas with the `JsonSchema` derive already on every Args struct
+- **Spacedrive integration** — connect agents to terabytes of indexed, content-addressed file data across devices
+
 ## Decided Against
 
 ### Built-in Tunnel Support
 
-Some self-hosted agent frameworks bundle Cloudflare/ngrok/Tailscale tunnel management into the binary. We intentionally don't — it's unnecessary for Spacebot's architecture.
+All current channel adapters use outbound connections — the bot connects to the platform, nothing needs to POST inbound. There's no port to expose.
 
-All current channel adapters (Discord, Telegram, Slack, webhooks) use **outbound connections**. The bot connects to the platform's gateway or API — nothing needs to POST inbound to the agent. There's no port to expose.
-
-For hosted instances, the platform proxy handles access over a private WireGuard mesh. For self-hosted instances, the embedded API and UI are accessible on your LAN. If you want remote access, Tailscale works out of the box — just install it on the host machine and access the Spacebot API via your tailnet. No integration needed, no config, no child process management.
-
-If a future channel adapter requires inbound HTTP callbacks (e.g. WhatsApp Business API), hosted instances would handle it via the platform proxy, and self-hosted users can point the callback URL at their existing Tailscale/Cloudflare setup.
+For hosted instances, the platform proxy handles access over a private WireGuard mesh. For self-hosted instances, Tailscale works out of the box. If a future adapter requires inbound callbacks (e.g. WhatsApp), hosted instances handle it via the proxy, and self-hosted users point the callback at their existing reverse proxy.
 
 ### `doctor` Diagnostic Command
 
-Some agent frameworks ship a `doctor` CLI command that checks daemon heartbeats, scheduler health, and channel connectivity. This usually exists to compensate for a fragile runtime — if you need a separate command to tell you your process is dead, the process management is the problem.
-
-Spacebot handles this through its control interface and the cortex. The embedded UI shows adapter status, agent health, and active connections in real-time. The cortex observes system-wide signals and surfaces issues proactively. Channel token validation happens at setup time through the bindings API — if something is misconfigured, you find out immediately when you add the binding, not by running `doctor` ten minutes later.
-
-## Post-Launch
-
-- **Cross-agent communication** — routing between agents, shared observations
-- **Hot reload agent topology** — adding/removing agents without restart
-- **Agent templates** — pre-built configurations for common use cases
-- **JsonSchema-derived tool definitions** — replace hand-written JSON schemas in all tools with the `JsonSchema` derive that's already on every Args struct
-- **Spacedrive integration** — connect agents to terabytes of indexed, content-addressed file data across devices
+The embedded UI shows adapter status, agent health, and active connections in real-time. The cortex surfaces issues proactively. Channel token validation happens at setup time through the bindings API. A separate diagnostic command would compensate for a fragile runtime — which isn't the problem we have.

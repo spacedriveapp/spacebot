@@ -350,9 +350,9 @@ Per-user context injected when specific users are active in the current channel.
 
 ### Relationship to existing designs
 
-This layer is the `participant-awareness.md` design, integrated into the layered context assembly. The design is unchanged -- `humans` table, cortex-generated summaries, cached and injected when `participants.len() >= min_participants`. The only change is its position in the prompt (it moves from "after Memory Context" to its own layer in the new assembly order).
+The long-term target for this layer is still the `participant-awareness.md` design, but the current implementation is a lighter config-backed variant. The channel now maintains a per-session active participant map keyed by canonical human ID when available and by `platform:sender_id` otherwise. Prompt rendering reads from that tracked participant set, matches known humans against configured `HumanDef` entries, and renders the available profile fields (`display_name`, `role`, `description` / `bio`) inline. There is still no dedicated `humans` table or cortex-generated participant summary cache on the current code path yet.
 
-If user-scoped memories lands first, the `humans` table merges with `user_identifiers` as described in that design doc. The working memory system does not depend on which identity table is canonical.
+If user-scoped memories or the full participant-awareness pipeline lands later, this layer can switch to that richer source without changing the prompt shape. The working memory system does not depend on which identity store is canonical.
 
 ### Enhancement: Recent Activity Per User
 
@@ -370,9 +370,9 @@ The participant summary (2-3 sentences about who this person is) is augmented wi
   Recent: asked about Docker runtime deps in #talk-to-spacebot 10m ago.
 ```
 
-The "Recent:" line is programmatic -- a query against `working_memory_events WHERE user_id = X ORDER BY timestamp DESC LIMIT 3`. The summary paragraph is the cached cortex-generated profile from the participant-awareness design. No additional LLM call.
+The "Recent:" line is programmatic -- a query against `working_memory_events WHERE user_id = X ORDER BY timestamp DESC LIMIT 3`. The profile paragraph currently comes from configured human metadata when available. No additional LLM call.
 
-**Token budget:** Configurable, default 400 tokens. Max 5 participants rendered. In a 50-person channel, only the 5 most recently active participants get profiles.
+**Token budget:** Configurable via the dedicated participant-context config, default 400 tokens. Max 5 participants rendered. In a 50-person channel, only the 5 most recently active participants get profiles.
 
 ---
 

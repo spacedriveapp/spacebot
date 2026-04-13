@@ -1195,6 +1195,7 @@ fn cmd_skill(
 
                 for info in skills.list() {
                     let source_label = match info.source {
+                        spacebot::skills::SkillSource::Builtin => "builtin",
                         spacebot::skills::SkillSource::Instance => "instance",
                         spacebot::skills::SkillSource::Workspace => "workspace",
                     };
@@ -1238,6 +1239,7 @@ fn cmd_skill(
                 };
 
                 let source_label = match skill.source {
+                    spacebot::skills::SkillSource::Builtin => "builtin",
                     spacebot::skills::SkillSource::Instance => "instance",
                     spacebot::skills::SkillSource::Workspace => "workspace",
                 };
@@ -1617,16 +1619,33 @@ async fn run(
 
     // Instance-level global task database. Shared across all agents with globally
     // unique task numbers. Lives alongside secrets.redb in the instance data dir.
-    let global_task_pool = spacebot::db::connect_global_tasks(&config.instance_dir.join("data"))
+    let instance_pool = spacebot::db::connect_instance_db(&config.instance_dir.join("data"))
         .await
-        .context("failed to initialize global task database")?;
+        .context("failed to initialize instance database")?;
 
     // Migrate legacy per-agent tasks to the global database on first run.
-    spacebot::tasks::migration::migrate_legacy_tasks(&config.instance_dir, &global_task_pool)
+    spacebot::tasks::migration::migrate_legacy_tasks(&config.instance_dir, &instance_pool)
         .await
         .context("failed to migrate legacy tasks to global database")?;
 
-    let global_task_store = Arc::new(spacebot::tasks::TaskStore::new(global_task_pool));
+    let global_task_store = Arc::new(spacebot::tasks::TaskStore::new(instance_pool.clone()));
+
+    // Instance-wide wiki knowledge base.
+    let global_wiki_store = Arc::new(spacebot::wiki::WikiStore::new(instance_pool.clone()));
+
+    // Instance-level notification store for the dashboard inbox.
+    let global_notification_store = Arc::new(spacebot::notifications::NotificationStore::new(
+        instance_pool.clone(),
+    ));
+
+    // Instance-level shared project store. Replaces per-agent project stores.
+    let global_project_store =
+        Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone()));
+
+    // Migrate per-agent projects into the instance database on first run.
+    spacebot::projects::migration::migrate_legacy_projects(&config.instance_dir, &instance_pool)
+        .await
+        .context("failed to migrate legacy projects to instance database")?;
 
     // Start HTTP API server if enabled
     let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
@@ -1637,6 +1656,8 @@ async fn run(
     );
     api_state.auth_token = config.api.auth_token.clone();
     api_state.set_task_store(global_task_store.clone());
+    api_state.set_wiki_store(global_wiki_store.clone());
+    api_state.set_notification_store(global_notification_store.clone());
     let api_state = Arc::new(api_state);
 
     // Keep the secrets API available in setup mode so encrypted stores can be
@@ -1803,6 +1824,9 @@ async fn run(
             agent_humans.clone(),
             injection_tx.clone(),
             global_task_store.clone(),
+            global_wiki_store.clone(),
+            global_project_store.clone(),
+            global_notification_store.clone(),
             &bootstrapped_store,
         )
         .await?;
@@ -2019,6 +2043,7 @@ async fn run(
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
                         resolved_settings,
+                        None, // no cron outcome for normal channels
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2302,6 +2327,7 @@ async fn run(
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
                         resolved_settings,
+                        None, // no cron outcome for normal channels
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2444,12 +2470,18 @@ async fn run(
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
                     });
+                    let inbound_attachments: Vec<spacebot::agent::channel_attachments::SavedAttachmentMeta> =
+                        message.metadata
+                            .get("portal_attachment_metas")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
                     api_state.event_tx.send(spacebot::api::ApiEvent::InboundMessage {
                         agent_id: agent_id.to_string(),
                         channel_id: conversation_id.clone(),
                         sender_name,
                         sender_id: message.sender_id.clone(),
                         text: message.content.to_string(),
+                        attachments: inbound_attachments,
                     }).ok();
 
                     if let Err(error) = message_tx.send(message).await {
@@ -2577,6 +2609,9 @@ async fn run(
                                     agent_humans.clone(),
                                     injection_tx.clone(),
                                     global_task_store.clone(),
+                                    global_wiki_store.clone(),
+                                    global_project_store.clone(),
+                                    global_notification_store.clone(),
                                     &bootstrapped_store,
                                 ).await {
                                     Ok(()) => {
@@ -2720,6 +2755,9 @@ async fn initialize_agents(
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
     global_task_store: Arc<spacebot::tasks::TaskStore>,
+    global_wiki_store: Arc<spacebot::wiki::WikiStore>,
+    global_project_store: Arc<spacebot::projects::ProjectStore>,
+    global_notification_store: Arc<spacebot::notifications::NotificationStore>,
     bootstrapped_store: &Option<Arc<spacebot::secrets::store::SecretsStore>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
@@ -2838,7 +2876,7 @@ async fn initialize_agents(
         // Per-agent memory system
         let memory_store =
             spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
-        let project_store = Arc::new(spacebot::projects::ProjectStore::new(db.sqlite.clone()));
+        let project_store = global_project_store.clone();
         let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
             .await
             .with_context(|| {
@@ -2942,8 +2980,7 @@ async fn initialize_agents(
 
         // Inject active project root paths into the sandbox allowlist so
         // workers can access project directories even outside the workspace.
-        spacebot::projects::refresh_sandbox_project_paths(&project_store, &agent_id, &sandbox)
-            .await;
+        spacebot::projects::refresh_sandbox_project_paths(&project_store, &sandbox).await;
 
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
@@ -2967,6 +3004,8 @@ async fn initialize_agents(
             ),
             injection_tx: injection_tx.clone(),
             working_memory,
+            api_state: Some(api_state.clone()),
+            wiki_store: Some(global_wiki_store.clone()),
         };
 
         let agent = spacebot::Agent {
@@ -3026,7 +3065,6 @@ async fn initialize_agents(
         let mut agent_configs = Vec::new();
         let mut memory_searches = std::collections::HashMap::new();
         let mut mcp_managers = std::collections::HashMap::new();
-        let mut project_stores = std::collections::HashMap::new();
         let mut agent_workspaces = std::collections::HashMap::new();
         let mut agent_identity_dirs = std::collections::HashMap::new();
         let mut agent_data_dirs = std::collections::HashMap::new();
@@ -3038,7 +3076,6 @@ async fn initialize_agents(
             agent_pools.insert(agent_id.to_string(), agent.db.sqlite.clone());
             memory_searches.insert(agent_id.to_string(), agent.deps.memory_search.clone());
             mcp_managers.insert(agent_id.to_string(), agent.deps.mcp_manager.clone());
-            project_stores.insert(agent_id.to_string(), agent.deps.project_store.clone());
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());
             agent_identity_dirs.insert(agent_id.to_string(), agent.config.identity_dir.clone());
             agent_data_dirs.insert(agent_id.to_string(), agent.config.data_dir.clone());
@@ -3061,7 +3098,7 @@ async fn initialize_agents(
         api_state.set_agent_configs(agent_configs);
         api_state.set_memory_searches(memory_searches);
         api_state.set_mcp_managers(mcp_managers);
-        api_state.set_project_stores(project_stores);
+        api_state.set_project_store(global_project_store.clone());
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_agent_identity_dirs(agent_identity_dirs);
@@ -3691,7 +3728,8 @@ async fn initialize_agents(
 
     // Start cortex warmup, runtime, and association loops for each agent
     for (agent_id, agent) in agents.iter() {
-        let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
+        let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone())
+            .with_notifications(global_notification_store.clone(), agent_id.to_string());
         let warmup_handle =
             spacebot::agent::cortex::spawn_warmup_loop(agent.deps.clone(), cortex_logger.clone());
         cortex_handles.push(warmup_handle);
@@ -3709,7 +3747,8 @@ async fn initialize_agents(
 
         let ready_task_handle = spacebot::agent::cortex::spawn_ready_task_loop(
             agent.deps.clone(),
-            spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone()),
+            spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone())
+                .with_notifications(global_notification_store.clone(), agent_id.to_string()),
         );
         cortex_handles.push(ready_task_handle);
         tracing::info!(agent_id = %agent_id, "cortex ready-task loop started");
@@ -3726,6 +3765,7 @@ async fn initialize_agents(
             let channel_store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
             let run_logger = spacebot::conversation::ProcessRunLogger::new(agent.db.sqlite.clone());
             let cortex_ctx = spacebot::agent::cortex_chat::CortexChatSession::create_context();
+            #[allow(deprecated)] // Cortex chat is legacy — being replaced by Channel Settings
             let tool_server = spacebot::tools::create_cortex_chat_tool_server(
                 agent.deps.agent_id.clone(),
                 agent.deps.clone(),

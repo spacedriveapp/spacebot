@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type PresetMeta } from "@/api/client";
-import { Dialog, DialogContent } from "@/ui";
-import { CortexChatPanel } from "@/components/CortexChatPanel";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import {useState} from "react";
+import {useQuery} from "@tanstack/react-query";
+import {api, type PresetMeta} from "@/api/client";
+import {DialogRoot, DialogContent} from "@spacedrive/primitives";
+import {CortexChatPanel} from "@/components/CortexChatPanel";
+import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
 	faRobot,
 	faCode,
@@ -16,7 +16,7 @@ import {
 	faTableColumns,
 	faPlus,
 } from "@fortawesome/free-solid-svg-icons";
-import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
+import type {IconDefinition} from "@fortawesome/fontawesome-svg-core";
 
 interface CreateAgentDialogProps {
 	open: boolean;
@@ -50,7 +50,7 @@ function PresetCard({
 		<button
 			type="button"
 			onClick={onClick}
-			className="group flex items-start gap-3 rounded-lg border border-app-line/40 bg-app-darkBox/30 p-3 text-left transition-all hover:border-accent/50 hover:bg-accent/5"
+			className="group flex items-start gap-3 rounded-lg border border-app-line/40 bg-app-dark-box/30 p-3 text-left transition-all hover:border-accent/50 hover:bg-accent/5"
 		>
 			<div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-app-box/60 text-ink-faint transition-colors group-hover:bg-accent/15 group-hover:text-accent">
 				<FontAwesomeIcon icon={icon} className="h-3.5 w-3.5" />
@@ -65,7 +65,7 @@ function PresetCard({
 	);
 }
 
-function ScratchCard({ onClick }: { onClick: () => void }) {
+function ScratchCard({onClick}: {onClick: () => void}) {
 	return (
 		<button
 			type="button"
@@ -85,11 +85,15 @@ function ScratchCard({ onClick }: { onClick: () => void }) {
 	);
 }
 
-export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDialogProps) {
+export function CreateAgentDialog({
+	open,
+	onOpenChange,
+	agentId,
+}: CreateAgentDialogProps) {
 	const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
 	const [chatPrompt, setChatPrompt] = useState<string | null>(null);
 
-	const { data } = useQuery({
+	const {data} = useQuery({
 		queryKey: ["factory-presets"],
 		queryFn: api.factoryPresets,
 		enabled: open,
@@ -101,7 +105,7 @@ export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDi
 		setSelectedPreset(preset.id);
 		setChatPrompt(
 			`I would like to create a new agent using the "${preset.name}" preset (${preset.id}). ` +
-			`Load the preset, walk me through customizing it for my needs, and create the agent when ready.`
+				`Load the preset, walk me through customizing it for my needs, and create the agent when ready.`,
 		);
 	}
 
@@ -109,7 +113,7 @@ export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDi
 		setSelectedPreset("scratch");
 		setChatPrompt(
 			"I would like to create a new agent from scratch. " +
-			"Ask me what I need, recommend a preset if one fits, and walk me through the creation process."
+				"Ask me what I need, recommend a preset if one fits, and walk me through the creation process.",
 		);
 	}
 
@@ -119,7 +123,7 @@ export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDi
 	}
 
 	return (
-		<Dialog
+		<DialogRoot
 			open={open}
 			onOpenChange={(v) => {
 				if (!v) handleClose();
@@ -169,7 +173,8 @@ export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDi
 								<span className="text-sm font-medium text-ink">
 									{selectedPreset === "scratch"
 										? "New Agent"
-										: presets.find((p) => p.id === selectedPreset)?.name ?? "New Agent"}
+										: (presets.find((p) => p.id === selectedPreset)?.name ??
+											"New Agent")}
 								</span>
 							</div>
 						</div>
@@ -183,6 +188,6 @@ export function CreateAgentDialog({ open, onOpenChange, agentId }: CreateAgentDi
 					</div>
 				)}
 			</DialogContent>
-		</Dialog>
+		</DialogRoot>
 	);
 }

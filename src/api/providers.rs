@@ -405,12 +405,14 @@ pub(super) async fn get_providers(
         github_copilot,
         azure,
     ) = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for providers");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+            tracing::error!(%error, "failed to parse config.toml for providers");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         let resolve_value = |value: &str| -> Option<String> {
             if let Some(alias) = value.strip_prefix("secret:") {
@@ -881,16 +883,18 @@ pub(super) async fn update_provider(
     let config_path = state.config_path.read().await.clone();
 
     let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for provider setup");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     } else {
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for provider setup");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if doc.get("llm").is_none() {
         doc["llm"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -901,7 +905,10 @@ pub(super) async fn update_provider(
 
     tokio::fs::write(&config_path, doc.to_string())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to write config.toml for provider setup");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Refresh in-memory defaults so newly created agents inherit the updated routing.
     refresh_defaults_config(&state).await;
@@ -986,16 +993,18 @@ async fn update_azure_provider(
 
     let config_path = state.config_path.read().await.clone();
     let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure setup");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     } else {
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for azure setup");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Determine the API key: use incoming if non-empty, otherwise preserve existing
     let api_key = if request.api_key.trim().is_empty() {
@@ -1030,7 +1039,10 @@ async fn update_azure_provider(
         doc["llm"]["provider"]["azure"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
 
-    let azure_table = doc["llm"]["provider"]["azure"].as_table_mut().unwrap();
+    // Just initialized above if it was missing, so the table is guaranteed to exist.
+    let azure_table = doc["llm"]["provider"]["azure"]
+        .as_table_mut()
+        .expect("azure table must exist after initialization above");
     azure_table["api_type"] = toml_edit::value("azure");
     azure_table["base_url"] = toml_edit::value(base_url.trim());
     azure_table["api_key"] = toml_edit::value(api_key.trim());
@@ -1150,13 +1162,15 @@ pub(super) async fn get_provider_config(
         }));
     }
 
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+        tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure config");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for azure config");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Get Azure config from [llm.provider.azure]
     let azure_config = doc
@@ -1484,9 +1498,10 @@ pub(super) async fn delete_provider(
         let instance_dir = (**state.instance_dir.load()).clone();
         let cred_path = crate::openai_auth::credentials_path(&instance_dir);
         if cred_path.exists() {
-            tokio::fs::remove_file(&cred_path)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            tokio::fs::remove_file(&cred_path).await.map_err(|error| {
+                tracing::error!(%error, path = %cred_path.display(), "failed to remove OpenAI OAuth credentials");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         }
         if let Some(mgr) = state.llm_manager.read().await.as_ref() {
             mgr.clear_openai_oauth_credentials().await;
@@ -1503,9 +1518,10 @@ pub(super) async fn delete_provider(
         let instance_dir = (**state.instance_dir.load()).clone();
         let token_path = crate::github_copilot_auth::credentials_path(&instance_dir);
         if token_path.exists() {
-            tokio::fs::remove_file(&token_path)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            tokio::fs::remove_file(&token_path).await.map_err(|error| {
+                tracing::error!(%error, path = %token_path.display(), "failed to remove github copilot token");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         }
         if let Some(manager) = state.llm_manager.read().await.as_ref() {
             manager.clear_copilot_token().await;
@@ -1521,13 +1537,15 @@ pub(super) async fn delete_provider(
             }));
         }
 
-        let content = tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure removal");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-        let mut doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+            tracing::error!(%error, "failed to parse config.toml for azure removal");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         if let Some(llm) = doc.get_mut("llm")
             && let Some(llm_table) = llm.as_table_mut()
@@ -1568,13 +1586,15 @@ pub(super) async fn delete_provider(
         }));
     }
 
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+        tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for provider removal");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for provider removal");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if let Some(llm) = doc.get_mut("llm")
         && let Some(table) = llm.as_table_mut()
@@ -1584,7 +1604,10 @@ pub(super) async fn delete_provider(
 
     tokio::fs::write(&config_path, doc.to_string())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            tracing::error!(%error, path = %config_path.display(), "failed to write config.toml for provider removal");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(ProviderUpdateResponse {
         success: true,

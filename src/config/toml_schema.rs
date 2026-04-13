@@ -291,6 +291,7 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) ingestion: Option<TomlIngestionConfig>,
     pub(super) cortex: Option<TomlCortexConfig>,
     pub(super) warmup: Option<TomlWarmupConfig>,
+    pub(super) participant_context: Option<TomlParticipantContextConfig>,
     pub(super) browser: Option<TomlBrowserConfig>,
     pub(super) channel: Option<TomlChannelConfig>,
     #[serde(default)]
@@ -301,6 +302,14 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) opencode: Option<TomlOpenCodeConfig>,
     pub(super) worker_log_mode: Option<String>,
     pub(super) projects: Option<TomlProjectsConfig>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlParticipantContextConfig {
+    pub(super) enabled: Option<bool>,
+    pub(super) min_participants: Option<usize>,
+    pub(super) token_budget: Option<usize>,
+    pub(super) max_participants: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]

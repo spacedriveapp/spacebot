@@ -770,6 +770,69 @@ pub async fn render_channel_activity_map(
     Ok(output)
 }
 
+/// Render Layer 4: participant context for the most recently active users in
+/// the current channel.
+pub async fn render_participant_context(
+    working_memory: &WorkingMemoryStore,
+    participants: &[crate::conversation::ActiveParticipant],
+    channel_id: &str,
+    config: &crate::config::ParticipantContextConfig,
+) -> Result<String> {
+    use std::fmt::Write;
+
+    if !config.enabled || participants.len() < config.min_participants {
+        return Ok(String::new());
+    }
+
+    let now = Utc::now();
+    let mut output = String::new();
+    writeln!(output, "## Participants\n").ok();
+
+    for participant in participants {
+        write!(output, "**{}**", participant.display_name).ok();
+        if let Some(role) = participant.role.as_deref() {
+            write!(output, " -- {role}").ok();
+        }
+        writeln!(output).ok();
+
+        if let Some(profile) = participant.profile_summary.as_deref() {
+            writeln!(output, "  {profile}").ok();
+        }
+
+        let recent_line = participant_recent_activity(
+            working_memory,
+            &participant.participant_key,
+            participant.last_message_at,
+            now,
+            channel_id,
+        )
+        .await?;
+        writeln!(output, "  Recent: {recent_line}.").ok();
+        writeln!(output).ok();
+
+        if estimate_tokens(&output) >= config.token_budget {
+            break;
+        }
+    }
+
+    if estimate_tokens(&output) > config.token_budget {
+        let mut trimmed = String::new();
+        let mut tokens_used = 0usize;
+        for line in output.lines() {
+            let candidate = format!("{line}\n");
+            let candidate_tokens = estimate_tokens(&candidate);
+            if tokens_used + candidate_tokens > config.token_budget {
+                break;
+            }
+            trimmed.push_str(&candidate);
+            tokens_used += candidate_tokens;
+        }
+        return Ok(trimmed.trim_end().to_string());
+    }
+
+    Ok(output.trim_end().to_string())
+}
+
 /// Format a single event as a one-line summary for the raw tail.
 fn format_event_line(event: &WorkingMemoryEvent, current_channel_id: &str) -> String {
     let type_label = match event.event_type {
@@ -862,6 +925,42 @@ fn format_time_ago(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
         let days = minutes / 1440;
         format!("{days}d ago")
     }
+}
+
+async fn participant_recent_activity(
+    working_memory: &WorkingMemoryStore,
+    user_id: &str,
+    last_message_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    channel_id: &str,
+) -> Result<String> {
+    let recent_events = working_memory.get_user_recent_events(user_id, 3).await?;
+    if recent_events.is_empty() {
+        return Ok(format!(
+            "active in this channel {}",
+            format_time_ago(now, last_message_at)
+        ));
+    }
+
+    let parts: Vec<String> = recent_events
+        .iter()
+        .rev()
+        .map(|event| {
+            let channel_prefix = match &event.channel_id {
+                Some(event_channel_id) if event_channel_id != channel_id => {
+                    format!("in {event_channel_id} ")
+                }
+                _ => String::new(),
+            };
+            format!(
+                "{channel_prefix}{} {}",
+                event.summary,
+                format_time_ago(now, event.timestamp)
+            )
+        })
+        .collect();
+
+    Ok(parts.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,6 +1605,61 @@ mod tests {
 
         // No channels in DB, so should be empty.
         assert!(rendered.is_empty(), "should be empty with no channels");
+    }
+
+    #[tokio::test]
+    async fn test_render_participant_context_uses_humans_and_recent_activity() {
+        let store = setup_test_store().await;
+        let config = crate::config::ParticipantContextConfig {
+            max_participants: 3,
+            ..crate::config::ParticipantContextConfig::default()
+        };
+
+        sqlx::query(
+            "INSERT INTO conversation_messages \
+             (id, channel_id, role, sender_name, sender_id, content) \
+             VALUES (?, ?, 'user', ?, ?, ?)",
+        )
+        .bind("message-1")
+        .bind("discord:chan-1")
+        .bind("Victor")
+        .bind("12345")
+        .bind("Can you review this?")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let event = WorkingMemoryEvent {
+            id: Uuid::new_v4().to_string(),
+            event_type: WorkingMemoryEventType::Decision,
+            timestamp: Utc::now() - chrono::Duration::minutes(10),
+            channel_id: Some("discord:chan-2".to_string()),
+            user_id: Some("victor".to_string()),
+            summary: "approved the migration approach".to_string(),
+            detail: None,
+            importance: 0.8,
+            day: store.today(),
+        };
+        insert_event(&store.pool, &event).await.unwrap();
+
+        let participants = vec![crate::conversation::ActiveParticipant {
+            participant_key: "victor".to_string(),
+            platform: "discord".to_string(),
+            sender_id: "12345".to_string(),
+            display_name: "Victor".to_string(),
+            role: Some("Maintainer".to_string()),
+            profile_summary: Some("Prefers direct, technical responses.".to_string()),
+            last_message_at: Utc::now(),
+        }];
+
+        let rendered = render_participant_context(&store, &participants, "discord:chan-1", &config)
+            .await
+            .unwrap();
+
+        assert!(rendered.contains("## Participants"));
+        assert!(rendered.contains("**Victor** -- Maintainer"));
+        assert!(rendered.contains("Prefers direct, technical responses."));
+        assert!(rendered.contains("approved the migration approach"));
     }
 
     #[test]

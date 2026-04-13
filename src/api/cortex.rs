@@ -1,3 +1,7 @@
+// NOTE: Cortex chat endpoints are deprecated. Cortex chat is being replaced
+// by Channel Settings which provide fine-grained per-channel control.
+// The cortex *events* endpoint (process logs) is NOT deprecated.
+
 use super::state::ApiState;
 
 use crate::agent::cortex::{CortexEvent, CortexLogger};

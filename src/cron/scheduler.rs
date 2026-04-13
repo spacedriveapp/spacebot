@@ -16,8 +16,8 @@ use chrono_tz::Tz;
 use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 /// A cron job definition loaded from the database.
@@ -37,6 +37,51 @@ pub struct CronJob {
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
+}
+
+/// Reply buffer for cron job outcome delivery.
+///
+/// When a cron job has a delivery target, replies are accumulated in this buffer
+/// during execution and flushed as a single consolidated message on completion.
+/// This prevents "spam" delivery where multiple messages are sent progressively.
+/// Stores the final delivery outcome for a cron job.
+///
+/// Written by the `SetOutcomeTool` during execution, read by the scheduler
+/// after the channel exits. This replaces the old `CronReplyBuffer` approach:
+/// the cron channel is now a normal channel where `reply()` posts visibly,
+/// and only an explicit `set_outcome()` call determines what gets delivered.
+#[derive(Debug, Clone)]
+pub struct CronOutcome {
+    content: Arc<Mutex<Option<String>>>,
+}
+
+impl CronOutcome {
+    pub fn new() -> Self {
+        Self {
+            content: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Store the outcome content. Overwrites any previous value.
+    pub fn set(&self, content: String) {
+        *self.content.lock().unwrap() = Some(content);
+    }
+
+    /// Take the outcome, leaving None.
+    pub fn take(&self) -> Option<String> {
+        self.content.lock().unwrap().take()
+    }
+
+    /// Check if an outcome has been set.
+    pub fn is_some(&self) -> bool {
+        self.content.lock().unwrap().is_some()
+    }
+}
+
+impl Default for CronOutcome {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Serializable cron job config (for storage and TOML parsing).
@@ -1270,10 +1315,12 @@ async fn run_cron_job(
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
+    let (response_tx, _response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
 
     // Subscribe to the agent's event bus (the channel needs this for branch/worker events)
     let event_rx = context.deps.event_tx.subscribe();
+
+    let cron_outcome = CronOutcome::new();
 
     let (channel, channel_tx) = Channel::new(
         channel_id.clone(),
@@ -1285,10 +1332,15 @@ async fn run_cron_job(
         None, // cron channels don't capture prompt snapshots
         None, // cron channels don't share live transcript cache
         crate::conversation::settings::ResolvedConversationSettings::default(),
+        Some(cron_outcome.clone()),
     );
 
+    // Hold a control handle so we can cancel outstanding workers on timeout,
+    // giving the LLM a chance to synthesize partial results before we give up.
+    let _control_handle = channel.control_handle();
+
     // Spawn the channel's event loop
-    let channel_handle = tokio::spawn(async move { channel.run().await });
+    let mut channel_handle = tokio::spawn(async move { channel.run().await });
 
     // Send the cron job prompt as a synthetic message
     // Derive source from the delivery target's adapter so adapter_selector() can extract
@@ -1332,96 +1384,15 @@ async fn run_cron_job(
         ));
     }
 
-    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(120));
+    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(1500));
 
-    // Drop the sender so the cron channel behaves as a one-shot conversation.
-    drop(channel_tx);
+    // Keep channel_tx alive — on timeout we send a "synthesize now" message
+    // so the LLM gets a direct turn to compose the final reply.
 
-    let delivery_response = match await_cron_delivery_response(&job.id, &mut response_rx, timeout)
-        .await
-    {
-        CronResponseWaitOutcome::Delivered(response) => {
-            if !channel_handle.is_finished() {
-                channel_handle.abort();
-            }
-
-            match channel_handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(cron_id = %job.id, %error, "cron channel returned an error after emitting a delivery response");
-                }
-                Err(join_error) if !join_error.is_cancelled() => {
-                    tracing::warn!(cron_id = %job.id, %join_error, "cron channel join failed after emitting a delivery response");
-                }
-                Err(_) => {}
-            }
-
-            Some(response)
-        }
-        CronResponseWaitOutcome::ChannelClosed => match channel_handle.await {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => {
-                let error_message = format!("cron channel failed: {error}");
-                persist_cron_execution(
-                    context,
-                    &job.id,
-                    CronExecutionRecord {
-                        execution_succeeded: false,
-                        delivery_attempted: false,
-                        delivery_succeeded: None,
-                        result_summary: None,
-                        execution_error: Some(error_message.clone()),
-                        delivery_error: None,
-                    },
-                );
-                return Err(CronRunError::Execution(
-                    anyhow::anyhow!(error_message).into(),
-                ));
-            }
-            Err(join_error) => {
-                let error_message = format!("cron channel join failed: {join_error}");
-                persist_cron_execution(
-                    context,
-                    &job.id,
-                    CronExecutionRecord {
-                        execution_succeeded: false,
-                        delivery_attempted: false,
-                        delivery_succeeded: None,
-                        result_summary: None,
-                        execution_error: Some(error_message.clone()),
-                        delivery_error: None,
-                    },
-                );
-                return Err(CronRunError::Execution(
-                    anyhow::anyhow!(error_message).into(),
-                ));
-            }
-        },
-        CronResponseWaitOutcome::TimedOut => {
-            if !channel_handle.is_finished() {
-                channel_handle.abort();
-            }
-
-            match channel_handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        cron_id = %job.id,
-                        %error,
-                        "cron channel returned an error after timing out"
-                    );
-                }
-                Err(join_error) if !join_error.is_cancelled() => {
-                    tracing::warn!(
-                        cron_id = %job.id,
-                        %join_error,
-                        "cron channel join failed after timing out"
-                    );
-                }
-                Err(_) => {}
-            }
-
-            let error_message = format!("cron job timed out after {timeout:?}");
+    let timed_out = match tokio::time::timeout(timeout, &mut channel_handle).await {
+        Ok(Ok(Ok(()))) => false,
+        Ok(Ok(Err(error))) => {
+            let error_message = format!("cron channel failed: {error}");
             persist_cron_execution(
                 context,
                 &job.id,
@@ -1434,15 +1405,81 @@ async fn run_cron_job(
                     delivery_error: None,
                 },
             );
-
             return Err(CronRunError::Execution(
                 anyhow::anyhow!(error_message).into(),
             ));
         }
+        Ok(Err(join_error)) => {
+            let error_message = format!("cron channel join failed: {join_error}");
+            persist_cron_execution(
+                context,
+                &job.id,
+                CronExecutionRecord {
+                    execution_succeeded: false,
+                    delivery_attempted: false,
+                    delivery_succeeded: None,
+                    result_summary: None,
+                    execution_error: Some(error_message.clone()),
+                    delivery_error: None,
+                },
+            );
+            return Err(CronRunError::Execution(
+                anyhow::anyhow!(error_message).into(),
+            ));
+        }
+        Err(_elapsed) => true,
     };
 
+    if timed_out {
+        // Send a direct "wrap up" message so the LLM gets a turn to synthesize
+        // whatever worker results have already landed in context.
+        // This is more reliable than cancelling workers and waiting for retrigger
+        // events, because cancel_worker removes from worker_handles before the
+        // event handler sees the WorkerComplete — the guard clause drops it.
+        tracing::warn!(
+            cron_id = %job.id,
+            "cron job timed out, sending synthesis prompt"
+        );
+        let wrap_up = InboundMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "system".into(),
+            adapter: Some(job.delivery_target.adapter.clone()),
+            conversation_id: format!("cron:{}", job.id),
+            sender_id: "system".into(),
+            agent_id: Some(context.deps.agent_id.clone()),
+            content: MessageContent::Text(
+                "Time is up. Some workers may not have finished. \
+                 Synthesize your response NOW using whatever results you have. \
+                 Call set_outcome() immediately with the best output you can produce \
+                 from the available data. Do not spawn more workers."
+                    .to_string(),
+            ),
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+        };
+        let _ = channel_tx.send(wrap_up).await;
+        // Drop sender so the channel exits after processing this message.
+        drop(channel_tx);
+
+        // Grace period for the LLM to synthesize and call reply().
+        let grace = Duration::from_secs(120);
+        match tokio::time::timeout(grace, &mut channel_handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                channel_handle.abort();
+                let _ = channel_handle.await;
+            }
+        }
+    } else {
+        drop(channel_tx);
+    }
+
+    // Channel has fully exited. Deliver the outcome if set_outcome() was called.
+    let final_response = cron_outcome.take().map(OutboundResponse::Text);
+
     // Deliver result to target (only if there's something to say)
-    if let Some(response) = delivery_response {
+    if let Some(response) = final_response {
         let summary = cron_response_summary(&response);
         if let Err(error) = context
             .messaging_manager
@@ -1549,6 +1586,46 @@ fn record_cron_metrics(agent_id: &str, cron_id: &str, record: &CronExecutionReco
         .inc();
 }
 
+fn cron_response_summary(response: &OutboundResponse) -> Option<String> {
+    match response {
+        OutboundResponse::Text(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        OutboundResponse::RichMessage { text, cards, .. } => {
+            let text = text.trim();
+            if !text.is_empty() {
+                Some(text.to_string())
+            } else {
+                let derived = OutboundResponse::text_from_cards(cards);
+                let derived = derived.trim();
+                (!derived.is_empty()).then(|| derived.to_string())
+            }
+        }
+        OutboundResponse::ThreadReply { text, .. }
+        | OutboundResponse::Ephemeral { text, .. }
+        | OutboundResponse::ScheduledMessage { text, .. } => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        OutboundResponse::File {
+            filename, caption, ..
+        } => caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|caption| !caption.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| Some(format!("Attached file: {filename}"))),
+        OutboundResponse::Status(_)
+        | OutboundResponse::Reaction(_)
+        | OutboundResponse::RemoveReaction(_)
+        | OutboundResponse::StreamStart
+        | OutboundResponse::StreamChunk(_)
+        | OutboundResponse::StreamEnd => None,
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 enum CronResponseWaitOutcome {
     Delivered(OutboundResponse),
@@ -1556,9 +1633,10 @@ enum CronResponseWaitOutcome {
     TimedOut,
 }
 
+#[cfg(test)]
 async fn await_cron_delivery_response(
     cron_id: &str,
-    response_rx: &mut mpsc::Receiver<RoutedResponse>,
+    response_rx: &mut tokio::sync::mpsc::Receiver<RoutedResponse>,
     timeout: Duration,
 ) -> CronResponseWaitOutcome {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -1585,6 +1663,7 @@ async fn await_cron_delivery_response(
     }
 }
 
+#[cfg(test)]
 fn normalize_cron_delivery_response(response: OutboundResponse) -> Option<OutboundResponse> {
     match response {
         OutboundResponse::Text(text) => {
@@ -1639,45 +1718,6 @@ fn normalize_cron_delivery_response(response: OutboundResponse) -> Option<Outbou
             mime_type,
             caption,
         }),
-        OutboundResponse::Status(_)
-        | OutboundResponse::Reaction(_)
-        | OutboundResponse::RemoveReaction(_)
-        | OutboundResponse::StreamStart
-        | OutboundResponse::StreamChunk(_)
-        | OutboundResponse::StreamEnd => None,
-    }
-}
-
-fn cron_response_summary(response: &OutboundResponse) -> Option<String> {
-    match response {
-        OutboundResponse::Text(text) => {
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_string())
-        }
-        OutboundResponse::RichMessage { text, cards, .. } => {
-            let text = text.trim();
-            if !text.is_empty() {
-                Some(text.to_string())
-            } else {
-                let derived = OutboundResponse::text_from_cards(cards);
-                let derived = derived.trim();
-                (!derived.is_empty()).then(|| derived.to_string())
-            }
-        }
-        OutboundResponse::ThreadReply { text, .. }
-        | OutboundResponse::Ephemeral { text, .. }
-        | OutboundResponse::ScheduledMessage { text, .. } => {
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_string())
-        }
-        OutboundResponse::File {
-            filename, caption, ..
-        } => caption
-            .as_deref()
-            .map(str::trim)
-            .filter(|caption| !caption.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| Some(format!("Attached file: {filename}"))),
         OutboundResponse::Status(_)
         | OutboundResponse::Reaction(_)
         | OutboundResponse::RemoveReaction(_)

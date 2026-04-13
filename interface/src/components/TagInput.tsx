@@ -8,7 +8,12 @@ interface TagInputProps {
 	className?: string;
 }
 
-export function TagInput({value, onChange, placeholder, className}: TagInputProps) {
+export function TagInput({
+	value,
+	onChange,
+	placeholder,
+	className,
+}: TagInputProps) {
 	const [inputValue, setInputValue] = useState("");
 	const inputRef = useRef<HTMLInputElement>(null);
 
@@ -41,7 +46,7 @@ export function TagInput({value, onChange, placeholder, className}: TagInputProp
 
 	return (
 		<div className={className}>
-			<div className="flex flex-wrap gap-2 p-2 border border-app-line/50 rounded-md bg-app-darkBox/30 min-h-[42px] focus-within:border-accent/50">
+			<div className="flex flex-wrap gap-2 p-2 border border-app-line/50 rounded-md bg-app-dark-box/30 min-h-[42px] focus-within:border-accent/50">
 				{value.map((tag) => (
 					<div
 						key={tag}

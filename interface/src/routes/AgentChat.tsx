@@ -1,5 +1,5 @@
-import { WebChatPanel } from "@/components/WebChatPanel";
+import { PortalPanel } from "@/components/portal";
 
 export function AgentChat({ agentId }: { agentId: string }) {
-	return <WebChatPanel agentId={agentId} />;
+	return <PortalPanel agentId={agentId} />;
 }

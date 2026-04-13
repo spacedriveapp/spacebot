@@ -253,6 +253,8 @@ The participant summary loop would then use the canonical user ID for memory rec
 
 ## Configuration
 
+The current codebase already has a smaller `ParticipantContextConfig` runtime surface for prompt-time rendering and a per-channel active participant map. The config below is still the intended full-pipeline target once summary generation and persistence land.
+
 ```rust
 pub struct ParticipantConfig {
     pub enabled: bool,                      // default: true

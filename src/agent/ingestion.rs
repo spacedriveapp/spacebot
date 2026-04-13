@@ -506,6 +506,9 @@ async fn process_chunk(
             working_memory: Some(deps.working_memory.clone()),
             channel_id: None,
         },
+        deps.api_state.clone(),
+        deps.wiki_store.clone(),
+        deps.sandbox.clone(),
     );
 
     let agent = AgentBuilder::new(model)

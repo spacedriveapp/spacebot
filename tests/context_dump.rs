@@ -130,6 +130,8 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
             db.sqlite.clone(),
             chrono_tz::Tz::UTC,
         ),
+        api_state: None,
+        wiki_store: None,
     };
 
     Ok((deps, config))
@@ -252,21 +254,26 @@ async fn dump_channel_context() {
         )),
         worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
         model_overrides: Arc::new(Default::default()),
+        active_participants: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        cron_outcome: None,
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
     let replied_flag = spacebot::tools::new_replied_flag();
+    let reply_target = spacebot::tools::ReplyTarget::Live(Box::new(response_tx.clone()));
     spacebot::tools::add_channel_tools(
         &tool_server,
         state,
         response_tx,
+        reply_target,
         "test-conversation",
         skip_flag,
         replied_flag,
         None,
         None,
         true,
+        None,
         None,
         None,
     )
@@ -311,7 +318,7 @@ async fn dump_branch_context() {
     let instance_dir = rc.instance_dir.to_string_lossy();
     let workspace_dir = rc.workspace_dir.to_string_lossy();
     let branch_prompt = prompt_engine
-        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .render_branch_prompt(&instance_dir, &workspace_dir, false)
         .expect("failed to render branch prompt");
     print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
     print_stats("System prompt", &branch_prompt);
@@ -332,6 +339,9 @@ async fn dump_branch_context() {
         channel_store,
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
+        None,
+        None,
+        deps.sandbox.clone(),
     );
 
     let tool_defs = branch_tool_server
@@ -383,6 +393,8 @@ async fn dump_worker_context() {
             &[],
             browser_config.persist_session,
             None,
+            false,
+            None,
         )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
@@ -405,6 +417,8 @@ async fn dump_worker_context() {
         deps.runtime_config.clone(),
         Default::default(),
         deps.memory_search.clone(),
+        false,
+        None,
     );
 
     let tool_defs = worker_tool_server
@@ -496,20 +510,25 @@ async fn dump_all_contexts() {
         )),
         worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
         model_overrides: Arc::new(Default::default()),
+        active_participants: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        cron_outcome: None,
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
     let replied_flag = spacebot::tools::new_replied_flag();
+    let reply_target = spacebot::tools::ReplyTarget::Live(Box::new(response_tx.clone()));
     spacebot::tools::add_channel_tools(
         &channel_tool_server,
         state,
         response_tx,
+        reply_target,
         "test",
         skip_flag,
         replied_flag,
         None,
         None,
         true,
+        None,
         None,
         None,
     )
@@ -530,7 +549,7 @@ async fn dump_all_contexts() {
 
     // ── Branch ──
     let branch_prompt = prompt_engine
-        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .render_branch_prompt(&instance_dir, &workspace_dir, false)
         .expect("failed to render branch prompt");
     let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
@@ -544,6 +563,9 @@ async fn dump_all_contexts() {
         channel_store,
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
+        None,
+        None,
+        deps.sandbox.clone(),
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -571,6 +593,8 @@ async fn dump_all_contexts() {
             &[],
             browser_config.persist_session,
             None,
+            false,
+            None,
         )
         .expect("failed to render worker prompt");
     let brave_search_key = (**rc.brave_search_key.load()).clone();
@@ -589,6 +613,8 @@ async fn dump_all_contexts() {
         deps.runtime_config.clone(),
         Default::default(),
         deps.memory_search.clone(),
+        false,
+        None,
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

@@ -549,6 +549,7 @@ pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
             | (TaskStatus::InProgress, TaskStatus::Done)
             | (TaskStatus::InProgress, TaskStatus::Ready)
             | (TaskStatus::Backlog, TaskStatus::Ready)
+            | (TaskStatus::Done, TaskStatus::Ready)
     )
 }
 

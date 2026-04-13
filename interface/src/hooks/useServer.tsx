@@ -8,7 +8,11 @@ import {
 	type ReactNode,
 } from "react";
 import { setServerUrl as setClientServerUrl } from "@/api/client";
-import { IS_TAURI, invoke as platformInvoke } from "@/platform";
+import {
+	HAS_BUNDLED_SERVER,
+	IS_DESKTOP,
+	invoke as platformInvoke,
+} from "@/platform";
 
 export type ServerState = "checking" | "connected" | "disconnected";
 
@@ -29,10 +33,10 @@ interface ServerContextValue {
 	hasBootstrapped: boolean;
 	/** Signal that bootstrap queries have completed (called by LiveContextProvider) */
 	onBootstrapped: () => void;
-	/** Whether the app is running inside Tauri */
-	isTauri: boolean;
-	/** Whether a sidecar binary is bundled (Tauri only) */
-	hasSidecar: boolean;
+	/** Whether the app is running inside a desktop host */
+	isDesktopHost: boolean;
+	/** Whether a bundled local server binary is available */
+	hasBundledServer: boolean;
 }
 
 const ServerContext = createContext<ServerContextValue>({
@@ -42,8 +46,8 @@ const ServerContext = createContext<ServerContextValue>({
 	hasConnected: false,
 	hasBootstrapped: false,
 	onBootstrapped: () => {},
-	isTauri: false,
-	hasSidecar: false,
+	isDesktopHost: false,
+	hasBundledServer: false,
 });
 
 export function useServer() {
@@ -63,8 +67,6 @@ function normalizeUrl(raw: string): string {
 	}
 }
 
-// IS_TAURI imported from @/platform
-
 async function checkHealth(baseUrl: string): Promise<boolean> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 3000);
@@ -83,22 +85,22 @@ async function checkHealth(baseUrl: string): Promise<boolean> {
 /** Persist the server URL. Uses Tauri IPC when available, localStorage otherwise. */
 async function persistUrl(url: string): Promise<void> {
 	localStorage.setItem(STORAGE_KEY, url);
-	if (IS_TAURI) {
+	if (IS_DESKTOP) {
 		try {
 			await platformInvoke("set_server_url", { url });
 		} catch {
-			// Tauri command not available (e.g. dev mode without Tauri)
+			// Desktop command not available (e.g. browser/dev mode)
 		}
 	}
 }
 
-/** Load the persisted server URL. Tauri IPC is async so this is only
+/** Load the persisted server URL. Desktop IPC is async so this is only
  *  used for the initial load; subsequent reads use React state. */
 async function loadPersistedUrl(): Promise<string | null> {
-	if (IS_TAURI) {
+	if (IS_DESKTOP) {
 		try {
 			const url = await platformInvoke<string>("get_server_url");
-			// The Tauri command returns the default sentinel when nothing
+			// The desktop command returns the default sentinel when nothing
 			// is stored. Treat it (and empty strings) as "not persisted"
 			// so we fall through to localStorage.
 			if (url && url !== DEFAULT_SERVER_URL) return url;
@@ -111,7 +113,7 @@ async function loadPersistedUrl(): Promise<string | null> {
 
 /**
  * Detect whether the SPA is served from the spacebot server itself
- * (same-origin) rather than from Tauri or a separate dev server.
+ * (same-origin) rather than from the desktop host or a separate dev server.
  *
  * In same-origin mode (embedded via rust_embed, or behind the hosted
  * proxy with __SPACEBOT_BASE_PATH), API calls use relative paths and
@@ -119,12 +121,12 @@ async function loadPersistedUrl(): Promise<string | null> {
  */
 function isSameOriginMode(): boolean {
 	// Hosted deployment with a base path prefix
-	if ((window as any).__SPACEBOT_BASE_PATH) return true;
-	// Not Tauri, and served from a normal HTTP origin (not a dev server
+	if (window.__SPACEBOT_BASE_PATH) return true;
+	// Not running in the desktop host, and served from a normal HTTP origin (not a dev server
 	// with a Vite proxy). In production the spacebot binary embeds the
 	// SPA at the same origin, so relative API paths just work.
 	// In Vite dev mode, the proxy handles /api, so same-origin is also fine.
-	if (!IS_TAURI) return true;
+	if (!IS_DESKTOP) return true;
 	return false;
 }
 
@@ -132,7 +134,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
 	const sameOrigin = isSameOriginMode();
 
 	// Load saved URL from localStorage synchronously for first render;
-	// an async effect will reconcile with Tauri's persisted value.
+	// an async effect will reconcile with the desktop host's persisted value.
 	const [serverUrl, setServerUrlRaw] = useState<string>(() => {
 		if (sameOrigin) {
 			// Same-origin or dev proxy mode: API is relative, no server
@@ -140,7 +142,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
 			// returns the relative BASE_PATH + "/api".
 			return "";
 		}
-		// Tauri desktop mode: need an explicit server URL.
+		// Desktop mode: need an explicit server URL.
 		const saved = localStorage.getItem(STORAGE_KEY);
 		const initial = saved ? normalizeUrl(saved) : DEFAULT_SERVER_URL;
 		// Sync to the API client module immediately so the very first
@@ -157,7 +159,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
 	const onBootstrapped = useCallback(() => setHasBootstrapped(true), []);
 	const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-	// On mount, reconcile with Tauri-persisted URL (async)
+	// On mount, reconcile with the desktop host's persisted URL (async)
 	useEffect(() => {
 		if (sameOrigin) return;
 		loadPersistedUrl().then((saved) => {
@@ -211,8 +213,8 @@ export function ServerProvider({ children }: { children: ReactNode }) {
 				hasConnected,
 				hasBootstrapped,
 				onBootstrapped,
-				isTauri: IS_TAURI,
-				hasSidecar: IS_TAURI, // sidecar is always bundled in Tauri builds
+				isDesktopHost: IS_DESKTOP,
+				hasBundledServer: HAS_BUNDLED_SERVER,
 			}}
 		>
 			{children}

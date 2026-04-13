@@ -15,11 +15,11 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
-    ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
+    ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
+    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -1613,6 +1613,36 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
+            participant_context: toml
+                .defaults
+                .participant_context
+                .map(|participant_context| -> Result<ParticipantContextConfig> {
+                    let resolved = ParticipantContextConfig {
+                        enabled: participant_context
+                            .enabled
+                            .unwrap_or(base_defaults.participant_context.enabled),
+                        min_participants: participant_context
+                            .min_participants
+                            .unwrap_or(base_defaults.participant_context.min_participants),
+                        token_budget: participant_context
+                            .token_budget
+                            .unwrap_or(base_defaults.participant_context.token_budget),
+                        max_participants: participant_context
+                            .max_participants
+                            .unwrap_or(base_defaults.participant_context.max_participants),
+                    };
+                    if resolved.max_participants < resolved.min_participants {
+                        return Err(ConfigError::Invalid(format!(
+                            "defaults.participant_context.max_participants ({}) must be >= defaults.participant_context.min_participants ({})",
+                            resolved.max_participants, resolved.min_participants
+                        ))
+                        .into());
+                    }
+
+                    Ok(resolved)
+                })
+                .transpose()?
+                .unwrap_or(base_defaults.participant_context),
             browser: {
                 let chrome_cache_dir = instance_dir.join("chrome_cache");
                 toml.defaults

@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, lazy, Suspense } from "react";
-import { Button } from "@/ui/Button";
-import { Input } from "@/ui/Input";
+import { Button, Input } from "@spacedrive/primitives";
 import { useServer } from "@/hooks/useServer";
-import { IS_TAURI } from "@/platform";
+import {
+	dragRegionAttributes,
+	IS_DESKTOP,
+	spawnBundledProcess,
+} from "@/platform";
 
 const Orb = lazy(() => import("@/components/Orb"));
 
@@ -11,10 +14,10 @@ type SidecarState = "idle" | "starting" | "running" | "error";
 /**
  * Full-screen connection screen shown when the app cannot reach
  * the spacebot server. Allows changing the server URL and, in
- * Tauri builds with a bundled sidecar, starting a local instance.
+ * desktop hosts with a bundled binary, starting a local instance.
  */
 export function ConnectionScreen() {
-	const { serverUrl, setServerUrl, state, hasSidecar } = useServer();
+	const { serverUrl, setServerUrl, state, hasBundledServer } = useServer();
 	const [draft, setDraft] = useState(serverUrl);
 	const [sidecarState, setSidecarState] = useState<SidecarState>("idle");
 	const [sidecarError, setSidecarError] = useState<string | null>(null);
@@ -36,47 +39,48 @@ export function ConnectionScreen() {
 	);
 
 	const handleStartLocal = useCallback(async () => {
-		if (!IS_TAURI) return;
+		if (!IS_DESKTOP) return;
 		setSidecarState("starting");
 		setSidecarError(null);
 		try {
-			// Dynamic import: this module only exists in Tauri builds
-			const { Command } = await import("@tauri-apps/plugin-shell");
-			const command = Command.sidecar("binaries/spacebot", [
+			let sawReady = false;
+			const spawned = await spawnBundledProcess("binaries/spacebot", [
 				"start",
 				"--foreground",
-			]);
-			let sawReady = false;
-
-			command.on("error", (error: string) => {
-				setSidecarState("error");
-				setSidecarError(error);
-			});
-
-			command.on("close", (data: { code: number | null }) => {
-				if (!sawReady || data.code === null || data.code !== 0) {
+			], {
+				onError: (error) => {
 					setSidecarState("error");
-					setSidecarError(
-						data.code === null
-							? "Process exited before the HTTP server became ready"
-							: `Process exited with code ${data.code}`,
-					);
-					return;
-				}
-				setSidecarState("idle");
+					setSidecarError(error);
+				},
+				onClose: (data) => {
+					if (!sawReady || data.code === null || data.code !== 0) {
+						setSidecarState("error");
+						setSidecarError(
+							data.code === null
+								? "Process exited before the HTTP server became ready"
+								: `Process exited with code ${data.code}`,
+						);
+						return;
+					}
+					setSidecarState("idle");
+				},
+				onStdout: (line) => {
+					// Look for the "HTTP server listening" log line
+					if (line.includes("HTTP server listening")) {
+						sawReady = true;
+						setSidecarState("running");
+						// Point the app at localhost
+						setServerUrl("http://localhost:19898");
+					}
+				},
 			});
 
-			command.stdout.on("data", (line: string) => {
-				// Look for the "HTTP server listening" log line
-				if (line.includes("HTTP server listening")) {
-					sawReady = true;
-					setSidecarState("running");
-					// Point the app at localhost
-					setServerUrl("http://localhost:19898");
-				}
-			});
+			if (!spawned) {
+				setSidecarState("error");
+				setSidecarError("Bundled server is unavailable in this host.");
+				return;
+			}
 
-			await command.spawn();
 			setSidecarState("starting");
 		} catch (error) {
 			setSidecarState("error");
@@ -90,10 +94,10 @@ export function ConnectionScreen() {
 
 	return (
 		<div className="flex h-screen w-full flex-col items-center justify-center bg-app overflow-hidden">
-			{/* Draggable titlebar region for Tauri */}
-			{IS_TAURI && (
+			{/* Draggable titlebar region for the desktop host */}
+			{IS_DESKTOP && (
 				<div
-					data-tauri-drag-region
+					{...dragRegionAttributes()}
 					className="fixed inset-x-0 top-0 h-8"
 				/>
 			)}
@@ -146,8 +150,8 @@ export function ConnectionScreen() {
 						<Button
 							onClick={handleConnect}
 							disabled={isChecking || !draft.trim()}
-							size="default"
-							variant="ghost"
+							size="md"
+							variant="accent"
 							className="bg-[hsl(282,70%,57%)] text-white shadow hover:bg-[hsl(282,70%,50%)] hover:text-white"
 						>
 							Connect
@@ -167,7 +171,7 @@ export function ConnectionScreen() {
 				</div>
 
 				{/* Divider */}
-				{hasSidecar && (
+				{hasBundledServer && (
 					<>
 						<div className="flex w-full items-center gap-3">
 							<div className="h-px flex-1 bg-app-line" />
@@ -177,12 +181,11 @@ export function ConnectionScreen() {
 
 						{/* Start Local Server */}
 						<div className="flex w-full flex-col gap-3">
-							<Button
-								onClick={handleStartLocal}
-								variant="outline"
-								loading={sidecarState === "starting"}
-								disabled={
-									sidecarState === "starting" ||
+						<Button
+							onClick={handleStartLocal}
+							variant="outline"
+							disabled={
+								sidecarState === "starting" ||
 									sidecarState === "running"
 								}
 								className="w-full"
@@ -213,7 +216,7 @@ export function ConnectionScreen() {
 				{/* Footer hint */}
 				<p className="text-center text-xs text-ink-faint">
 					Spacebot runs on port 19898 by default.
-					{!hasSidecar && (
+					{!hasBundledServer && (
 						<>
 							{" "}
 							Install via{" "}

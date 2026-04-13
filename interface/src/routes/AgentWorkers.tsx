@@ -10,13 +10,16 @@ import {
 	type TranscriptStep,
 	type OpenCodePart,
 } from "@/api/client";
-import {ToolCall, pairTranscriptSteps, openCodePartToPair} from "@/components/ToolCall";
-import {Badge} from "@/ui/Badge";
+import {
+	ToolCall,
+	pairTranscriptSteps,
+	openCodePartToPair,
+} from "@/components/ToolCall";
+import {Badge, badgeVariants} from "@spacedrive/primitives";
 import {formatTimeAgo, formatDuration} from "@/lib/format";
 import {LiveDuration} from "@/components/LiveDuration";
 import {useLiveContext} from "@/hooks/useLiveContext";
-import {cx} from "@/ui/utils";
-import {badgeStyles} from "@/ui/Badge";
+import {cx} from "class-variance-authority";
 import {ProviderIcon} from "@/lib/providerIcons";
 
 import {OpenCodeEmbed, base64UrlEncode} from "@/components/OpenCodeEmbed";
@@ -25,6 +28,11 @@ const STATUS_FILTERS = ["all", "running", "idle", "done", "failed"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 const KNOWN_STATUSES = new Set(["running", "idle", "done", "failed"]);
+
+/** Collapse runs of 3+ spaces to 2, preventing Markdown 4-space code blocks. */
+function stripExcessWhitespace(text: string): string {
+	return text.replace(/ {3,}/g, "  ");
+}
 
 function normalizeStatus(status: string): string {
 	if (KNOWN_STATUSES.has(status)) return status;
@@ -48,7 +56,12 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 	const navigate = useNavigate();
 	const routeSearch = useSearch({strict: false}) as {worker?: string};
 	const selectedWorkerId = routeSearch.worker ?? null;
-	const {activeWorkers, workerEventVersion, liveTranscripts, liveOpenCodeParts} = useLiveContext();
+	const {
+		activeWorkers,
+		workerEventVersion,
+		liveTranscripts,
+		liveOpenCodeParts,
+	} = useLiveContext();
 
 	// Invalidate worker queries when SSE events fire
 	const prevVersion = useRef(workerEventVersion);
@@ -151,12 +164,14 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 	// Running workers that haven't hit the DB yet still get a full detail view
 	// from SSE state + live transcript.
 	const mergedDetail: WorkerDetailResponse | null = useMemo(() => {
-		const live = selectedWorkerId ? scopedActiveWorkers[selectedWorkerId] : null;
+		const live = selectedWorkerId
+			? scopedActiveWorkers[selectedWorkerId]
+			: null;
 
 		if (detailData) {
 			// DB data exists — overlay live status if worker is still running
 			if (!live) return detailData;
-			return { ...detailData, status: live.isIdle ? "idle" : "running" };
+			return {...detailData, status: live.isIdle ? "idle" : "running"};
 		}
 
 		// No DB data yet — synthesize from SSE state
@@ -174,10 +189,10 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			transcript: null,
 			tool_calls: live.toolCalls,
 			opencode_session_id: null,
-		opencode_port: null,
-		interactive: live.interactive,
-		directory: null,
-	};
+			opencode_port: null,
+			interactive: live.interactive,
+			directory: null,
+		};
 	}, [detailData, scopedActiveWorkers, selectedWorkerId]);
 
 	const selectWorker = useCallback(
@@ -196,7 +211,7 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			{/* Left column: worker list */}
 			<div className="flex w-[360px] flex-shrink-0 flex-col border-r border-app-line/50">
 				{/* Toolbar */}
-				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-4 py-2.5">
+				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-dark-box/20 px-4 py-2.5">
 					<input
 						type="text"
 						placeholder="Search tasks..."
@@ -266,7 +281,7 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 	);
 }
 
-interface LiveWorker {
+export interface LiveWorker {
 	id: string;
 	task: string;
 	status: string;
@@ -292,7 +307,11 @@ function WorkerCard({
 	const isLive = worker.status === "running" || !!liveWorker;
 	const isIdle = liveWorker?.isIdle ?? worker.status === "idle";
 	const isInteractive = liveWorker?.interactive ?? worker.interactive;
-	const displayStatus = isIdle ? "idle" : isLive ? "running" : normalizeStatus(worker.status);
+	const displayStatus = isIdle
+		? "idle"
+		: isLive
+			? "running"
+			: normalizeStatus(worker.status);
 	const toolCalls = liveWorker?.toolCalls ?? worker.tool_calls;
 
 	return (
@@ -304,7 +323,12 @@ function WorkerCard({
 			)}
 		>
 			<div className="flex items-center justify-between gap-2">
-				<p className={cx("min-w-0 flex-1 truncate text-xs font-medium", selected ? "text-ink" : "text-ink-dull")}>
+				<p
+					className={cx(
+						"min-w-0 flex-1 truncate text-xs font-medium",
+						selected ? "text-ink" : "text-ink-dull",
+					)}
+				>
 					{worker.task.replace(/^\[opencode]\s*/, "")}
 				</p>
 				<div className="flex shrink-0 items-center gap-1.5 pointer-events-none">
@@ -317,10 +341,7 @@ function WorkerCard({
 							interactive
 						</Badge>
 					) : null}
-					<Badge
-						variant="outline"
-						size="sm"
-					>
+					<Badge variant="outline" size="sm">
 						{isLive && !isIdle && (
 							<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
 						)}
@@ -338,8 +359,7 @@ function WorkerCard({
 				{isLive && !isIdle ? (
 					<LiveDuration
 						startMs={
-							liveWorker?.startedAt ??
-							new Date(worker.started_at).getTime()
+							liveWorker?.startedAt ?? new Date(worker.started_at).getTime()
 						}
 					/>
 				) : (
@@ -358,7 +378,7 @@ function WorkerCard({
 
 type DetailTab = "opencode" | "transcript";
 
-function WorkerDetail({
+export function WorkerDetail({
 	detail,
 	liveWorker,
 	liveTranscript,
@@ -371,7 +391,10 @@ function WorkerDetail({
 }) {
 	const isLive = detail.status === "running" || !!liveWorker;
 	const isIdle = liveWorker?.isIdle ?? detail.status === "idle";
-	const duration = durationBetween(detail.started_at, detail.completed_at ?? null);
+	const duration = durationBetween(
+		detail.started_at,
+		detail.completed_at ?? null,
+	);
 	const displayStatus = liveWorker?.status;
 	const currentTool = liveWorker?.currentTool;
 	const toolCalls = liveWorker?.toolCalls ?? detail.tool_calls ?? 0;
@@ -402,8 +425,10 @@ function WorkerDetail({
 	// from the DB or the server-side live cache (survives page refreshes).
 	// For completed workers, always use the persisted DB transcript.
 	const rawTranscript = isLive
-		? (liveTranscript && liveTranscript.length > 0 ? liveTranscript : detail.transcript ?? null)
-		: detail.transcript ?? null;
+		? liveTranscript && liveTranscript.length > 0
+			? liveTranscript
+			: (detail.transcript ?? null)
+		: (detail.transcript ?? null);
 	const transcript = useMemo(() => {
 		if (!rawTranscript || !detail.result) return rawTranscript;
 		const last = rawTranscript[rawTranscript.length - 1];
@@ -430,7 +455,7 @@ function WorkerDetail({
 	return (
 		<div className="flex h-full flex-col">
 			{/* Header */}
-			<div className="flex flex-col gap-2 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-4">
+			<div className="flex flex-col gap-2 border-b border-app-line/50 bg-app-dark-box/20 px-6 py-4">
 				<div className="flex items-start justify-between gap-3">
 					<TaskText text={detail.task} />
 					{isLive && detail.channel_id && (
@@ -443,13 +468,13 @@ function WorkerDetail({
 				<div className="flex items-center justify-between gap-3">
 					<div className="flex items-center gap-3 text-tiny text-ink-faint">
 						{detail.channel_name && <span>{detail.channel_name}</span>}
-				{hasOpenCodeEmbed && detail.opencode_port && (
-					<OpenCodeDirectLink
-						port={detail.opencode_port}
-						sessionId={detail.opencode_session_id!}
-						directory={detail.directory ?? null}
-					/>
-				)}
+						{hasOpenCodeEmbed && detail.opencode_port && (
+							<OpenCodeDirectLink
+								port={detail.opencode_port}
+								sessionId={detail.opencode_session_id!}
+								directory={detail.directory ?? null}
+							/>
+						)}
 						{isRunning ? (
 							<span>
 								Running for{" "}
@@ -461,14 +486,14 @@ function WorkerDetail({
 								/>
 							</span>
 						) : isIdle ? (
-							<span className="text-blue-500">Idle — waiting for follow-up</span>
+							<span className="text-blue-500">
+								Idle — waiting for follow-up
+							</span>
 						) : (
 							duration && <span>{duration}</span>
 						)}
 						{!isLive && <span>{formatTimeAgo(detail.started_at)}</span>}
-						{toolCalls > 0 && (
-							<span>{toolCalls} tool calls</span>
-						)}
+						{toolCalls > 0 && <span>{toolCalls} tool calls</span>}
 					</div>
 					{hasOpenCodeEmbed && (
 						<div className="flex items-center gap-1 rounded-full border border-app-line/50 p-0.5">
@@ -501,9 +526,7 @@ function WorkerDetail({
 				{isRunning && (currentTool || displayStatus) && (
 					<div className="flex items-center gap-2 text-tiny">
 						{currentTool ? (
-							<span className="text-accent">
-								Running {currentTool}...
-							</span>
+							<span className="text-accent">Running {currentTool}...</span>
 						) : displayStatus ? (
 							<span className="text-amber-500">{displayStatus}</span>
 						) : null}
@@ -512,12 +535,12 @@ function WorkerDetail({
 			</div>
 
 			{/* Content */}
-		{activeTab === "opencode" && hasOpenCodeEmbed ? (
-			<OpenCodeEmbed
-				port={detail.opencode_port!}
-				sessionId={detail.opencode_session_id!}
-				directory={detail.directory ?? null}
-			/>
+			{activeTab === "opencode" && hasOpenCodeEmbed ? (
+				<OpenCodeEmbed
+					port={detail.opencode_port!}
+					sessionId={detail.opencode_session_id!}
+					directory={detail.directory ?? null}
+				/>
 			) : (
 				<div ref={transcriptRef} className="flex-1 overflow-y-auto">
 					{/* Result section */}
@@ -576,8 +599,8 @@ function WorkerDetail({
 										transition={{duration: 0.2, ease: "easeOut"}}
 									>
 										{item.kind === "text" ? (
-											<div className="text-xs text-ink">
-												<Markdown>{item.text}</Markdown>
+											<div className="text-xs text-ink-dull">
+												<Markdown>{stripExcessWhitespace(item.text)}</Markdown>
 											</div>
 										) : (
 											<ToolCall pair={item.pair} />
@@ -647,9 +670,13 @@ function OpenCodeDirectLink({
 			href={href}
 			target="_blank"
 			rel="noopener noreferrer"
-			className={cx(badgeStyles({ variant: "outline", size: "sm" }), "w-fit")}
+			className={cx(badgeVariants({variant: "outline", size: "sm"}), "w-fit")}
 		>
-			<ProviderIcon provider="opencode-zen" size={12} className="text-current" />
+			<ProviderIcon
+				provider="opencode-zen"
+				size={12}
+				className="text-current"
+			/>
 			OpenCode ::{port}
 		</a>
 	);
@@ -671,13 +698,12 @@ function TaskText({text}: {text: string}) {
 		<div
 			ref={containerRef}
 			className="relative min-w-0 flex-1"
-			onMouseEnter={() => { if (isTruncated) setHovered(true); }}
+			onMouseEnter={() => {
+				if (isTruncated) setHovered(true);
+			}}
 			onMouseLeave={() => setHovered(false)}
 		>
-			<p
-				ref={textRef}
-				className="truncate text-sm font-medium text-ink-dull"
-			>
+			<p ref={textRef} className="truncate text-sm font-medium text-ink-dull">
 				{text}
 			</p>
 			{hovered && (
@@ -717,8 +743,6 @@ function CancelWorkerButton({
 	);
 }
 
-
-
 // -- OpenCode-native part renderers --
 
 function OpenCodePartView({part}: {part: OpenCodePart}) {
@@ -753,5 +777,3 @@ function OpenCodePartView({part}: {part: OpenCodePart}) {
 			return null;
 	}
 }
-
-

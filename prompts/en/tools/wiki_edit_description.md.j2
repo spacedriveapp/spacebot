@@ -1,0 +1,7 @@
+Edit an existing wiki page by replacing a specific string. Uses tolerant matching — minor whitespace or formatting drift won't break the match.
+
+Always call wiki_read before editing to confirm the current content. Provide enough surrounding context in old_string to make the match unique. If the match fails, the error will tell you why — read the page again and try with more context.
+
+**replace_all**: default false. Set true only when intentionally renaming something that appears multiple times.
+
+**edit_summary**: brief description of what changed and why. Always provide one.

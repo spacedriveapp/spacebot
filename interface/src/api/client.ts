@@ -1,4 +1,10 @@
-export const BASE_PATH: string = (window as any).__SPACEBOT_BASE_PATH || "";
+declare global {
+	interface Window {
+		__SPACEBOT_BASE_PATH?: string;
+	}
+}
+
+export const BASE_PATH: string = window.__SPACEBOT_BASE_PATH || "";
 
 /**
  * Dynamic server URL for the Tauri desktop app. When set, all API
@@ -13,7 +19,7 @@ export function getServerUrl(): string {
 	return _serverUrl;
 }
 
-function getApiBase(): string {
+export function getApiBase(): string {
 	if (_serverUrl) return `${_serverUrl}/api`;
 	return BASE_PATH + "/api";
 }
@@ -108,6 +114,7 @@ export interface InboundMessageEvent {
 	sender_name?: string | null;
 	sender_id: string;
 	text: string;
+	attachments?: AttachmentMeta[];
 }
 
 export interface OutboundMessageEvent {
@@ -266,6 +273,14 @@ export type ApiEvent =
 
 // -- Timeline types (discriminated union parts) --
 
+export interface AttachmentMeta {
+	id: string;
+	filename: string;
+	saved_filename: string;
+	mime_type: string;
+	size_bytes: number;
+}
+
 export interface TimelineMessage {
 	type: "message";
 	id: string;
@@ -274,6 +289,7 @@ export interface TimelineMessage {
 	sender_id: string | null;
 	content: string;
 	created_at: string;
+	attachments?: AttachmentMeta[];
 }
 
 export interface TimelineBranchRun {
@@ -338,12 +354,45 @@ export interface StatusBlockSnapshot {
 	completed_items: CompletedItemInfo[];
 }
 
+/**
+ * One entry in the prompt history. Mirrors rig's `Message` enum as
+ * serialized to JSON: role plus content that may be a plain string,
+ * a single block, or an array of blocks depending on the LLM provider.
+ */
+export interface PromptHistoryMessage {
+	role: string;
+	content: PromptHistoryContent;
+}
+
+export type PromptHistoryContent =
+	| string
+	| PromptHistoryBlock
+	| PromptHistoryBlock[];
+
+/**
+ * A single content block inside a `PromptHistoryMessage`. Fields are
+ * optional because rig's content variants are structurally different:
+ * text blocks, tool calls, tool results, and reasoning all flow through
+ * the same channel.
+ */
+export interface PromptHistoryBlock {
+	type?: string;
+	text?: string;
+	id?: string;
+	content?: unknown;
+	function?: {
+		name: string;
+		arguments: string | Record<string, unknown>;
+	};
+	reasoning?: string[];
+}
+
 export interface PromptInspectResponse {
 	channel_id: string;
 	system_prompt: string;
 	total_chars: number;
 	history_length: number;
-	history: unknown[];
+	history: PromptHistoryMessage[];
 	capture_enabled: boolean;
 	/** Present when the channel is not active */
 	error?: string;
@@ -368,7 +417,7 @@ export interface PromptSnapshot {
 	user_message: string;
 	system_prompt: string;
 	system_prompt_chars: number;
-	history: unknown;
+	history: PromptHistoryMessage[];
 	history_length: number;
 }
 
@@ -838,6 +887,7 @@ export interface OpenCodeSettingsUpdate {
 }
 
 export interface GlobalSettingsUpdate {
+	company_name?: string;
 	brave_search_key?: string | null;
 	api_enabled?: boolean;
 	api_port?: number;
@@ -853,7 +903,7 @@ export interface SkillInfo {
 	description: string;
 	file_path: string;
 	base_dir: string;
-	source: "instance" | "workspace";
+	source: "builtin" | "instance" | "workspace";
 	source_repo?: string;
 }
 
@@ -988,6 +1038,47 @@ export interface UpdateTaskRequest {
 	complete_subtask?: number;
 	worker_id?: string;
 	approved_by?: string;
+}
+
+// -- Notification Types --
+
+export type NotificationKind = "task_approval" | "worker_failed" | "cortex_observation";
+export type NotificationSeverity = "info" | "warn" | "error";
+
+export interface NotificationItem {
+	id: string;
+	kind: NotificationKind;
+	severity: NotificationSeverity;
+	title: string;
+	body?: string;
+	agent_id?: string;
+	related_entity_type?: string;
+	related_entity_id?: string;
+	action_url?: string;
+	metadata?: string;
+	created_at: string;
+	read_at?: string;
+	dismissed_at?: string;
+}
+
+export interface NotificationsResponse {
+	notifications: NotificationItem[];
+}
+
+export interface UnreadCountResponse {
+	count: number;
+}
+
+export interface NotificationCreatedEvent {
+	type: "notification_created";
+	notification: NotificationItem;
+}
+
+export interface NotificationUpdatedEvent {
+	type: "notification_updated";
+	id: string;
+	read: boolean;
+	dismissed: boolean;
 }
 
 // -- Messaging / Bindings Types --
@@ -1153,14 +1244,15 @@ export type ProjectStatus = "active" | "archived";
 
 export interface Project {
 	id: string;
-	agent_id: string;
 	name: string;
 	description: string;
 	icon: string;
 	tags: string[];
 	root_path: string;
+	logo_path: string | null;
 	settings: Record<string, unknown>;
 	status: ProjectStatus;
+	sort_order: number;
 	created_at: string;
 	updated_at: string;
 }
@@ -1238,6 +1330,7 @@ export interface UpdateProjectRequest {
 	description?: string;
 	icon?: string;
 	tags?: string[];
+	logo_path?: string | null;
 	settings?: Record<string, unknown>;
 	status?: ProjectStatus;
 }
@@ -1758,8 +1851,11 @@ export const api = {
 	},
 
 	togglePlatform: async (platform: string, enabled: boolean, adapter?: string) => {
-		const body: Record<string, unknown> = { platform, enabled };
-		if (adapter) body.adapter = adapter;
+		const body: Types.TogglePlatformRequest = {
+			platform,
+			enabled,
+			adapter: adapter ?? null,
+		};
 		const response = await fetch(`${getApiBase()}/messaging/toggle`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1772,8 +1868,10 @@ export const api = {
 	},
 
 	disconnectPlatform: async (platform: string, adapter?: string) => {
-		const body: Record<string, unknown> = { platform };
-		if (adapter) body.adapter = adapter;
+		const body: Types.DisconnectPlatformRequest = {
+			platform,
+			adapter: adapter ?? null,
+		};
 		const response = await fetch(`${getApiBase()}/messaging/disconnect`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1939,7 +2037,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ link: AgentLinkResponse }>;
 	},
 	updateLink: async (from: string, to: string, request: UpdateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
 		const response = await fetch(
@@ -1953,7 +2051,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ link: AgentLinkResponse }>;
 	},
 	deleteLink: async (from: string, to: string): Promise<void> => {
 		const response = await fetch(
@@ -1976,7 +2074,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ group: TopologyGroup }>;
 	},
 	updateGroup: async (name: string, request: UpdateGroupRequest): Promise<{ group: TopologyGroup }> => {
 		const response = await fetch(
@@ -1990,7 +2088,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ group: TopologyGroup }>;
 	},
 	deleteGroup: async (name: string): Promise<void> => {
 		const response = await fetch(
@@ -2013,7 +2111,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ human: TopologyHuman }>;
 	},
 	updateHuman: async (id: string, request: UpdateHumanRequest): Promise<{ human: TopologyHuman }> => {
 		const response = await fetch(
@@ -2027,7 +2125,7 @@ export const api = {
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ human: TopologyHuman }>;
 	},
 	deleteHuman: async (id: string): Promise<void> => {
 		const response = await fetch(
@@ -2039,8 +2137,35 @@ export const api = {
 		}
 	},
 
+	// Attachment API
+	uploadAttachment: (agentId: string, channelId: string, file: File) => {
+		const form = new FormData();
+		form.append("file", file, file.name);
+		return fetch(
+			`${getApiBase()}/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}/attachments/upload`,
+			{ method: "POST", body: form },
+		);
+	},
+
+	attachmentUrl: (agentId: string, attachmentId: string, opts?: { thumbnail?: boolean; download?: boolean }) => {
+		const params = new URLSearchParams();
+		if (opts?.thumbnail) params.set("thumbnail", "true");
+		if (opts?.download) params.set("download", "true");
+		const qs = params.toString();
+		return `${getApiBase()}/agents/${encodeURIComponent(agentId)}/attachments/${encodeURIComponent(attachmentId)}${qs ? `?${qs}` : ""}`;
+	},
+
+	listAttachments: (agentId: string, channelId: string, params?: { message_id?: string; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.message_id) search.set("message_id", params.message_id);
+		if (params?.limit) search.set("limit", String(params.limit));
+		return fetchJson<{ attachments: Array<{ id: string; original_filename: string; mime_type: string; size_bytes: number; created_at: string }> }>(
+			`/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}/attachments${search.toString() ? `?${search}` : ""}`,
+		);
+	},
+
 	// Portal API (renamed from webchat)
-	portalSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>
+	portalSend: (agentId: string, sessionId: string, message: string, senderName?: string, attachmentIds?: string[]) =>
 		fetch(`${getApiBase()}/portal/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -2049,33 +2174,66 @@ export const api = {
 				session_id: sessionId,
 				sender_name: senderName ?? "user",
 				message,
+				...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
 			}),
 		}),
 
 	portalHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${getApiBase()}/portal/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
-	listPortalConversations: (agentId: string, includeArchived = false, limit = 100) =>
-		fetch(`${getApiBase()}/portal/conversations?agent_id=${encodeURIComponent(agentId)}&include_archived=${includeArchived}&limit=${limit}`),
+	listPortalConversations: (
+		agentId: string,
+		includeArchived = false,
+		limit = 100,
+	): Promise<Types.PortalConversationsResponse> =>
+		fetchJson<Types.PortalConversationsResponse>(
+			`/portal/conversations?agent_id=${encodeURIComponent(agentId)}&include_archived=${includeArchived}&limit=${limit}`,
+		),
 
-	createPortalConversation: (agentId: string, title?: string, settings?: import("./types").ConversationSettings) =>
-		fetch(`${getApiBase()}/portal/conversations`, {
+	createPortalConversation: async (
+		agentId: string,
+		title?: string,
+		settings?: Types.ConversationSettings,
+	): Promise<Types.PortalConversationResponse> => {
+		const response = await fetch(`${getApiBase()}/portal/conversations`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, title, settings }),
-		}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<Types.PortalConversationResponse>;
+	},
 
-	updatePortalConversation: (agentId: string, sessionId: string, title?: string, archived?: boolean, settings?: import("./types").ConversationSettings) =>
-		fetch(`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}`, {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent_id: agentId, title, archived, settings }),
-		}),
+	updatePortalConversation: async (
+		agentId: string,
+		sessionId: string,
+		title?: string,
+		archived?: boolean,
+		settings?: Types.ConversationSettings,
+	): Promise<Types.PortalConversationResponse> => {
+		const response = await fetch(
+			`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ agent_id: agentId, title, archived, settings }),
+			},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<Types.PortalConversationResponse>;
+	},
 
-	deletePortalConversation: (agentId: string, sessionId: string) =>
-		fetch(`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}?agent_id=${encodeURIComponent(agentId)}`, {
-			method: "DELETE",
-		}),
+	deletePortalConversation: async (
+		agentId: string,
+		sessionId: string,
+	): Promise<{ success: boolean }> => {
+		const response = await fetch(
+			`${getApiBase()}/portal/conversations/${encodeURIComponent(sessionId)}?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return { success: true };
+	},
 
 	getConversationDefaults: (agentId: string) =>
 		fetchJson<Types.ConversationDefaultsResponse>(`/conversation-defaults?agent_id=${encodeURIComponent(agentId)}`),
@@ -2212,7 +2370,7 @@ export const api = {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ state: string; message: string }>;
 	},
 	rotateKey: async (): Promise<{ master_key: string; message: string }> => {
 		const response = await fetch(`${getApiBase()}/secrets/rotate`, { method: "POST" });
@@ -2220,7 +2378,7 @@ export const api = {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
 		}
-		return response.json();
+		return response.json() as Promise<{ master_key: string; message: string }>;
 	},
 	migrateSecrets: async (): Promise<MigrateResponse> => {
 		const response = await fetch(`${getApiBase()}/secrets/migrate`, { method: "POST" });
@@ -2232,92 +2390,102 @@ export const api = {
 	},
 
 	// Projects API
-	listProjects: (agentId: string, status?: ProjectStatus) => {
-		const search = new URLSearchParams({ agent_id: agentId });
+	listProjects: (status?: ProjectStatus) => {
+		const search = new URLSearchParams();
 		if (status) search.set("status", status);
-		return fetchJson<ProjectListResponse>(`/agents/projects?${search}`);
+		const qs = search.toString();
+		return fetchJson<ProjectListResponse>(`/agents/projects${qs ? `?${qs}` : ""}`);
 	},
 
-	getProject: (agentId: string, projectId: string) =>
+	getProject: (projectId: string) =>
 		fetchJson<ProjectWithRelations>(
-			`/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`/agents/projects/${encodeURIComponent(projectId)}`,
 		),
 
-	createProject: async (agentId: string, request: CreateProjectRequest): Promise<ProjectWithRelations> => {
+	createProject: async (request: CreateProjectRequest): Promise<ProjectWithRelations> => {
 		const response = await fetch(`${getApiBase()}/agents/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	updateProject: async (agentId: string, projectId: string, request: UpdateProjectRequest): Promise<ProjectWithRelations> => {
+	updateProject: async (projectId: string, request: UpdateProjectRequest): Promise<ProjectWithRelations> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	deleteProject: async (agentId: string, projectId: string): Promise<ProjectActionResponse> => {
+	deleteProject: async (projectId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
 	},
 
-	scanProject: async (agentId: string, projectId: string): Promise<ProjectWithRelations> => {
+	scanProject: async (projectId: string): Promise<ProjectWithRelations> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/scan?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/scan`,
 			{ method: "POST" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	projectDiskUsage: (agentId: string, projectId: string) =>
+	reorderProjects: async (ids: string[]): Promise<void> => {
+		const response = await fetch(`${getApiBase()}/agents/projects/reorder`, {
+			method: "PUT",
+			headers: {"Content-Type": "application/json"},
+			body: JSON.stringify({ids}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+	},
+
+	projectDiskUsage: (projectId: string) =>
 		fetchJson<DiskUsageResponse>(
-			`/agents/projects/${encodeURIComponent(projectId)}/disk-usage?agent_id=${encodeURIComponent(agentId)}`,
+			`/agents/projects/${encodeURIComponent(projectId)}/disk-usage`,
 		),
 
-	createProjectRepo: async (agentId: string, projectId: string, request: CreateRepoRequest): Promise<{ repo: ProjectRepo }> => {
+	createProjectRepo: async (projectId: string, request: CreateRepoRequest): Promise<{ repo: ProjectRepo }> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<{ repo: ProjectRepo }>;
 	},
 
-	deleteProjectRepo: async (agentId: string, projectId: string, repoId: string): Promise<ProjectActionResponse> => {
+	deleteProjectRepo: async (projectId: string, repoId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
 	},
 
-	createProjectWorktree: async (agentId: string, projectId: string, request: CreateWorktreeRequest): Promise<{ worktree: ProjectWorktree }> => {
+	createProjectWorktree: async (projectId: string, request: CreateWorktreeRequest): Promise<{ worktree: ProjectWorktree }> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<{ worktree: ProjectWorktree }>;
 	},
 
-	deleteProjectWorktree: async (agentId: string, projectId: string, worktreeId: string): Promise<ProjectActionResponse> => {
+	deleteProjectWorktree: async (projectId: string, worktreeId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
@@ -2336,5 +2504,278 @@ export const api = {
 		return new Response(null, { status: 501 });
 	},
 
+	// -- Notifications --
+
+	listNotifications: async (params?: {
+		filter?: "unread" | "all";
+		agent_id?: string;
+		kind?: NotificationKind;
+		limit?: number;
+		offset?: number;
+	}): Promise<NotificationsResponse> => {
+		const query = new URLSearchParams();
+		if (params?.filter) query.set("filter", params.filter);
+		if (params?.agent_id) query.set("agent_id", params.agent_id);
+		if (params?.kind) query.set("kind", params.kind);
+		if (params?.limit !== undefined) query.set("limit", String(params.limit));
+		if (params?.offset !== undefined) query.set("offset", String(params.offset));
+		const qs = query.toString();
+		const response = await fetch(`${getApiBase()}/notifications${qs ? `?${qs}` : ""}`);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<NotificationsResponse>;
+	},
+
+	getUnreadCount: async (): Promise<UnreadCountResponse> => {
+		const response = await fetch(`${getApiBase()}/notifications/unread_count`);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<UnreadCountResponse>;
+	},
+
+	markNotificationRead: async (id: string): Promise<void> => {
+		const response = await fetch(`${getApiBase()}/notifications/${encodeURIComponent(id)}/read`, {
+			method: "POST",
+		});
+		if (!response.ok && response.status !== 404) throw new Error(`API error: ${response.status}`);
+	},
+
+	dismissNotification: async (id: string): Promise<void> => {
+		const response = await fetch(`${getApiBase()}/notifications/${encodeURIComponent(id)}/dismiss`, {
+			method: "POST",
+		});
+		if (!response.ok && response.status !== 404) throw new Error(`API error: ${response.status}`);
+	},
+
+	markAllNotificationsRead: async (): Promise<void> => {
+		const response = await fetch(`${getApiBase()}/notifications/read_all`, { method: "POST" });
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+	},
+
+	dismissReadNotifications: async (): Promise<void> => {
+		const response = await fetch(`${getApiBase()}/notifications/dismiss_read`, { method: "POST" });
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+	},
+
 	getEventsUrl: () => `${getApiBase()}/events`,
+
+	// Wiki API
+	listWikiPages: (params?: { page_type?: string }) => {
+		const qs = new URLSearchParams();
+		if (params?.page_type) qs.set("page_type", params.page_type);
+		const query = qs.toString();
+		return fetchJson<WikiListResponse>(`/wiki${query ? `?${query}` : ""}`);
+	},
+
+	searchWikiPages: (params: { query: string; page_type?: string }) => {
+		const qs = new URLSearchParams({ query: params.query });
+		if (params.page_type) qs.set("page_type", params.page_type);
+		return fetchJson<WikiListResponse>(`/wiki/search?${qs}`);
+	},
+
+	getWikiPage: (slug: string, version?: number) => {
+		const qs = version !== undefined ? `?version=${version}` : "";
+		return fetchJson<WikiPageResponse>(`/wiki/${encodeURIComponent(slug)}${qs}`);
+	},
+
+	createWikiPage: async (request: CreateWikiPageRequest): Promise<WikiPageResponse> => {
+		const response = await fetch(`${getApiBase()}/wiki`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<WikiPageResponse>;
+	},
+
+	editWikiPage: async (slug: string, request: EditWikiPageRequest): Promise<WikiPageResponse> => {
+		const response = await fetch(`${getApiBase()}/wiki/${encodeURIComponent(slug)}/edit`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<WikiPageResponse>;
+	},
+
+	getWikiHistory: (slug: string, limit = 20) =>
+		fetchJson<WikiHistoryResponse>(`/wiki/${encodeURIComponent(slug)}/history?limit=${limit}`),
+
+	restoreWikiVersion: async (slug: string, version: number): Promise<WikiPageResponse> => {
+		const response = await fetch(`${getApiBase()}/wiki/${encodeURIComponent(slug)}/restore`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ version }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<WikiPageResponse>;
+	},
+
+	archiveWikiPage: async (slug: string): Promise<{ success: boolean; message: string }> => {
+		const response = await fetch(`${getApiBase()}/wiki/${encodeURIComponent(slug)}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json();
+	},
+
+	usage: (params?: { agent_id?: string; since?: string; until?: string; group_by?: string }) => {
+		const qs = new URLSearchParams();
+		if (params?.agent_id) qs.set("agent_id", params.agent_id);
+		if (params?.since) qs.set("since", params.since);
+		if (params?.until) qs.set("until", params.until);
+		if (params?.group_by) qs.set("group_by", params.group_by);
+		const query = qs.toString();
+		return fetchJson<UsageResponse>(`/usage${query ? `?${query}` : ""}`);
+	},
+
+	activity: (params?: { since?: string; until?: string }) => {
+		const qs = new URLSearchParams();
+		if (params?.since) qs.set("since", params.since);
+		if (params?.until) qs.set("until", params.until);
+		const query = qs.toString();
+		return fetchJson<ActivityResponse>(`/activity${query ? `?${query}` : ""}`);
+	},
+}
+
+export interface UsageTotals {
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	reasoning_tokens: number;
+	request_count: number;
+	estimated_cost_usd: number | null;
+	cost_status: string;
+}
+
+export interface UsageByModel {
+	model: string;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	reasoning_tokens: number;
+	request_count: number;
+	estimated_cost_usd: number | null;
+}
+
+export interface UsageResponse {
+	total: UsageTotals;
+	by_model?: UsageByModel[];
+	by_day?: Array<{ date: string } & UsageTotals>;
+	by_agent?: Array<{ agent_id: string } & UsageTotals>;
 };
+
+// Activity types
+export interface ProcessTokens {
+	input: number;
+	output: number;
+	cache_read: number;
+	reasoning: number;
+	cost_usd: number;
+}
+
+export interface TokenSummary {
+	input: number;
+	output: number;
+	cache_read: number;
+	reasoning: number;
+	cost_usd: number;
+	by_process: Record<string, ProcessTokens>;
+}
+
+export interface ActivityDay {
+	date: string;
+	messages: number;
+	branches: number;
+	workers: number;
+	cortex: number;
+	cron: number;
+	active_channels: number;
+	tokens: TokenSummary;
+}
+
+export interface ActivityTotals {
+	messages: number;
+	branches: number;
+	workers: number;
+	cortex: number;
+	cron: number;
+	active_channels: number;
+	tokens: TokenSummary;
+}
+
+export interface ActivityResponse {
+	daily: ActivityDay[];
+	totals: ActivityTotals;
+}
+
+// Wiki types
+export type WikiPageType = "entity" | "concept" | "decision" | "project" | "reference";
+
+export interface WikiPageSummary {
+	id: string;
+	slug: string;
+	title: string;
+	page_type: string;
+	version: number;
+	updated_at: string;
+	updated_by: string;
+}
+
+export interface WikiPage {
+	id: string;
+	slug: string;
+	title: string;
+	page_type: string;
+	content: string;
+	related: string[];
+	created_by: string;
+	updated_by: string;
+	version: number;
+	archived: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface WikiPageVersion {
+	id: string;
+	page_id: string;
+	version: number;
+	content: string;
+	edit_summary: string | null;
+	author_type: string;
+	author_id: string;
+	created_at: string;
+}
+
+export interface WikiListResponse {
+	pages: WikiPageSummary[];
+	total: number;
+}
+
+export interface WikiPageResponse {
+	page: WikiPage;
+}
+
+export interface WikiHistoryResponse {
+	versions: WikiPageVersion[];
+}
+
+export interface CreateWikiPageRequest {
+	title: string;
+	page_type: WikiPageType;
+	content: string;
+	related?: string[];
+	edit_summary?: string;
+	author_id?: string;
+	author_type?: string;
+}
+
+export interface EditWikiPageRequest {
+	old_string: string;
+	new_string: string;
+	replace_all?: boolean;
+	edit_summary?: string;
+	author_id?: string;
+	author_type?: string;
+}

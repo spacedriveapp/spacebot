@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Memory mode controls how memory is used in a conversation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +145,10 @@ pub struct WorkerContextMode {
     pub history: WorkerHistoryMode,
     /// What memory context the worker gets.
     pub memory: WorkerMemoryMode,
+    /// Whether the worker gets wiki tools (wiki_create, wiki_edit, wiki_read, wiki_list,
+    /// wiki_search, wiki_history). Defaults to true so all workers can access the wiki.
+    #[serde(default = "default_true")]
+    pub wiki_write: bool,
 }
 
 /// Per-process model overrides. Each field, when set, overrides the
@@ -331,7 +339,7 @@ impl Default for ResolvedConversationSettings {
             memory: MemoryMode::Full,
             delegation: DelegationMode::Standard,
             response_mode: ResponseMode::Active,
-            save_attachments: false,
+            save_attachments: true,
             worker_context: WorkerContextMode::default(),
         }
     }
@@ -427,6 +435,7 @@ mod tests {
             worker_context: WorkerContextMode {
                 history: WorkerHistoryMode::Recent(20),
                 memory: WorkerMemoryMode::Tools,
+                wiki_write: false,
             },
             ..Default::default()
         };

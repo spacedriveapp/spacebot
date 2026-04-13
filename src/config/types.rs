@@ -617,6 +617,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub participant_context: ParticipantContextConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
@@ -653,6 +654,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
+            .field("participant_context", &self.participant_context)
             .field("browser", &self.browser)
             .field("channel", &self.channel)
             .field("mcp", &self.mcp)
@@ -813,6 +815,38 @@ impl Default for WorkingMemoryConfig {
     }
 }
 
+/// Participant context configuration.
+///
+/// Keeps the prompt-facing participant-awareness surface separate from working
+/// memory so the future humans/user-identity pipeline can evolve behind a
+/// stable boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct ParticipantContextConfig {
+    /// Whether participant context injection is enabled.
+    pub enabled: bool,
+    /// Minimum active participants required before the section appears.
+    ///
+    /// Defaults to 1 for the current config-backed implementation so DMs still
+    /// benefit from participant metadata. The fuller participant-awareness
+    /// pipeline can raise this later if needed.
+    pub min_participants: usize,
+    /// Token budget for the participant context section.
+    pub token_budget: usize,
+    /// Maximum participants to render in the prompt.
+    pub max_participants: usize,
+}
+
+impl Default for ParticipantContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_participants: 1,
+            token_budget: 400,
+            max_participants: 5,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -949,7 +983,7 @@ impl Default for BrowserConfig {
 }
 
 /// Channel behavior configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
     /// Deprecated: use `response_mode` instead. Kept for backwards compatibility.
     pub listen_only_mode: bool,
@@ -959,6 +993,16 @@ pub struct ChannelConfig {
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
     pub save_attachments: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            listen_only_mode: false,
+            response_mode: None,
+            save_attachments: true,
+        }
+    }
 }
 
 /// OpenCode subprocess worker configuration.
@@ -1036,7 +1080,7 @@ impl Default for CortexConfig {
         Self {
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
-            branch_timeout_secs: 60,
+            branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,
@@ -1383,6 +1427,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
+            participant_context: ParticipantContextConfig::default(),
             browser: BrowserConfig::default(),
             channel: ChannelConfig::default(),
             mcp: Vec::new(),
