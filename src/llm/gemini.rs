@@ -36,8 +36,14 @@ pub fn build_client(
         format!("models/{model_name}")
     };
 
-    Gemini::with_model(&provider_config.api_key, model_str)
-        .map_err(|error| CompletionError::ProviderError(format!("Gemini client error: {error}")))
+    let mut client = Gemini::with_model(&provider_config.api_key, model_str)
+        .map_err(|error| CompletionError::ProviderError(format!("Gemini client error: {error}")))?;
+        
+    if let Some(base_url) = &provider_config.base_url {
+        client = client.with_base_url(base_url.clone());
+    }
+
+    Ok(client)
 }
 
 /// Execute a non-streaming completion request against the native Gemini API.
@@ -182,7 +188,11 @@ fn append_message(
                         tool_responses.push((tool_result.id.clone(), result_json));
                     }
                     _ => {
-                        // Image, Audio, Video, Document — skip for now
+                        return Err(CompletionError::RequestError(
+                            "Gemini multimodal input is not yet supported in Spacebot"
+                                .to_string()
+                                .into(),
+                        ));
                     }
                 }
             }
@@ -265,7 +275,11 @@ fn convert_response(
         .unwrap_or_default();
 
     // Serialize the full response for RawResponse
-    let body = serde_json::to_value(&response).unwrap_or_default();
+    let body = serde_json::to_value(&response).map_err(|e| {
+        CompletionError::ResponseError(
+            format!("Failed to serialize Gemini response for accounting: {e}").into(),
+        )
+    })?;
 
     // Extract text and tool calls from the first candidate
     let mut choice_content: Vec<AssistantContent> = Vec::new();
@@ -279,8 +293,9 @@ fn convert_response(
 
     // Function calls
     for function_call in response.function_calls() {
+        let id = format!("call_{}", uuid::Uuid::new_v4().simple());
         choice_content.push(AssistantContent::tool_call(
-            function_call.name.clone(),
+            id,
             function_call.name.clone(),
             function_call.args.clone(),
         ));
@@ -327,7 +342,12 @@ fn convert_stream(
                     *guard = Some(usage);
                 }
                 if let Ok(mut guard) = accumulated_body.try_lock() {
-                    *guard = serde_json::to_value(&chunk).unwrap_or_default();
+                    match serde_json::to_value(&chunk) {
+                        Ok(val) => *guard = val,
+                        Err(e) => {
+                            tracing::warn!("Failed to serialize Gemini chunk for accounting: {e}")
+                        }
+                    }
                 }
             }
 
@@ -340,7 +360,7 @@ fn convert_stream(
 
             // Function calls
             for function_call in chunk.function_calls() {
-                let id = function_call.name.clone();
+                let id = format!("call_{}", uuid::Uuid::new_v4().simple());
                 yield RawStreamingChoice::<RawStreamingResponse>::ToolCall(
                     RawStreamingToolCall::new(
                         id,

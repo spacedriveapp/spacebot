@@ -584,12 +584,20 @@ impl CompletionModel for SpacebotModel {
             && let Ok(ref response) = result
         {
             let body = &response.raw_response.body;
-            let extended = if self.provider == "anthropic" {
-                crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
-            } else if self.provider == "gemini" {
-                crate::llm::usage::ExtendedUsage::from_gemini_body(body)
-            } else {
-                crate::llm::usage::ExtendedUsage::from_openai_body(body)
+            let api_type = self
+                .provider_config_for_current_model()
+                .await
+                .map(|c| c.api_type)
+                .unwrap_or(crate::config::ApiType::OpenAiChatCompletions);
+
+            let extended = match api_type {
+                crate::config::ApiType::Anthropic => {
+                    crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+                }
+                crate::config::ApiType::Gemini => {
+                    crate::llm::usage::ExtendedUsage::from_gemini_body(body)
+                }
+                _ => crate::llm::usage::ExtendedUsage::from_openai_body(body),
             };
             let cost =
                 crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
