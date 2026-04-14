@@ -21,6 +21,7 @@ rig = { version = "0.33", package = "rig-core", features = ["derive"] }
 
 # HTTP clients for LLM providers
 reqwest = { version = "0.13", features = ["json", "stream", "form", "query", "gzip"] }
+gemini-rust = "1.7"
 
 # Databases
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono", "uuid"] }

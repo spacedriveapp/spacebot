@@ -64,6 +64,23 @@ impl ExtendedUsage {
             reasoning_tokens,
         }
     }
+
+    /// Extract extended usage from a native Gemini API response body.
+    pub fn from_gemini_body(body: &serde_json::Value) -> Self {
+        let usage = &body["usageMetadata"];
+        let input_tokens = usage["promptTokenCount"].as_u64().unwrap_or(0);
+        let output_tokens = usage["candidatesTokenCount"].as_u64().unwrap_or(0);
+        let reasoning_tokens = usage["thoughtsTokenCount"].as_u64().unwrap_or(0);
+        let cache_read_tokens = usage["cachedContentTokenCount"].as_u64().unwrap_or(0);
+
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens: 0,
+            reasoning_tokens,
+        }
+    }
 }
 
 /// Cost classification for a usage record.
