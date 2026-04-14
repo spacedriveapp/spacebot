@@ -14,7 +14,7 @@ use gemini_rust::{
     Content, Gemini, GenerationResponse, Message as GeminiMessage, Part, Role, Tool, UsageMetadata,
 };
 use rig::completion::{self, CompletionError, CompletionRequest};
-use rig::message::{AssistantContent, Message, ToolResultContent};
+use rig::message::{AssistantContent, Message, ReasoningContent, ToolResultContent};
 use rig::one_or_many::OneOrMany;
 use rig::streaming::{
     RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse, StreamingResult,
@@ -39,8 +39,8 @@ pub fn build_client(
     let mut client = Gemini::with_model(&provider_config.api_key, model_str)
         .map_err(|error| CompletionError::ProviderError(format!("Gemini client error: {error}")))?;
         
-    if let Some(base_url) = &provider_config.base_url {
-        client = client.with_base_url(base_url.clone());
+    if !provider_config.base_url.is_empty() {
+        client = client.with_base_url(provider_config.base_url.clone());
     }
 
     Ok(client)
@@ -246,6 +246,39 @@ fn append_message(
                             ),
                             thought_signature: tool_call.signature.clone(),
                         });
+                    }
+                    AssistantContent::Reasoning(reasoning) => {
+                        // Flatten reasoning content into plain text parts.
+                        // Gemini doesn't have a native reasoning role, so we
+                        // preserve the text as a thought-tagged Part::Text.
+                        for content in &reasoning.content {
+                            match content {
+                                ReasoningContent::Text { text, signature } => {
+                                    if !text.trim().is_empty() {
+                                        parts.push(Part::Text {
+                                            text: text.clone(),
+                                            thought: Some(true),
+                                            thought_signature: signature.clone(),
+                                        });
+                                    }
+                                }
+                                ReasoningContent::Summary(summary) => {
+                                    if !summary.trim().is_empty() {
+                                        parts.push(Part::Text {
+                                            text: summary.clone(),
+                                            thought: Some(true),
+                                            thought_signature: None,
+                                        });
+                                    }
+                                }
+                                // Encrypted/redacted reasoning — nothing visible to
+                                // include, skip without error.
+                                ReasoningContent::Encrypted(_)
+                                | ReasoningContent::Redacted { .. } => {}
+                                #[allow(unreachable_patterns)]
+                                _ => {}
+                            }
+                        }
                     }
                     _ => {
                         return Err(CompletionError::RequestError(
