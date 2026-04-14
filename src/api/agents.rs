@@ -476,7 +476,10 @@ pub(super) async fn trigger_warmup(
         let humans = (**state.agent_humans.load()).clone();
         let notif_store_warmup = state.notification_store.load().as_ref().clone();
         tokio::spawn(async move {
-            let (event_tx, memory_event_tx) = crate::create_process_event_buses();
+            let process_event_buses = crate::create_process_event_buses();
+            let event_tx = process_event_buses.control;
+            let memory_event_tx = process_event_buses.memory;
+            let tool_output_tx = process_event_buses.tool_output;
             let working_memory_tz = runtime_config
                 .user_timezone
                 .load()
@@ -495,6 +498,7 @@ pub(super) async fn trigger_warmup(
                 runtime_config,
                 event_tx,
                 memory_event_tx,
+                tool_output_tx,
                 sqlite_pool: sqlite_pool.clone(),
                 messaging_manager: None,
                 sandbox,
@@ -802,7 +806,10 @@ pub async fn create_agent_internal(
         .clone()
         .ok_or_else(|| "global task store not initialized".to_string())?;
 
-    let (event_tx, memory_event_tx) = crate::create_process_event_buses();
+    let process_event_buses = crate::create_process_event_buses();
+    let event_tx = process_event_buses.control;
+    let memory_event_tx = process_event_buses.memory;
+    let tool_output_tx = process_event_buses.tool_output;
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
 
     crate::identity::scaffold_identity_files(&agent_config.identity_dir)
@@ -896,6 +903,7 @@ pub async fn create_agent_internal(
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
         memory_event_tx: memory_event_tx.clone(),
+        tool_output_tx: tool_output_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: Some(messaging_manager.clone()),
         sandbox: sandbox.clone(),
@@ -944,6 +952,8 @@ pub async fn create_agent_internal(
 
     let event_rx = event_tx.subscribe();
     state.register_agent_events(agent_id.clone(), event_rx);
+    let tool_output_rx = tool_output_tx.subscribe();
+    state.register_tool_output_stream(agent_id.clone(), tool_output_rx);
 
     let cron_store = std::sync::Arc::new(crate::cron::CronStore::new(db.sqlite.clone()));
     let cron_context = crate::cron::CronContext {

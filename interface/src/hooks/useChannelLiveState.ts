@@ -614,7 +614,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			// Skip conversation/routing tools — they're infrastructure, not user-visible.
 			if (HIDDEN_CHANNEL_TOOLS.has(event.tool_name)) return;
 
-			const toolCallId = `tool-${generateId()}`;
+			const toolCallId = event.call_id || `tool-${generateId()}`;
 			const queueKey = `${channelId}:${event.tool_name}`;
 			const queue = pendingChannelToolCallsRef.current[queueKey] ?? [];
 			pendingChannelToolCallsRef.current[queueKey] = [...queue, toolCallId];
@@ -710,9 +710,11 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		if (channelId && event.process_type === "channel") {
 			const queueKey = `${channelId}:${event.tool_name}`;
 			const queue = pendingChannelToolCallsRef.current[queueKey] ?? [];
-			const toolCallId = queue[0];
+			const toolCallId = event.call_id || queue[0];
 			if (toolCallId) {
-				pendingChannelToolCallsRef.current[queueKey] = queue.slice(1);
+				pendingChannelToolCallsRef.current[queueKey] = queue.filter(
+					(id) => id !== toolCallId,
+				);
 				updateItem(channelId, toolCallId, (item) => {
 					if (item.type !== "tool_call_run") return item;
 					return { ...item, result: event.result, status: "completed", completed_at: new Date().toISOString() };

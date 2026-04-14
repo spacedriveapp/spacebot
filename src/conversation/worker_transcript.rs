@@ -14,6 +14,24 @@ use std::io::{Read, Write};
 /// Maximum byte length for tool call arguments in transcripts.
 const MAX_TOOL_ARGS_BYTES: usize = 2_000;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    /// Streaming output is still attached to a running tool call.
+    Pending,
+    /// Tool execution has completed and `text` contains the final result.
+    #[default]
+    Final,
+    /// Tool execution stopped because the command appears to need interactive input.
+    WaitingForInput,
+}
+
+impl ToolResultStatus {
+    fn is_final(&self) -> bool {
+        matches!(self, Self::Final)
+    }
+}
+
 /// A single step in a worker transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -36,6 +54,11 @@ pub enum TranscriptStep {
         call_id: String,
         name: String,
         text: String,
+        /// Accumulated streaming output for live display. Cleared when tool completes.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        live_output: Option<String>,
+        #[serde(default, skip_serializing_if = "ToolResultStatus::is_final")]
+        status: ToolResultStatus,
     },
 }
 
@@ -181,6 +204,8 @@ pub fn convert_opencode_messages(messages: &[serde_json::Value]) -> (Vec<Transcr
                                 call_id,
                                 name: tool_name.to_string(),
                                 text: truncated,
+                                live_output: None,
+                                status: ToolResultStatus::Final,
                             });
                         }
                         "error" => {
@@ -192,6 +217,8 @@ pub fn convert_opencode_messages(messages: &[serde_json::Value]) -> (Vec<Transcr
                                 call_id,
                                 name: tool_name.to_string(),
                                 text: format!("Error: {error_text}"),
+                                live_output: None,
+                                status: ToolResultStatus::Final,
                             });
                         }
                         _ => {}
@@ -292,6 +319,8 @@ pub fn convert_opencode_parts(
                             call_id: id.clone(),
                             name: tool.clone(),
                             text: truncated,
+                            live_output: None,
+                            status: ToolResultStatus::Final,
                         });
                     }
                     OpenCodeToolState::Error { error } => {
@@ -300,6 +329,8 @@ pub fn convert_opencode_parts(
                             call_id: id.clone(),
                             name: tool.clone(),
                             text: format!("Error: {error_text}"),
+                            live_output: None,
+                            status: ToolResultStatus::Final,
                         });
                     }
                     _ => {}
@@ -379,6 +410,8 @@ pub fn transcript_to_history(steps: &[TranscriptStep]) -> Vec<rig::message::Mess
                 call_id,
                 name: _,
                 text,
+                live_output: _,
+                status: _,
             } => {
                 let result = ToolResult {
                     id: call_id.clone(),
@@ -460,6 +493,8 @@ fn convert_history(history: &[rig::message::Message]) -> Vec<TranscriptStep> {
                                 call_id,
                                 name: String::new(),
                                 text: truncated,
+                                live_output: None,
+                                status: ToolResultStatus::Final,
                             });
                         }
                         rig::message::UserContent::Text(text) => {

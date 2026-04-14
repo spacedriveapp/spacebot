@@ -135,6 +135,7 @@ pub(super) async fn events_sse(
                             ApiEvent::CortexChatMessage { .. } => "cortex_chat_message",
                             ApiEvent::NotificationCreated { .. } => "notification_created",
                             ApiEvent::NotificationUpdated { .. } => "notification_updated",
+                            ApiEvent::ToolOutput { .. } => "tool_output",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

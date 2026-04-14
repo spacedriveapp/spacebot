@@ -998,6 +998,12 @@ impl Cortex {
             } => {
                 state.track_worker_activity(*worker_id);
             }
+            ProcessEvent::ToolOutput {
+                process_id: ProcessId::Worker(worker_id),
+                ..
+            } => {
+                state.track_worker_activity(*worker_id);
+            }
             ProcessEvent::ToolCompleted {
                 process_id,
                 tool_name,
@@ -1411,7 +1417,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::WorkerInitialResult { .. }
         | ProcessEvent::WorkerText { .. }
         | ProcessEvent::CortexChatUpdate { .. }
-        | ProcessEvent::SettingsUpdated { .. } => return None,
+        | ProcessEvent::SettingsUpdated { .. }
+        | ProcessEvent::ToolOutput { .. } => return None,
     })
 }
 
@@ -1583,8 +1590,15 @@ pub fn spawn_cortex_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::
         let cortex = Cortex::new(deps.clone(), system_prompt);
         let mut event_rx = deps.event_tx.subscribe();
         let mut memory_event_rx = deps.memory_event_tx.subscribe();
-        if let Err(error) =
-            run_cortex_loop(&cortex, &logger, &mut event_rx, &mut memory_event_rx).await
+        let mut tool_output_rx = deps.tool_output_tx.subscribe();
+        if let Err(error) = run_cortex_loop(
+            &cortex,
+            &logger,
+            &mut event_rx,
+            &mut memory_event_rx,
+            &mut tool_output_rx,
+        )
+        .await
         {
             tracing::error!(%error, "cortex loop exited with error");
         }
@@ -1788,6 +1802,7 @@ async fn run_cortex_loop(
     logger: &CortexLogger,
     event_rx: &mut broadcast::Receiver<ProcessEvent>,
     memory_event_rx: &mut broadcast::Receiver<ProcessEvent>,
+    tool_output_rx: &mut broadcast::Receiver<ProcessEvent>,
 ) -> anyhow::Result<()> {
     tracing::info!("cortex loop started");
 
@@ -1846,7 +1861,10 @@ async fn run_cortex_loop(
     let mut last_lag_warning_control: Option<Instant> = None;
     let mut lagged_since_last_warning_memory: u64 = 0;
     let mut last_lag_warning_memory: Option<Instant> = None;
+    let mut lagged_since_last_warning_tool_output: u64 = 0;
+    let mut last_lag_warning_tool_output: Option<Instant> = None;
     let mut memory_event_stream_open = true;
+    let mut tool_output_stream_open = true;
     let mut refresh_task: Option<tokio::task::JoinHandle<BulletinRefreshOutcome>> = None;
     let mut maintenance_task: Option<
         tokio::task::JoinHandle<crate::error::Result<memory_maintenance::MaintenanceReport>>,
@@ -1927,6 +1945,31 @@ async fn run_cortex_loop(
                     }
                     CortexReceiverOutcome::DisableStream => {
                         memory_event_stream_open = false;
+                    }
+                }
+            },
+            event = tool_output_rx.recv(), if tool_output_stream_open => {
+                match handle_cortex_receiver_result(
+                    event,
+                    "tool_output",
+                    ReceiverClosedBehavior::DisableStream,
+                    &mut lagged_since_last_warning_tool_output,
+                    &mut last_lag_warning_tool_output,
+                    LAG_WARNING_INTERVAL_SECS,
+                ) {
+                    CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
+                    CortexReceiverOutcome::Lagged { dropped } => {
+                        #[cfg(feature = "metrics")]
+                        crate::telemetry::Metrics::global()
+                            .event_receiver_lagged_events_total
+                            .with_label_values(&[&*cortex.deps.agent_id, "cortex_tool_output"])
+                            .inc_by(dropped);
+                        #[cfg(not(feature = "metrics"))]
+                        let _ = dropped;
+                    }
+                    CortexReceiverOutcome::StopLoop => unreachable!("tool output stream cannot stop cortex loop"),
+                    CortexReceiverOutcome::DisableStream => {
+                        tool_output_stream_open = false;
                     }
                 }
             },
@@ -4599,6 +4642,7 @@ mod tests {
                 agent_id: agent_id.clone(),
                 process_id: crate::ProcessId::Worker(worker_id),
                 channel_id: Some(channel_id.clone()),
+                call_id: "shell-call-1".to_string(),
                 tool_name: "shell".to_string(),
                 args: "echo hi".to_string(),
             },
@@ -4606,6 +4650,7 @@ mod tests {
                 agent_id: agent_id.clone(),
                 process_id: crate::ProcessId::Worker(worker_id),
                 channel_id: Some(channel_id.clone()),
+                call_id: "shell-call-1".to_string(),
                 tool_name: "shell".to_string(),
                 result: "done".to_string(),
             },

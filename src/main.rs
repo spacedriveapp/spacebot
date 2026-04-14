@@ -2907,7 +2907,10 @@ async fn initialize_agents(
             spacebot::memory::WorkingMemoryStore::new(db.sqlite.clone(), working_memory_timezone);
 
         // Per-agent control and memory event buses (broadcast fan-out).
-        let (event_tx, memory_event_tx) = spacebot::create_process_event_buses();
+        let process_event_buses = spacebot::create_process_event_buses();
+        let event_tx = process_event_buses.control;
+        let memory_event_tx = process_event_buses.memory;
+        let tool_output_tx = process_event_buses.tool_output;
 
         let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
         let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
@@ -2993,6 +2996,7 @@ async fn initialize_agents(
             runtime_config,
             event_tx,
             memory_event_tx,
+            tool_output_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
             sandbox,
@@ -3073,6 +3077,8 @@ async fn initialize_agents(
         for (agent_id, agent) in agents.iter() {
             let event_rx = agent.deps.event_tx.subscribe();
             api_state.register_agent_events(agent_id.to_string(), event_rx);
+            let tool_output_rx = agent.deps.tool_output_tx.subscribe();
+            api_state.register_tool_output_stream(agent_id.to_string(), tool_output_rx);
             agent_pools.insert(agent_id.to_string(), agent.db.sqlite.clone());
             memory_searches.insert(agent_id.to_string(), agent.deps.memory_search.clone());
             mcp_managers.insert(agent_id.to_string(), agent.deps.mcp_manager.clone());

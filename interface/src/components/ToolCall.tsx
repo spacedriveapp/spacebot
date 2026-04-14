@@ -1,12 +1,24 @@
 import {useState} from "react";
 import {cx} from "class-variance-authority";
-import type {TranscriptStep, OpenCodePart} from "@/api/client";
+import type {OpenCodePart} from "@/api/client";
+import type { TranscriptStep as SchemaTranscriptStep } from "@/api/types";
+
+// Extended TranscriptStep with live_output for streaming shell output
+type ToolResultStatus = "pending" | "final" | "waiting_for_input";
+
+type ExtendedTranscriptStep = SchemaTranscriptStep & {
+	live_output?: string;
+	status?: ToolResultStatus;
+};
+
+// Use the extended type for pairing
+type TranscriptStep = ExtendedTranscriptStep;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type ToolCallStatus = "running" | "completed" | "error";
+export type ToolCallStatus = "running" | "completed" | "error" | "waiting_for_input";
 
 export interface ToolCallPair {
 	/** The call_id linking tool_call to tool_result */
@@ -25,6 +37,8 @@ export interface ToolCallPair {
 	status: ToolCallStatus;
 	/** Human-readable summary provided by live opencode parts */
 	title?: string | null;
+	/** Live streaming output from tool_output SSE events (running tools only) */
+	liveOutput?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,12 +56,21 @@ export type TranscriptItem =
 
 export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 	const items: TranscriptItem[] = [];
-	const resultsById = new Map<string, {name: string; text: string}>();
+	const resultsById = new Map<
+		string,
+		{name: string; text: string; status: ToolResultStatus; liveOutput?: string}
+	>();
 
 	// First pass: index all tool_result steps by call_id
 	for (const step of steps) {
 		if (step.type === "tool_result") {
-			resultsById.set(step.call_id, {name: step.name, text: step.text});
+			const liveOutput = step.live_output;
+			resultsById.set(step.call_id, {
+				name: step.name,
+				text: step.text,
+				status: step.status ?? "final",
+				liveOutput,
+			});
 		}
 	}
 
@@ -60,12 +83,21 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 				} else if (content.type === "tool_call") {
 					const result = resultsById.get(content.id);
 					const parsedArgs = tryParseJson(content.args);
-					const parsedResult = result ? tryParseJson(result.text) : null;
+					const resultStatus = result?.status ?? "final";
+					const hasFinalResult = !!result && resultStatus !== "pending";
+					const parsedResult = hasFinalResult ? tryParseJson(result.text) : null;
 
 					// Detect error: result text starts with "Error" or contains error indicators
-					const isError = result
+					const isError = hasFinalResult
 						? isErrorResult(result.text, parsedResult)
 						: false;
+					const status: ToolCallStatus = resultStatus === "pending"
+							? "running"
+							: resultStatus === "waiting_for_input"
+								? "waiting_for_input"
+								: isError
+									? "error"
+									: "completed";
 
 					items.push({
 						kind: "tool",
@@ -74,9 +106,10 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 							name: content.name,
 							argsRaw: content.args,
 							args: parsedArgs,
-							resultRaw: result?.text ?? null,
+							resultRaw: hasFinalResult ? result.text : null,
 							result: parsedResult,
-							status: result ? (isError ? "error" : "completed") : "running",
+							status,
+							liveOutput: result?.liveOutput,
 						},
 					});
 				}
@@ -977,12 +1010,14 @@ const STATUS_ICONS: Record<ToolCallStatus, string> = {
 	running: "\u25B6", // ▶
 	completed: "\u2713", // ✓
 	error: "\u2717", // ✗
+	waiting_for_input: "!",
 };
 
 const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
 	completed: "text-status-success",
 	error: "text-status-error",
+	waiting_for_input: "text-blue-500",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1031,7 +1066,11 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 		<div
 			className={cx(
 				"rounded-md border bg-app-dark-box/30",
-				pair.status === "error" ? "border-status-error/30" : "border-app-line/50",
+				pair.status === "error"
+					? "border-status-error/30"
+					: pair.status === "waiting_for_input"
+						? "border-blue-500/30"
+						: "border-app-line/50",
 			)}
 		>
 			{/* Header — always visible */}
@@ -1056,6 +1095,9 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 				)}
 				{pair.status === "running" && (
 					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+				)}
+				{pair.status === "waiting_for_input" && !expanded && (
+					<span className="text-tiny text-blue-500">Waiting for input</span>
 				)}
 			</button>
 
@@ -1118,10 +1160,28 @@ function renderResult(
 	renderer: ToolRenderer,
 ): React.ReactNode {
 	if (pair.status === "running") {
+		if (pair.liveOutput) {
+			return (
+				<div className="px-3 py-2">
+					<pre className="max-h-60 overflow-auto whitespace-pre-wrap font-mono text-tiny text-ink-dull">
+						{pair.liveOutput}
+					</pre>
+				</div>
+			);
+		}
 		return (
 			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-ink-faint">
 				<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
 				Running...
+			</div>
+		);
+	}
+
+	if (pair.status === "waiting_for_input" && !pair.resultRaw) {
+		return (
+			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-blue-500">
+				<span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+				Waiting for input
 			</div>
 		);
 	}

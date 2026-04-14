@@ -192,12 +192,82 @@ use crate::conversation::settings::WorkerMemoryMode;
 use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
-use crate::{AgentId, ChannelId, ProcessEvent, RoutedSender, WorkerId};
+use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, RoutedSender, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+
+/// Shares hook-observed tool call IDs with tools that emit their own streaming events.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallRegistry {
+    pending: Arc<std::sync::Mutex<HashMap<ToolCallRegistryKey, VecDeque<String>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolCallRegistryKey {
+    process_id: String,
+    tool_name: String,
+}
+
+impl ToolCallRegistry {
+    pub fn push(&self, process_id: &ProcessId, tool_name: &str, call_id: String) {
+        let Ok(mut pending) = self.pending.lock() else {
+            tracing::warn!("tool call registry lock poisoned while recording call_id");
+            return;
+        };
+
+        let key = ToolCallRegistryKey {
+            process_id: process_id.to_string(),
+            tool_name: tool_name.to_string(),
+        };
+        pending.entry(key).or_default().push_back(call_id);
+    }
+
+    pub fn take(&self, process_id: &ProcessId, tool_name: &str) -> Option<String> {
+        let Ok(mut pending) = self.pending.lock() else {
+            tracing::warn!("tool call registry lock poisoned while taking call_id");
+            return None;
+        };
+
+        let key = ToolCallRegistryKey {
+            process_id: process_id.to_string(),
+            tool_name: tool_name.to_string(),
+        };
+        let call_id = pending.get_mut(&key)?.pop_front();
+        if pending.get(&key).is_some_and(VecDeque::is_empty) {
+            pending.remove(&key);
+        }
+        call_id
+    }
+
+    pub fn remove(&self, process_id: &ProcessId, tool_name: &str, call_id: &str) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            tracing::warn!("tool call registry lock poisoned while removing call_id");
+            return false;
+        };
+
+        let key = ToolCallRegistryKey {
+            process_id: process_id.to_string(),
+            tool_name: tool_name.to_string(),
+        };
+
+        let Some(queue) = pending.get_mut(&key) else {
+            return false;
+        };
+
+        let original_len = queue.len();
+        queue.retain(|existing_call_id| existing_call_id != call_id);
+        let removed = queue.len() != original_len;
+        let should_remove_key = queue.is_empty();
+        if should_remove_key {
+            pending.remove(&key);
+        }
+        removed
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum BranchToolProfile {
@@ -865,6 +935,8 @@ pub fn create_worker_tool_server(
     channel_id: Option<ChannelId>,
     task_store: Arc<TaskStore>,
     event_tx: broadcast::Sender<ProcessEvent>,
+    tool_output_tx: broadcast::Sender<ProcessEvent>,
+    tool_call_registry: ToolCallRegistry,
     browser_config: BrowserConfig,
     screenshot_dir: PathBuf,
     brave_search_key: Option<String>,
@@ -878,7 +950,15 @@ pub fn create_worker_tool_server(
     wiki_store: Option<Arc<crate::wiki::WikiStore>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
-        .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+        .tool(
+            ShellTool::new(workspace.clone(), sandbox.clone()).with_streaming(
+                tool_output_tx,
+                ProcessId::Worker(worker_id),
+                channel_id.clone(),
+                agent_id.clone(),
+                tool_call_registry,
+            ),
+        )
         .tool(TaskUpdateTool::for_worker(
             task_store,
             agent_id.clone(),
@@ -1292,6 +1372,187 @@ mod tests {
             result.unwrap_err().to_string().contains("code injection"),
             "should reject dangerous env var regardless of case"
         );
+    }
+
+    #[test]
+    fn tool_call_registry_returns_fifo_ids_per_process_and_tool() {
+        let registry = ToolCallRegistry::default();
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+
+        registry.push(&process_id, "shell", "call-1".to_string());
+        registry.push(&process_id, "shell", "call-2".to_string());
+
+        assert_eq!(
+            registry.take(&process_id, "shell").as_deref(),
+            Some("call-1")
+        );
+        assert_eq!(
+            registry.take(&process_id, "shell").as_deref(),
+            Some("call-2")
+        );
+        assert!(registry.take(&process_id, "shell").is_none());
+    }
+
+    #[test]
+    fn tool_call_registry_removes_specific_call_id() {
+        let registry = ToolCallRegistry::default();
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+
+        registry.push(&process_id, "shell", "call-1".to_string());
+        registry.push(&process_id, "shell", "call-2".to_string());
+
+        assert!(registry.remove(&process_id, "shell", "call-1"));
+        assert_eq!(
+            registry.take(&process_id, "shell").as_deref(),
+            Some("call-2")
+        );
+        assert!(!registry.remove(&process_id, "shell", "missing-call"));
+    }
+
+    #[tokio::test]
+    async fn streaming_shell_uses_registered_tool_call_id() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+        let registry = ToolCallRegistry::default();
+        registry.push(&process_id, "shell", "tool-call-1".to_string());
+        let (tool_output_tx, mut tool_output_rx) = tokio::sync::broadcast::channel(16);
+        let tool = shell::ShellTool::new(workspace, sandbox).with_streaming(
+            tool_output_tx,
+            process_id,
+            None,
+            std::sync::Arc::<str>::from("agent"),
+            registry,
+        );
+        let args = shell::ShellArgs {
+            command: "printf 'hello\\n'".into(),
+            working_dir: None,
+            env: Vec::new(),
+            timeout_seconds: 5,
+        };
+
+        let output = rig::tool::Tool::call(&tool, args)
+            .await
+            .expect("shell command should run");
+        assert!(output.success);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), tool_output_rx.recv())
+            .await
+            .expect("tool output event should arrive")
+            .expect("tool output sender should stay open");
+
+        let ProcessEvent::ToolOutput { call_id, line, .. } = event else {
+            panic!("expected tool output event");
+        };
+        assert_eq!(call_id, "tool-call-1");
+        assert_eq!(line, "hello");
+    }
+
+    #[tokio::test]
+    async fn streaming_shell_drops_stale_call_id_after_validation_error() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+        let registry = ToolCallRegistry::default();
+        registry.push(&process_id, "shell", "tool-call-1".to_string());
+        registry.push(&process_id, "shell", "tool-call-2".to_string());
+        let (tool_output_tx, mut tool_output_rx) = tokio::sync::broadcast::channel(16);
+        let tool = shell::ShellTool::new(workspace, sandbox).with_streaming(
+            tool_output_tx,
+            process_id.clone(),
+            None,
+            std::sync::Arc::<str>::from("agent"),
+            registry.clone(),
+        );
+
+        // First call fails validation before command execution.
+        let invalid_args = shell::ShellArgs {
+            command: "echo should-not-run".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "LD_PRELOAD".into(),
+                value: "/evil.so".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let invalid_result = rig::tool::Tool::call(&tool, invalid_args).await;
+        assert!(invalid_result.is_err());
+
+        // Second call should use the next queued call ID, not the stale one.
+        let valid_args = shell::ShellArgs {
+            command: "printf 'hello\\n'".into(),
+            working_dir: None,
+            env: Vec::new(),
+            timeout_seconds: 5,
+        };
+        let valid_output = rig::tool::Tool::call(&tool, valid_args)
+            .await
+            .expect("shell command should run");
+        assert!(valid_output.success);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), tool_output_rx.recv())
+            .await
+            .expect("tool output event should arrive")
+            .expect("tool output sender should stay open");
+        let ProcessEvent::ToolOutput { call_id, line, .. } = event else {
+            panic!("expected tool output event");
+        };
+        assert_eq!(call_id, "tool-call-2");
+        assert_eq!(line, "hello");
+        assert!(registry.take(&process_id, "shell").is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_shell_allows_quiet_noninteractive_command() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+        let registry = ToolCallRegistry::default();
+        registry.push(&process_id, "shell", "tool-call-quiet".to_string());
+        let (tool_output_tx, _tool_output_rx) = tokio::sync::broadcast::channel(16);
+        let tool = shell::ShellTool::new(workspace, sandbox).with_streaming(
+            tool_output_tx,
+            process_id,
+            None,
+            std::sync::Arc::<str>::from("agent"),
+            registry,
+        );
+
+        let args = shell::ShellArgs {
+            command: "sleep 6; printf 'quiet-done\\n'".into(),
+            working_dir: None,
+            env: Vec::new(),
+            timeout_seconds: 20,
+        };
+
+        let output = rig::tool::Tool::call(&tool, args)
+            .await
+            .expect("quiet command should complete successfully");
+        assert!(output.success);
+        assert!(!output.waiting_for_input);
+        assert_eq!(output.exit_code, 0);
+        assert!(output.stdout.contains("quiet-done"));
     }
 
     #[test]

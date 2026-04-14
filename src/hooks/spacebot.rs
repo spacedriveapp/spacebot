@@ -66,6 +66,7 @@ pub struct SpacebotHook {
     /// append the messages to history before re-prompting.
     injected_messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
+    tool_call_registry: Option<crate::tools::ToolCallRegistry>,
     reply_tool_delta_state:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ReplyToolDeltaState>>>,
 }
@@ -129,6 +130,7 @@ impl SpacebotHook {
             inject_rx: None,
             injected_messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             memory_persistence_contract: None,
+            tool_call_registry: None,
             reply_tool_delta_state: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -146,6 +148,11 @@ impl SpacebotHook {
         contract_state: Arc<MemoryPersistenceContractState>,
     ) -> Self {
         self.memory_persistence_contract = Some(contract_state);
+        self
+    }
+
+    pub fn with_tool_call_registry(mut self, registry: crate::tools::ToolCallRegistry) -> Self {
+        self.tool_call_registry = Some(registry);
         self
     }
 
@@ -824,21 +831,23 @@ impl SpacebotHook {
         let _ = (tool_name, internal_call_id);
     }
 
-    pub(crate) fn emit_tool_completed_event(&self, tool_name: &str, result: &str) {
+    pub(crate) fn emit_tool_completed_event(&self, tool_name: &str, call_id: String, result: &str) {
         let capped_result =
             crate::tools::truncate_output(result, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-        self.emit_tool_completed_event_from_capped(tool_name, capped_result);
+        self.emit_tool_completed_event_from_capped(tool_name, call_id, capped_result);
     }
 
     pub(crate) fn emit_tool_completed_event_from_capped(
         &self,
         tool_name: &str,
+        call_id: String,
         capped_result: String,
     ) {
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
+            call_id,
             tool_name: tool_name.to_string(),
             result: capped_result,
         };
@@ -1232,10 +1241,20 @@ where
 
         // Send event without blocking. Truncate args to keep broadcast payloads bounded.
         let capped_args = crate::tools::truncate_output(args, 2_000);
+        let call_id = _tool_call_id
+            .clone()
+            .unwrap_or_else(|| _internal_call_id.to_string());
+        if self.process_type == ProcessType::Worker
+            && tool_name == "shell"
+            && let Some(registry) = &self.tool_call_registry
+        {
+            registry.push(&self.process_id, tool_name, call_id.clone());
+        }
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
+            call_id,
             tool_name: tool_name.to_string(),
             args: capped_args,
         };
@@ -1294,6 +1313,16 @@ where
             };
         }
 
+        let call_id = _tool_call_id
+            .clone()
+            .unwrap_or_else(|| internal_call_id.to_string());
+        if self.process_type == ProcessType::Worker
+            && tool_name == "shell"
+            && let Some(registry) = &self.tool_call_registry
+        {
+            registry.remove(&self.process_id, tool_name, &call_id);
+        }
+
         // Cap the result stored in the broadcast event to avoid blowing up
         // event subscribers with multi-MB tool results. For worker/branch
         // processes, scrub leak patterns from the event payload so secrets
@@ -1302,9 +1331,9 @@ where
             let scrubbed = crate::secrets::scrub::scrub_leaks(result);
             let capped =
                 crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-            self.emit_tool_completed_event_from_capped(tool_name, capped);
+            self.emit_tool_completed_event_from_capped(tool_name, call_id, capped);
         } else {
-            self.emit_tool_completed_event(tool_name, result);
+            self.emit_tool_completed_event(tool_name, call_id, result);
         }
 
         tracing::debug!(
@@ -1398,6 +1427,7 @@ mod tests {
     use crate::llm::SpacebotModel;
     use crate::llm::model::RawResponse;
     use crate::tools::MemoryPersistenceContractState;
+    use crate::tools::ToolCallRegistry;
     use crate::{ProcessId, ProcessType};
     use rig::OneOrMany;
     use rig::agent::{HookAction, PromptHook};
@@ -1754,6 +1784,43 @@ mod tests {
             ),
             "Expected nudge — failed set_status should not signal outcome"
         );
+    }
+
+    #[tokio::test]
+    async fn shell_tool_result_clears_registry_entry_after_error() {
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+        let registry = ToolCallRegistry::default();
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            process_id.clone(),
+            ProcessType::Worker,
+            None,
+            event_tx,
+        )
+        .with_tool_call_registry(registry.clone());
+
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "shell",
+            Some("call-shell-1".to_string()),
+            "internal_1",
+            "{\"command\":42}",
+        )
+        .await;
+        assert!(matches!(action, rig::agent::ToolCallHookAction::Continue));
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "shell",
+            Some("call-shell-1".to_string()),
+            "internal_1",
+            "{\"command\":42}",
+            "ToolsetError: expected string for field command",
+        )
+        .await;
+
+        assert!(registry.take(&process_id, "shell").is_none());
     }
 
     #[tokio::test]

@@ -139,6 +139,10 @@ fn try_acquire_send_lock(
         .map_err(|_| CortexChatSendError::Busy)
 }
 
+fn resolve_lifecycle_call_id(tool_call_id: Option<String>, internal_call_id: &str) -> String {
+    tool_call_id.unwrap_or_else(|| internal_call_id.to_string())
+}
+
 async fn persist_and_emit_cortex_chat_error(
     store: &CortexChatStore,
     event_tx: &mpsc::Sender<CortexChatEvent>,
@@ -160,6 +164,7 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
+        let call_id = resolve_lifecycle_call_id(tool_call_id.clone(), internal_call_id);
         let action = <SpacebotHook as PromptHook<M>>::on_tool_call(
             &self.spacebot_hook,
             tool_name,
@@ -171,8 +176,6 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         if !matches!(action, ToolCallHookAction::Continue) {
             return action;
         }
-
-        let call_id = internal_call_id.to_string();
 
         // Record tool call start in accumulated list
         {
@@ -209,13 +212,15 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
                 .record_tool_result_metrics(tool_name, internal_call_id);
             return guard_action;
         }
+        let call_id = resolve_lifecycle_call_id(_tool_call_id, internal_call_id);
         let preview = crate::tools::truncate_utf8_ellipsis(result, 200);
-        self.spacebot_hook
-            .emit_tool_completed_event_from_capped(tool_name, preview.clone());
+        self.spacebot_hook.emit_tool_completed_event_from_capped(
+            tool_name,
+            call_id.clone(),
+            preview.clone(),
+        );
         self.spacebot_hook
             .record_tool_result_metrics(tool_name, internal_call_id);
-
-        let call_id = internal_call_id.to_string();
 
         // Update the accumulated tool call with the result
         {
@@ -911,7 +916,7 @@ impl CortexChatSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{CortexChatSendError, try_acquire_send_lock};
+    use super::{CortexChatSendError, resolve_lifecycle_call_id, try_acquire_send_lock};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -932,6 +937,18 @@ mod tests {
         let text = "done";
         let preview = crate::tools::truncate_utf8_ellipsis(text, 200);
         assert_eq!(preview, text);
+    }
+
+    #[test]
+    fn resolve_lifecycle_call_id_prefers_tool_call_id() {
+        let call_id = resolve_lifecycle_call_id(Some("call_external".to_string()), "internal_1");
+        assert_eq!(call_id, "call_external");
+    }
+
+    #[test]
+    fn resolve_lifecycle_call_id_falls_back_to_internal_call_id() {
+        let call_id = resolve_lifecycle_call_id(None, "internal_1");
+        assert_eq!(call_id, "internal_1");
     }
 
     #[tokio::test]

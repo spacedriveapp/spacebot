@@ -335,6 +335,11 @@ impl Worker {
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
         let mcp_tools = self.deps.mcp_manager.get_tools().await;
+        let tool_call_registry = crate::tools::ToolCallRegistry::default();
+        self.hook = self
+            .hook
+            .clone()
+            .with_tool_call_registry(tool_call_registry.clone());
 
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
@@ -343,6 +348,8 @@ impl Worker {
             self.channel_id.clone(),
             self.deps.task_store.clone(),
             self.deps.event_tx.clone(),
+            self.deps.tool_output_tx.clone(),
+            tool_call_registry,
             self.browser_config.clone(),
             self.screenshot_dir.clone(),
             self.brave_search_key.clone(),

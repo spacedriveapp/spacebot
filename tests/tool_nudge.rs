@@ -207,8 +207,12 @@ async fn tool_call_emits_started_event() {
         "Expected ToolStarted event, got {:?}",
         event
     );
-    if let spacebot::ProcessEvent::ToolStarted { tool_name, .. } = event {
+    if let spacebot::ProcessEvent::ToolStarted {
+        tool_name, call_id, ..
+    } = event
+    {
         assert_eq!(tool_name, "test_tool");
+        assert_eq!(call_id, "call_123");
     }
 }
 
@@ -266,10 +270,14 @@ async fn tool_result_emits_completed_event() {
         event
     );
     if let spacebot::ProcessEvent::ToolCompleted {
-        tool_name, result, ..
+        tool_name,
+        call_id,
+        result,
+        ..
     } = event
     {
         assert_eq!(tool_name, "test_tool");
+        assert_eq!(call_id, "call_123");
         assert_eq!(result, "Tool result content");
     }
 }

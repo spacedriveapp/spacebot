@@ -489,7 +489,8 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         | ProcessEvent::StatusUpdate { .. }
         | ProcessEvent::TaskUpdated { .. }
         | ProcessEvent::WorkerText { .. }
-        | ProcessEvent::CortexChatUpdate { .. } => false,
+        | ProcessEvent::CortexChatUpdate { .. }
+        | ProcessEvent::ToolOutput { .. } => false,
     }
 }
 
@@ -1142,6 +1143,7 @@ mod tests {
             agent_id: Arc::from("agent"),
             process_id: process_id.clone(),
             channel_id: Some(channel_id.clone()),
+            call_id: "call-related".to_string(),
             tool_name: "memory_save".to_string(),
             args: "{}".to_string(),
         };
@@ -1149,6 +1151,7 @@ mod tests {
             agent_id: Arc::from("agent"),
             process_id,
             channel_id: Some(other_channel),
+            call_id: "call-unrelated".to_string(),
             tool_name: "memory_save".to_string(),
             args: "{}".to_string(),
         };

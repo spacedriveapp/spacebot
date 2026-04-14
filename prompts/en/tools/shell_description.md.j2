@@ -3,3 +3,5 @@ Execute a shell command. Use this for file operations, running scripts, building
 Use the optional `env` parameter to set per-command environment variables (e.g. `[{"key": "RUST_LOG", "value": "debug"}]`). Dangerous variables that enable library injection (LD_PRELOAD, NODE_OPTIONS, etc.) are blocked.
 
 To install tools that persist across restarts, place binaries in the persistent tools directory at $SPACEBOT_DIR/tools/bin (already on PATH). For example: `curl -fsSL https://example.com/tool -o $SPACEBOT_DIR/tools/bin/tool && chmod +x $SPACEBOT_DIR/tools/bin/tool`
+
+Commands have no interactive stdin and no attached TTY — interactive prompts cannot be answered. If a command prints an interactive-style prompt and then stalls for ~5 seconds, it may be killed and return `waiting_for_input: true`. To avoid this, always pass `--yes`, `-y`, or `--non-interactive` flags, use pipe input (e.g. `echo y | command`), or heredocs (`<<EOF`). Shell-created pipes and here-docs are valid non-interactive input methods. The environment already sets `CI=true` and `DEBIAN_FRONTEND=noninteractive`.

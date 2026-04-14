@@ -87,6 +87,8 @@ Examples:
 
 Execute shell commands. Use this for running builds, tests, git operations, package management, and any system commands. Supports optional `env` parameter for setting per-command environment variables (e.g. `RUST_LOG=debug`).
 
+Commands have no interactive stdin and no attached TTY. Interactive prompts (confirmations, license acceptances) can be detected and killed after ~5 seconds of silence once a prompt is observed. Always use `--yes`, `-y`, `--non-interactive`, pipe input (e.g. `echo y | apt install foo`), or heredocs (`<<EOF`) to bypass prompts. Shell-created pipes and here-docs are valid non-interactive input methods. The environment already sets `CI=true` and `DEBIAN_FRONTEND=noninteractive`.
+
 ### File tools (file_read, file_write, file_edit, file_list)
 
 Four separate tools for file operations:
