@@ -270,10 +270,7 @@ impl SpacebotModel {
                 .await
             }
             ApiType::OpenAiResponses => self.call_openai_responses(request, &provider_config).await,
-            ApiType::Gemini => {
-                self.call_openai_compatible(request, "Google Gemini", &provider_config)
-                    .await
-            }
+            ApiType::Gemini => self.call_gemini_native(request, &provider_config).await,
         }
     }
 
@@ -589,6 +586,8 @@ impl CompletionModel for SpacebotModel {
             let body = &response.raw_response.body;
             let extended = if self.provider == "anthropic" {
                 crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+            } else if self.provider == "gemini" {
+                crate::llm::usage::ExtendedUsage::from_gemini_body(body)
             } else {
                 crate::llm::usage::ExtendedUsage::from_openai_body(body)
             };
@@ -727,10 +726,7 @@ impl CompletionModel for SpacebotModel {
                 )
                 .await
             }
-            ApiType::Gemini => {
-                self.stream_openai_compatible(request, "Google Gemini", &provider_config)
-                    .await
-            }
+            ApiType::Gemini => self.stream_gemini_native(request, &provider_config).await,
             ApiType::Anthropic => {
                 let response = self.attempt_completion(request).await?;
                 Ok(stream_from_completion_response(response))
@@ -744,6 +740,34 @@ impl CompletionModel for SpacebotModel {
 }
 
 impl SpacebotModel {
+    async fn call_gemini_native(
+        &self,
+        request: CompletionRequest,
+        provider_config: &ProviderConfig,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let client = crate::llm::gemini::build_client(provider_config, &self.model_name)?;
+        let effort = self
+            .routing
+            .as_ref()
+            .map(|r| r.thinking_effort_for_model(&self.full_model_name))
+            .unwrap_or("auto");
+        crate::llm::gemini::call_gemini(&client, &request, effort).await
+    }
+
+    async fn stream_gemini_native(
+        &self,
+        request: CompletionRequest,
+        provider_config: &ProviderConfig,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let client = crate::llm::gemini::build_client(provider_config, &self.model_name)?;
+        let effort = self
+            .routing
+            .as_ref()
+            .map(|r| r.thinking_effort_for_model(&self.full_model_name))
+            .unwrap_or("auto");
+        crate::llm::gemini::stream_gemini(&client, &request, effort).await
+    }
+
     async fn call_anthropic(
         &self,
         request: CompletionRequest,
@@ -1353,7 +1377,13 @@ impl SpacebotModel {
         let base_url = provider_config.base_url.trim_end_matches('/');
         let endpoint_path = match provider_config.api_type {
             ApiType::OpenAiCompletions | ApiType::OpenAiResponses => "/v1/chat/completions",
-            ApiType::OpenAiChatCompletions | ApiType::Gemini => "/chat/completions",
+            ApiType::OpenAiChatCompletions => "/chat/completions",
+            ApiType::Gemini => {
+                return Err(CompletionError::ProviderError(
+                    "Gemini provider uses the native API, not OpenAI-compatible endpoints"
+                        .to_string(),
+                ));
+            }
             ApiType::Azure => {
                 // Azure handles its own endpoint construction in the call() match
                 // This fallback should not be reached for Azure
@@ -1744,6 +1774,8 @@ async fn record_streaming_usage(
     if let Some(acc) = accumulator {
         let extended = if provider == "anthropic" {
             crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+        } else if provider == "gemini" {
+            crate::llm::usage::ExtendedUsage::from_gemini_body(body)
         } else {
             crate::llm::usage::ExtendedUsage::from_openai_body(body)
         };
