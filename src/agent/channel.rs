@@ -2308,13 +2308,20 @@ impl Channel {
             }
         };
 
-        // Filter out the current channel and cron channels
+        // Filter out the current channel, cron channels, and link channels.
+        // Link channels (platform == "link") are internal audit trails between agents;
+        // they have no real messaging adapter. Inter-agent communication goes through
+        // `send_agent_message` (task delegation), not `send_message_to_another_channel`.
+        // Exposing link channels here causes the LLM to attempt direct routing via
+        // `send_message_to_another_channel`, which fails with a platform resolution error
+        // because `resolve_broadcast_target` has no handler for the "link" platform.
         let entries: Vec<crate::prompts::engine::ChannelEntry> = channels
             .into_iter()
             .filter(|channel| {
                 channel.id.as_str() != self.id.as_ref()
                     && channel.platform != "cron"
                     && channel.platform != "webhook"
+                    && channel.platform != "link"
             })
             .map(|channel| crate::prompts::engine::ChannelEntry {
                 name: channel.display_name.unwrap_or_else(|| channel.id.clone()),
@@ -4261,5 +4268,53 @@ mod tests {
         assert!(!is_dm_conversation_id("discord:guild:123:channel:456"));
         assert!(!is_dm_conversation_id("discord:conversation"));
         assert!(!is_dm_conversation_id(""));
+    }
+
+    /// `build_available_channels` must never surface link-platform channels to the LLM.
+    ///
+    /// Link channels (e.g. "link:agent1:agent2") are internal audit trails; they have no
+    /// real messaging adapter.  Exposing them causes the LLM to try
+    /// `send_message_to_another_channel` which fails with a platform-resolution error
+    /// because `resolve_broadcast_target` has no handler for platform == "link".
+    /// Inter-agent communication is exclusively via `send_agent_message` (task delegation).
+    #[test]
+    fn available_channels_filter_excludes_link_platform() {
+        use crate::conversation::channels::ChannelInfo;
+
+        let make_channel = |id: &str, platform: &str| ChannelInfo {
+            id: id.to_string(),
+            platform: platform.to_string(),
+            display_name: None,
+            platform_meta: None,
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+        };
+
+        let channels = vec![
+            make_channel("discord:guild:123", "discord"),
+            make_channel("link:agent1:agent2", "link"),
+            make_channel("link:agent2:agent1", "link"),
+            make_channel("cron:daily", "cron"),
+            make_channel("webhook:intake", "webhook"),
+            make_channel("slack:T01:C01", "slack"),
+        ];
+
+        let current_id = "discord:guild:123";
+
+        // Mirror the exact filter used in `build_available_channels`.
+        let visible: Vec<_> = channels
+            .into_iter()
+            .filter(|ch| {
+                ch.id.as_str() != current_id
+                    && ch.platform != "cron"
+                    && ch.platform != "webhook"
+                    && ch.platform != "link"
+            })
+            .collect();
+
+        // Only the slack channel should pass through.
+        assert_eq!(visible.len(), 1, "only real-platform channels should be visible");
+        assert_eq!(visible[0].platform, "slack");
     }
 }
