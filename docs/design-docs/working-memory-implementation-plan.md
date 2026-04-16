@@ -158,6 +158,12 @@ pub enum WorkingMemoryEventType {
     CronExecuted,
     MemorySaved,
     Decision,
+    UserCorrection,
+    DecisionRevised,
+    DeadlineSet,
+    BlockedOn,
+    Constraint,
+    Outcome,
     Error,
     TaskUpdate,
     AgentMessage,
@@ -861,7 +867,8 @@ Update `prompts/en/memory_persistence.md.j2` to add:
 In addition to saving graph memories, identify key decisions and important events
 from the conversation. For each, include it in the `events` field of
 memory_persistence_complete. Events should be one-line summaries with a type
-("decision", "error", "system") and importance score (0.0-1.0).
+("decision", "user_correction", "decision_revised", "deadline_set", "blocked_on",
+"constraint", "outcome", "error", "system") and importance score (0.0-1.0).
 ```
 
 Update `src/tools/memory_persistence_complete.rs`:

@@ -75,6 +75,18 @@ pub enum WorkingMemoryEventType {
     MemorySaved,
     /// A decision was made (extracted from conversation)
     Decision,
+    /// The user corrected a prior assumption, instruction, or framing
+    UserCorrection,
+    /// A prior decision changed after feedback or new information
+    DecisionRevised,
+    /// A concrete due date, deadline, or scheduled milestone was set
+    DeadlineSet,
+    /// Progress is waiting on approval, missing input, or an external dependency
+    BlockedOn,
+    /// A hard requirement, limitation, or non-negotiable boundary was stated
+    Constraint,
+    /// A task, branch, or delegated step reached a clear terminal result
+    Outcome,
     /// An error or failure occurred
     Error,
     /// A task was created or updated
@@ -455,7 +467,7 @@ The periodic memory persistence branch currently runs every 50 user messages. Re
 
 ### Persistence Branch Dual Output
 
-The memory persistence branch gains a second responsibility: in addition to saving graph memories, it emits `Decision` and `MemorySaved` events into the working memory log. This connects the two systems:
+The memory persistence branch gains a second responsibility: in addition to saving graph memories, it emits typed conversational events into the working memory log. This connects the two systems:
 
 ```
 Persistence branch runs:
@@ -463,11 +475,11 @@ Persistence branch runs:
   2. Reads conversation history since last run
   3. Saves new graph memories via memory_save (as today)
   4. Identifies key decisions and events
-  5. Emits working memory events for each decision identified
+  5. Emits working memory events for each important event identified
   6. Calls memory_persistence_complete
 ```
 
-Step 5 is new. The persistence branch prompt is updated to instruct it to identify decisions explicitly. The `memory_persistence_complete` tool gains an optional `events` field:
+Step 5 is new. The persistence branch prompt is updated to identify durable temporal events explicitly: decisions, user corrections, revised decisions, concrete deadlines, blockers, constraints, terminal outcomes, errors, and system events. The `memory_persistence_complete` tool gains an optional `events` field:
 
 ```rust
 pub struct MemoryPersistenceCompleteArgs {
@@ -477,7 +489,7 @@ pub struct MemoryPersistenceCompleteArgs {
 }
 
 pub struct WorkingMemoryEventInput {
-    pub event_type: String,       // "decision", "error", etc.
+    pub event_type: String,       // "decision", "blocked_on", "outcome", etc.
     pub summary: String,
     pub importance: Option<f32>,
 }
@@ -490,13 +502,17 @@ The majority of working memory events are captured programmatically, with zero L
 | Event            | Emitter                                      | How                                                                  |
 | ---------------- | -------------------------------------------- | -------------------------------------------------------------------- |
 | Worker spawned   | `spawn_worker` tool handler                  | After successful spawn, write event with task description as summary |
-| Worker completed | Worker state machine terminal transition     | Write event with worker result summary (truncated to 200 chars)      |
-| Branch completed | Branch return path in channel                | Write event with branch conclusion (truncated to 200 chars)          |
+| Worker completed | Worker state machine terminal transition     | Write typed result, blocker, constraint, or deadline event when the summary uses a recognized prefix; otherwise write `WorkerCompleted` |
+| Branch completed | Branch return path in channel                | Write typed result, blocker, constraint, or deadline event when the summary uses a recognized prefix; otherwise write `BranchCompleted` |
 | Cron executed    | Cron scheduler after job completes           | Write event with cron name + outcome                                 |
 | Memory saved     | `memory_save` tool handler                   | Write event with memory type + content preview                       |
-| Task updated     | Task tool handlers                           | Write event with task title + new status                             |
+| Task updated     | Task tool handlers                           | Write `Outcome` when a task transitions to `done`; otherwise write `TaskUpdate` with task status |
+| Duplicate worker | `spawn_worker` duplicate guard               | Write `BlockedOn` with the active worker ID and duplicate task preview |
+| Agent delegation | `send_agent_message` tool handler            | Write `Outcome` when delegation creates the cross-agent task          |
 | Error            | SpacebotHook on tool failure, worker failure | Write event with error description                                   |
 | System           | Startup, config change, maintenance          | Write event with description                                         |
+
+Branch and worker summaries may opt into richer event types with these prefixes: `outcome:`, `blocked_on:` or `blocked on:`, `constraint:`, and `deadline_set:` or `deadline:`. The prefix is stripped before rendering the event summary.
 
 Each emitter calls `working_memory_store.record_event()` as a fire-and-forget `tokio::spawn`. The message processing pipeline never waits on event recording.
 

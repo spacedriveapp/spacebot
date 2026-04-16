@@ -97,6 +97,8 @@ const CHANGE_COMPARISON_VERBS: &[&str] = &[
     "go with ",
     "proceed with ",
 ];
+const BRANCH_CANCELLED_PREFIX: &str = "Branch cancelled:";
+const BRANCH_CANCELLED_SENTENCE: &str = "Branch cancelled.";
 
 async fn recv_channel_event(
     event_rx: &mut broadcast::Receiver<ProcessEvent>,
@@ -117,6 +119,114 @@ fn should_flush_coalesce_buffer_for_event(event: &ProcessEvent) -> bool {
             | ProcessEvent::WorkerStatus { .. }
             | ProcessEvent::WorkerComplete { .. }
     )
+}
+
+fn classify_conversational_event_summary(
+    summary: &str,
+    default_event_type: crate::memory::WorkingMemoryEventType,
+) -> (crate::memory::WorkingMemoryEventType, String) {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return (default_event_type, String::new());
+    }
+
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        let rest_trimmed = rest.trim();
+        let prefix = prefix.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        if prefix == "outcome" {
+            return (
+                crate::memory::WorkingMemoryEventType::Outcome,
+                rest_trimmed.to_string(),
+            );
+        }
+        if prefix == "blocked_on" {
+            return (
+                crate::memory::WorkingMemoryEventType::BlockedOn,
+                rest_trimmed.to_string(),
+            );
+        }
+        if prefix == "constraint" {
+            return (
+                crate::memory::WorkingMemoryEventType::Constraint,
+                rest_trimmed.to_string(),
+            );
+        }
+        if prefix == "deadline_set" || prefix == "deadline" {
+            return (
+                crate::memory::WorkingMemoryEventType::DeadlineSet,
+                rest_trimmed.to_string(),
+            );
+        }
+    }
+
+    (default_event_type, trimmed.to_string())
+}
+
+fn format_conversational_event_summary(
+    event_type: crate::memory::WorkingMemoryEventType,
+    source: &str,
+    event_summary: &str,
+) -> String {
+    let label = match event_type {
+        crate::memory::WorkingMemoryEventType::Outcome => "outcome",
+        crate::memory::WorkingMemoryEventType::BlockedOn => "blocked on",
+        crate::memory::WorkingMemoryEventType::Constraint => "constraint",
+        crate::memory::WorkingMemoryEventType::DeadlineSet => "deadline set",
+        crate::memory::WorkingMemoryEventType::Error => "failed",
+        crate::memory::WorkingMemoryEventType::BranchCompleted
+        | crate::memory::WorkingMemoryEventType::WorkerCompleted => "completed",
+        _ => "concluded",
+    };
+
+    if event_summary.is_empty() {
+        format!("{source} {label}")
+    } else {
+        format!("{source} {label}: {event_summary}")
+    }
+}
+
+fn truncate_working_memory_summary(summary: &str) -> String {
+    if summary.len() > 200 {
+        let boundary = summary.floor_char_boundary(200);
+        format!("{}...", &summary[..boundary])
+    } else {
+        summary.to_string()
+    }
+}
+
+fn branch_working_memory_event_summary(
+    conclusion: &str,
+) -> (crate::memory::WorkingMemoryEventType, String) {
+    if let Some(reason) = parse_branch_cancellation_reason(conclusion) {
+        let reason = truncate_working_memory_summary(reason.trim());
+        let summary = if reason.is_empty() {
+            "Branch cancelled".to_string()
+        } else {
+            format!("Branch cancelled: {reason}")
+        };
+        return (crate::memory::WorkingMemoryEventType::Error, summary);
+    }
+
+    let summary = truncate_working_memory_summary(conclusion);
+    let (event_type, event_summary) = classify_conversational_event_summary(
+        &summary,
+        crate::memory::WorkingMemoryEventType::BranchCompleted,
+    );
+    (
+        event_type,
+        format_conversational_event_summary(event_type, "Branch", &event_summary),
+    )
+}
+
+fn parse_branch_cancellation_reason(conclusion: &str) -> Option<&str> {
+    let trimmed = conclusion.trim();
+    if let Some(rest) = trimmed.strip_prefix(BRANCH_CANCELLED_PREFIX) {
+        return Some(rest);
+    }
+    if let Some(rest) = trimmed.strip_prefix(BRANCH_CANCELLED_SENTENCE) {
+        return Some(rest);
+    }
+    None
 }
 
 fn sentence_contains_decision_marker(sentence: &str) -> bool {
@@ -432,9 +542,9 @@ impl ChannelState {
 
         let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
         let conclusion = if reason.is_empty() {
-            "Branch cancelled.".to_string()
+            BRANCH_CANCELLED_SENTENCE.to_string()
         } else {
-            format!("Branch cancelled: {reason}")
+            format!("{BRANCH_CANCELLED_PREFIX} {reason}")
         };
         self.process_run_logger
             .log_branch_completed(branch_id, &conclusion);
@@ -3201,7 +3311,7 @@ impl Channel {
                     // Regular branch: accumulate result for the next retrigger.
                     // The result text will be embedded directly in the retrigger
                     // message so the LLM knows exactly which process produced it.
-                    let branch_success = !conclusion.starts_with("Branch cancelled:");
+                    let branch_success = parse_branch_cancellation_reason(conclusion).is_none();
                     self.pending_results.push(PendingResult {
                         process_type: "branch",
                         process_id: branch_id.to_string(),
@@ -3217,19 +3327,11 @@ impl Channel {
                         );
                     }
 
-                    // Truncate for working memory — full conclusion lives in branch_runs.
-                    let summary = if conclusion.len() > 200 {
-                        let boundary = conclusion.floor_char_boundary(200);
-                        format!("{}...", &conclusion[..boundary])
-                    } else {
-                        conclusion.clone()
-                    };
+                    let (event_type, event_summary) =
+                        branch_working_memory_event_summary(conclusion);
                     self.deps
                         .working_memory
-                        .emit(
-                            crate::memory::WorkingMemoryEventType::BranchCompleted,
-                            format!("Branch concluded: {summary}"),
-                        )
+                        .emit(event_type, event_summary)
                         .channel(self.id.to_string())
                         .importance(0.7)
                         .record();
@@ -3297,20 +3399,18 @@ impl Channel {
                 } else {
                     result.clone()
                 };
-                let event_type = if *success {
+                let default_event_type = if *success {
                     crate::memory::WorkingMemoryEventType::WorkerCompleted
                 } else {
                     crate::memory::WorkingMemoryEventType::Error
                 };
+                let (event_type, event_summary) =
+                    classify_conversational_event_summary(&worker_summary, default_event_type);
                 self.deps
                     .working_memory
                     .emit(
                         event_type,
-                        if *success {
-                            format!("Worker completed: {worker_summary}")
-                        } else {
-                            format!("Worker failed: {worker_summary}")
-                        },
+                        format_conversational_event_summary(event_type, "Worker", &event_summary),
                     )
                     .channel(self.id.to_string())
                     .importance(if *success { 0.6 } else { 0.8 })
@@ -3890,12 +3990,13 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObserveModeFallbackState, compute_listen_mode_invocation, decision_user_id,
-        extract_decision_summary_from_reply, is_dm_conversation_id, recv_channel_event,
-        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
-        should_send_quiet_mode_fallback,
+        ObserveModeFallbackState, branch_working_memory_event_summary,
+        classify_conversational_event_summary, compute_listen_mode_invocation, decision_user_id,
+        extract_decision_summary_from_reply, format_conversational_event_summary,
+        is_dm_conversation_id, recv_channel_event, should_process_event_for_channel,
+        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
-    use crate::memory::MemoryType;
+    use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -4134,6 +4235,115 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_outcome_prefix() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "outcome: implemented the migration safety check",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(summary, "implemented the migration safety check");
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_blocked_on_prefix() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "blocked_on: waiting for review from infra",
+            WorkingMemoryEventType::Error,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::BlockedOn);
+        assert_eq!(summary, "waiting for review from infra");
+    }
+
+    #[test]
+    fn conversational_event_summary_falls_back_to_default_type() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "completed with no blockers",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::WorkerCompleted);
+        assert_eq!(summary, "completed with no blockers");
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_constraint_prefix_case_insensitively() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "CoNsTrAiNt: must keep migrations immutable",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Constraint);
+        assert_eq!(summary, "must keep migrations immutable");
+    }
+
+    #[test]
+    fn conversational_event_summary_is_case_insensitive_across_prefixes() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "OUTCOME: implemented the follow-up",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(summary, "implemented the follow-up");
+
+        let (event_type, summary) = classify_conversational_event_summary(
+            "Blocked_On: waiting on reviewer signoff",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::BlockedOn);
+        assert_eq!(summary, "waiting on reviewer signoff");
+
+        let (event_type, summary) = classify_conversational_event_summary(
+            "blocked on: user approval",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::BlockedOn);
+        assert_eq!(summary, "user approval");
+    }
+
+    #[test]
+    fn conversational_event_summary_treats_empty_prefixed_content_as_empty_summary() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "outcome:   ",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert!(summary.is_empty());
+        assert_eq!(
+            format_conversational_event_summary(event_type, "Worker", &summary),
+            "Worker outcome"
+        );
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_deadline_prefix() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "deadline-set: ship by 2026-04-20",
+            WorkingMemoryEventType::BranchCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::DeadlineSet);
+        assert_eq!(summary, "ship by 2026-04-20");
+        assert_eq!(
+            format_conversational_event_summary(event_type, "Branch", &summary),
+            "Branch deadline set: ship by 2026-04-20"
+        );
+    }
+
+    #[test]
+    fn branch_working_memory_event_records_cancellation_as_error() {
+        let (event_type, summary) =
+            branch_working_memory_event_summary("Branch cancelled: superseded by user request");
+
+        assert_eq!(event_type, WorkingMemoryEventType::Error);
+        assert_eq!(summary, "Branch cancelled: superseded by user request");
+    }
+
+    #[test]
+    fn branch_working_memory_event_records_sentence_cancellation_as_error() {
+        let (event_type, summary) = branch_working_memory_event_summary("Branch cancelled.");
+
+        assert_eq!(event_type, WorkingMemoryEventType::Error);
+        assert_eq!(summary, "Branch cancelled");
     }
 
     #[test]

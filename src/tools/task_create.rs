@@ -174,12 +174,25 @@ impl Tool for TaskCreateTool {
         }
 
         if let Some(working_memory) = &self.working_memory {
-            working_memory
-                .emit(
-                    crate::memory::WorkingMemoryEventType::TaskUpdate,
-                    format!("Task created #{}: {}", task.task_number, task.title),
+            let (event_type, summary, importance) = if task.status == TaskStatus::Done {
+                (
+                    crate::memory::WorkingMemoryEventType::Outcome,
+                    format!("Task #{} completed: {}", task.task_number, task.title),
+                    0.7,
                 )
-                .importance(0.5)
+            } else {
+                (
+                    crate::memory::WorkingMemoryEventType::TaskUpdate,
+                    format!(
+                        "Task created #{}: {} (status: {})",
+                        task.task_number, task.title, task.status
+                    ),
+                    0.5,
+                )
+            };
+            working_memory
+                .emit(event_type, summary)
+                .importance(importance)
                 .record();
         }
 
@@ -189,5 +202,72 @@ impl Tool for TaskCreateTool {
             status: task.status.to_string(),
             message: format!("Created task #{}: {}", task.task_number, task.title),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::memory::working::WorkingMemoryEvent;
+    use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
+    use chrono_tz::Tz;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
+
+    async fn wait_for_single_event(store: &WorkingMemoryStore) -> WorkingMemoryEvent {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .get_recent_events(10, 0.0)
+                    .await
+                    .expect("working memory query");
+                if let Some(event) = events.into_iter().next() {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for working memory event")
+    }
+
+    #[tokio::test]
+    async fn task_create_emits_task_update_for_new_tasks() {
+        let task_store = Arc::new(setup_test_store().await);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        let working_memory = WorkingMemoryStore::new(pool, Tz::UTC);
+
+        let tool = TaskCreateTool::new(task_store, "agent-test", "branch")
+            .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(TaskCreateArgs {
+                title: "Ship observation MVP".to_string(),
+                description: Some("land the first packet".to_string()),
+                priority: "medium".to_string(),
+                subtasks: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("task create should succeed");
+
+        assert_eq!(output.status, "pending_approval");
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::TaskUpdate);
+        assert_eq!(
+            event.summary,
+            "Task created #1: Ship observation MVP (status: pending_approval)"
+        );
     }
 }
