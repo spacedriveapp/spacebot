@@ -14,11 +14,19 @@ import {
 	ArrowRight01Icon,
 	Folder01Icon,
 	CodeIcon,
+	DocumentCodeIcon,
 	Search01Icon,
 	Cancel01Icon,
 	Target02Icon,
 	LeftToRightListBulletIcon,
+	CubeIcon,
+	HashtagIcon,
+	TextFontIcon,
+	ThirdBracketIcon,
+	VariableIcon,
+	AtIcon,
 } from "@hugeicons/core-free-icons";
+import type { IconSvgElement } from "@hugeicons/react";
 import * as Popover from "@radix-ui/react-popover";
 import {
 	NODE_COLORS,
@@ -28,6 +36,26 @@ import {
 	type NodeLabel,
 	type EdgeType,
 } from "./constants";
+
+// Icon per filter-facing node type. Mirrors GitNexus's lucide choices
+// (Box/Hash/List/Type/Braces/Variable/AtSign/FileCode) using their
+// closest Hugeicons counterparts.
+const NODE_TYPE_ICONS: Record<string, IconSvgElement> = {
+	Folder: Folder01Icon,
+	File: DocumentCodeIcon,
+	Class: CubeIcon,
+	Interface: HashtagIcon,
+	Enum: LeftToRightListBulletIcon,
+	Type: TextFontIcon,
+	Function: ThirdBracketIcon,
+	Method: ThirdBracketIcon,
+	Variable: VariableIcon,
+	Decorator: AtIcon,
+	Import: DocumentCodeIcon,
+};
+
+const getNodeTypeIcon = (label: NodeLabel): IconSvgElement =>
+	NODE_TYPE_ICONS[label] ?? CodeIcon;
 import { getNodeColor } from "./graphAdapter";
 import type { BulkNode } from "./types";
 import { GraphStatsView } from "../GraphStatsView";
@@ -166,14 +194,20 @@ function TreeItem({
 				)}
 
 				<HugeiconsIcon
-					icon={node.type === "folder" ? Folder01Icon : CodeIcon}
+					icon={node.type === "folder" ? Folder01Icon : DocumentCodeIcon}
 					className="h-4 w-4 shrink-0"
 					style={{
 						color: node.type === "folder" ? NODE_COLORS.Folder : NODE_COLORS.File,
 					}}
 				/>
 
-				<span className="truncate font-mono text-xs">{node.name}</span>
+				<span className="flex-1 truncate font-mono text-xs">{node.name}</span>
+
+				{node.type === "folder" && hasChildren && (
+					<span className="shrink-0 rounded bg-app px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-ink-faint">
+						{node.children.length}
+					</span>
+				)}
 			</button>
 
 			{isExpanded && filteredChildren.length > 0 && (
@@ -420,6 +454,7 @@ export function CodeGraphSidebar({
 							{FILTERABLE_LABELS.map((label) => {
 								const isVisible = visibleLabels.includes(label);
 								const color = getNodeColor(label, colorOverrides);
+								const icon = getNodeTypeIcon(label);
 								return (
 									<div
 										key={label}
@@ -430,7 +465,7 @@ export function CodeGraphSidebar({
 												: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
 										)}
 									>
-										{/* Color dot — static indicator */}
+										{/* Icon swatch — color tint + type icon */}
 										<div
 											className={clsx(
 												"flex h-5 w-5 shrink-0 items-center justify-center rounded",
@@ -438,9 +473,10 @@ export function CodeGraphSidebar({
 											)}
 											style={{ backgroundColor: `${color}20` }}
 										>
-											<div
-												className="h-2.5 w-2.5 rounded-full"
-												style={{ backgroundColor: color }}
+											<HugeiconsIcon
+												icon={icon}
+												className="h-3 w-3"
+												style={{ color }}
 											/>
 										</div>
 
