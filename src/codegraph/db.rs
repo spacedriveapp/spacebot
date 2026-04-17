@@ -26,6 +26,42 @@ fn truncate_for_log(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Path to the plaintext schema-version sidecar file that lives next to
+/// the LadybugDB. Persisting the version outside of LadybugDB lets us
+/// detect stale schemas without having to call `Database::new()` first —
+/// which is critical because old on-disk formats can segfault the native
+/// open path, and `spawn_blocking` cannot catch segfaults.
+fn sidecar_path(db_path: &Path) -> PathBuf {
+    db_path.with_extension("version")
+}
+
+async fn read_sidecar_version(db_path: &Path) -> Option<u32> {
+    tokio::fs::read_to_string(sidecar_path(db_path))
+        .await
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+async fn write_sidecar_version(db_path: &Path, version: u32) {
+    let path = sidecar_path(db_path);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if let Err(e) = tokio::fs::write(&path, version.to_string()).await {
+        tracing::warn!(
+            path = %path.display(),
+            err = %e,
+            "failed to write schema version sidecar (non-fatal)"
+        );
+    }
+}
+
+async fn remove_sidecar_version(db_path: &Path) {
+    let _ = tokio::fs::remove_file(sidecar_path(db_path)).await;
+}
+
 /// Remove a LadybugDB database at `path`, handling both the single-file
 /// format (file + optional `.wal` sibling) and the directory-based format.
 /// Retries up to 5 times with escalating delays because Windows holds file
@@ -105,6 +141,49 @@ impl CodeGraphDb {
         // Track whether we cleaned up stale data so we can skip the schema
         // version check on a freshly created database (no tables to nuke).
         let mut freshly_cleaned = false;
+
+        // Pre-open sidecar check: if the on-disk schema version recorded
+        // next to the DB doesn't match what this binary expects, nuke the
+        // DB *before* calling Database::new(). Old formats (e.g. v5 vs v11)
+        // can segfault the native open path, and spawn_blocking cannot
+        // catch segfaults. The sidecar is missing on pre-existing installs;
+        // in that case we fall through to the legacy _SchemaVersion query.
+        if db_path.exists() {
+            match read_sidecar_version(&db_path).await {
+                Some(v) if v == schema::SCHEMA_VERSION => {
+                    // DB is at the expected version per sidecar — safe to open.
+                }
+                Some(v) => {
+                    tracing::info!(
+                        project_id = %project_id,
+                        stored = v,
+                        expected = schema::SCHEMA_VERSION,
+                        path = %db_path.display(),
+                        "sidecar version mismatch — nuking DB before open to avoid native segfault"
+                    );
+                    if !retry_remove_db(&db_path).await {
+                        bail!(
+                            "cannot remove stale LadybugDB at {} — file locks held",
+                            db_path.display()
+                        );
+                    }
+                    remove_sidecar_version(&db_path).await;
+                    freshly_cleaned = true;
+                }
+                None => {
+                    // No sidecar on an existing DB: pre-existing install.
+                    // The post-open _SchemaVersion check will catch stale
+                    // schemas *if* Database::new() succeeds. If it segfaults,
+                    // the user must manually delete the DB directory — we
+                    // cannot recover from a native crash. Future opens after
+                    // one successful init will have the sidecar.
+                    tracing::debug!(
+                        path = %db_path.display(),
+                        "no version sidecar; falling back to post-open schema check"
+                    );
+                }
+            }
+        }
 
         // If an empty directory sits at db_path, remove it so LadybugDB
         // can initialize a fresh database. Files (single-file DB format)
@@ -230,6 +309,10 @@ impl CodeGraphDb {
         } else {
             database
         };
+
+        // Persist the current version so the next open() can short-circuit
+        // the Database::new() → _SchemaVersion query path entirely.
+        write_sidecar_version(&db_path, schema::SCHEMA_VERSION).await;
 
         Ok(Self {
             db_path,
@@ -414,6 +497,52 @@ impl CodeGraphDb {
         .context("query task panicked")?
     }
 
+    /// Stream rows from a Cypher query without materializing them all.
+    ///
+    /// The native cursor is driven inside `spawn_blocking` — each row comes
+    /// from a separate `hasNext()/getNext()` FFI pair. Rows are pushed
+    /// through a bounded channel, so a slow consumer backpressures the
+    /// producer, and dropping the stream (e.g. client disconnect) causes
+    /// the next `blocking_send` to fail, breaking the loop and releasing
+    /// the native cursor via `Drop`. Matches GitNexus's `streamQuery`
+    /// pattern (`lbug-adapter.ts:690`) so LadybugDB never has to assemble
+    /// a large result set in one shot — the `.collect()` in `query` is
+    /// what segfaults the native layer on big graphs.
+    pub fn query_stream(
+        &self,
+        cypher: String,
+    ) -> impl futures::Stream<Item = Result<Vec<lbug::Value>>> + Send + 'static {
+        let db = self.database.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<lbug::Value>>>(256);
+
+        tokio::task::spawn_blocking(move || {
+            let conn = match lbug::Connection::new(&db).context("creating connection") {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            };
+            let mut result = match conn
+                .query(&cypher)
+                .with_context(|| format!("querying: {}", truncate_for_log(&cypher, 120)))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            };
+            while let Some(row) = result.next() {
+                if tx.blocking_send(Ok(row)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio_stream::wrappers::ReceiverStream::new(rx)
+    }
+
     /// Execute a query and return a single i64 value (e.g. from RETURN id).
     pub async fn query_scalar_i64(&self, cypher: &str) -> Result<Option<i64>> {
         let rows = self.query(cypher).await?;
@@ -537,3 +666,30 @@ pub struct BatchResult {
 
 /// Wraps a `CodeGraphDb` behind an `Arc` for shared ownership.
 pub type SharedCodeGraphDb = Arc<CodeGraphDb>;
+
+/// Nuke a project's on-disk LadybugDB directory and version sidecar.
+/// The caller must ensure no `lbug::Database` handle for this project is
+/// still live in memory — Windows file locks will defeat the removal
+/// otherwise. Safe to call on a project that was never indexed.
+///
+/// Re-index flows call this before `ensure_db` so the subsequent
+/// `lbug::Database::new` always runs against an empty directory. That
+/// eliminates the stale-data segfault risk that the open-path sidecar
+/// check can miss (e.g. sidecar written correctly but native storage
+/// corrupt in a way only the lbug binary can detect — too late, it has
+/// already SIGSEGV'd).
+pub async fn reset_project_db(project_id: &str, base_path: &Path) -> Result<()> {
+    let db_path = base_path
+        .join("codegraph")
+        .join(project_id)
+        .join("lbug");
+
+    if db_path.exists() && !retry_remove_db(&db_path).await {
+        bail!(
+            "cannot remove LadybugDB at {} — file handles still held",
+            db_path.display()
+        );
+    }
+    remove_sidecar_version(&db_path).await;
+    Ok(())
+}

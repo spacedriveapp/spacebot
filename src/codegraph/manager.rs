@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
-use super::db::{CodeGraphDb, SharedCodeGraphDb};
+use super::db::{CodeGraphDb, SharedCodeGraphDb, reset_project_db};
 use super::events::CodeGraphEvent;
 use super::pipeline;
 use super::pipeline::incremental;
@@ -432,6 +432,19 @@ impl CodeGraphManager {
         config: Arc<CodeGraphConfig>,
         inner: Arc<Inner>,
     ) -> Result<()> {
+        // Drop any live in-memory DB handle and nuke the on-disk directory
+        // before opening. Re-index rebuilds everything anyway, and opening
+        // a stale/partially-corrupt LadybugDB can SIGSEGV inside native
+        // code — `spawn_blocking` can't catch segfaults, so the whole
+        // process dies. Opening fresh sidesteps the risk entirely.
+        {
+            let mut databases = self.inner.databases.write().await;
+            databases.remove(&project_id);
+        }
+        reset_project_db(&project_id, &self.inner.base_path)
+            .await
+            .context("nuking LadybugDB before re-index")?;
+
         let db = self.ensure_db(&project_id).await?;
 
         // Purge existing graph data so re-index starts fresh. When the
