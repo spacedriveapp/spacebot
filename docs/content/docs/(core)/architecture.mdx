@@ -58,8 +58,8 @@ Five process types, each implemented as a Rig `Agent<SpacebotModel, SpacebotHook
 ├─────────────────────────────────────────────────────────┤
 │                       Cortex                            │
 │  System-level observer. Sees across all channels.       │
-│  Generates the memory bulletin — an LLM-curated         │
-│  briefing injected into every channel's prompt.         │
+│  Maintains working memory and knowledge synthesis for   │
+│  channel prompt context.                                │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -160,7 +160,7 @@ The primary database. Stores everything that benefits from relational queries:
 | `cron_executions` | Execution history for cron jobs |
 | `worker_runs` | Worker execution history with transcripts |
 | `branch_runs` | Branch execution history |
-| `cortex_events` | Cortex action log (bulletin generations, maintenance) |
+| `cortex_events` | Cortex action log (knowledge synthesis, maintenance) |
 | `cortex_chat_messages` | Persistent admin chat with cortex |
 | `tasks` | Structured task board (backlog → in_progress → done) |
 | `ingestion_progress` | Chunk-level progress for file ingestion |
@@ -372,7 +372,7 @@ CLI (clap) → parse args
     → Best-effort startup warmup pass (bounded wait)
     → Initialize MessagingManager (start all platform adapters)
     → Initialize CronScheduler
-    → Start Cortex loops (warmup, bulletin fallback, association, ready-task)
+        → Start Cortex loops (warmup, knowledge synthesis, association, ready-task)
         → Register agent in active agents map
     → Enter main event loop (tokio::select!)
         → Inbound messages → route to Channel instances

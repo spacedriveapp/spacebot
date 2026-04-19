@@ -93,12 +93,12 @@ ClawRouter's 15 dimensions are overkill for Spacebot. We know more about the con
 
 - We know the process type (channel vs branch vs worker)
 - We have conversation history (not just the current prompt)
-- We have the memory bulletin (what the agent knows about)
+- We have knowledge synthesis and working-memory layers (what the agent knows and what recently happened)
 - System prompts are excluded from scoring (they're ours, not the user's)
 
 A simplified scorer for Spacebot:
 
-**Score only the user message.** System prompts, memory bulletins, and compaction summaries are excluded. ClawRouter partially does this (reasoning markers check user prompt only) but inconsistently applies it — most dimensions still score against the concatenated system + user text. We score user message only across all dimensions.
+**Score only the user message.** System prompts, memory context layers, and compaction summaries are excluded. ClawRouter partially does this (reasoning markers check user prompt only) but inconsistently applies it -- most dimensions still score against the concatenated system + user text. We score user message only across all dimensions.
 
 **6-8 dimensions instead of 15:**
 

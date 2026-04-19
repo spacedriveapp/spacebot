@@ -11,7 +11,7 @@ Users are reporting that cron behavior feels inconsistent:
 - The assistant can claim a deleted cron still exists.
 - Timezone semantics are unclear and not user-visible.
 
-Current behavior has multiple state surfaces that can drift from each other (in-memory scheduler, DB rows, memory bulletin), and active-hour evaluation is tied to server local time without explicit configuration.
+Current behavior has multiple state surfaces that can drift from each other (in-memory scheduler, DB rows, knowledge context), and active-hour evaluation is tied to server local time without explicit configuration.
 
 ## Goals
 

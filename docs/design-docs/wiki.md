@@ -147,7 +147,7 @@ struct WikiHistoryInput {
 
 **Workers** can be granted wiki write access via a `wiki_write: bool` flag on `WorkerContextMode` (default: `false`). Enable it when the worker is explicitly tasked with wiki creation so it can read and write in one pass. Workers doing background task enrichment for the autonomy loop leave this off and surface findings via task comments instead.
 
-**The autonomy channel** has full wiki access — memory escalation, ingest-triggered synthesis, and wiki maintenance (stale pages, broken links, contradictions). It has the context to do all of this meaningfully: memory bulletin, working memory events, and run history.
+**The autonomy channel** has full wiki access -- memory escalation, ingest-triggered synthesis, and wiki maintenance (stale pages, broken links, contradictions). It has the context to do all of this meaningfully: knowledge synthesis, working memory events, and run history.
 
 ---
 
@@ -307,7 +307,7 @@ who knows nothing about the current conversation.
 
 Agents do not get all wiki pages injected into every conversation. The agent knows what exists; it fetches what it needs.
 
-**Index in bulletin.** The memory bulletin includes a compact wiki index: page titles and types only, no content. The agent sees what pages exist and can fetch any of them with `wiki_read`.
+**Index in knowledge context.** Knowledge synthesis can include a compact wiki index: page titles and types only, no content. The agent sees what pages exist and can fetch any of them with `wiki_read`.
 
 ```
 ## Wiki (14 pages)

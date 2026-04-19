@@ -227,9 +227,9 @@ Current user: JamiePine (user_id: a1b2c3d4-...)
 
 The branch uses this when calling `memory_save` (to scope new memories) and `memory_recall` (to search for that user's context). The LLM still makes the judgment call — not every memory in a conversation with user X should be scoped to user X.
 
-### Channel → Compactor
+### Channel to Compactor
 
-The compactor currently renders messages as `User: {text}`, stripping all sender attribution. This means memories extracted during compaction can never be user-scoped because the compaction LLM doesn't know who said what.
+Historical note: the old compactor path rendered messages as `User: {text}`, stripping all sender attribution. That made compaction-extracted memories impossible to scope to a user because the compaction LLM did not know who said what.
 
 Fix: `render_messages_as_transcript()` preserves sender names:
 

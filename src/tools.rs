@@ -1031,8 +1031,7 @@ pub fn create_worker_tool_server(
 
 /// Create a ToolServer for the cortex process.
 ///
-/// Retained for potential future use. The compactor no longer uses this
-/// (Phase 5b removed compactor memory_save).
+/// Retained for potential future cortex workflows.
 #[allow(dead_code)]
 pub fn create_cortex_tool_server(
     agent_id: AgentId,

@@ -19,7 +19,9 @@ prompts/
 │   ├── compactor.md.j2         # Compactor worker prompt
 │   ├── memory_persistence.md.j2 # Memory persistence branch prompt
 │   ├── ingestion.md.j2          # File ingestion worker prompt
-│   └── cortex_bulletin.md.j2    # Bulletin synthesis prompt
+│   ├── cortex_knowledge_synthesis.md.j2 # Knowledge context synthesis prompt
+│   ├── cortex_intraday_synthesis.md.j2  # Working-memory batch synthesis prompt
+│   └── cortex_daily_summary.md.j2       # Working-memory daily summary prompt
 ```
 
 All templates are embedded into the binary using `include_str!` and loaded into the `PromptEngine` at startup.
@@ -38,7 +40,7 @@ let worker_prompt = engine.render_static("worker")?;
 // Render with variables
 let channel_prompt = engine.render_channel_prompt(
     Some(identity_context),      // Option<String>
-    Some(memory_bulletin),       // Option<String>
+    Some(memory_bulletin),       // Option<String> legacy fallback
     Some(skills_prompt),         // Option<String>
     worker_capabilities,         // String
     conversation_context,        // Option<String>
@@ -62,7 +64,7 @@ fragments/
     ├── worker_overflow       # Context overflow recovery
     ├── worker_compact        # History compaction marker
     ├── memory_persistence    # Memory persistence user prompt
-    ├── cortex_synthesis      # Bulletin synthesis instruction
+    ├── cortex_synthesis      # Synthesis instruction
     └── ingestion_chunk       # File chunk processing prompt
 ```
 
@@ -110,12 +112,6 @@ The channel system prompt is the most complex, assembled from multiple dynamic c
 {{ identity_context }}
 {%- endif %}
 
-{%- if memory_bulletin %}
-## Memory Context
-
-{{ memory_bulletin }}
-{%- endif %}
-
 [Base channel instructions...]
 
 {%- if skills_prompt %}
@@ -123,6 +119,30 @@ The channel system prompt is the most complex, assembled from multiple dynamic c
 {%- endif %}
 
 {{ worker_capabilities }}
+
+{%- if working_memory %}
+{{ working_memory }}
+{%- endif %}
+
+{%- if channel_activity_map %}
+{{ channel_activity_map }}
+{%- endif %}
+
+{%- if participant_context %}
+{{ participant_context }}
+{%- endif %}
+
+{%- if knowledge_synthesis %}
+## Knowledge Context
+
+{{ knowledge_synthesis }}
+{%- endif %}
+
+{%- if memory_bulletin and not knowledge_synthesis %}
+## Memory Context
+
+{{ memory_bulletin }}
+{%- endif %}
 
 {%- if conversation_context %}
 ## Conversation Context
@@ -136,6 +156,49 @@ The channel system prompt is the most complex, assembled from multiple dynamic c
 {{ status_text }}
 {%- endif %}
 ```
+
+## Prompt Cache Boundaries
+
+Prompt assembly should preserve stable prefix bytes where possible. Provider prompt caches reward repeated prefix content, so static sections should stay deterministic across turns.
+
+Stable sections:
+
+- identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`)
+- base channel, branch, worker, compactor, and cortex instructions
+- tool descriptions and capability lists, sorted deterministically
+- skill lists, sorted deterministically
+
+Volatile sections:
+
+- `## Working Memory`
+- `## Other Channels`
+- `## Participants`
+- `## Knowledge Context`
+- `## Conversation Context`
+- `## Current Status`
+- retrigger and coalesced-message hints
+
+Rules:
+
+1. Keep volatile sections near the lower end of the channel prompt.
+2. Render maps, sets, registries, channels, tools, and skills in deterministic order.
+3. Do not rewrite older transcript or summary bytes every turn.
+4. Prefer appending or replacing the newest volatile section over reshaping the whole prompt.
+5. Add snapshot tests when changing prompt assembly so stable sections remain byte-identical when only runtime status changes.
+
+## Active Recall Pattern
+
+Targeted memory recall belongs in branches, not in the channel. For latency-sensitive recall, use an opportunistic branch with a narrow contract:
+
+```text
+Return exactly NONE or one compact background note for the channel.
+Do not answer the user.
+Do not include raw search rows.
+Treat the latest user message as primary.
+If confidence is weak, return NONE.
+```
+
+This keeps OpenClaw-style active memory useful without blocking the channel or polluting its prompt with raw retrieval data.
 
 ## Adding a New Language
 

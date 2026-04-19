@@ -166,12 +166,12 @@ There are two distinct execution paths for `ready` tasks. Both use the same bran
 3. As the worker executes, it can only update progress for its assigned task via `task_update`
 4. When the worker completes, the task moves to `done` with `completed_at` set
 
-### Bulletin Integration
+### Knowledge Context Integration
 
-The bulletin generation loop should include a new section querying active tasks:
+The knowledge synthesis loop should include a compact section querying active tasks:
 
 ```rust
-BulletinSection {
+KnowledgeSynthesisSection {
     name: "Active Tasks",
     search_mode: SearchMode::Typed,
     // This would actually query the tasks table, not memories
