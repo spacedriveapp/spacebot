@@ -371,6 +371,8 @@ impl BulletinRefreshOutcome {
     }
 }
 
+const CORTEX_ONE_SHOT_MAX_TURNS: usize = 1;
+
 fn maybe_spawn_synthesis_task(
     task: &mut Option<tokio::task::JoinHandle<anyhow::Result<bool>>>,
     backoff: &SynthesisTaskBackoff,
@@ -2762,6 +2764,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     let agent = AgentBuilder::new(model)
         .preamble(&bulletin_prompt)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let synthesis_prompt = match prompt_engine
@@ -3006,6 +3009,7 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
     let agent = AgentBuilder::new(model)
         .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let max_words = cortex_config.knowledge_synthesis_max_words;
@@ -3251,6 +3255,13 @@ pub async fn maybe_synthesize_intraday_batch(
 
     // Render the synthesis prompt.
     let prompt_engine = deps.runtime_config.prompts.load();
+    let synthesis_preamble = match prompt_engine.render_static("cortex_intraday_synthesis_system") {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            tracing::warn!(%error, "failed to render cortex_intraday_synthesis_system prompt");
+            return Err(error.into());
+        }
+    };
     let prompt = prompt_engine.render_intraday_synthesis(
         unsynthesized.len(),
         &time_start_str,
@@ -3270,8 +3281,9 @@ pub async fn maybe_synthesize_intraday_batch(
         .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
-        .preamble("You are a concise narrative summarizer. Output only the summary paragraph, nothing else.")
+        .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let synthesis = agent.prompt(&prompt).await;
@@ -3407,6 +3419,13 @@ pub async fn maybe_synthesize_daily_summary(
 
     let wm_config = **deps.runtime_config.working_memory.load();
     let prompt_engine = deps.runtime_config.prompts.load();
+    let synthesis_preamble = match prompt_engine.render_static("cortex_daily_summary_system") {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            tracing::warn!(%error, "failed to render cortex_daily_summary_system prompt");
+            return Err(error.into());
+        }
+    };
     let prompt = prompt_engine.render_daily_summary(
         &yesterday,
         wm_config.daily_summary_max_words,
@@ -3425,8 +3444,9 @@ pub async fn maybe_synthesize_daily_summary(
         .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
-        .preamble("You are a daily activity summarizer. Output only the summary, nothing else.")
+        .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let summary = agent.prompt(&prompt).await;
@@ -3591,6 +3611,7 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     let agent = AgentBuilder::new(model)
         .preamble(&profile_prompt)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let result = agent
