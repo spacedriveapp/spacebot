@@ -132,19 +132,38 @@ fn build_system_prompt(
     }
 
     if let Some(preamble) = &request.preamble {
-        let mut preamble_block = serde_json::json!({
-            "type": "text",
-            "text": preamble,
-        });
-        if let Some(cc) = cache_control {
-            preamble_block["cache_control"] = cc.clone();
+        if let Some((stable_prefix, volatile_suffix)) =
+            crate::prompts::engine::split_system_prompt_cache_boundary(preamble)
+        {
+            push_system_text_block(&mut system_blocks, stable_prefix, cache_control);
+            push_system_text_block(&mut system_blocks, volatile_suffix, &None);
+        } else {
+            push_system_text_block(&mut system_blocks, preamble, cache_control);
         }
-        system_blocks.push(preamble_block);
     }
 
     if !system_blocks.is_empty() {
         body["system"] = serde_json::json!(system_blocks);
     }
+}
+
+fn push_system_text_block(
+    system_blocks: &mut Vec<serde_json::Value>,
+    text: &str,
+    cache_control: &Option<serde_json::Value>,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let mut block = serde_json::json!({
+        "type": "text",
+        "text": text,
+    });
+    if let Some(cache_control) = cache_control {
+        block["cache_control"] = cache_control.clone();
+    }
+    system_blocks.push(block);
 }
 
 /// Build tool definitions, optionally normalizing names. Returns the original
@@ -201,6 +220,23 @@ fn build_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig::completion::{Message, ToolDefinition};
+    use rig::one_or_many::OneOrMany;
+
+    fn completion_request_with_preamble(preamble: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: Some(preamble.to_string()),
+            chat_history: OneOrMany::one(Message::user("hello")),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        }
+    }
 
     #[test]
     fn adaptive_thinking_detected_for_4_6_models() {
@@ -217,5 +253,98 @@ mod tests {
         assert!(!supports_adaptive_thinking("claude-sonnet-4-5"));
         assert!(!supports_adaptive_thinking("claude-opus-4-0"));
         assert!(!supports_adaptive_thinking("gpt-4o"));
+    }
+
+    #[test]
+    fn system_prompt_cache_boundary_splits_preamble_cache_control() {
+        let request = completion_request_with_preamble(&format!(
+            "stable prefix\n{}\nvolatile suffix",
+            crate::prompts::engine::SYSTEM_PROMPT_CACHE_BOUNDARY
+        ));
+        let expected_cache_control = serde_json::json!({"type": "ephemeral"});
+        let cache_control = Some(expected_cache_control.clone());
+        let mut body = serde_json::json!({});
+
+        build_system_prompt(&mut body, &request, false, &cache_control);
+
+        let system_blocks = body["system"]
+            .as_array()
+            .expect("system prompt should be an array");
+        assert_eq!(system_blocks.len(), 2);
+        assert_eq!(system_blocks[0]["text"], "stable prefix\n");
+        assert_eq!(system_blocks[0]["cache_control"], expected_cache_control);
+        assert_eq!(system_blocks[1]["text"], "\nvolatile suffix");
+        assert!(system_blocks[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn system_prompt_without_cache_boundary_preserves_existing_cache_behavior() {
+        let request = completion_request_with_preamble("stable prompt");
+        let expected_cache_control = serde_json::json!({"type": "ephemeral"});
+        let cache_control = Some(expected_cache_control.clone());
+        let mut body = serde_json::json!({});
+
+        build_system_prompt(&mut body, &request, false, &cache_control);
+
+        let system_blocks = body["system"]
+            .as_array()
+            .expect("system prompt should be an array");
+        assert_eq!(system_blocks.len(), 1);
+        assert_eq!(system_blocks[0]["text"], "stable prompt");
+        assert_eq!(system_blocks[0]["cache_control"], expected_cache_control);
+    }
+
+    #[test]
+    fn build_anthropic_request_keeps_cache_boundary_out_of_volatile_system_block() {
+        let client = reqwest::Client::new();
+        let mut request = completion_request_with_preamble(&format!(
+            "stable prefix\n{}\nvolatile suffix",
+            crate::prompts::engine::SYSTEM_PROMPT_CACHE_BOUNDARY
+        ));
+        request.tools = vec![ToolDefinition {
+            name: "reply".to_string(),
+            description: "Send a reply".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"}
+                }
+            }),
+        }];
+
+        let anthropic_request = build_anthropic_request(
+            &client,
+            "sk-ant-test",
+            "https://api.anthropic.com",
+            "claude-sonnet-4-5",
+            &request,
+            "auto",
+            false,
+        );
+        let http_request = anthropic_request
+            .builder
+            .build()
+            .expect("request should build");
+        let body = http_request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .expect("request body should be buffered JSON");
+        let body: serde_json::Value =
+            serde_json::from_slice(body).expect("request body should be JSON");
+
+        let system_blocks = body["system"]
+            .as_array()
+            .expect("system prompt should be an array");
+        assert_eq!(system_blocks.len(), 2);
+        assert!(system_blocks[0]["cache_control"].is_object());
+        assert!(system_blocks[1].get("cache_control").is_none());
+        assert_eq!(system_blocks[0]["text"], "stable prefix\n");
+        assert_eq!(system_blocks[1]["text"], "\nvolatile suffix");
+
+        let tools = body["tools"]
+            .as_array()
+            .expect("tool definitions should be an array");
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0]["cache_control"].is_object());
     }
 }

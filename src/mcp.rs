@@ -605,6 +605,7 @@ impl McpManager {
             }
         }
 
+        names.sort();
         names
     }
 
@@ -852,6 +853,68 @@ fn interpolate_env_placeholders(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_mcp_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            enabled: true,
+            transport: McpTransport::Stdio {
+                command: "test".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        }
+    }
+
+    fn test_tool(name: &str, description: Option<&str>) -> rmcp::model::Tool {
+        let mut tool = rmcp::model::Tool::default();
+        tool.name = Cow::Owned(name.to_string());
+        tool.description = description.map(|description| Cow::Owned(description.to_string()));
+        tool
+    }
+
+    #[tokio::test]
+    async fn get_tool_names_returns_deterministic_sorted_names() {
+        let manager = McpManager::new(Vec::new());
+
+        let later_connection = Arc::new(McpConnection::new(test_mcp_config("z_server")));
+        {
+            let mut tools = later_connection.tools.write().await;
+            *tools = vec![test_tool("z_tool", Some("z desc"))];
+        }
+        {
+            let mut state = later_connection.state.write().await;
+            *state = McpConnectionState::Connected;
+        }
+
+        let earlier_connection = Arc::new(McpConnection::new(test_mcp_config("a_server")));
+        {
+            let mut tools = earlier_connection.tools.write().await;
+            *tools = vec![
+                test_tool("b_tool", None),
+                test_tool("a_tool", Some("a desc")),
+            ];
+        }
+        {
+            let mut state = earlier_connection.state.write().await;
+            *state = McpConnectionState::Connected;
+        }
+
+        {
+            let mut connections = manager.connections.write().await;
+            connections.insert("z_server".to_string(), later_connection);
+            connections.insert("a_server".to_string(), earlier_connection);
+        }
+
+        assert_eq!(
+            manager.get_tool_names().await,
+            vec![
+                "a_tool — a desc",
+                "b_tool — from a_server",
+                "z_tool — z desc"
+            ]
+        );
+    }
 
     #[test]
     fn parse_bearer_token_strips_bearer_prefix() {
