@@ -130,6 +130,7 @@ pub struct CronContext {
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const WORKING_MEMORY_CRON_ERROR_MAX_CHARS: usize = 500;
 
 /// RAII guard that clears an `AtomicBool` on drop, ensuring the flag is
 /// released even if the holding task panics.
@@ -153,7 +154,12 @@ fn emit_cron_error(
     failure_class: &'static str,
     error: &crate::error::Error,
 ) {
-    let message = format!("Cron {failure_class}: {job_id}: {error}");
+    let secrets_guard = context.deps.runtime_config.secrets.load();
+    let tool_secret_pairs = match (*secrets_guard).as_ref() {
+        Some(store) => store.tool_secret_pairs(),
+        None => Vec::new(),
+    };
+    let message = cron_error_memory_message(job_id, failure_class, error, &tool_secret_pairs);
 
     // Emit to working memory for agent context awareness
     context
@@ -165,6 +171,19 @@ fn emit_cron_error(
 
     // Log to tracing for observability
     tracing::error!(cron_id = %job_id, failure_class, %error, "cron job execution failed");
+}
+
+fn cron_error_memory_message(
+    job_id: &str,
+    failure_class: &'static str,
+    error: &crate::error::Error,
+    tool_secret_pairs: &[(String, String)],
+) -> String {
+    crate::secrets::scrub::scrub_working_memory_text(
+        &format!("Cron {failure_class}: {job_id}: {error}"),
+        tool_secret_pairs,
+        WORKING_MEMORY_CRON_ERROR_MAX_CHARS,
+    )
 }
 
 #[derive(Debug)]
@@ -1730,9 +1749,11 @@ fn normalize_cron_delivery_response(response: OutboundResponse) -> Option<Outbou
 #[cfg(test)]
 mod tests {
     use super::{
-        CronConfig, CronJob, CronResponseWaitOutcome, CronRunError, await_cron_delivery_response,
-        cron_response_summary, hour_in_active_window, normalize_active_hours,
-        normalize_cron_delivery_response, set_job_enabled_state, sync_job_from_store,
+        CronConfig, CronJob, CronResponseWaitOutcome, CronRunError,
+        WORKING_MEMORY_CRON_ERROR_MAX_CHARS, await_cron_delivery_response,
+        cron_error_memory_message, cron_response_summary, hour_in_active_window,
+        normalize_active_hours, normalize_cron_delivery_response, set_job_enabled_state,
+        sync_job_from_store,
     };
     use crate::cron::store::CronStore;
     use crate::messaging::target::parse_delivery_target;
@@ -1996,6 +2017,43 @@ mod tests {
         assert_eq!(delivery_error.as_error().to_string(), "adapter offline");
         assert_eq!(delivery_error.failure_class(), "delivery_error");
         assert_eq!(execution_error.failure_class(), "execution_error");
+    }
+
+    #[test]
+    fn cron_error_memory_message_redacts_and_bounds_error_text() {
+        let tool_secret_pairs = vec![("API_KEY".to_string(), "stored-secret".to_string())];
+        let error = crate::error::Error::Other(anyhow::anyhow!(
+            "{} {} {}",
+            "stored-secret",
+            "sk-ant-abc123456789012345678",
+            "x".repeat(WORKING_MEMORY_CRON_ERROR_MAX_CHARS)
+        ));
+
+        let message = cron_error_memory_message(
+            "daily-digest",
+            "execution_error",
+            &error,
+            &tool_secret_pairs,
+        );
+
+        assert!(
+            !message.contains("stored-secret"),
+            "stored secret should be redacted in: {message}"
+        );
+        assert!(
+            !message.contains("sk-ant-"),
+            "leak pattern should be redacted in: {message}"
+        );
+        assert!(
+            message.contains("[REDACTED:API_KEY]"),
+            "stored secret marker missing in: {message}"
+        );
+        assert!(
+            message.contains("[LEAKED_SECRET_REDACTED]"),
+            "leak marker missing in: {message}"
+        );
+        assert_eq!(message.chars().count(), WORKING_MEMORY_CRON_ERROR_MAX_CHARS);
+        assert!(message.ends_with(" ... [truncated]"));
     }
 
     #[tokio::test]

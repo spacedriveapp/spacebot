@@ -17,8 +17,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R3 — Don't exclude participant-role facts yet** (`prompts/en/cortex_knowledge_synthesis.md.j2:21`)
   Exclusion of "The user is the CEO" drops participant context with nowhere else to live until Phase 6 ships. **Fixed in this slice:** knowledge synthesis now preserves concise participant/user role facts when they affect future routing, authority, relationships, or interpretation.
 
-- [ ] **R4 — Raw worker task in working memory** (`src/agent/channel_dispatch.rs:596`)
-  `task` from user input persisted verbatim; could capture secrets/PII. Truncate and scrub.
+- [x] **R4 — Raw worker task in working memory** (`src/agent/channel_dispatch.rs:596`)
+  `task` from user input persisted verbatim; could capture secrets/PII. **Fixed in this slice:** worker-spawn working-memory text now uses shared secret redaction and char-safe truncation.
 
 - [ ] **R5 — Dirty flag only bumps on merges** (`src/agent/cortex.rs:1958`)
   Prunes and decays also change the memory set but don't trigger knowledge synthesis re-gen. Add `report.pruned > 0 || report.decayed > 0`. **Partial in PR #570:** prunes and merges now dirty synthesis; decay remains intentionally importance-only and needs a follow-up decision.
@@ -44,8 +44,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [ ] **R12 — Silent error swallowing in inspect_prompt** (`src/api/channels.rs:649`)
   `unwrap_or_default()` / `.ok()` hides DB/template errors. Log and propagate per coding guidelines.
 
-- [ ] **R13 — Raw error strings in working memory** (`src/cron/scheduler.rs:386`)
-  Full error text persisted; could contain sensitive internals. Emit redacted summary only.
+- [x] **R13 — Raw error strings in working memory** (`src/cron/scheduler.rs:386`)
+  Full error text persisted; could contain sensitive internals. **Fixed in this slice:** cron error working-memory text now uses the same redacted, bounded summary while tracing keeps the full error.
 
 - [ ] **R14 — Timezone fallback drops valid `cron_timezone`** (`src/main.rs:2559`)
   If `user_timezone` is present but unparseable, `cron_timezone` is never tried. Parse each independently.
