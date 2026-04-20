@@ -507,6 +507,10 @@ struct BranchTracker {
     branch_id: BranchId,
     channel_id: ChannelId,
     started_at: Instant,
+    /// Currently set at branch spawn only. To make this truly activity-based,
+    /// send a ProcessEvent variant from the hook on tool completions and text
+    /// deltas, then update this field in the cortex event loop.
+    last_activity_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -588,12 +592,14 @@ impl HealthRuntimeState {
     }
 
     fn track_branch_start(&mut self, branch_id: BranchId, channel_id: ChannelId) {
+        let now = Instant::now();
         self.branch_trackers.insert(
             branch_id,
             BranchTracker {
                 branch_id,
                 channel_id,
-                started_at: Instant::now(),
+                started_at: now,
+                last_activity_at: now,
             },
         );
     }
@@ -660,7 +666,7 @@ fn parse_structured_success_flag(result: &str) -> Option<bool> {
 fn kill_target_last_activity(target: &KillTarget) -> Instant {
     match target {
         KillTarget::Worker(tracker) => tracker.last_activity_at,
-        KillTarget::Branch(tracker) => tracker.started_at,
+        KillTarget::Branch(tracker) => tracker.last_activity_at,
     }
 }
 
@@ -1194,7 +1200,7 @@ impl Cortex {
             .await;
 
         let now = Instant::now();
-        let (lagged_control, pending_breaker_trips, overdue_workers, overdue_branches) = {
+        let (lagged_control, pending_breaker_trips, overdue_workers, overdue_branches, active_branches, active_workers) = {
             let mut state = self.health_runtime_state.write().await;
             let lagged_control = take_lagged_control_flag(&mut state);
 
@@ -1220,18 +1226,33 @@ impl Cortex {
                 state
                     .branch_trackers
                     .values()
-                    .filter(|tracker| now.duration_since(tracker.started_at) >= branch_timeout)
+                    .filter(|tracker| now.duration_since(tracker.last_activity_at) >= branch_timeout)
                     .cloned()
                     .collect()
             };
+
+            let active_branches = state.branch_trackers.len();
+            let active_workers = state.worker_trackers.len();
 
             (
                 lagged_control,
                 pending_breaker_trips,
                 overdue_workers,
                 overdue_branches,
+                active_branches,
+                active_workers,
             )
         };
+
+        if !lagged_control {
+            tracing::debug!(
+                active_branches,
+                active_workers,
+                overdue_branches = overdue_branches.len(),
+                overdue_workers = overdue_workers.len(),
+                "cortex health tick"
+            );
+        }
 
         for trip in pending_breaker_trips {
             logger.log(
@@ -1254,6 +1275,8 @@ impl Cortex {
                     "kill_skipped_due_to_lag": true,
                     "kill_budget": kill_budget,
                     "pruned_dead_channels": pruned_dead_channels,
+                    "active_branches": active_branches,
+                    "active_workers": active_workers,
                 })),
             );
             return Ok(());
@@ -5627,12 +5650,14 @@ mod tests {
                 .expect("valid uuid"),
             channel_id: Arc::from("channel-a"),
             started_at: older,
+            last_activity_at: older,
         };
         let branch_newest = BranchTracker {
             branch_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002")
                 .expect("valid uuid"),
             channel_id: Arc::from("channel-a"),
             started_at: newer,
+            last_activity_at: newer,
         };
 
         let targets = build_kill_targets(
