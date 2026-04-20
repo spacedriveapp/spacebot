@@ -75,17 +75,17 @@ The Discord agent's conversation history shows users referencing prior conversat
 
 ## Problem 3: Memory Creation Is Too Passive
 
-### What happens today
+### Original baseline
 
-Memories are created through three paths:
+At the time of this analysis, memories were created through three paths:
 
 1. **Branch-initiated:** A branch decides to call `memory_save` during conversation processing. This depends on the LLM's judgment -- it may or may not decide something is worth saving.
 
-2. **Compactor-initiated:** When context hits >80% capacity, the compactor spawns a worker that summarizes old context AND extracts memories via `memory_save`. This only fires when the context window is nearly full.
+2. **Compactor-initiated, now removed:** When context hit >80% capacity, the compactor spawned a worker that summarized old context AND extracted memories via `memory_save`. This only fired when the context window was nearly full.
 
 3. **Periodic memory persistence branch:** Every 50 user messages (configurable), a special branch runs with the full conversation history and a prompt to extract important memories. It recalls first to avoid duplicates, then saves selectively.
 
-### Why this is a problem
+### Why this was a problem
 
 **Compaction is the wrong trigger for memory creation.** Compaction fires at >80% context capacity. For light conversations (a few messages per day), the agent may never hit this threshold. Days or weeks of conversation can pass with zero compaction-initiated memories. Memory creation should not depend on context pressure.
 
@@ -232,9 +232,9 @@ The Discord agent's conversation transcript shows:
 
 ---
 
-## The Compaction Memory Path Should Be Sunset
+## The Compaction Memory Path Was Sunset
 
-The compactor currently has two jobs: (1) summarize old context to free up space, and (2) extract memories from the context being compacted. Job 1 is fine and should remain. Job 2 is the wrong place for memory creation, for several reasons:
+The original compactor had two jobs: (1) summarize old context to free up space, and (2) extract memories from the context being compacted. Job 1 is fine and remains. Job 2 was the wrong place for memory creation and has since been removed, for several reasons:
 
 **It only fires under context pressure.** If the agent has a light conversation (20 messages), compaction never triggers. Those 20 messages may contain critical information that is never persisted.
 

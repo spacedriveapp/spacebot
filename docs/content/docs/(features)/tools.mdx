@@ -22,7 +22,7 @@ Core tools include:
 | `cancel` | Stop a running worker or branch | Channel |
 | `skip` | Opt out of responding to the current message | Channel |
 | `react` | Add an emoji reaction to the user's message | Channel |
-| `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
+| `memory_save` | Write a memory to the store | Branch, Cortex |
 | `memory_recall` | Search memories via hybrid search | Branch |
 | `channel_recall` | Retrieve transcript from another channel | Branch |
 | `spacebot_docs` | Read embedded Spacebot docs/changelog/AGENTS | Branch, Cortex Chat |
@@ -164,7 +164,7 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, `email_search` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, `email_search` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -182,6 +182,8 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 ### Per-process tools (created and destroyed with the process)
 
 Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
+
+Compaction workers do not get a ToolServer. They produce a one-turn rolling history summary only; durable memory extraction happens through branches, ingestion, cortex, and silent memory persistence branches.
 
 ## Tool Design Patterns
 

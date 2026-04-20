@@ -44,13 +44,11 @@ These are the normal path. A compaction worker runs in `tokio::spawn` alongside 
 
 1. **Drain** — Write-lock the channel's history, remove the oldest N messages (30% for background, 50% for aggressive). Release the lock. The channel can immediately continue with the remaining history.
 
-2. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/en/compactor.md.j2` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
+2. **Summarize** — Build a transcript from the removed messages and run a toolless one-turn agent with `prompts/en/compactor.md.j2` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
 
-3. **Extract memories** — The compaction agent has access to the `memory_save` tool. While summarizing, it identifies facts, preferences, decisions, and observations worth keeping long-term and saves them directly to the memory store. These persist independently of the conversation.
+3. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
 
-4. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
-
-The compaction agent runs with `max_turns(10)` — enough for the LLM to produce the summary and call `memory_save` a few times for extracted memories.
+The compaction worker runs with a single LLM turn and no tools. It does not write durable memories; memory extraction is handled by branches, ingestion, cortex, and silent memory persistence branches.
 
 ## Emergency Truncation
 
@@ -83,7 +81,7 @@ The compaction agent receives a rendered transcript of the removed messages. Use
 
 **Discard:** Greetings, small talk, tool call details (results matter, not mechanics), intermediate reasoning, repeated information.
 
-**Extract as memories:** Facts, preferences, decisions, observations — anything that should outlive the conversation.
+Durable memories are extracted separately by memory persistence branches and other explicit memory-writing paths. Compaction summaries preserve rolling conversation context but do not write to the memory store.
 
 ## Configuration
 
@@ -114,8 +112,8 @@ The `context_window` setting (default 128,000 tokens) determines the denominator
 | When it runs | Blocks the session | Background tokio task |
 | User experience | Typing indicator, 20s freeze | No interruption |
 | Summarization | Same session's LLM | Dedicated compaction worker |
-| Memory extraction | Separate pass | Same LLM call as summarization |
-| Raw transcript | Lost | Extracted as memories |
+| Memory extraction | Separate pass | Persistence branches and explicit memory tools |
+| Raw transcript | Lost | Preserved as rolling compaction summaries |
 | Multiple summaries | One summary replaces all | Summaries stack chronologically |
 | Emergency fallback | None (just hope it fits) | Hard truncation at 95% |
 

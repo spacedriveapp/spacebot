@@ -24,7 +24,7 @@ pub struct Memory {
 }
 ```
 
-User identity does exist at the message level — `InboundMessage.sender_id` carries platform user IDs, and `conversation_messages` persists `sender_name` and `sender_id` per message. But none of this connects to memory. Branches see formatted history like `[JamiePine]: hello` but have no structured user data. The compactor actively strips attribution, rendering everything as `User: text`.
+User identity does exist at the message level — `InboundMessage.sender_id` carries platform user IDs, and `conversation_messages` persists `sender_name` and `sender_id` per message. But none of this connects to memory. Branches see formatted history like `[JamiePine]: hello` but have no structured user data. Persistence branches can read attributed conversation history, but they do not receive a canonical user ID map today.
 
 ## Canonical User Identity
 
@@ -227,18 +227,18 @@ Current user: JamiePine (user_id: a1b2c3d4-...)
 
 The branch uses this when calling `memory_save` (to scope new memories) and `memory_recall` (to search for that user's context). The LLM still makes the judgment call — not every memory in a conversation with user X should be scoped to user X.
 
-### Channel → Compactor
+### Channel → Persistence Branch
 
-The compactor currently renders messages as `User: {text}`, stripping all sender attribution. This means memories extracted during compaction can never be user-scoped because the compaction LLM doesn't know who said what.
+Memory persistence branches review conversation history and save durable memories in the background. They need sender attribution plus canonical user IDs so memories extracted from multi-user conversations can be scoped to the right person.
 
-Fix: `render_messages_as_transcript()` preserves sender names:
+Fix: the persistence branch context preserves sender names and injects a mapping of display names/platform senders to canonical user IDs:
 
 ```
 JamiePine: I'm switching the auth system to JWT
 JamiePine: session cookies don't work well with the mobile app
 ```
 
-The compaction worker also receives a mapping of display names to canonical user IDs, injected into its system prompt, so it can set `user_id` on extracted memories.
+The persistence branch uses this mapping when calling `memory_save`, so it can set `user_id` on extracted memories when the memory is about or from a specific person.
 
 ### Context Injection
 
@@ -294,9 +294,9 @@ When a branch is spawned with user context, the prompt includes structured user 
 | `src/memory/search.rs` | `SearchConfig.user_id`, filter propagation |
 | `src/tools/memory_save.rs` | `user_id` on `MemorySaveArgs`, pass through to `Memory` |
 | `src/tools/memory_recall.rs` | `user_id` on `MemoryRecallArgs`, pass to `SearchConfig` |
-| `src/agent/channel.rs` | Resolve canonical user_id, pass to branch/compactor |
+| `src/agent/channel.rs` | Resolve canonical user_id, pass to branches and memory persistence |
 | `src/agent/branch.rs` | Accept user context, inject into prompt |
-| `src/agent/compactor.rs` | Preserve sender attribution in transcripts, pass user mapping |
+| `src/agent/channel_dispatch.rs` | Preserve sender attribution in persistence branch context, pass user mapping |
 | `src/conversation/context.rs` | User-aware memory injection |
 | `src/main.rs` | Initialize `UserStore`, resolve on inbound messages |
 | `src/api/server.rs` | `user_id` filter params, `/api/agents/users` endpoint |
@@ -304,7 +304,7 @@ When a branch is spawned with user context, the prompt includes structured user 
 | `prompts/en/tools/memory_save_description.md.j2` | Document `user_id` |
 | `prompts/en/tools/memory_recall_description.md.j2` | Document `user_id` filter |
 | `prompts/en/branch.md.j2` | User context injection |
-| `prompts/en/compactor.md.j2` | User mapping for memory extraction |
+| `prompts/en/memory_persistence.md.j2` | User mapping for memory extraction |
 
 ## Phases
 

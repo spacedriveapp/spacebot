@@ -77,9 +77,11 @@ These events drive `StatusBlock` updates but are **not persisted**. They exist o
 
 ### Current Memory Persistence Flow
 
-1. **Compaction-based** — When the compactor runs (`>80%` context), the compaction worker calls `memory_save` on extracted facts/decisions. This is the safety net.
-2. **Periodic persistence branch** — Triggered every 50 user messages. Branches off channel context, recalls existing memories, saves new ones, calls `memory_persistence_complete`.
-3. **Manual** — Branches can call `memory_save` directly during thinking.
+The original baseline included compactor-driven memory extraction. Phase 5b has since removed that path; compaction is now context management only.
+
+1. **Signal-triggered persistence branch** — Triggered by message count, time, or working-memory event density. Branches off channel context, recalls existing memories, saves new ones, calls `memory_persistence_complete`, and can emit typed working-memory events.
+2. **Manual branch save** — Branches can call `memory_save` directly during thinking.
+3. **Ingestion/cortex save** — Ingestion and cortex paths can write durable memories when processing source material or system-level observations.
 
 ---
 
@@ -99,7 +101,7 @@ These events drive `StatusBlock` updates but are **not persisted**. They exist o
 | **Progressive compression** | Nothing | Rendering logic with token budgeting |
 | **Decision extraction** | Nothing | Persistence branch dual output, programmatic heuristics |
 | **Persistence triggers** | 50-message threshold only | Message count (20), time (15min), event density (5+) |
-| **Compactor memory removal** | Compactor calls `memory_save` | Remove `memory_save` from compactor tool set |
+| **Compactor memory removal** | Removed | Compactor is summary-only; memory extraction is handled by persistence branches and explicit memory tools |
 | **Config changes** | `bulletin_interval_secs`, `bulletin_max_words` | New `WorkingMemoryConfig`, deprecation aliases |
 
 ### Dependencies Between Gaps
@@ -836,7 +838,7 @@ Remove: bulletin interval timer, bulletin generation function, warmup bulletin r
 ### Phase 5a: Smarter Memory Persistence Triggers
 
 **Dependencies:** Phase 1 (event density trigger needs event counting)
-**Risk:** Low — purely additive, existing compactor behavior unchanged
+**Risk:** Low — purely additive; compactor behavior remains summary-only
 
 #### 5a.1 New Persistence Triggers
 
@@ -904,17 +906,18 @@ When `events` is present, write each to the working memory store with the curren
 
 ### Phase 5b: Sunset Compactor Memory Extraction
 
+**Status:** Completed.
 **Dependencies:** Phase 5a deployed and validated (new persistence triggers confirmed adequate)
-**Risk:** Medium — removes a memory creation path. Only deploy after Phase 5a monitoring confirms coverage.
+**Risk:** Medium — removed a memory creation path. Continue to monitor memory quality and persistence coverage.
 
 #### 5b.1 Remove Memory Save from Compactor
 
-Update `src/agent/compactor.rs`:
-- Remove `memory_save` from the compactor's tool server
+Current `src/agent/compactor.rs` behavior:
+- The compactor has no tool server
 - The compactor's only output is the compaction summary injected into history
 
-Update `prompts/en/compactor.md.j2`:
-- Remove all `memory_save` instructions
+Current `prompts/en/compactor.md.j2` behavior:
+- The prompt tells the compactor not to save memories
 - The compactor's sole responsibility is producing a compaction summary
 
 #### 5b.2 Verification
@@ -1143,7 +1146,7 @@ Each phase has a clean rollback:
 - **Phase 2:** Revert template to use `memory_bulletin`. Remove rendering functions. The bulletin is still being generated.
 - **Phase 3:** Restore bulletin timer loop. Revert dirty flag changes. The old bulletin resumes.
 - **Phase 4:** Restore bulletin loop (if Phase 3 rollback hasn't already). Daily summaries become orphaned (harmless).
-- **Phase 5:** Restore 50-message persistence trigger, restore `memory_save` in compactor.
+- **Phase 5:** Restore the previous persistence trigger thresholds. Restoring compactor memory writes would require reintroducing a compactor tool server and should be treated as a new design decision, not a routine rollback.
 - **Phase 6:** Remove participant rendering from context assembly.
 
 ---
@@ -1197,7 +1200,7 @@ The additional ~2000 tokens for Layers 2-4 is well within the headroom. The comp
 | Daily summary synthesis fails silently | No yesterday context | Low | Circuit breaker (existing pattern), fallback to raw events |
 | Knowledge synthesis never triggers (no memory changes) | Stale Layer 5 | Low | Startup warmup generates initial synthesis, periodic health check |
 | High event volume floods working memory log | Noisy context injection | Low | Events are structured process lifecycle signals, not raw messages. Volume is naturally bounded by worker/branch/cron activity. |
-| Compactor without memory_save loses important memories | Knowledge loss | Medium | Verify persistence branch frequency compensates, monitor memory count |
+| Summary-only compactor plus weak persistence misses important memories | Knowledge loss | Medium | Verify persistence branch frequency compensates, monitor memory count |
 | Day computation timezone mismatch | Events on wrong day | Low | Use agent's configured timezone consistently, test edge cases |
 | Token budget exceeded with many channels/participants | Context overflow | Low | Hard caps on channels (10) and participants (5), configurable |
 
@@ -1226,7 +1229,7 @@ The six phases are ordered to minimize risk and maximize incremental value:
 3. **Phase 3** — Knowledge synthesis becomes efficient (change-driven, not timer-driven)
 4. **Phase 4** — Intra-day synthesis + progressive temporal compression with daily summaries
 5. **Phase 5a** — Smarter memory persistence triggers (additive, no behavior removed)
-6. **Phase 5b** — Sunset compactor memory extraction (only after 5a is validated)
+6. **Phase 5b** — Sunset compactor memory extraction
 7. **Phase 6** — Per-user context rounds out the system
 
 Each phase is independently deployable and rollback-safe. Phase 1 is the critical foundation that unblocks all subsequent work.

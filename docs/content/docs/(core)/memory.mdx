@@ -66,7 +66,7 @@ The graph enables traversal during recall. When a recall worker finds a relevant
 
 ## How Memories Are Created
 
-Three paths:
+Four paths:
 
 ### 1. Branch-initiated (during conversation)
 
@@ -81,15 +81,21 @@ User: "Actually, let's switch to SQLite for the prototype. PostgreSQL is overkil
 
 Branches have a `memory_save` tool. They decide what to save, with what type and importance. The system handles embedding generation and auto-association.
 
-### 2. Compactor-initiated (during compaction)
+### 2. Persistence-branch initiated (background extraction)
 
-When the compactor triggers a compaction worker, that worker does two things in one pass: summarize the conversation and extract memories. This is where memories are harvested from conversation that's about to leave the context window.
+Silent memory persistence branches periodically review conversation history, recall existing memories to avoid duplicates, and save durable facts, preferences, decisions, and observations. They run in the background and complete silently, so the channel stays focused on responding to the user.
 
-This mirrors OpenClaw's memory flush pattern -- the best idea in OpenClaw's memory system. Before context is lost, an LLM pass pulls out anything worth keeping. But unlike OpenClaw, this happens in a background worker. The channel never blocks.
+Persistence branches are the main safety net for conversations that contain important context but never hit the compaction threshold. They can also be triggered earlier by working-memory signals such as decisions, worker completions, cron executions, and other high-signal events.
 
-### 3. Cortex-initiated (system-level)
+### 3. Ingestion-initiated (document extraction)
+
+Ingestion workers process uploaded or watched documents in chunks and save extracted memories through the same memory tools as branches. This path is for turning source material into durable knowledge without relying on a conversation turn.
+
+### 4. Cortex-initiated (system-level)
 
 The cortex observes patterns across channels and can create memories at the system level. It consolidates related memories, creates observations ("James has been asking about authentication a lot this week"), and manages the graph.
+
+Compaction is not a memory creation path. The compactor summarizes old conversation turns so the channel can keep a rolling history, but it has no memory tools and does not write durable memories.
 
 ## How Memories Are Recalled
 
@@ -137,7 +143,7 @@ The branch curates. 50 raw results become 5 relevant, contextualized memories. T
 
 In OpenClaw, the LLM calls `memory_search`, gets raw results in its context, and has to make sense of them. This pollutes the context with irrelevant matches, partial chunks, and search metadata. In Spacebot, the branch absorbs all that noise and returns only what matters. The branch is disposable -- its context gets thrown away after it returns. The channel stays clean.
 
-This costs an extra LLM call. But it keeps the channel's context clean, which means fewer compactions, which means fewer memory extractions, which means the system runs more efficiently overall.
+This costs an extra LLM call. But it keeps the channel's context clean, which means fewer compactions and less pressure on context-management machinery overall.
 
 ## Importance and Decay
 
