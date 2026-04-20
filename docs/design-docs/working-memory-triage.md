@@ -53,8 +53,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R15 — UTF-8 panic on topic truncation** (`src/memory/working.rs:739`)
   Byte-index slice at 80 can split multibyte chars. **Fixed:** `floor_char_boundary(80)`.
 
-- [ ] **R16 — Task update event always says "status change"** (`src/tools/task_update.rs:246`)
-  Every update emits `"updated to <status>"` even for title/description edits. Compute actual delta.
+- [x] **R16 — Task update event always says "status change"** (`src/tools/task_update.rs:246`)
+  Every update emits `"updated to <status>"` even for title/description edits. **Fixed in this slice:** task-update working-memory events now compare the before/after task record and name the actual changed fields, while preserving the existing status-only wording.
 
 ## Live Observations (from prompt inspect, March 19)
 
