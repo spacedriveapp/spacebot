@@ -2021,6 +2021,8 @@ mod tests {
 
     #[test]
     fn cron_error_memory_message_redacts_and_bounds_error_text() {
+        use base64::Engine as _;
+
         let tool_secret_pairs = vec![("API_KEY".to_string(), "stored-secret".to_string())];
         let error = crate::error::Error::Other(anyhow::anyhow!(
             "{} {} {}",
@@ -2054,6 +2056,29 @@ mod tests {
         );
         assert_eq!(message.chars().count(), WORKING_MEMORY_CRON_ERROR_MAX_CHARS);
         assert!(message.ends_with(" ... [truncated]"));
+
+        let encoded_secret =
+            base64::engine::general_purpose::STANDARD.encode("sk-ant-abc123456789012345678");
+        let encoded_error = crate::error::Error::Other(anyhow::anyhow!(
+            "{} {}",
+            encoded_secret,
+            "x".repeat(WORKING_MEMORY_CRON_ERROR_MAX_CHARS)
+        ));
+        let encoded_message = cron_error_memory_message(
+            "daily-digest",
+            "execution_error",
+            &encoded_error,
+            &tool_secret_pairs,
+        );
+
+        assert!(
+            encoded_message.contains("[WORKING_MEMORY_REDACTED:encoded-secret]"),
+            "encoded leak marker missing in: {encoded_message}"
+        );
+        assert!(
+            !encoded_message.contains(&encoded_secret),
+            "encoded secret should be redacted in: {encoded_message}"
+        );
     }
 
     #[tokio::test]
