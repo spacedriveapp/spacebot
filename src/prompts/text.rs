@@ -65,8 +65,20 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "cortex_intraday_synthesis") => {
             include_str!("../../prompts/en/cortex_intraday_synthesis.md.j2")
         }
+        ("en", "cortex_intraday_synthesis_system") => {
+            include_str!("../../prompts/en/cortex_intraday_synthesis_system.md.j2")
+        }
+        ("en", "cortex_intraday_synthesis_system_fallback") => {
+            include_str!("../../prompts/en/cortex_intraday_synthesis_system_fallback.md.j2")
+        }
         ("en", "cortex_daily_summary") => {
             include_str!("../../prompts/en/cortex_daily_summary.md.j2")
+        }
+        ("en", "cortex_daily_summary_system") => {
+            include_str!("../../prompts/en/cortex_daily_summary_system.md.j2")
+        }
+        ("en", "cortex_daily_summary_system_fallback") => {
+            include_str!("../../prompts/en/cortex_daily_summary_system_fallback.md.j2")
         }
         ("en", "cortex_profile") => include_str!("../../prompts/en/cortex_profile.md.j2"),
         ("en", "compactor") => include_str!("../../prompts/en/compactor.md.j2"),
