@@ -56,5 +56,47 @@ fn main() {
         }
     }
 
+    // In dev mode, copy the sidecar binary next to the desktop executable.
+    // Tauri resolves sidecars as `{exe_dir}/{name}.exe` but the sidecar is built
+    // separately. Without this, the sidecar is not found at runtime.
+    #[cfg(windows)]
+    {
+        let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+        let out_path = std::path::Path::new(&out_dir);
+        // OUT_DIR is like <target>/debug/build/<crate>/out — walk up to <target>/debug
+        if let Some(target_debug) = out_path.ancestors().nth(3) {
+            let dest = target_debug.join("spacebot.exe");
+            let manifest_dir =
+                std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+            let triple = std::env::var("TAURI_ENV_TARGET_TRIPLE")
+                .or_else(|_| std::env::var("TARGET"))
+                .unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_string());
+            let src =
+                std::path::Path::new(&manifest_dir).join(format!("binaries/spacebot-{triple}.exe"));
+            if !src.exists() {
+                panic!(
+                    "sidecar binary not found at {}. Build the server first \
+                     (`cargo build -p spacebot`) then copy it to binaries/.",
+                    src.display()
+                );
+            }
+
+            let needs_copy = !dest.exists()
+                || src.metadata().and_then(|s| s.modified()).ok()
+                    > dest.metadata().and_then(|d| d.modified()).ok();
+            if needs_copy {
+                println!("cargo:warning=Copying sidecar to {}", dest.display());
+                std::fs::copy(&src, &dest).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to copy sidecar from {} to {}: {error}",
+                        src.display(),
+                        dest.display()
+                    )
+                });
+            }
+            println!("cargo:rerun-if-changed={}", src.display());
+        }
+    }
+
     tauri_build::build()
 }
