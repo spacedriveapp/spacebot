@@ -17,7 +17,7 @@ Knowledge synthesis is narrower than the old memory bulletin. Identity, recent a
 
 Knowledge synthesis is change-driven:
 
-1. Memory mutations bump `knowledge_synthesis_version`.
+1. Memory content mutations bump `knowledge_synthesis_version` (create, update, delete, merge; not importance-only changes).
 2. The cortex waits for the debounce window so bursts of memory writes produce one synthesis pass.
 3. The cortex gathers relevant memory data and active task context.
 4. A one-shot LLM synthesis pass renders the `## Knowledge Context` briefing.

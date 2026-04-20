@@ -174,15 +174,15 @@ What's gone:
 
 ## Context Injection
 
-When a channel starts or a cron job fires, memory-derived context is injected into the system prompt as layered context. This is not a raw dump.
+When a channel starts or a cron job fires, the system prompt is assembled from layered context. This is not a raw dump.
 
 The main layers are:
 
-1. Identity files from the agent root.
-2. Working memory, rendered from recent events and summaries.
-3. Channel activity, rendered from the channel registry and recent messages.
-4. Participant context, when there is useful per-person context.
-5. Knowledge context, synthesized from the long-term memory graph.
+1. Identity files from the agent root (identity layer).
+2. Working memory, rendered from recent events and summaries (memory-derived layer).
+3. Channel activity, rendered from the channel registry and recent messages (activity layer).
+4. Participant context, when there is useful per-person context (participant layer).
+5. Knowledge context, synthesized from the long-term memory graph (memory-derived layer).
 
 The channel sees structured sections like:
 

@@ -372,8 +372,8 @@ CLI (clap) → parse args
     → Best-effort startup warmup pass (bounded wait)
     → Initialize MessagingManager (start all platform adapters)
     → Initialize CronScheduler
-        → Start Cortex loops (warmup, knowledge synthesis, association, ready-task)
-        → Register agent in active agents map
+    → Start Cortex loops (warmup, knowledge synthesis, association, ready-task)
+    → Register agent in active agents map
     → Enter main event loop (tokio::select!)
         → Inbound messages → route to Channel instances
         → Agent registration/removal

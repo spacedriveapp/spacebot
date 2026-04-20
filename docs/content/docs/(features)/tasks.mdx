@@ -162,7 +162,7 @@ Workers executing a task get a restricted version of the `task_update` tool. The
 
 They cannot change the task's status, priority, title, description, or worker binding. These fields are managed by the cortex and the API. This prevents a worker from marking its own task as `done` — only the cortex does that based on whether the worker succeeded or failed.
 
-## Bulletin Integration
+## Knowledge Context Integration
 
 Active tasks (non-done) are included in the cortex knowledge context. Each task is listed with its number, status, priority, title, and subtask progress:
 
