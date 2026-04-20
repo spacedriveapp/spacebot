@@ -72,6 +72,9 @@ Shell `find` command traversed node_modules directory. Returned 5,000+ entries (
 **Impact:**
 Single tool call consumed ~8,000 tokens. Multiple such calls in sequence rapidly approached context limit.
 
+**Current Mitigation:**
+The shell tool now emits pre-execution `analysis` metadata with command category, risk level, duration hint, and UX flags like `collapsed_by_default` and `expects_no_output`. That lets downstream UI code collapse search/read/list output and render silent successes as `Done` without re-parsing the raw command string.
+
 ---
 
 ### Working Directory Mismatch

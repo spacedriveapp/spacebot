@@ -1,10 +1,12 @@
 //! Shell tool for executing shell commands and subprocesses (task workers only).
 //!
 //! This is the unified execution tool — it replaces the previous `shell` + `exec`
-//! split. Commands run through `sh -c` with optional per-command environment
-//! variables. Dangerous env vars that enable library injection are blocked.
+//! split. Commands are analyzed before execution, then run through `sh -c` with
+//! optional per-command environment variables. Dangerous env vars that enable
+//! library injection are blocked.
 
 use crate::sandbox::Sandbox;
+use crate::tools::shell_analysis::{CommandAnalysis, ShellAnalyzer};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -37,12 +39,19 @@ const DANGEROUS_ENV_VARS: &[&str] = &[
 pub struct ShellTool {
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    analyzer: ShellAnalyzer,
 }
 
 impl ShellTool {
     /// Create a new shell tool with sandbox containment.
     pub fn new(workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
-        Self { workspace, sandbox }
+        let analyzer = ShellAnalyzer::new(workspace.clone());
+
+        Self {
+            workspace,
+            sandbox,
+            analyzer,
+        }
     }
 }
 
@@ -98,6 +107,8 @@ pub struct ShellOutput {
     pub stderr: String,
     /// Formatted summary for LLM consumption.
     pub summary: String,
+    /// Pre-execution analysis metadata for UI and worker logic.
+    pub analysis: CommandAnalysis,
 }
 
 impl Tool for ShellTool {
@@ -227,6 +238,20 @@ impl Tool for ShellTool {
             }
         }
 
+        let analysis = self.analyzer.analyze(&args.command, &working_dir);
+        if analysis.requires_confirmation {
+            return Err(ShellError {
+                message: format!(
+                    "Command requires confirmation: {}",
+                    analysis
+                        .confirmation_reason
+                        .as_deref()
+                        .unwrap_or("the command was flagged as risky before execution")
+                ),
+                exit_code: -1,
+            });
+        }
+
         // Build per-command env map for sandbox-aware injection. The sandbox
         // injects these via --setenv (bubblewrap) or .env() (other backends),
         // so they always reach the inner sandboxed process.
@@ -270,7 +295,7 @@ impl Tool for ShellTool {
         let exit_code = output.status.code().unwrap_or(-1);
         let success = output.status.success();
 
-        let summary = format_shell_output(exit_code, &stdout, &stderr);
+        let summary = format_shell_output(exit_code, &stdout, &stderr, analysis.expects_no_output);
 
         Ok(ShellOutput {
             success,
@@ -278,12 +303,18 @@ impl Tool for ShellTool {
             stdout,
             stderr,
             summary,
+            analysis,
         })
     }
 }
 
 /// Format shell output for display.
-fn format_shell_output(exit_code: i32, stdout: &str, stderr: &str) -> String {
+fn format_shell_output(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    expects_no_output: bool,
+) -> String {
     let mut output = String::new();
 
     output.push_str(&format!("Exit code: {}\n", exit_code));
@@ -299,7 +330,11 @@ fn format_shell_output(exit_code: i32, stdout: &str, stderr: &str) -> String {
     }
 
     if stdout.is_empty() && stderr.is_empty() {
-        output.push_str("\n[No output]\n");
+        if exit_code == 0 && expects_no_output {
+            output.push_str("\nDone\n");
+        } else {
+            output.push_str("\n[No output]\n");
+        }
     }
 
     output
@@ -354,6 +389,6 @@ pub struct ShellResult {
 impl ShellResult {
     /// Format as a readable string for LLM consumption.
     pub fn format(&self) -> String {
-        format_shell_output(self.exit_code, &self.stdout, &self.stderr)
+        format_shell_output(self.exit_code, &self.stdout, &self.stderr, false)
     }
 }

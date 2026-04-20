@@ -55,6 +55,7 @@ pub mod send_message_to_another_channel;
 pub mod set_outcome;
 pub mod set_status;
 pub mod shell;
+pub mod shell_analysis;
 pub mod skills_search;
 pub mod skip;
 pub mod spacebot_docs;
@@ -138,6 +139,9 @@ pub use send_message_to_another_channel::{
 pub use set_outcome::{SetOutcomeArgs, SetOutcomeError, SetOutcomeOutput, SetOutcomeTool};
 pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
 pub use shell::{EnvVar, ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use shell_analysis::{
+    CommandAnalysis, CommandCategory, DetectedPattern, DurationHint, PatternType, RiskLevel,
+};
 pub use skills_search::{
     SkillsSearchArgs, SkillsSearchError, SkillsSearchOutput, SkillsSearchTool,
 };
