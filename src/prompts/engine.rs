@@ -70,12 +70,20 @@ impl PromptEngine {
             crate::prompts::text::get("cortex_intraday_synthesis_system"),
         )?;
         env.add_template(
+            "cortex_intraday_synthesis_system_fallback",
+            crate::prompts::text::get("cortex_intraday_synthesis_system_fallback"),
+        )?;
+        env.add_template(
             "cortex_daily_summary",
             crate::prompts::text::get("cortex_daily_summary"),
         )?;
         env.add_template(
             "cortex_daily_summary_system",
             crate::prompts::text::get("cortex_daily_summary_system"),
+        )?;
+        env.add_template(
+            "cortex_daily_summary_system_fallback",
+            crate::prompts::text::get("cortex_daily_summary_system_fallback"),
         )?;
         env.add_template("compactor", crate::prompts::text::get("compactor"))?;
         env.add_template(

@@ -372,13 +372,14 @@ impl BulletinRefreshOutcome {
 }
 
 const CORTEX_ONE_SHOT_MAX_TURNS: usize = 1;
-const CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK: &str = "You write concise working-memory summaries for the cortex.\n\nOutput one narrative summary paragraph and nothing else.";
-const CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK: &str = "You write daily activity summaries for the cortex.\n\nOutput the daily activity summary and nothing else.";
+const CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE: &str =
+    "cortex_intraday_synthesis_system_fallback";
+const CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK_TEMPLATE: &str = "cortex_daily_summary_system_fallback";
 
 fn render_static_prompt_or_fallback(
     prompt_engine: &crate::prompts::engine::PromptEngine,
     template_name: &'static str,
-    fallback: &'static str,
+    fallback_template_name: &'static str,
 ) -> String {
     match prompt_engine.render_static(template_name) {
         Ok(prompt) => prompt,
@@ -388,7 +389,9 @@ fn render_static_prompt_or_fallback(
                 template_name,
                 "failed to render static cortex prompt, using fallback"
             );
-            fallback.to_string()
+            prompt_engine
+                .render_static(fallback_template_name)
+                .expect("fallback cortex prompt template should render")
         }
     }
 }
@@ -3278,7 +3281,7 @@ pub async fn maybe_synthesize_intraday_batch(
     let synthesis_preamble = render_static_prompt_or_fallback(
         &prompt_engine,
         "cortex_intraday_synthesis_system",
-        CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK,
+        CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
     );
     let prompt = prompt_engine.render_intraday_synthesis(
         unsynthesized.len(),
@@ -3440,7 +3443,7 @@ pub async fn maybe_synthesize_daily_summary(
     let synthesis_preamble = render_static_prompt_or_fallback(
         &prompt_engine,
         "cortex_daily_summary_system",
-        CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK,
+        CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK_TEMPLATE,
     );
     let prompt = prompt_engine.render_daily_summary(
         &yesterday,
@@ -4662,17 +4665,18 @@ async fn fetch_memories_for_association(
 mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
-        BulletinRefreshOutcome, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK, CortexReceiverOutcome,
-        GatheredSections, HealthRuntimeState, MAINTENANCE_TASK_CANCEL_GRACE_SECS,
-        MaintenanceTimeoutAction, ReceiverClosedBehavior, Signal, SynthesisTaskBackoff,
-        WorkerTracker, apply_cancelled_warmup_status, build_kill_targets,
-        claim_detached_completion, collect_synthesis_task, detached_timeout_transition,
-        generate_if_dirty_under_lock, handle_cortex_receiver_result, has_completed_initial_warmup,
-        is_cancelled_control_result, is_terminal_control_result, maintenance_task_timeout,
-        maintenance_timeout_action, mark_knowledge_synthesis_version_complete,
-        maybe_close_bulletin_refresh_circuit, maybe_generate_bulletin_under_lock,
-        maybe_spawn_synthesis_task, parse_structured_success_flag, push_signal_into_buffer,
-        record_bulletin_refresh_failure, render_static_prompt_or_fallback, should_execute_warmup,
+        BulletinRefreshOutcome, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
+        CortexReceiverOutcome, GatheredSections, HealthRuntimeState,
+        MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction, ReceiverClosedBehavior,
+        Signal, SynthesisTaskBackoff, WorkerTracker, apply_cancelled_warmup_status,
+        build_kill_targets, claim_detached_completion, collect_synthesis_task,
+        detached_timeout_transition, generate_if_dirty_under_lock, handle_cortex_receiver_result,
+        has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
+        maintenance_task_timeout, maintenance_timeout_action,
+        mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
+        maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
+        parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
+        render_static_prompt_or_fallback, should_execute_warmup,
         should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
         take_lagged_control_flag,
     };
@@ -4717,10 +4721,15 @@ mod tests {
         let prompt = render_static_prompt_or_fallback(
             &prompt_engine,
             "missing_cortex_synthesis_template",
-            CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK,
+            CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
         );
 
-        assert_eq!(prompt, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK);
+        assert_eq!(
+            prompt,
+            prompt_engine
+                .render_static(CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE)
+                .expect("fallback prompt should render")
+        );
     }
 
     #[test]
