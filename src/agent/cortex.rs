@@ -372,6 +372,26 @@ impl BulletinRefreshOutcome {
 }
 
 const CORTEX_ONE_SHOT_MAX_TURNS: usize = 1;
+const CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK: &str = "You write concise working-memory summaries for the cortex.\n\nOutput one narrative summary paragraph and nothing else.";
+const CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK: &str = "You write daily activity summaries for the cortex.\n\nOutput the daily activity summary and nothing else.";
+
+fn render_static_prompt_or_fallback(
+    prompt_engine: &crate::prompts::engine::PromptEngine,
+    template_name: &'static str,
+    fallback: &'static str,
+) -> String {
+    match prompt_engine.render_static(template_name) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                template_name,
+                "failed to render static cortex prompt, using fallback"
+            );
+            fallback.to_string()
+        }
+    }
+}
 
 fn maybe_spawn_synthesis_task(
     task: &mut Option<tokio::task::JoinHandle<anyhow::Result<bool>>>,
@@ -3255,13 +3275,11 @@ pub async fn maybe_synthesize_intraday_batch(
 
     // Render the synthesis prompt.
     let prompt_engine = deps.runtime_config.prompts.load();
-    let synthesis_preamble = match prompt_engine.render_static("cortex_intraday_synthesis_system") {
-        Ok(prompt) => prompt,
-        Err(error) => {
-            tracing::warn!(%error, "failed to render cortex_intraday_synthesis_system prompt");
-            return Err(error.into());
-        }
-    };
+    let synthesis_preamble = render_static_prompt_or_fallback(
+        &prompt_engine,
+        "cortex_intraday_synthesis_system",
+        CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK,
+    );
     let prompt = prompt_engine.render_intraday_synthesis(
         unsynthesized.len(),
         &time_start_str,
@@ -3419,13 +3437,11 @@ pub async fn maybe_synthesize_daily_summary(
 
     let wm_config = **deps.runtime_config.working_memory.load();
     let prompt_engine = deps.runtime_config.prompts.load();
-    let synthesis_preamble = match prompt_engine.render_static("cortex_daily_summary_system") {
-        Ok(prompt) => prompt,
-        Err(error) => {
-            tracing::warn!(%error, "failed to render cortex_daily_summary_system prompt");
-            return Err(error.into());
-        }
-    };
+    let synthesis_preamble = render_static_prompt_or_fallback(
+        &prompt_engine,
+        "cortex_daily_summary_system",
+        CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK,
+    );
     let prompt = prompt_engine.render_daily_summary(
         &yesterday,
         wm_config.daily_summary_max_words,
@@ -4646,22 +4662,24 @@ async fn fetch_memories_for_association(
 mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
-        BulletinRefreshOutcome, CortexReceiverOutcome, GatheredSections, HealthRuntimeState,
-        MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction, ReceiverClosedBehavior,
-        Signal, SynthesisTaskBackoff, WorkerTracker, apply_cancelled_warmup_status,
-        build_kill_targets, claim_detached_completion, collect_synthesis_task,
-        detached_timeout_transition, generate_if_dirty_under_lock, handle_cortex_receiver_result,
-        has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
-        maintenance_task_timeout, maintenance_timeout_action,
-        mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
-        maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
-        parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
-        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
-        summarize_signal_text, take_lagged_control_flag,
+        BulletinRefreshOutcome, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK, CortexReceiverOutcome,
+        GatheredSections, HealthRuntimeState, MAINTENANCE_TASK_CANCEL_GRACE_SECS,
+        MaintenanceTimeoutAction, ReceiverClosedBehavior, Signal, SynthesisTaskBackoff,
+        WorkerTracker, apply_cancelled_warmup_status, build_kill_targets,
+        claim_detached_completion, collect_synthesis_task, detached_timeout_transition,
+        generate_if_dirty_under_lock, handle_cortex_receiver_result, has_completed_initial_warmup,
+        is_cancelled_control_result, is_terminal_control_result, maintenance_task_timeout,
+        maintenance_timeout_action, mark_knowledge_synthesis_version_complete,
+        maybe_close_bulletin_refresh_circuit, maybe_generate_bulletin_under_lock,
+        maybe_spawn_synthesis_task, parse_structured_success_flag, push_signal_into_buffer,
+        record_bulletin_refresh_failure, render_static_prompt_or_fallback, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
+        take_lagged_control_flag,
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
     use crate::memory::MemoryType;
+    use crate::prompts::engine::PromptEngine;
     use crate::tasks::TaskStatus;
     use crate::tasks::TaskStore;
     use futures::FutureExt;
@@ -4690,6 +4708,19 @@ mod tests {
         };
 
         assert!(should_execute_warmup(warmup_config, true));
+    }
+
+    #[test]
+    fn static_cortex_prompt_fallback_keeps_synthesis_running_when_template_fails() {
+        let prompt_engine = PromptEngine::new("en").expect("prompt engine should build");
+
+        let prompt = render_static_prompt_or_fallback(
+            &prompt_engine,
+            "missing_cortex_synthesis_template",
+            CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK,
+        );
+
+        assert_eq!(prompt, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK);
     }
 
     #[test]
