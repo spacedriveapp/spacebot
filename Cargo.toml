@@ -94,6 +94,7 @@ ignore = "0.4"
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "chrono", "rustls_backend"] }
 async-trait = "0.1"
+streaming-iterator = "0.1"
 
 # Slack
 slack-morphism = { version = "2.17", features = ["hyper"] }

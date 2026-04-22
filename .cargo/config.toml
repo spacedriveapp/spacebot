@@ -4,4 +4,8 @@ bump = "run --quiet --bin cargo-bump --"
 # Debug builds use larger stack frames (no optimizations) and overflow
 # the default 8 MB stack on deep call chains. Bump to 16 MB.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-args=/STACK:16777216"]
+# /STACK:16MB for deep call chains in debug mode.
+# /FORCE:MULTIPLE resolves duplicate zstd symbols between lbug's bundled
+# zstd and the zstd-sys crate (used by lance). Both provide identical
+# symbols; the linker picks the first definition.
+rustflags = ["-C", "link-args=/STACK:16777216 /FORCE:MULTIPLE"]
