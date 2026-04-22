@@ -4,8 +4,10 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
 use super::PhaseResult;
 use crate::codegraph::db::SharedCodeGraphDb;
+use crate::codegraph::types::PipelinePhase;
 
 fn cypher_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
@@ -152,4 +154,40 @@ pub async fn resolve_heritage(
     );
 
     Ok(result)
+}
+
+/// Heritage phase: resolves `extends` / `implements` edges, then runs the
+/// overrides pass (C3-linearized MRO) in the same phase because they
+/// share state and report combined progress to the UI.
+pub struct HeritagePhase;
+
+#[async_trait::async_trait]
+impl Phase for HeritagePhase {
+    fn label(&self) -> &'static str {
+        "heritage"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Heritage)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Heritage, 0.0, "Resolving inheritance");
+
+        let heritage_result = resolve_heritage(&ctx.project_id, &ctx.db).await?;
+        ctx.stats.edges_created += heritage_result.edges_created;
+
+        ctx.emit_progress(
+            PipelinePhase::Heritage,
+            0.5,
+            "Inheritance resolved, computing overrides",
+        );
+
+        let overrides_result =
+            super::overrides::resolve_overrides(&ctx.project_id, &ctx.db).await?;
+        ctx.stats.edges_created += overrides_result.edges_created;
+
+        ctx.emit_progress(PipelinePhase::Heritage, 1.0, "Heritage resolved");
+        Ok(())
+    }
 }

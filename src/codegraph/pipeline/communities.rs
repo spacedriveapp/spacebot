@@ -16,8 +16,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
 use crate::codegraph::db::SharedCodeGraphDb;
-use crate::codegraph::types::CodeGraphConfig;
+use crate::codegraph::types::{CodeGraphConfig, PipelinePhase};
 
 /// Escape a string for use in a Cypher string literal.
 fn cypher_escape(s: &str) -> String {
@@ -709,4 +710,33 @@ fn longest_common_dir_prefix(paths: &[&str]) -> String {
     }
 
     prefix.join("/")
+}
+
+/// Communities phase: Louvain clustering over the call/heritage graph
+/// with Community nodes + MEMBER_OF edges persisted to LadybugDB.
+pub struct CommunitiesPhase;
+
+#[async_trait::async_trait]
+impl Phase for CommunitiesPhase {
+    fn label(&self) -> &'static str {
+        "communities"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Communities)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Communities, 0.0, "Detecting communities");
+        let result = detect_communities(&ctx.project_id, &ctx.db, &ctx.config).await?;
+        ctx.stats.communities_detected = result.communities_detected;
+        ctx.stats.nodes_created += result.nodes_created;
+        ctx.stats.edges_created += result.edges_created;
+        ctx.emit_progress(
+            PipelinePhase::Communities,
+            1.0,
+            &format!("Detected {} communities", result.communities_detected),
+        );
+        Ok(())
+    }
 }

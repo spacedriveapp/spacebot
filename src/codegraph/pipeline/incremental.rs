@@ -132,8 +132,21 @@ pub async fn run_incremental_pipeline(
         scope_set.insert(dep.clone());
     }
 
-    let import_result =
-        imports::resolve_imports_scoped(project_id, db, Some(&scope_set)).await?;
+    // On the incremental path we don't carry the ConfigContext from
+    // the full pipeline — walking the entire tree just to reload
+    // manifests on every debounced change would cost more than the
+    // incremental run saves. Aliased imports (tsconfig paths, PSR-4,
+    // etc.) therefore fall through to the tail heuristics on
+    // incremental; a manifest edit triggers a full re-index via the
+    // `re_index_threshold` path and the aliases kick back in there.
+    let empty_config = crate::codegraph::config::ConfigContext::default();
+    let import_result = imports::resolve_imports_scoped(
+        project_id,
+        db,
+        &empty_config,
+        Some(&scope_set),
+    )
+    .await?;
     stats.edges_created += import_result.phase.edges_created;
     stats.errors += import_result.phase.errors;
     // The scoped import_map only covers files we just rebuilt. The full

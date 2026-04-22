@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
 use crate::codegraph::db::SharedCodeGraphDb;
-use crate::codegraph::types::CodeGraphConfig;
+use crate::codegraph::types::{CodeGraphConfig, PipelinePhase};
 
 /// Escape a string for use in a Cypher string literal.
 fn cypher_escape(s: &str) -> String {
@@ -384,4 +385,33 @@ pub async fn trace_processes(
         nodes_created,
         edges_created,
     })
+}
+
+/// Processes phase: score entry points, BFS-trace call chains, emit
+/// Process nodes + ENTRY_POINT_OF/STEP_IN_PROCESS edges.
+pub struct ProcessesPhase;
+
+#[async_trait::async_trait]
+impl Phase for ProcessesPhase {
+    fn label(&self) -> &'static str {
+        "processes"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Processes)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Processes, 0.0, "Tracing processes");
+        let result = trace_processes(&ctx.project_id, &ctx.db, &ctx.config).await?;
+        ctx.stats.processes_traced = result.processes_traced;
+        ctx.stats.nodes_created += result.nodes_created;
+        ctx.stats.edges_created += result.edges_created;
+        ctx.emit_progress(
+            PipelinePhase::Processes,
+            1.0,
+            &format!("Traced {} processes", result.processes_traced),
+        );
+        Ok(())
+    }
 }

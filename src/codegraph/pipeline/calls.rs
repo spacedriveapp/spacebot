@@ -12,9 +12,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
 use super::PhaseResult;
 use crate::codegraph::db::SharedCodeGraphDb;
 use crate::codegraph::lang;
+use crate::codegraph::types::PipelinePhase;
 
 /// Escape a string for use in a Cypher string literal.
 fn cypher_escape(s: &str) -> String {
@@ -370,6 +372,43 @@ pub async fn resolve_calls(
                             "MATCH (a:{src_label}) WHERE a.qualified_name = '{caller_escaped}' \
                              AND a.project_id = '{pid}' \
                              CREATE (a)-[:CodeRelation {{type: 'QUERIES', confidence: 0.75, \
+                             reason: '{callee}', step: {line}}}]->(a)",
+                            callee = cypher_escape(&format!("{}.{}", site.receiver.as_deref().unwrap_or(""), site.callee_name)),
+                            line = site.line,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // --- Higher-order function wrapping → WRAPS edges ---
+        for site in &call_sites {
+            let callee = site.callee_name.as_str();
+            let is_wrap = match (callee, site.receiver.as_deref()) {
+                // React HOFs
+                ("memo" | "forwardRef" | "createContext" | "lazy", Some("React")) => true,
+                ("memo" | "forwardRef" | "createContext" | "lazy", None) => true,
+                // Redux / React Router
+                ("connect" | "withRouter", _) => true,
+                // Python functools
+                ("wraps" | "partial" | "lru_cache" | "cache" | "cached_property",
+                 Some("functools")) => true,
+                // Rust wrapping types
+                ("new", Some("Arc" | "Rc" | "Mutex" | "RwLock" | "Box" | "RefCell" | "Cell" | "Pin")) => true,
+                // General: with_* or wrap_* prefix
+                _ if callee.starts_with("with_") || callee.starts_with("wrap_")
+                    || callee.starts_with("With") || callee.starts_with("Wrap") => true,
+                _ => false,
+            };
+            if is_wrap {
+                let wrap_key = format!("WRAPS:{}::{}", site.caller_qualified_name, site.line);
+                if seen_edges.insert(wrap_key) {
+                    let caller_escaped = cypher_escape(&site.caller_qualified_name);
+                    for src_label in &["Function", "Method"] {
+                        edge_stmts.push(format!(
+                            "MATCH (a:{src_label}) WHERE a.qualified_name = '{caller_escaped}' \
+                             AND a.project_id = '{pid}' \
+                             CREATE (a)-[:CodeRelation {{type: 'WRAPS', confidence: 0.80, \
                              reason: '{callee}', step: {line}}}]->(a)",
                             callee = cypher_escape(&format!("{}.{}", site.receiver.as_deref().unwrap_or(""), site.callee_name)),
                             line = site.line,
@@ -1249,5 +1288,44 @@ fn push_access_edge(stmts: &mut Vec<String>, caller_qn: &str, target_qn: &str, p
              AND b.qualified_name = '{tgt_escaped}' AND b.project_id = '{pid}' \
              CREATE (a)-[:CodeRelation {{type: 'ACCESSES', confidence: 0.92, reason: 'self-receiver', step: 0}}]->(b)",
         ));
+    }
+}
+
+/// Calls phase: AST-extracted call-site resolution with tiered
+/// confidence scoring. Consumes the `import_map` stashed on the context
+/// by the Imports phase.
+pub struct CallsPhase;
+
+#[async_trait::async_trait]
+impl Phase for CallsPhase {
+    fn label(&self) -> &'static str {
+        "calls"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Calls)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Calls, 0.0, "Resolving call-sites");
+
+        let progress = ctx.make_progress_fn(PipelinePhase::Calls, |merged, pr| {
+            merged.edges_created += pr.edges_created;
+            merged.errors += pr.errors;
+        });
+
+        let result = resolve_calls(
+            &ctx.project_id,
+            &ctx.db,
+            &ctx.root_path,
+            &ctx.files,
+            &ctx.import_map,
+            Some(&progress),
+        )
+        .await?;
+        ctx.stats.edges_created += result.edges_created;
+
+        ctx.emit_progress(PipelinePhase::Calls, 1.0, "Calls resolved");
+        Ok(())
     }
 }

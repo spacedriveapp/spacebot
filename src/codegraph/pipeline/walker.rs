@@ -1,11 +1,14 @@
 //! Filesystem walk with .gitignore / .spacebotignore respect.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
+use crate::codegraph::events::CodeGraphEvent;
 use crate::codegraph::lang;
-use crate::codegraph::types::CodeGraphConfig;
+use crate::codegraph::types::{CodeGraphConfig, PipelinePhase, PipelineProgress};
 
 /// Files larger than this are skipped during the walk — they are almost
 /// always generated, minified, or vendored code that tree-sitter either
@@ -142,20 +145,17 @@ pub async fn walk_project(
                 continue;
             }
 
-            // Check if we can determine a language for this file.
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let detected = lang::language_for_extension(ext);
-            if detected.is_none() {
-                continue;
-            }
-
-            // Apply language filter if set.
-            if !language_filter.is_empty()
-                && let Some(detected) = detected
-            {
-                let lang_name = detected.as_str().to_lowercase();
-                if !language_filter.iter().any(|f| f.to_lowercase() == lang_name) {
-                    continue;
+            // Apply language filter if set. The filter only restricts
+            // files whose language can be identified — config, web, and
+            // other non-language files always pass through so they appear
+            // in the file tree.
+            if !language_filter.is_empty() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if let Some(detected) = lang::language_for_extension(ext) {
+                    let lang_name = detected.as_str().to_lowercase();
+                    if !language_filter.iter().any(|f| f.to_lowercase() == lang_name) {
+                        continue;
+                    }
                 }
             }
 
@@ -211,7 +211,7 @@ pub async fn walk_project(
 
 /// Check if a path looks like a build artifact, generated file, or any
 /// other non-source file that should be excluded from indexing.
-fn is_build_artifact(path: &Path) -> bool {
+pub(crate) fn is_build_artifact(path: &Path) -> bool {
     // Walk path components and reject any that match a skip directory.
     // Using `Component::Normal` is cross-platform and avoids the fragile
     // `/name/` vs `\name\` substring matching we used before.
@@ -389,3 +389,87 @@ const SKIP_FILENAMES: &[&str] = &[
     "thumbs.db",
     ".ds_store",
 ];
+
+/// Extracting phase: walks the filesystem, respects `.gitignore` /
+/// `.spacebotignore`, and stashes the resulting files + outcome on the
+/// pipeline context for every downstream phase to consume.
+///
+/// The walker emits incremental progress every `WALK_PROGRESS_INTERVAL`
+/// files via a `ProgressFn` callback and the phase itself sends the
+/// final `1.0` tick with a message that surfaces ignore-rule state
+/// (`.spacebotignore applied`, `.gitignore bypassed`, oversize count).
+pub struct ExtractingPhase;
+
+#[async_trait::async_trait]
+impl Phase for ExtractingPhase {
+    fn label(&self) -> &'static str {
+        "extracting"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Extracting)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Extracting, 0.0, "Walking filesystem");
+
+        // Walker callback fires every WALK_PROGRESS_INTERVAL files. Total
+        // file count is unknown until the walk finishes, so the walker
+        // reports phase_progress at a fixed midway value (~0.5) and the
+        // final 1.0 tick is sent below after walk_project returns.
+        let walk_progress: super::ProgressFn = {
+            let tx = Arc::clone(&ctx.progress_tx);
+            let etx = ctx.event_tx.clone();
+            let pid = ctx.project_id.clone();
+            let base = ctx.stats.clone();
+            Arc::new(move |pct: f32, msg: &str, _pr: &super::PhaseResult| {
+                let _ = tx.send(PipelineProgress {
+                    phase: PipelinePhase::Extracting,
+                    phase_progress: pct,
+                    message: msg.to_string(),
+                    stats: base.clone(),
+                });
+                let _ = etx.send(CodeGraphEvent::IndexProgress {
+                    project_id: pid.clone(),
+                    phase: PipelinePhase::Extracting,
+                    phase_progress: pct,
+                    message: msg.to_string(),
+                });
+            })
+        };
+
+        let walk_outcome = walk_project(&ctx.root_path, &ctx.config, Some(&walk_progress)).await?;
+        ctx.stats.files_found = walk_outcome.files.len() as u64;
+
+        // Surface ignore-rule state in the progress message so users can
+        // see whether their `.spacebotignore` / `SPACEBOT_NO_GITIGNORE`
+        // actually took effect.
+        let mut suffix_parts: Vec<String> = Vec::new();
+        if walk_outcome.spacebotignore_loaded.is_some() {
+            suffix_parts.push(".spacebotignore applied".to_string());
+        }
+        if walk_outcome.gitignore_bypassed {
+            suffix_parts.push(".gitignore bypassed".to_string());
+        }
+        if walk_outcome.oversized_skipped > 0 {
+            suffix_parts.push(format!(
+                "{} oversized skipped",
+                walk_outcome.oversized_skipped
+            ));
+        }
+        let walk_message = if suffix_parts.is_empty() {
+            format!("Found {} files", walk_outcome.files.len())
+        } else {
+            format!(
+                "Found {} files ({})",
+                walk_outcome.files.len(),
+                suffix_parts.join(", ")
+            )
+        };
+
+        ctx.files = walk_outcome.files.clone();
+        ctx.walk_outcome = Some(walk_outcome);
+        ctx.emit_progress(PipelinePhase::Extracting, 1.0, &walk_message);
+        Ok(())
+    }
+}

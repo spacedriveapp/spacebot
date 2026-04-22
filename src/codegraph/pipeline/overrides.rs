@@ -1,23 +1,24 @@
-//! Resolve method overrides via parent-class chain walk.
+//! Resolve method overrides via C3 linearization.
 //!
 //! Runs after [`super::heritage::resolve_heritage`] inside the Heritage
-//! phase. Builds a transitive parent chain for every class-like node
-//! (Class, Interface, Struct, Trait, Impl), then for each method on a
-//! child class walks up the chain looking for the nearest ancestor
-//! method with the same name and emits an OVERRIDES edge.
+//! phase. Builds C3-linearized Method Resolution Order (MRO) for every
+//! class-like node (Class, Interface, Struct, Trait, Impl), then for
+//! each method on a child class walks the MRO looking for the nearest
+//! ancestor method with the same name and emits an OVERRIDES edge.
+//!
+//! C3 linearization handles diamond inheritance (Python), multiple
+//! interfaces (Java/C#), and trait hierarchies (Rust) correctly by
+//! preserving local precedence order + monotonicity.
 //!
 //! Known limitations:
 //!
 //! - Single-name match only — no signature comparison. Overloading and
 //!   overriding are not distinguished, so a Java overload of
 //!   `print(int)` will match a parent's `print(String)`.
-//! - Single-parent walk per class qname. Multiple-inheritance chains
-//!   (Python diamond, C++ MI) are walked but without C3 linearization,
-//!   so the "nearest" definition is whichever the DFS hits first.
-//! - Cycle detection caps chain depth at 50 and tracks visited nodes
-//!   to avoid infinite loops on broken graphs.
+//! - Cycle detection caps chain depth at 50 to avoid infinite loops
+//!   on broken graphs.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -171,19 +172,19 @@ pub async fn resolve_overrides(
         return Ok(result);
     }
 
-    // ─── 5. For each method, walk parent chain and find the nearest match
+    // ─── 5. For each method, compute C3 MRO and find the nearest match
     let mut edge_stmts: Vec<String> = Vec::new();
     let mut seen_edges: HashSet<String> = HashSet::new();
+    let mut mro_cache: HashMap<String, Vec<String>> = HashMap::new();
 
     for (child_class_qn, methods) in &class_methods {
         for (method_name, method_qn) in methods {
-            // Walk parent chain (ordered, nearest-first) and stop at the
-            // first ancestor that defines a method with this name.
             if let Some(target_qn) = find_nearest_override(
                 child_class_qn,
                 method_name,
                 &immediate_parents,
                 &class_methods,
+                &mut mro_cache,
             ) && target_qn != *method_qn
             {
                 let edge_key = format!("OV:{method_qn}->{target_qn}");
@@ -214,52 +215,102 @@ pub async fn resolve_overrides(
     Ok(result)
 }
 
-/// Walk up the parent chain (BFS, nearest-first) starting from
-/// `start_class_qn`, looking for an ancestor class that has a method
-/// with `method_name`. Returns that method's qname.
-///
-/// Cycles are bounded by both `MAX_CHAIN_DEPTH` and a visited set.
+/// Compute C3 linearization (MRO) for `class_qn`. Results are memoized
+/// in `cache` so each class is linearized at most once.
+fn c3_linearize(
+    class_qn: &str,
+    parents: &HashMap<String, Vec<String>>,
+    cache: &mut HashMap<String, Vec<String>>,
+    depth: usize,
+) -> Vec<String> {
+    if let Some(cached) = cache.get(class_qn) {
+        return cached.clone();
+    }
+    if depth > MAX_CHAIN_DEPTH {
+        return vec![class_qn.to_string()];
+    }
+
+    let direct = match parents.get(class_qn) {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => {
+            let result = vec![class_qn.to_string()];
+            cache.insert(class_qn.to_string(), result.clone());
+            return result;
+        }
+    };
+
+    let mut to_merge: Vec<Vec<String>> = Vec::new();
+    for p in &direct {
+        to_merge.push(c3_linearize(p, parents, cache, depth + 1));
+    }
+    to_merge.push(direct);
+
+    let mut result = vec![class_qn.to_string()];
+    c3_merge(&mut result, &mut to_merge);
+    cache.insert(class_qn.to_string(), result.clone());
+    result
+}
+
+/// Standard C3 merge: repeatedly pick the first head that doesn't
+/// appear in the tail of any other list. Falls back to draining
+/// remaining heads on inconsistent hierarchies.
+fn c3_merge(result: &mut Vec<String>, lists: &mut Vec<Vec<String>>) {
+    loop {
+        lists.retain(|l| !l.is_empty());
+        if lists.is_empty() {
+            break;
+        }
+
+        let mut found = None;
+        for list in lists.iter() {
+            let head = &list[0];
+            let in_tail = lists.iter().any(|l| l.len() > 1 && l[1..].contains(head));
+            if !in_tail {
+                found = Some(head.clone());
+                break;
+            }
+        }
+
+        match found {
+            Some(cls) => {
+                result.push(cls.clone());
+                for list in lists.iter_mut() {
+                    if list.first() == Some(&cls) {
+                        list.remove(0);
+                    }
+                }
+            }
+            None => {
+                for list in lists.iter() {
+                    if !list.is_empty() && !result.contains(&list[0]) {
+                        result.push(list[0].clone());
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Walk the C3-linearized MRO for `start_class_qn`, looking for
+/// the nearest ancestor that defines a method with `method_name`.
 fn find_nearest_override(
     start_class_qn: &str,
     method_name: &str,
     parents: &HashMap<String, Vec<String>>,
     class_methods: &HashMap<String, Vec<(String, String)>>,
+    mro_cache: &mut HashMap<String, Vec<String>>,
 ) -> Option<String> {
-    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    // Seed with immediate parents in declaration order so the
-    // leftmost base class is checked first.
-    if let Some(direct) = parents.get(start_class_qn) {
-        for p in direct {
-            if visited.insert(p.clone()) {
-                queue.push_back((p.clone(), 1));
-            }
-        }
-    }
-
-    while let Some((class_qn, depth)) = queue.pop_front() {
-        if depth > MAX_CHAIN_DEPTH {
-            continue;
-        }
-
-        if let Some(methods) = class_methods.get(&class_qn) {
+    let mro = c3_linearize(start_class_qn, parents, mro_cache, 0);
+    for ancestor in &mro[1..] {
+        if let Some(methods) = class_methods.get(ancestor) {
             for (name, qn) in methods {
                 if name == method_name {
                     return Some(qn.clone());
                 }
             }
         }
-
-        if let Some(grandparents) = parents.get(&class_qn) {
-            for gp in grandparents {
-                if visited.insert(gp.clone()) {
-                    queue.push_back((gp.clone(), depth + 1));
-                }
-            }
-        }
     }
-
     None
 }
 
