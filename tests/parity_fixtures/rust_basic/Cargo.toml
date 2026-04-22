@@ -1,0 +1,15 @@
+# Parity fixture — NOT part of the spacebot workspace. The walker only
+# uses this file to detect a "Rust package" marker for the structure
+# phase; nothing compiles it.
+[package]
+name = "rust_basic"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "rust_basic"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust_basic"
+path = "src/main.rs"
