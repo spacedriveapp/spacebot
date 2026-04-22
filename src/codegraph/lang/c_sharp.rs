@@ -106,6 +106,10 @@ impl LanguageProvider for CSharpProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::csharp::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -223,7 +227,18 @@ fn walk_csharp_node(
                     implements,
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
-                    is_exported: vis.as_deref() == Some("public"),
+                    is_exported: crate::codegraph::semantic::member_rules::is_exported(
+                        SupportedLanguage::CSharp,
+                        match vis.as_deref() {
+                            Some("public") => crate::codegraph::semantic::member_rules::Visibility::Public,
+                            Some("private") => crate::codegraph::semantic::member_rules::Visibility::Private,
+                            Some("protected") => crate::codegraph::semantic::member_rules::Visibility::Protected,
+                            Some("internal") => crate::codegraph::semantic::member_rules::Visibility::Package,
+                            _ => crate::codegraph::semantic::member_rules::Visibility::Package,
+                        },
+                        &[],
+                        &name,
+                    ),
                     visibility: vis,
                     is_static,
                     is_abstract,
@@ -955,7 +970,18 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
-        is_exported: vis.as_deref() == Some("public"),
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::CSharp,
+            match vis.as_deref() {
+                Some("public") => crate::codegraph::semantic::member_rules::Visibility::Public,
+                Some("private") => crate::codegraph::semantic::member_rules::Visibility::Private,
+                Some("protected") => crate::codegraph::semantic::member_rules::Visibility::Protected,
+                Some("internal") => crate::codegraph::semantic::member_rules::Visibility::Package,
+                _ => crate::codegraph::semantic::member_rules::Visibility::Package,
+            },
+            &[],
+            name,
+        ),
         visibility: vis,
         is_static,
         is_abstract,

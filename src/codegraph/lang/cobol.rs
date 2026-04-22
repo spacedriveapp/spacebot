@@ -86,6 +86,7 @@ impl LanguageProvider for CobolProvider {
                         implements: Vec::new(),
                         decorates: None,
                         metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 }
                 continue;
@@ -119,6 +120,7 @@ impl LanguageProvider for CobolProvider {
                         implements: Vec::new(),
                         decorates: None,
                         metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 }
             }
@@ -308,5 +310,6 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

@@ -74,6 +74,10 @@ impl LanguageProvider for KotlinProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::kotlin::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -140,6 +144,7 @@ fn walk_kotlin_node(
                     implements: Vec::new(),
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -234,6 +239,7 @@ fn collect_kotlin_params(
             implements: Vec::new(),
             decorates: None,
             metadata: std::collections::HashMap::new(),
+            ..Default::default()
         });
     }
 }
@@ -537,6 +543,7 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -592,5 +599,6 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

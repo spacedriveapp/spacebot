@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::phase::{Phase, PhaseCtx};
 use super::PhaseResult;
 use crate::codegraph::db::SharedCodeGraphDb;
 use crate::codegraph::lang;
-use crate::codegraph::types::CodeGraphConfig;
+use crate::codegraph::types::{CodeGraphConfig, PipelinePhase};
 
 /// Hard ceiling on file size for tree-sitter parsing. The walker's
 /// 512 KB soft cap catches the common case, but this defends against
@@ -74,6 +75,19 @@ pub async fn parse_files(
     let total_files = files.len();
     let report_interval = (total_files / 20).max(1);
 
+    // Project-root-relative path set for markdown link resolution.
+    // Built once up front so every markdown file can probe
+    // membership in O(1); the alternative (scan `files` per link)
+    // is O(docs × links × files).
+    let known_files: std::collections::HashSet<String> = files
+        .iter()
+        .filter_map(|p| {
+            p.strip_prefix(root_path)
+                .ok()
+                .map(|r| normalize_path(&r.to_string_lossy()))
+        })
+        .collect();
+
     for (file_idx, file_path) in files.iter().enumerate() {
         let ext = file_path
             .extension()
@@ -97,6 +111,14 @@ pub async fn parse_files(
             let file_qname = format!("{pid}::{rel_escaped}");
             extract_markdown_sections(
                 &content, &relative, &pid, &file_qname, &mut node_stmts, &mut edge_stmts,
+            );
+            extract_markdown_link_edges(
+                &content,
+                &relative,
+                &pid,
+                &file_qname,
+                &known_files,
+                &mut edge_stmts,
             );
             result.files_parsed += 1;
             continue;
@@ -247,6 +269,11 @@ pub async fn parse_files(
             let snippet = extract_snippet(&content, sym.line_start, sym.line_end);
             let snippet_escaped = cypher_escape(&snippet);
 
+            let return_type_escaped = cypher_escape(sym.return_type.as_deref().unwrap_or(""));
+            let visibility_escaped = cypher_escape(sym.visibility.as_deref().unwrap_or(""));
+            let annotations_escaped = cypher_escape(sym.annotations.as_deref().unwrap_or(""));
+            let param_count = sym.parameter_count.map(|c| c as i32).unwrap_or(-1);
+
             node_stmts.push(format!(
                 "CREATE (:{label} {{qualified_name: '{qname}', name: '{name}', \
                  project_id: '{pid}', source_file: '{rel_escaped}', \
@@ -254,9 +281,19 @@ pub async fn parse_files(
                  source: 'pipeline', written_by: 'pipeline', \
                  extends_type: '{extends_val}', import_source: '{import_src}', \
                  declared_type: '{declared_type}', \
-                 content: '{snippet_escaped}', description: ''}})",
+                 content: '{snippet_escaped}', description: '', \
+                 is_exported: {is_exported}, return_type: '{return_type_escaped}', \
+                 visibility: '{visibility_escaped}', parameter_count: {param_count}, \
+                 is_static: {is_static}, is_readonly: {is_readonly}, \
+                 is_abstract: {is_abstract}, is_final: {is_final}, \
+                 annotations: '{annotations_escaped}'}})",
                 ls = sym.line_start,
                 le = sym.line_end,
+                is_exported = sym.is_exported,
+                is_static = sym.is_static,
+                is_readonly = sym.is_readonly,
+                is_abstract = sym.is_abstract,
+                is_final = sym.is_final,
             ));
 
             edge_stmts.push(format!(
@@ -274,8 +311,10 @@ pub async fn parse_files(
                     .unwrap_or("Class");
 
                 let edge_type = match sym.label {
-                    crate::codegraph::types::NodeLabel::Method => "HAS_METHOD",
-                    crate::codegraph::types::NodeLabel::Variable => "HAS_PROPERTY",
+                    crate::codegraph::types::NodeLabel::Method
+                    | crate::codegraph::types::NodeLabel::Constructor => "HAS_METHOD",
+                    crate::codegraph::types::NodeLabel::Variable
+                    | crate::codegraph::types::NodeLabel::Property => "HAS_PROPERTY",
                     crate::codegraph::types::NodeLabel::Parameter => "HAS_PARAMETER",
                     _ => "CONTAINS",
                 };
@@ -333,7 +372,11 @@ pub async fn parse_files(
                  project_id: '{pid}', source_file: '{rel_escaped}', \
                  line_start: {ls}, line_end: {le}, \
                  source: 'pipeline', written_by: 'pipeline', \
-                 extends_type: '', import_source: '', declared_type: ''}})",
+                 extends_type: '', import_source: '', declared_type: '', \
+                 content: '', description: '', \
+                 is_exported: false, return_type: '', visibility: '', \
+                 parameter_count: -1, is_static: false, is_readonly: false, \
+                 is_abstract: false, is_final: false, annotations: ''}})",
                 ls = sym.line_start,
                 le = sym.line_end,
             ));
@@ -415,6 +458,66 @@ pub async fn parse_files(
     Ok(result)
 }
 
+/// Extract Markdown `[text](./link.md)` references and emit IMPORTS
+/// edges between the source File and the target File when the target
+/// exists in the project.
+///
+/// Only relative, in-project links become edges. External URLs,
+/// mailto targets, and links to files we don't index fall on the
+/// floor — they're documentation references, not structural code
+/// dependencies.
+pub(crate) fn extract_markdown_link_edges(
+    content: &str,
+    relative: &str,
+    pid: &str,
+    file_qname: &str,
+    known_files: &std::collections::HashSet<String>,
+    edge_stmts: &mut Vec<String>,
+) {
+    let src_dir = relative
+        .rfind('/')
+        .map(|i| &relative[..i])
+        .unwrap_or("");
+    let src_escaped = cypher_escape(file_qname);
+
+    for link in crate::codegraph::semantic::markdown_links::extract(content) {
+        let target = &link.target;
+        let resolved = if target.starts_with('/') {
+            // Root-anchored in-project link.
+            target.trim_start_matches('/').to_string()
+        } else if src_dir.is_empty() {
+            target.trim_start_matches("./").to_string()
+        } else {
+            let cleaned = target.trim_start_matches("./");
+            format!("{src_dir}/{cleaned}")
+        };
+        let normalized = resolved.replace("//", "/");
+        // Collapse `..` segments so `docs/../index.md` resolves to
+        // `index.md`. We do this one pass because markdown links
+        // rarely chain more than two `..` levels in practice.
+        let mut segments: Vec<&str> = Vec::new();
+        for seg in normalized.split('/') {
+            if seg == ".." {
+                segments.pop();
+            } else if !seg.is_empty() && seg != "." {
+                segments.push(seg);
+            }
+        }
+        let final_path = segments.join("/");
+        if !known_files.contains(&final_path) {
+            continue;
+        }
+        let tgt_qname = format!("{pid}::{esc}", esc = cypher_escape(&final_path));
+        let tgt_escaped = cypher_escape(&tgt_qname);
+        edge_stmts.push(format!(
+            "MATCH (s:File), (t:File) WHERE s.qualified_name = '{src_escaped}' \
+             AND s.project_id = '{pid}' AND t.qualified_name = '{tgt_escaped}' \
+             AND t.project_id = '{pid}' \
+             CREATE (s)-[:CodeRelation {{type: 'IMPORTS', confidence: 0.85, reason: 'markdown link', step: 0}}]->(t)"
+        ));
+    }
+}
+
 /// Extract `#`-prefixed headings from Markdown as Section nodes with
 /// hierarchical CONTAINS edges. Each heading becomes a Section node
 /// whose parent is the most recent heading at a shallower depth.
@@ -478,5 +581,54 @@ fn extract_markdown_sections(
         ));
 
         stack.push((depth, sec_qname));
+    }
+}
+
+/// Parsing phase: tree-sitter AST parse per file, extracts Class /
+/// Function / Method / Variable / Import / etc. nodes plus the per-file
+/// DEFINES edges. Emits incremental progress via the shared callback.
+pub struct ParsingPhase;
+
+#[async_trait::async_trait]
+impl Phase for ParsingPhase {
+    fn label(&self) -> &'static str {
+        "parsing"
+    }
+
+    fn phase(&self) -> Option<PipelinePhase> {
+        Some(PipelinePhase::Parsing)
+    }
+
+    async fn run(&self, ctx: &mut PhaseCtx) -> Result<()> {
+        ctx.emit_progress(PipelinePhase::Parsing, 0.0, "Parsing source files");
+
+        let progress = ctx.make_progress_fn(PipelinePhase::Parsing, |merged, pr| {
+            merged.files_parsed += pr.files_parsed;
+            merged.files_skipped += pr.files_skipped;
+            merged.nodes_created += pr.nodes_created;
+            merged.edges_created += pr.edges_created;
+            merged.errors += pr.errors;
+        });
+
+        let result = parse_files(
+            &ctx.project_id,
+            &ctx.root_path,
+            &ctx.files,
+            &ctx.db,
+            &ctx.config,
+            Some(&progress),
+        )
+        .await?;
+        ctx.stats.files_parsed = result.files_parsed;
+        ctx.stats.files_skipped = result.files_skipped;
+        ctx.stats.nodes_created += result.nodes_created;
+        ctx.stats.edges_created += result.edges_created;
+
+        ctx.emit_progress(
+            PipelinePhase::Parsing,
+            1.0,
+            &format!("Parsed {} files", result.files_parsed),
+        );
+        Ok(())
     }
 }

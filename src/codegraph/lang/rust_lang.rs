@@ -87,6 +87,10 @@ impl LanguageProvider for RustProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::rust::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -123,7 +127,7 @@ fn walk_rust_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let struct_qname = qname(file_path, parent_name, &name);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Struct, &node));
+                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Struct, &node, source));
                 // Extract struct fields.
                 if let Some(body) = node.child_by_field_name("body") {
                     let cursor = &mut body.walk();
@@ -132,7 +136,7 @@ fn walk_rust_node(
                             && let Some(fn_node) = child.child_by_field_name("name")
                         {
                             let fname = text(fn_node, source);
-                            let mut field_sym = sym(file_path, Some(&struct_qname), &fname, NodeLabel::Variable, &child);
+                            let mut field_sym = sym(file_path, Some(&struct_qname), &fname, NodeLabel::Variable, &child, source);
                             if let Some(type_node) = child.child_by_field_name("type") {
                                 let ty = text(type_node, source);
                                 if !ty.is_empty() {
@@ -149,7 +153,7 @@ fn walk_rust_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let enum_qname = qname(file_path, parent_name, &name);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Enum, &node));
+                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Enum, &node, source));
                 // Extract enum variants.
                 if let Some(body) = node.child_by_field_name("body") {
                     let cursor = &mut body.walk();
@@ -158,7 +162,7 @@ fn walk_rust_node(
                             && let Some(vn) = child.child_by_field_name("name")
                         {
                             let vname = text(vn, source);
-                            symbols.push(sym(file_path, Some(&enum_qname), &vname, NodeLabel::Variable, &child));
+                            symbols.push(sym(file_path, Some(&enum_qname), &vname, NodeLabel::Variable, &child, source));
                         }
                     }
                 }
@@ -168,7 +172,7 @@ fn walk_rust_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let mod_qname = qname(file_path, parent_name, &name);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Module, &node));
+                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Module, &node, source));
                 // Recurse into module body.
                 if let Some(body) = node.child_by_field_name("body") {
                     let cursor = &mut body.walk();
@@ -184,7 +188,14 @@ fn walk_rust_node(
                 let name = text(name_node, source);
                 // Only extract named bindings, skip destructuring
                 if !name.is_empty() && !name.contains('(') && !name.contains('{') {
-                    symbols.push(sym(file_path, parent_name, &name, NodeLabel::Variable, &node));
+                    let mut var_sym = sym(file_path, parent_name, &name, NodeLabel::Variable, &node, source);
+                    // In Rust, `let` without `mut` is readonly.
+                    let has_mut = {
+                        let cursor = &mut node.walk();
+                        node.children(cursor).any(|c| c.kind() == "mutable_specifier")
+                    };
+                    var_sym.is_readonly = !has_mut;
+                    symbols.push(var_sym);
                 }
             }
         }
@@ -192,7 +203,7 @@ fn walk_rust_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 let qname = qname(file_path, parent_name, &name);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Trait, &node));
+                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Trait, &node, source));
                 if let Some(body) = node.child_by_field_name("body") {
                     let cursor = &mut body.walk();
                     for child in body.children(cursor) {
@@ -209,6 +220,7 @@ fn walk_rust_node(
                 .map(|n| text(n, source))
                 .unwrap_or_else(|| "impl".to_string());
             let qname = qname(file_path, parent_name, &impl_name);
+            let impl_annotations = rust_collect_annotations(&node, source);
             symbols.push(ExtractedSymbol {
                 name: impl_name.clone(),
                 qualified_name: qname.clone(),
@@ -221,6 +233,8 @@ fn walk_rust_node(
                 implements: Vec::new(),
                 decorates: None,
                 metadata: std::collections::HashMap::new(),
+                annotations: if impl_annotations.is_empty() { None } else { Some(impl_annotations) },
+                ..Default::default()
             });
             if let Some(body) = node.child_by_field_name("body") {
                 let cursor = &mut body.walk();
@@ -238,7 +252,13 @@ fn walk_rust_node(
                 } else {
                     NodeLabel::Function
                 };
-                let mut fn_sym = sym(file_path, parent_name, &name, label, &node);
+                let mut fn_sym = sym(file_path, parent_name, &name, label, &node, source);
+                fn_sym.return_type = rust_return_type(&node, source);
+                fn_sym.parameter_count = Some(rust_count_params(&node));
+                // For methods: is_static means the first param is NOT self.
+                if label == NodeLabel::Method {
+                    fn_sym.is_static = !rust_has_self_param(&node);
+                }
                 if let Some(return_type) = node.child_by_field_name("return_type") {
                     let ty = text(return_type, source);
                     if !ty.is_empty() {
@@ -256,7 +276,7 @@ fn walk_rust_node(
         "macro_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Macro, &node));
+                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Macro, &node, source));
             }
         }
         "type_item" => {
@@ -272,13 +292,17 @@ fn walk_rust_node(
                 } else {
                     NodeLabel::TypeAlias
                 };
-                symbols.push(sym(file_path, parent_name, &name, label, &node));
+                symbols.push(sym(file_path, parent_name, &name, label, &node, source));
             }
         }
         "const_item" | "static_item" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Const, &node));
+                let mut const_sym = sym(file_path, parent_name, &name, NodeLabel::Const, &node, source);
+                // const items are always readonly; static items are mutable
+                // only with `static mut`.
+                const_sym.is_readonly = kind == "const_item";
+                symbols.push(const_sym);
             }
         }
         "use_declaration" => {
@@ -335,6 +359,7 @@ fn collect_rust_uses(
             implements: Vec::new(),
             decorates: None,
             metadata,
+            ..Default::default()
         });
     };
 
@@ -460,6 +485,7 @@ fn collect_rust_params(
             implements: Vec::new(),
             decorates: None,
             metadata,
+            ..Default::default()
         });
     }
 }
@@ -1098,7 +1124,8 @@ fn extract_fallback(file_path: &str, content: &str) -> Vec<ExtractedSymbol> {
             if let Some(rest) = trimmed.strip_prefix(prefix) {
                 let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                 if !name.is_empty() {
-                    symbols.push(fallback_sym(file_path, &name, *label, line_num));
+                    let is_pub = prefix.starts_with("pub ");
+                    symbols.push(fallback_sym_pub(file_path, &name, *label, line_num, is_pub));
                     break;
                 }
             }
@@ -1122,7 +1149,10 @@ fn sym(
     name: &str,
     label: NodeLabel,
     node: &tree_sitter::Node,
+    source: &str,
 ) -> ExtractedSymbol {
+    let is_pub = rust_has_visibility(node);
+    let annotations = rust_collect_annotations(node, source);
     ExtractedSymbol {
         name: name.to_string(),
         qualified_name: qname(file_path, parent, name),
@@ -1135,10 +1165,101 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::Rust,
+            if is_pub {
+                crate::codegraph::semantic::member_rules::Visibility::Public
+            } else {
+                crate::codegraph::semantic::member_rules::Visibility::Private
+            },
+            if is_pub { &["pub"] } else { &[] },
+            name,
+        ),
+        visibility: Some(if is_pub { "public".to_string() } else { "private".to_string() }),
+        annotations: if annotations.is_empty() { None } else { Some(annotations) },
+        ..Default::default()
     }
 }
 
-fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> ExtractedSymbol {
+/// Check whether a Rust item node has a `visibility_modifier` child (i.e., `pub`).
+#[cfg(feature = "codegraph")]
+fn rust_has_visibility(node: &tree_sitter::Node) -> bool {
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        if child.kind() == "visibility_modifier" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Collect `#[...]` attributes preceding a Rust item node.
+///
+/// In tree-sitter-rust, `attribute_item` nodes are siblings that precede the
+/// item they annotate. We walk backwards from the item collecting them. The
+/// `source` parameter is ignored when called without tree content — pass `""`
+/// for non-tree-sitter paths.
+#[cfg(feature = "codegraph")]
+fn rust_collect_annotations(node: &tree_sitter::Node, source: &str) -> String {
+    let mut attrs: Vec<String> = Vec::new();
+    let mut cursor = *node;
+    while let Some(prev) = cursor.prev_named_sibling() {
+        match prev.kind() {
+            "attribute_item" | "inner_attribute_item" => {
+                if let Ok(txt) = prev.utf8_text(source.as_bytes()) {
+                    attrs.push(txt.to_string());
+                }
+                cursor = prev;
+            }
+            _ => break,
+        }
+    }
+    attrs.reverse();
+    attrs.join(", ")
+}
+
+/// Count function parameters (excluding `self` receivers).
+#[cfg(feature = "codegraph")]
+fn rust_count_params(node: &tree_sitter::Node) -> u32 {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return 0;
+    };
+    let cursor = &mut params.walk();
+    params
+        .children(cursor)
+        .filter(|c| c.kind() == "parameter")
+        .count() as u32
+}
+
+/// Check whether a function_item's first parameter is a self receiver.
+#[cfg(feature = "codegraph")]
+fn rust_has_self_param(node: &tree_sitter::Node) -> bool {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return false;
+    };
+    let cursor = &mut params.walk();
+    params
+        .children(cursor)
+        .any(|c| c.kind() == "self_parameter")
+}
+
+/// Extract the return type text from a Rust function_item node.
+#[cfg(feature = "codegraph")]
+fn rust_return_type(node: &tree_sitter::Node, source: &str) -> Option<String> {
+    node.child_by_field_name("return_type")
+        .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Fallback variant that detects `pub` visibility from the line prefix.
+fn fallback_sym_pub(
+    file_path: &str,
+    name: &str,
+    label: NodeLabel,
+    line: u32,
+    is_pub: bool,
+) -> ExtractedSymbol {
     ExtractedSymbol {
         name: name.to_string(),
         qualified_name: format!("{file_path}::{name}"),
@@ -1151,5 +1272,17 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::Rust,
+            if is_pub {
+                crate::codegraph::semantic::member_rules::Visibility::Public
+            } else {
+                crate::codegraph::semantic::member_rules::Visibility::Private
+            },
+            if is_pub { &["pub"] } else { &[] },
+            name,
+        ),
+        visibility: Some(if is_pub { "public".to_string() } else { "private".to_string() }),
+        ..Default::default()
     }
 }

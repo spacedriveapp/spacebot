@@ -86,6 +86,10 @@ impl LanguageProvider for CProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::c::QUERY_SET)
+    }
 }
 
 impl LanguageProvider for CppProvider {
@@ -158,6 +162,10 @@ impl LanguageProvider for CppProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::cpp::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -223,6 +231,7 @@ fn walk_c_node(
                         implements: Vec::new(),
                         decorates: None,
                         metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 }
             }
@@ -442,6 +451,7 @@ fn collect_c_params(
             implements: Vec::new(),
             decorates: None,
             metadata,
+            ..Default::default()
         });
     }
 }
@@ -978,6 +988,7 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -994,5 +1005,6 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

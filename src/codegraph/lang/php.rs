@@ -81,6 +81,10 @@ impl LanguageProvider for PhpProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::php::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -149,6 +153,7 @@ fn walk_php_node(
                     implements: Vec::new(),
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -172,6 +177,7 @@ fn walk_php_node(
                     implements,
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
+                    ..Default::default()
                 });
                 if let Some(body) = node.child_by_field_name("body") {
                     let cursor = &mut body.walk();
@@ -337,6 +343,7 @@ fn collect_php_params(
             implements: Vec::new(),
             decorates: None,
             metadata: std::collections::HashMap::new(),
+            ..Default::default()
         });
     }
 }
@@ -621,6 +628,7 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -666,5 +674,6 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

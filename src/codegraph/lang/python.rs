@@ -2,6 +2,7 @@
 
 use super::provider::{AccessSite, CallSite, ExtractedSymbol, LanguageProvider};
 use super::languages::SupportedLanguage;
+use crate::codegraph::semantic::member_rules;
 use crate::codegraph::types::NodeLabel;
 
 pub struct PythonProvider;
@@ -68,6 +69,10 @@ impl LanguageProvider for PythonProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::python::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -120,6 +125,17 @@ fn walk_py_node(
                     implements: Vec::new(),
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
+                    is_exported: member_rules::is_exported(
+                        SupportedLanguage::Python,
+                        member_rules::classify_visibility(
+                            SupportedLanguage::Python,
+                            &[],
+                            name.as_ref(),
+                        ),
+                        &[],
+                        name.as_ref(),
+                    ),
+                    ..Default::default()
                 });
                 if let Some(body) = node.child_by_field_name("body") {
                     // Collect class-level assignments (`x = 0`, `x: T = 0`)
@@ -147,6 +163,7 @@ fn walk_py_node(
                             implements: Vec::new(),
                             decorates: None,
                             metadata,
+                            ..Default::default()
                         });
                     }
 
@@ -168,12 +185,27 @@ fn walk_py_node(
                 };
                 let fn_qname = qname(file_path, parent_name, &name);
                 let mut metadata = std::collections::HashMap::new();
+                let mut ret_type = None;
                 if let Some(return_type) = node.child_by_field_name("return_type") {
                     let ty = text_str(return_type, source);
                     if !ty.is_empty() {
-                        metadata.insert("declared_type".to_string(), ty);
+                        metadata.insert("declared_type".to_string(), ty.clone());
+                        ret_type = Some(ty);
                     }
                 }
+                let param_count = node.child_by_field_name("parameters").map(|params| {
+                    let cursor = &mut params.walk();
+                    params.children(cursor).filter(|c| {
+                        matches!(c.kind(), "identifier" | "typed_parameter" | "default_parameter"
+                            | "typed_default_parameter" | "list_splat_pattern" | "dictionary_splat_pattern")
+                    }).filter(|c| {
+                        let t = c.child_by_field_name("name")
+                            .map(|n| text_str(n, source))
+                            .or_else(|| if c.kind() == "identifier" { Some(text_str(*c, source)) } else { None })
+                            .unwrap_or_default();
+                        t != "self" && t != "cls"
+                    }).count() as u32
+                });
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: fn_qname.clone(),
@@ -186,6 +218,19 @@ fn walk_py_node(
                     implements: Vec::new(),
                     decorates: None,
                     metadata,
+                    is_exported: member_rules::is_exported(
+                        SupportedLanguage::Python,
+                        member_rules::classify_visibility(
+                            SupportedLanguage::Python,
+                            &[],
+                            name.as_ref(),
+                        ),
+                        &[],
+                        name.as_ref(),
+                    ),
+                    return_type: ret_type,
+                    parameter_count: param_count,
+                    ..Default::default()
                 });
 
                 if let Some(params) = node.child_by_field_name("parameters") {
@@ -214,6 +259,7 @@ fn walk_py_node(
                         implements: Vec::new(),
                         decorates: None,
                         metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 } else {
                     walk_py_node(child, file_path, source, symbols, parent_name);
@@ -277,6 +323,7 @@ fn collect_py_imports(
             implements: Vec::new(),
             decorates: None,
             metadata,
+            ..Default::default()
         });
     };
 
@@ -471,6 +518,7 @@ fn collect_py_params(
             implements: Vec::new(),
             decorates: None,
             metadata,
+            ..Default::default()
         });
     }
 }
@@ -914,5 +962,12 @@ fn sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> ExtractedSym
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        is_exported: member_rules::is_exported(
+                        SupportedLanguage::Python,
+                        member_rules::classify_visibility(SupportedLanguage::Python, &[], name),
+                        &[],
+                        name,
+                    ),
+        ..Default::default()
     }
 }

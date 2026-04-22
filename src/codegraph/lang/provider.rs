@@ -57,7 +57,7 @@ pub struct AccessSite {
 }
 
 /// A symbol extracted from a tree-sitter AST.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExtractedSymbol {
     /// Symbol name.
     pub name: String,
@@ -87,6 +87,24 @@ pub struct ExtractedSymbol {
     ///   `"map[string]int"`). The call-site resolver uses this to bind
     ///   receivers to their class qnames for method lookup.
     pub metadata: std::collections::HashMap<String, String>,
+    /// Whether this symbol is exported / public API.
+    pub is_exported: bool,
+    /// Return type string for functions/methods.
+    pub return_type: Option<String>,
+    /// Visibility: "public", "private", "protected", or "internal".
+    pub visibility: Option<String>,
+    /// Number of parameters (functions/methods/constructors).
+    pub parameter_count: Option<u32>,
+    /// Whether this symbol is static.
+    pub is_static: bool,
+    /// Whether this symbol is readonly/const/final.
+    pub is_readonly: bool,
+    /// Whether this symbol is abstract.
+    pub is_abstract: bool,
+    /// Whether this symbol is final/sealed.
+    pub is_final: bool,
+    /// Comma-separated annotation/attribute names.
+    pub annotations: Option<String>,
 }
 
 /// Trait that each language provider implements.
@@ -154,4 +172,16 @@ pub trait LanguageProvider: Send + Sync {
 
     /// Node labels that this language can produce.
     fn supported_labels(&self) -> &[NodeLabel];
+
+    /// Declarative tree-sitter queries for this provider.
+    ///
+    /// Returning `Some(q)` opts the provider into the Phase 2+ query-
+    /// based extraction path — each `Option<&'static str>` inside the
+    /// [`crate::codegraph::lang::queries::QuerySet`] lets a provider
+    /// migrate one extraction kind at a time without rewriting the
+    /// whole walk. `None` (the default) keeps the walk-based path
+    /// active, which is how every provider ships today.
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        None
+    }
 }

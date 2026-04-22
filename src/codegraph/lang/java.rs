@@ -101,6 +101,10 @@ impl LanguageProvider for JavaProvider {
             NodeLabel::Module,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::java::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -200,7 +204,16 @@ fn walk_java_node(
                     implements,
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
-                    is_exported: is_pub,
+                    is_exported: crate::codegraph::semantic::member_rules::is_exported(
+                        SupportedLanguage::Java,
+                        if is_pub {
+                            crate::codegraph::semantic::member_rules::Visibility::Public
+                        } else {
+                            crate::codegraph::semantic::member_rules::Visibility::Package
+                        },
+                        if is_pub { &["public"] } else { &[] },
+                        name.as_ref(),
+                    ),
                     visibility: vis,
                     is_static,
                     is_abstract,
@@ -902,7 +915,16 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
-        is_exported: is_pub,
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::Java,
+            if is_pub {
+                crate::codegraph::semantic::member_rules::Visibility::Public
+            } else {
+                crate::codegraph::semantic::member_rules::Visibility::Package
+            },
+            if is_pub { &["public"] } else { &[] },
+            name,
+        ),
         visibility: vis,
         is_static,
         is_abstract,

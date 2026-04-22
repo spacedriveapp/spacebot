@@ -78,6 +78,10 @@ impl LanguageProvider for TypeScriptProvider {
             NodeLabel::Const,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::typescript::QUERY_SET)
+    }
 }
 
 pub struct JavaScriptProvider;
@@ -132,6 +136,10 @@ impl LanguageProvider for JavaScriptProvider {
             NodeLabel::Import,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::javascript::QUERY_SET)
+    }
 }
 
 /// Extract symbols using tree-sitter with the TypeScript or JavaScript grammar.
@@ -171,9 +179,117 @@ fn extract_with_tree_sitter(
     let root = tree.root_node();
 
     // Walk the tree manually for reliability across grammar versions.
-    walk_ts_node(root, file_path, content, &mut symbols, None);
+    walk_ts_node(root, file_path, content, &mut symbols, None, false);
 
     symbols
+}
+
+/// Check whether a tree-sitter node has a child token with the given kind
+/// (e.g. `"static"`, `"readonly"`, `"abstract"`, `"override"`).
+#[cfg(feature = "codegraph")]
+fn has_modifier(node: tree_sitter::Node, modifier: &str) -> bool {
+    // tree-sitter-typescript represents modifiers as child nodes whose
+    // `kind()` matches the keyword text (e.g. "static", "abstract",
+    // "override"). Just walk direct children and compare kinds.
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        if child.kind() == modifier {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract the accessibility modifier ("public", "private", "protected") from
+/// a method_definition or property node.
+#[cfg(feature = "codegraph")]
+fn extract_visibility(node: tree_sitter::Node, source: &str) -> Option<String> {
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        match child.kind() {
+            "accessibility_modifier" | "public" | "private" | "protected" => {
+                let text = node_text(child, source);
+                match text.as_str() {
+                    "public" | "private" | "protected" => return Some(text),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Count the number of parameters in a `formal_parameters` node.
+#[cfg(feature = "codegraph")]
+fn count_parameters(params_node: tree_sitter::Node) -> u32 {
+    let cursor = &mut params_node.walk();
+    let mut count = 0u32;
+    for child in params_node.children(cursor) {
+        match child.kind() {
+            "required_parameter" | "optional_parameter" | "rest_parameter" | "identifier" => {
+                count += 1;
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Extract return type from a function/method node's `return_type` field.
+#[cfg(feature = "codegraph")]
+fn extract_return_type(node: tree_sitter::Node, source: &str) -> Option<String> {
+    node.child_by_field_name("return_type")
+        .map(|n| clean_ts_type_annotation(&node_text(n, source)))
+        .filter(|s| !s.is_empty())
+}
+
+/// Collect decorator names from sibling `decorator` nodes that appear
+/// immediately before the given declaration node. In tree-sitter-typescript,
+/// decorators are siblings of the decorated declaration inside the parent.
+#[cfg(feature = "codegraph")]
+fn collect_decorators(node: tree_sitter::Node, source: &str) -> Vec<String> {
+    let mut decorators = Vec::new();
+    // Walk preceding siblings looking for decorator nodes.
+    let mut sibling = node.prev_sibling();
+    while let Some(sib) = sibling {
+        if sib.kind() == "decorator" {
+            // The decorator node contains an expression (identifier or call_expression).
+            // Extract just the name.
+            let text = node_text(sib, source);
+            let name = text
+                .trim_start_matches('@')
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !name.is_empty() {
+                decorators.push(name);
+            }
+            sibling = sib.prev_sibling();
+        } else {
+            break;
+        }
+    }
+    decorators.reverse();
+    decorators
+}
+
+/// Check whether a node has `readonly` among its children.
+#[cfg(feature = "codegraph")]
+fn has_readonly(node: tree_sitter::Node, source: &str) -> bool {
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        if child.kind() == "readonly" {
+            return true;
+        }
+        // Some grammar versions use a generic modifier token.
+        if node_text(child, source) == "readonly" {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(feature = "codegraph")]
@@ -183,6 +299,7 @@ fn walk_ts_node(
     source: &str,
     symbols: &mut Vec<ExtractedSymbol>,
     parent_name: Option<&str>,
+    is_exported: bool,
 ) {
     let kind = node.kind();
 
@@ -191,6 +308,12 @@ fn walk_ts_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let qname = qualified_name(file_path, parent_name, &name);
+                let decorators = collect_decorators(node, source);
+                let annotations = if decorators.is_empty() {
+                    None
+                } else {
+                    Some(decorators.join(","))
+                };
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: qname.clone(),
@@ -198,15 +321,14 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
                     extends: child_text_by_field(node, "superclass", source),
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    is_exported,
+                    annotations,
+                    ..Default::default()
                 });
                 // Recurse into class body with class as parent.
                 if let Some(body) = node.child_by_field_name("body") {
-                    walk_ts_children(body, file_path, source, symbols, Some(&qname));
+                    walk_ts_children(body, file_path, source, symbols, Some(&qname), false);
                 }
                 return; // Don't recurse into children again.
             }
@@ -216,12 +338,13 @@ fn walk_ts_node(
                 let name = node_text(name_node, source);
                 let fn_qname = qualified_name(file_path, parent_name, &name);
                 let mut metadata = std::collections::HashMap::new();
-                if let Some(return_type) = node.child_by_field_name("return_type") {
-                    let ty = clean_ts_type_annotation(&node_text(return_type, source));
-                    if !ty.is_empty() {
-                        metadata.insert("declared_type".to_string(), ty);
-                    }
+                let return_type = extract_return_type(node, source);
+                if let Some(ref ty) = return_type {
+                    metadata.insert("declared_type".to_string(), ty.clone());
                 }
+                let parameter_count = node
+                    .child_by_field_name("parameters")
+                    .map(|p| count_parameters(p));
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: fn_qname.clone(),
@@ -229,11 +352,11 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
                     metadata,
+                    is_exported,
+                    return_type,
+                    parameter_count,
+                    ..Default::default()
                 });
                 if let Some(params) = node.child_by_field_name("parameters") {
                     collect_ts_params(params, source, &fn_qname, symbols);
@@ -261,14 +384,32 @@ fn walk_ts_node(
                         metadata.insert("declared_type".to_string(), ty);
                     }
                 }
+                let mut return_type = None;
                 if kind == "method_definition"
-                    && let Some(return_type) = node.child_by_field_name("return_type")
+                    && let Some(rt_node) = node.child_by_field_name("return_type")
                 {
-                    let ty = clean_ts_type_annotation(&node_text(return_type, source));
+                    let ty = clean_ts_type_annotation(&node_text(rt_node, source));
                     if !ty.is_empty() {
-                        metadata.insert("declared_type".to_string(), ty);
+                        metadata.insert("declared_type".to_string(), ty.clone());
+                        return_type = Some(ty);
                     }
                 }
+                let visibility = extract_visibility(node, source);
+                let is_static = has_modifier(node, "static");
+                let is_readonly = has_readonly(node, source);
+                let is_abstract = has_modifier(node, "abstract");
+                let parameter_count = if kind == "method_definition" {
+                    node.child_by_field_name("parameters")
+                        .map(|p| count_parameters(p))
+                } else {
+                    None
+                };
+                let decorators = collect_decorators(node, source);
+                let annotations = if decorators.is_empty() {
+                    None
+                } else {
+                    Some(decorators.join(","))
+                };
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: fn_qname.clone(),
@@ -276,11 +417,15 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
                     metadata,
+                    visibility,
+                    is_static,
+                    is_readonly,
+                    is_abstract,
+                    return_type,
+                    parameter_count,
+                    annotations,
+                    ..Default::default()
                 });
                 if kind == "method_definition"
                     && let Some(params) = node.child_by_field_name("parameters")
@@ -300,15 +445,12 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    is_exported,
+                    ..Default::default()
                 });
                 // Recurse into interface body to extract property/method signatures.
                 if let Some(body) = node.child_by_field_name("body") {
-                    walk_ts_children(body, file_path, source, symbols, Some(&qname));
+                    walk_ts_children(body, file_path, source, symbols, Some(&qname), false);
                 }
                 return;
             }
@@ -323,6 +465,9 @@ fn walk_ts_node(
                         metadata.insert("declared_type".to_string(), ty);
                     }
                 }
+                let is_readonly = has_readonly(node, source);
+                let is_static = has_modifier(node, "static");
+                let visibility = extract_visibility(node, source);
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: qualified_name(file_path, parent_name, &name),
@@ -330,17 +475,21 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
                     metadata,
+                    is_readonly,
+                    is_static,
+                    visibility,
+                    ..Default::default()
                 });
             }
         }
         "method_signature" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
+                let return_type = extract_return_type(node, source);
+                let parameter_count = node
+                    .child_by_field_name("parameters")
+                    .map(|p| count_parameters(p));
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: qualified_name(file_path, parent_name, &name),
@@ -348,11 +497,9 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    return_type,
+                    parameter_count,
+                    ..Default::default()
                 });
             }
         }
@@ -360,6 +507,12 @@ fn walk_ts_node(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let qname = qualified_name(file_path, parent_name, &name);
+                let decorators = collect_decorators(node, source);
+                let annotations = if decorators.is_empty() {
+                    None
+                } else {
+                    Some(decorators.join(","))
+                };
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: qname.clone(),
@@ -367,14 +520,14 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
                     extends: child_text_by_field(node, "superclass", source),
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    is_exported,
+                    is_abstract: true,
+                    annotations,
+                    ..Default::default()
                 });
                 if let Some(body) = node.child_by_field_name("body") {
-                    walk_ts_children(body, file_path, source, symbols, Some(&qname));
+                    walk_ts_children(body, file_path, source, symbols, Some(&qname), false);
                 }
                 return;
             }
@@ -390,15 +543,12 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    is_exported,
+                    ..Default::default()
                 });
                 // Recurse into enum body to extract members.
                 if let Some(body) = node.child_by_field_name("body") {
-                    walk_ts_children(body, file_path, source, symbols, Some(&qname));
+                    walk_ts_children(body, file_path, source, symbols, Some(&qname), false);
                 }
                 return;
             }
@@ -423,11 +573,8 @@ fn walk_ts_node(
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     parent: parent_name.map(String::from),
-                    import_source: None,
-                    extends: None,
-                    implements: Vec::new(),
-                    decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    is_exported,
+                    ..Default::default()
                 });
             }
         }
@@ -442,19 +589,39 @@ fn walk_ts_node(
         }
         "lexical_declaration" | "variable_declaration" => {
             // Handle `const foo = () => {}` and `var foo = ...`.
+            // Check if `const` (readonly for variable bindings).
+            let is_const = kind == "lexical_declaration" && {
+                let cursor = &mut node.walk();
+                node.children(cursor).any(|c| c.kind() == "const")
+            };
             let cursor = &mut node.walk();
             for child in node.children(cursor) {
                 if child.kind() == "variable_declarator"
                     && let Some(name_node) = child.child_by_field_name("name")
                 {
-                    let value_kind = child
-                        .child_by_field_name("value")
-                        .map(|v| v.kind().to_string());
-                    let label = match value_kind.as_deref() {
-                        Some("arrow_function") | Some("function") => NodeLabel::Function,
-                        _ => NodeLabel::Variable,
+                    let value_node = child.child_by_field_name("value");
+                    let value_kind = value_node.map(|v| v.kind().to_string());
+                    let is_arrow_or_fn = matches!(
+                        value_kind.as_deref(),
+                        Some("arrow_function") | Some("function")
+                    );
+                    let label = if is_arrow_or_fn {
+                        NodeLabel::Function
+                    } else {
+                        NodeLabel::Variable
                     };
                     let name = node_text(name_node, source);
+                    // For arrow/function values, extract return type and parameter count.
+                    let (return_type, parameter_count) = if is_arrow_or_fn {
+                        let val = value_node.unwrap();
+                        let rt = extract_return_type(val, source);
+                        let pc = val
+                            .child_by_field_name("parameters")
+                            .map(|p| count_parameters(p));
+                        (rt, pc)
+                    } else {
+                        (None, None)
+                    };
                     symbols.push(ExtractedSymbol {
                         name: name.clone(),
                         qualified_name: qualified_name(file_path, parent_name, &name),
@@ -462,11 +629,11 @@ fn walk_ts_node(
                         line_start: node.start_position().row as u32 + 1,
                         line_end: node.end_position().row as u32 + 1,
                         parent: parent_name.map(String::from),
-                        import_source: None,
-                        extends: None,
-                        implements: Vec::new(),
-                        decorates: None,
-                        metadata: std::collections::HashMap::new(),
+                        is_exported,
+                        is_readonly: is_const,
+                        return_type,
+                        parameter_count,
+                        ..Default::default()
                     });
                 }
             }
@@ -486,25 +653,21 @@ fn walk_ts_node(
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         parent: parent_name.map(String::from),
-                        import_source: None,
-                        extends: None,
-                        implements: Vec::new(),
-                        decorates: None,
-                        metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 }
             }
         }
         "export_statement" => {
             // Recurse into the exported declaration so `export function...` etc. are extracted.
-            walk_ts_children(node, file_path, source, symbols, parent_name);
+            walk_ts_children(node, file_path, source, symbols, parent_name, true);
             return; // Already recursed
         }
         _ => {}
     }
 
     // Recurse into children.
-    walk_ts_children(node, file_path, source, symbols, parent_name);
+    walk_ts_children(node, file_path, source, symbols, parent_name, is_exported);
 }
 
 #[cfg(feature = "codegraph")]
@@ -514,10 +677,11 @@ fn walk_ts_children(
     source: &str,
     symbols: &mut Vec<ExtractedSymbol>,
     parent_name: Option<&str>,
+    is_exported: bool,
 ) {
     let cursor = &mut node.walk();
     for child in node.children(cursor) {
-        walk_ts_node(child, file_path, source, symbols, parent_name);
+        walk_ts_node(child, file_path, source, symbols, parent_name, is_exported);
     }
 }
 
@@ -574,11 +738,8 @@ fn collect_ts_params(
             line_start: child.start_position().row as u32 + 1,
             line_end: child.end_position().row as u32 + 1,
             parent: Some(function_qname.to_string()),
-            import_source: None,
-            extends: None,
-            implements: Vec::new(),
-            decorates: None,
             metadata,
+            ..Default::default()
         });
     }
 }
@@ -625,12 +786,9 @@ fn collect_ts_imports(
             label: NodeLabel::Import,
             line_start,
             line_end,
-            parent: None,
             import_source: Some(source_text.to_string()),
-            extends: None,
-            implements: Vec::new(),
-            decorates: None,
             metadata,
+            ..Default::default()
         });
     };
 
@@ -1265,11 +1423,6 @@ fn simple_symbol(
         label,
         line_start: line,
         line_end: line,
-        parent: None,
-        import_source: None,
-        extends: None,
-        implements: Vec::new(),
-        decorates: None,
-        metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

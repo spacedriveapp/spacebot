@@ -77,6 +77,10 @@ impl LanguageProvider for DartProvider {
             NodeLabel::Module,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::dart::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -145,6 +149,7 @@ fn walk_dart_node(
                         implements: Vec::new(),
                         decorates: None,
                         metadata: std::collections::HashMap::new(),
+                        ..Default::default()
                     });
                 }
             }
@@ -168,6 +173,7 @@ fn walk_dart_node(
                     implements,
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
+                    ..Default::default()
                 });
                 let cursor = &mut node.walk();
                 for child in node.children(cursor) {
@@ -270,6 +276,7 @@ fn collect_dart_params(
             implements: Vec::new(),
             decorates: None,
             metadata: std::collections::HashMap::new(),
+            ..Default::default()
         });
     }
 }
@@ -595,6 +602,7 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -638,5 +646,6 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        ..Default::default()
     }
 }

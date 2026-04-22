@@ -11,10 +11,14 @@
 //! 3. Declare the new module below with `pub mod <name>;`
 //! 4. Add a row to the `LANGUAGES` table in `language_detection.rs`
 
+#[cfg(feature = "codegraph")]
+pub mod ast_cache;
 pub mod cobol_exec;
 pub mod cobol_preprocessor;
 pub mod jcl;
+pub mod parse_order;
 pub mod provider;
+pub mod queries;
 
 // Registry and enum.
 pub mod language_detection;

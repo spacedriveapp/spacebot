@@ -87,6 +87,10 @@ impl LanguageProvider for GoProvider {
             NodeLabel::Module,
         ]
     }
+
+    fn queries(&self) -> Option<&'static super::queries::QuerySet> {
+        Some(&super::queries::go::QUERY_SET)
+    }
 }
 
 #[cfg(feature = "codegraph")]
@@ -147,7 +151,8 @@ fn walk_go_node(
                     if let Some(result) = node.child_by_field_name("result") {
                         let ty = text(result, source);
                         if !ty.is_empty() {
-                            fn_sym.metadata.insert("declared_type".to_string(), ty);
+                            fn_sym.metadata.insert("declared_type".to_string(), ty.clone());
+                            fn_sym.return_type = Some(ty);
                         }
                     }
                     symbols.push(fn_sym);
@@ -186,7 +191,8 @@ fn walk_go_node(
                         if !ty.is_empty() {
                             method_sym
                                 .metadata
-                                .insert("declared_type".to_string(), ty);
+                                .insert("declared_type".to_string(), ty.clone());
+                            method_sym.return_type = Some(ty);
                         }
                     }
                     symbols.push(method_sym);
@@ -404,6 +410,7 @@ fn collect_go_params(
                 implements: Vec::new(),
                 decorates: None,
                 metadata,
+                ..Default::default()
             });
         }
     }
@@ -461,6 +468,7 @@ fn collect_import_specs(
                         implements: Vec::new(),
                         decorates: None,
                         metadata,
+                        ..Default::default()
                     });
                 }
             }
@@ -884,6 +892,17 @@ fn sym(
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::Go,
+            crate::codegraph::semantic::member_rules::classify_visibility(
+                SupportedLanguage::Go,
+                &[],
+                name,
+            ),
+            &[],
+            name,
+        ),
+        ..Default::default()
     }
 }
 
@@ -900,5 +919,16 @@ fn fallback_sym(file_path: &str, name: &str, label: NodeLabel, line: u32) -> Ext
         implements: Vec::new(),
         decorates: None,
         metadata: std::collections::HashMap::new(),
+        is_exported: crate::codegraph::semantic::member_rules::is_exported(
+            SupportedLanguage::Go,
+            crate::codegraph::semantic::member_rules::classify_visibility(
+                SupportedLanguage::Go,
+                &[],
+                name,
+            ),
+            &[],
+            name,
+        ),
+        ..Default::default()
     }
 }
