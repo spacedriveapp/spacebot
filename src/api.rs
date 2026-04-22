@@ -22,6 +22,7 @@ mod models;
 mod opencode_proxy;
 mod projects;
 mod providers;
+mod schema_alias;
 mod secrets;
 mod server;
 mod settings;

@@ -248,6 +248,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(codegraph::get_graph_stats))
         .routes(routes!(codegraph::get_bulk_nodes))
         .routes(routes!(codegraph::get_bulk_edges))
+        .routes(routes!(codegraph::get_graph_stream))
         // Filesystem routes (OpenAPI-documented)
         .routes(routes!(fs::read_file))
         // Factory routes

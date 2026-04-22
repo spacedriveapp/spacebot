@@ -6,8 +6,11 @@
 use super::state::ApiState;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -54,6 +57,11 @@ pub(super) struct NodeListQuery {
     offset: usize,
     #[serde(default = "default_node_limit")]
     limit: usize,
+    /// Optional output schema vocabulary (`default` or `gitnexus`).
+    /// When `gitnexus`, label names on response items are translated
+    /// to GitNexus conventions (e.g. `MacroDef`→`Macro`).
+    #[serde(default)]
+    schema: super::schema_alias::ApiSchema,
 }
 
 fn default_node_limit() -> usize {
@@ -79,6 +87,10 @@ pub(super) struct EdgeListQuery {
     offset: usize,
     #[serde(default = "default_node_limit")]
     limit: usize,
+    /// Optional output schema vocabulary (`default` or `gitnexus`).
+    /// Translates label + edge-type names on response items.
+    #[serde(default)]
+    schema: super::schema_alias::ApiSchema,
 }
 
 fn default_direction() -> String {
@@ -206,10 +218,6 @@ pub(super) struct GraphStatsResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct BulkNodesResponse {
     nodes: Vec<NodeSummary>,
-    /// True when the server truncated the result to stay under the node cap.
-    truncated: bool,
-    /// Total number of nodes that would have been returned without the cap.
-    total_available: usize,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -228,11 +236,6 @@ pub(super) struct BulkEdgeSummary {
     edge_type: String,
     confidence: f64,
 }
-
-/// Hard cap on the number of nodes returned by the bulk endpoint. Sigma +
-/// ForceAtlas2 handle 15k comfortably; bigger payloads slow the client
-/// layout to a crawl.
-const BULK_GRAPH_MAX_NODES: usize = 15_000;
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct LabelCount {
@@ -499,9 +502,9 @@ pub(super) async fn search_graph(
     let manager = get_manager(&state)?;
 
     let db = manager
-        .get_db(&project_id)
+        .get_or_open_db(&project_id)
         .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let results = crate::codegraph::search::hybrid_search(
         &project_id,
@@ -616,13 +619,14 @@ pub(super) async fn list_nodes(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let schema = query.schema;
     let nodes = nodes
         .into_iter()
         .map(|n| NodeSummary {
             id: n.id,
             qualified_name: n.qualified_name,
             name: n.name,
-            label: n.label,
+            label: super::schema_alias::translate_label(&n.label, schema).to_string(),
             source_file: n.source_file,
             line_start: n.line_start,
             line_end: n.line_end,
@@ -748,16 +752,17 @@ pub(super) async fn get_node_edges(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let schema = query.schema;
     let edges = edges
         .into_iter()
         .map(|e| EdgeSummary {
             from_id: e.from_id,
             from_name: e.from_name,
-            from_label: e.from_label,
+            from_label: super::schema_alias::translate_label(&e.from_label, schema).to_string(),
             to_id: e.to_id,
             to_name: e.to_name,
-            to_label: e.to_label,
-            edge_type: e.edge_type,
+            to_label: super::schema_alias::translate_label(&e.to_label, schema).to_string(),
+            edge_type: super::schema_alias::translate_edge_type(&e.edge_type, schema).to_string(),
             confidence: e.confidence,
         })
         .collect();
@@ -816,9 +821,9 @@ pub(super) async fn get_graph_stats(
 /// GET /codegraph/projects/:project_id/graph/bulk-nodes — all nodes.
 ///
 /// Returns every node in the project for the interactive graph canvas.
-/// Pipeline-only labels (Variable, Import, Parameter, Decorator) are
-/// deleted before finalization so this returns only display-worthy nodes.
-/// Hard-capped at 15k nodes with label-priority truncation.
+/// Parameter nodes are deleted before finalization (pipeline-only);
+/// everything else — including Variable, Import, and Decorator — is
+/// persisted. Hard-capped at 15k nodes with label-priority truncation.
 #[utoipa::path(
     get,
     path = "/codegraph/projects/{project_id}/graph/bulk-nodes",
@@ -838,12 +843,14 @@ pub(super) async fn get_bulk_nodes(
     let db = manager
         .get_or_open_db(&project_id)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            tracing::error!(project_id = %project_id, err = %e, "bulk-nodes: failed to open DB");
+            StatusCode::NOT_FOUND
+        })?;
 
-    let (queried, truncated, total_available) = crate::codegraph::graph_queries::query_bulk_nodes(
+    let queried = crate::codegraph::graph_queries::query_bulk_nodes(
         &db,
         &project_id,
-        BULK_GRAPH_MAX_NODES,
     )
     .await
     .map_err(|e| {
@@ -882,11 +889,7 @@ pub(super) async fn get_bulk_nodes(
         }})
         .collect();
 
-    Ok(Json(BulkNodesResponse {
-        nodes,
-        truncated,
-        total_available,
-    }))
+    Ok(Json(BulkNodesResponse { nodes }))
 }
 
 /// GET /codegraph/projects/:project_id/graph/bulk-edges — all edges.
@@ -911,12 +914,14 @@ pub(super) async fn get_bulk_edges(
     let db = manager
         .get_or_open_db(&project_id)
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            tracing::error!(project_id = %project_id, err = %e, "bulk-edges: failed to open DB");
+            StatusCode::NOT_FOUND
+        })?;
 
-    let (queried_nodes, _truncated, _total) = crate::codegraph::graph_queries::query_bulk_nodes(
+    let queried_nodes = crate::codegraph::graph_queries::query_bulk_nodes(
         &db,
         &project_id,
-        BULK_GRAPH_MAX_NODES,
     )
     .await
     .map_err(|e| {
@@ -947,6 +952,143 @@ pub(super) async fn get_bulk_edges(
         .collect();
 
     Ok(Json(BulkEdgesResponse { edges }))
+}
+
+/// GET /codegraph/projects/:project_id/graph/stream — NDJSON graph.
+///
+/// Streams every node, then every edge, as newline-delimited JSON:
+///
+/// ```text
+/// {"type":"node","data":{...}}
+/// {"type":"edge","data":{...}}
+/// {"type":"error","error":"..."}   // terminal, only on mid-stream failure
+/// ```
+///
+/// Uses the native Kuzu cursor end-to-end (`CodeGraphDb::query_stream`) so
+/// no result set is ever materialized — this is what lets huge graphs
+/// load without crashing LadybugDB's native layer. Ports the pattern
+/// from GitNexus's `/api/graph?stream=true` handler (`server/api.ts:707`).
+#[utoipa::path(
+    get,
+    path = "/codegraph/projects/{project_id}/graph/stream",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+    ),
+    responses(
+        (status = 200, description = "NDJSON stream of graph nodes and edges", content_type = "application/x-ndjson"),
+    ),
+    tag = "codegraph"
+)]
+pub(super) async fn get_graph_stream(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let manager = get_manager(&state)?;
+    let db = manager
+        .get_or_open_db(&project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(project_id = %project_id, err = %e, "graph/stream: failed to open DB");
+            StatusCode::NOT_FOUND
+        })?;
+    let project_root = manager
+        .get_project(&project_id)
+        .await
+        .map(|p| p.root_path.clone());
+
+    let body_stream = async_stream::stream! {
+        // Nodes — flatten the cursor stream into NDJSON lines.
+        let mut nodes = Box::pin(crate::codegraph::graph_queries::stream_bulk_nodes(
+            db.clone(),
+            project_id.clone(),
+        ));
+        while let Some(item) = nodes.next().await {
+            match item {
+                Ok(node) => {
+                    // Stat file size off the async runtime for File nodes;
+                    // everything else has `None`.
+                    let file_size = if node.label == "File" {
+                        stat_file_size(node.source_file.as_deref(), project_root.as_deref()).await
+                    } else {
+                        None
+                    };
+                    let record = serde_json::json!({
+                        "type": "node",
+                        "data": {
+                            "id": node.id,
+                            "qualified_name": node.qualified_name,
+                            "name": node.name,
+                            "label": node.label,
+                            "source_file": node.source_file,
+                            "line_start": node.line_start,
+                            "line_end": node.line_end,
+                            "file_size": file_size,
+                        }
+                    });
+                    yield Ok::<_, std::io::Error>(ndjson_line(&record));
+                }
+                Err(e) => {
+                    let record = serde_json::json!({ "type": "error", "error": e.to_string() });
+                    yield Ok(ndjson_line(&record));
+                    return;
+                }
+            }
+        }
+
+        // Edges
+        let mut edges = Box::pin(crate::codegraph::graph_queries::stream_bulk_edges(
+            db,
+            project_id,
+        ));
+        while let Some(item) = edges.next().await {
+            match item {
+                Ok(edge) => {
+                    let record = serde_json::json!({
+                        "type": "edge",
+                        "data": {
+                            "from_qname": edge.from_name,
+                            "from_label": edge.from_label,
+                            "to_qname": edge.to_name,
+                            "to_label": edge.to_label,
+                            "edge_type": edge.edge_type,
+                            "confidence": edge.confidence,
+                        }
+                    });
+                    yield Ok(ndjson_line(&record));
+                }
+                Err(e) => {
+                    let record = serde_json::json!({ "type": "error", "error": e.to_string() });
+                    yield Ok(ndjson_line(&record));
+                    return;
+                }
+            }
+        }
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson; charset=utf-8")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+fn ndjson_line(record: &serde_json::Value) -> axum::body::Bytes {
+    let mut s = serde_json::to_string(record).unwrap_or_else(|_| "{}".to_string());
+    s.push('\n');
+    axum::body::Bytes::from(s)
+}
+
+/// Resolve a file's size in bytes, off the async runtime. Returns `None`
+/// on any filesystem error or missing parameters.
+async fn stat_file_size(
+    source_file: Option<&str>,
+    project_root: Option<&std::path::Path>,
+) -> Option<u64> {
+    let sf = source_file?;
+    let root = project_root?;
+    let full = root.join(sf);
+    tokio::fs::metadata(full).await.ok().map(|m| m.len())
 }
 
 // ---------------------------------------------------------------------------
