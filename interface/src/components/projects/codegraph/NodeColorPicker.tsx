@@ -1,10 +1,12 @@
 // Shared color picker popover. Used by CodeGraphSidebar (node + edge color
 // overrides), GroupContainer, and FileNodeCard.
 //
-// Two tabs: Swatches (fixed palette grid) and Spectrum (continuous HSV with a
-// brightness slider). Changes are previewed locally; nothing is committed
-// until the user presses Done. Recent colors persist in localStorage across
-// picker instances.
+// Two tabs: Swatches (fixed palette grid) and Spectrum (continuous HSV with
+// a brightness slider). An alpha slider lives below the tab body so it
+// applies to both tabs. Output is `#rrggbb` when fully opaque and
+// `#rrggbbaa` once alpha drops below 1. Changes are previewed locally;
+// nothing is committed until the user presses Done. Recent colors persist
+// in localStorage across picker instances.
 
 import { clsx } from "clsx";
 import * as Popover from "@radix-ui/react-popover";
@@ -33,14 +35,31 @@ function clamp01(n: number): number {
 function hexToRgb(hex: string): [number, number, number] {
 	let m = hex.replace("#", "");
 	if (m.length === 3) m = m.split("").map((c) => c + c).join("");
+	// Ignore alpha byte if present so HSV math is unaffected by transparency.
+	if (m.length === 8) m = m.slice(0, 6);
 	const n = parseInt(m, 16);
 	if (Number.isNaN(n)) return [0, 0, 0];
 	return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
+function hexToAlpha(hex: string): number {
+	const m = hex.replace("#", "");
+	if (m.length !== 8) return 1;
+	const a = parseInt(m.slice(6, 8), 16);
+	return Number.isNaN(a) ? 1 : a / 255;
+}
+
 function rgbToHex(r: number, g: number, b: number): string {
 	const h = (v: number) => Math.round(v).toString(16).padStart(2, "0");
 	return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+// Append alpha byte only when below 1 — keeps the common opaque case as
+// `#rrggbb` so existing storage / comparisons stay byte-identical.
+function withAlpha(rgbHex: string, alpha: number): string {
+	if (alpha >= 1) return rgbHex;
+	const a = Math.round(clamp01(alpha) * 255).toString(16).padStart(2, "0");
+	return `${rgbHex}${a}`;
 }
 
 function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
@@ -101,6 +120,18 @@ function hsvToHex(h: number, s: number, v: number): string {
 	return rgbToHex(r, g, b);
 }
 
+// 8x8 checkerboard used to visualize transparency under colors and behind the
+// alpha slider track.
+const CHECKER_BG: React.CSSProperties = {
+	backgroundImage:
+		"linear-gradient(45deg, #6b7280 25%, transparent 25%), " +
+		"linear-gradient(-45deg, #6b7280 25%, transparent 25%), " +
+		"linear-gradient(45deg, transparent 75%, #6b7280 75%), " +
+		"linear-gradient(-45deg, transparent 75%, #6b7280 75%)",
+	backgroundSize: "8px 8px",
+	backgroundPosition: "0 0, 0 4px, 4px -4px, -4px 0",
+};
+
 // -- Swatch grid -------------------------------------------------------------
 
 const SWATCHES: string[] = (() => {
@@ -154,12 +185,26 @@ interface Props {
 
 export function NodeColorPicker({ currentColor, defaultColor, onSelect, onReset }: Props) {
 	const [tab, setTab] = useState<"swatches" | "spectrum">("swatches");
-	const [pending, setPending] = useState(currentColor);
+	// HSV is the source of truth so hue/saturation survive degenerate hex
+	// values like #000000 (V=0) or pure greys (S=0). Deriving HSV from the
+	// hex round-trip would collapse those axes and turn the picker grey when
+	// the user slides V back up.
+	const [hsv, setHsv] = useState<[number, number, number]>(() => hexToHsv(currentColor));
+	const [alpha, setAlpha] = useState<number>(() => hexToAlpha(currentColor));
 	const recent = useMemo(loadRecent, []);
 
-	const [hue, sat, val] = useMemo(() => hexToHsv(pending), [pending]);
+	const [hue, sat, val] = hsv;
+	const pending = useMemo(
+		() => withAlpha(hsvToHex(hue, sat, val), alpha),
+		[hue, sat, val, alpha],
+	);
 	const [r, g, b] = useMemo(() => hexToRgb(pending), [pending]);
 	const isCustom = pending.toLowerCase() !== defaultColor.toLowerCase();
+
+	const setFromHex = (hex: string) => {
+		setHsv(hexToHsv(hex));
+		setAlpha(hexToAlpha(hex));
+	};
 
 	const commit = () => {
 		onSelect(pending);
@@ -171,7 +216,7 @@ export function NodeColorPicker({ currentColor, defaultColor, onSelect, onReset 
 		if (!ED) return;
 		try {
 			const result = await new ED().open();
-			if (result?.sRGBHex) setPending(result.sRGBHex);
+			if (result?.sRGBHex) setFromHex(result.sRGBHex);
 		} catch {
 			// User cancelled.
 		}
@@ -186,12 +231,27 @@ export function NodeColorPicker({ currentColor, defaultColor, onSelect, onReset 
 			</div>
 
 			{tab === "swatches"
-				? <SwatchesGrid selected={pending} onPick={setPending} />
-				: <SpectrumPicker h={hue} s={sat} v={val} onChange={(h, s, v) => setPending(hsvToHex(h, s, v))} />}
+				? <SwatchesGrid selected={pending} onPick={(c) => setHsv(hexToHsv(c))} />
+				: <SpectrumPicker
+					h={hue}
+					s={sat}
+					v={val}
+					onChange={(h, s, v) => setHsv([h, s, v])}
+				/>}
+
+			<SliderTrack
+				value={alpha}
+				onChange={setAlpha}
+				checker
+				trackStyle={{
+					background: `linear-gradient(to right, ${rgbToHex(r, g, b)}00, ${rgbToHex(r, g, b)})`,
+				}}
+				label={`${Math.round(alpha * 100)}%`}
+			/>
 
 			{/* Preview + readouts */}
 			<div className="flex items-center gap-3">
-				<div className="flex h-9 w-14 overflow-hidden rounded-md border border-app-line">
+				<div className="flex h-9 w-14 overflow-hidden rounded-md border border-app-line" style={CHECKER_BG}>
 					<div className="h-full w-1/2" style={{ backgroundColor: pending }} title="New" />
 					<div className="h-full w-1/2" style={{ backgroundColor: currentColor }} title="Current" />
 				</div>
@@ -215,7 +275,7 @@ export function NodeColorPicker({ currentColor, defaultColor, onSelect, onReset 
 						return c ? (
 							<button
 								key={i}
-								onClick={() => setPending(c)}
+								onClick={() => setFromHex(c)}
 								className="h-6 w-6 rounded-full border border-app-line transition-transform hover:scale-110"
 								style={{ backgroundColor: c }}
 								title={c}
@@ -373,12 +433,13 @@ function SpectrumPicker({
 }
 
 function SliderTrack({
-	value, onChange, trackStyle, label,
+	value, onChange, trackStyle, label, checker = false,
 }: {
 	value: number;
 	onChange: (v: number) => void;
 	trackStyle: React.CSSProperties;
 	label?: string;
+	checker?: boolean;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const update = (clientX: number) => {
@@ -389,22 +450,28 @@ function SliderTrack({
 	};
 	return (
 		<div className="flex items-center gap-2">
-			<div
-				ref={ref}
-				onPointerDown={(e) => {
-					e.currentTarget.setPointerCapture(e.pointerId);
-					update(e.clientX);
-				}}
-				onPointerMove={(e) => {
-					if (e.buttons === 1) update(e.clientX);
-				}}
-				className="relative h-2.5 flex-1 cursor-pointer touch-none rounded-full"
-				style={trackStyle}
-			>
+			<div className="relative h-4 flex-1 overflow-hidden rounded-full" style={checker ? CHECKER_BG : undefined}>
 				<div
-					className="pointer-events-none absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border border-app-line bg-white shadow"
-					style={{ left: `${value * 100}%` }}
-				/>
+					ref={ref}
+					onPointerDown={(e) => {
+						e.currentTarget.setPointerCapture(e.pointerId);
+						update(e.clientX);
+					}}
+					onPointerMove={(e) => {
+						if (e.buttons === 1) update(e.clientX);
+					}}
+					className="absolute inset-0 cursor-pointer touch-none rounded-full"
+					style={trackStyle}
+				>
+					<div
+						className="pointer-events-none absolute top-0 h-4 w-4 rounded-full border border-app-line bg-white shadow"
+						// Inset so the thumb's full width stays inside the track at both
+						// extremes — at value=0 the left edge sits at 0; at value=1 it
+						// sits at (track width - thumb width). Avoids overflow-hidden
+						// clipping the right half at 100%.
+						style={{ left: `calc(${value * 100}% - ${value * 16}px)` }}
+					/>
+				</div>
 			</div>
 			{label && <span className="w-10 shrink-0 text-right text-[10px] text-ink-faint">{label}</span>}
 		</div>
