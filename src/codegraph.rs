@@ -18,6 +18,7 @@ pub mod manager;
 pub mod pipeline;
 pub mod schema;
 pub mod search;
+pub mod search_augmentation;
 pub mod semantic;
 pub mod tools;
 pub mod types;

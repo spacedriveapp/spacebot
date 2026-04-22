@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use futures::{Stream, StreamExt};
 
 use super::db::SharedCodeGraphDb;
 use super::schema::ALL_NODE_LABELS;
@@ -128,7 +129,8 @@ pub async fn query_communities(
         .query(&format!(
             "MATCH (c:Community) WHERE c.project_id = '{pid}' \
              RETURN c.qualified_name, c.name, c.description, \
-             c.node_count, c.file_count, c.function_count"
+             c.node_count, c.file_count, c.function_count, \
+             c.cohesion, c.keywords"
         ))
         .await?;
 
@@ -137,6 +139,16 @@ pub async fn query_communities(
 
     for row in &rows {
         let qname = val_str(row.first());
+        let cohesion_val = match row.get(6) {
+            Some(lbug::Value::Double(d)) => Some(*d),
+            _ => None,
+        };
+        let keywords_str = val_str(row.get(7));
+        let keywords: Vec<String> = if keywords_str.is_empty() {
+            Vec::new()
+        } else {
+            keywords_str.split(',').map(|s| s.trim().to_string()).collect()
+        };
         let info = super::types::CommunityInfo {
             id: qname.clone(),
             name: val_str(row.get(1)),
@@ -145,6 +157,8 @@ pub async fn query_communities(
             file_count: val_i64(row.get(4)) as u64,
             function_count: val_i64(row.get(5)) as u64,
             key_symbols: Vec::new(),
+            cohesion: cohesion_val,
+            keywords,
         };
         qname_to_idx.insert(qname, communities.len());
         communities.push(info);
@@ -200,7 +214,8 @@ pub async fn query_processes(
         .query(&format!(
             "MATCH (p:Process) WHERE p.project_id = '{pid}' \
              RETURN p.qualified_name, p.name, p.entry_function, \
-             p.source_file, p.call_depth"
+             p.source_file, p.call_depth, p.process_type, \
+             p.communities, p.entry_point_score, p.terminal_id"
         ))
         .await?;
 
@@ -209,6 +224,16 @@ pub async fn query_processes(
 
     for row in &rows {
         let qname = val_str(row.first());
+        let communities_str = val_str(row.get(6));
+        let communities: Vec<String> = if communities_str.is_empty() {
+            Vec::new()
+        } else {
+            communities_str.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        let entry_point_score = match row.get(7) {
+            Some(lbug::Value::Double(d)) => Some(*d),
+            _ => None,
+        };
         let info = super::types::ProcessInfo {
             id: qname.clone(),
             entry_function: val_str(row.get(2)),
@@ -216,6 +241,10 @@ pub async fn query_processes(
             call_depth: val_i64(row.get(4)) as u32,
             community: None,
             steps: Vec::new(),
+            process_type: val_str_opt(row.get(5)),
+            communities,
+            entry_point_score,
+            terminal_id: val_str_opt(row.get(8)),
         };
         qname_to_idx.insert(qname, processes.len());
         processes.push(info);
@@ -685,110 +714,121 @@ pub async fn query_graph_stats(
 // Bulk graph queries — for the interactive graph canvas view
 // ---------------------------------------------------------------------------
 
-/// Ordering used when the hard cap is exceeded: keep structural and
-/// top-level symbols first, drop leaf labels last.
-const BULK_LABEL_PRIORITY: &[&str] = &[
-    "Project", "Package", "Module", "Namespace", "Folder", "File",
-    "Class", "Interface", "Struct", "Trait", "Enum", "TypeAlias", "Type",
-    "Function", "Method", "Impl", "Record", "Template", "Const", "MacroDef",
-    "Test", "Route", "Section", "Process", "Community",
-];
-
-/// Return a numeric priority for a label — lower = more important.
-fn label_priority(label: &str) -> usize {
-    BULK_LABEL_PRIORITY
-        .iter()
-        .position(|&l| l == label)
-        .unwrap_or(BULK_LABEL_PRIORITY.len())
-}
+/// Page size for SKIP/LIMIT on bulk node and edge queries. LadybugDB's
+/// native result collector crashes the process on very large single-query
+/// result sets (no Rust panic, no error — just process death), so we
+/// always page. 5k rows × ~6 string columns is well inside the safe zone
+/// and keeps the round-trip cost negligible.
+const BULK_PAGE_SIZE: usize = 5_000;
 
 /// Fetch every node in the project, for the bulk graph endpoint.
 ///
-/// When `include_noise` is false, skips `Parameter`, `Variable`, `Decorator`,
-/// and `Import`. When the total exceeds `max_nodes`, the result is truncated
-/// by label priority (structural first, noise last) and `truncated` is set.
+/// Pages each per-label query with SKIP/LIMIT so LadybugDB never has to
+/// materialize a giant result set in a single call — large single queries
+/// have been observed to segfault the native library and tear down the
+/// whole backend process (no Rust panic catches this).
 pub async fn query_bulk_nodes(
     db: &SharedCodeGraphDb,
     project_id: &str,
-    max_nodes: usize,
-) -> Result<(Vec<QueriedNode>, bool, usize)> {
+) -> Result<Vec<QueriedNode>> {
     let pid = esc(project_id);
     let mut all_nodes: Vec<QueriedNode> = Vec::new();
 
-    // Use DISPLAY_NODE_LABELS — pipeline-only labels (Variable, Import,
-    // Parameter, Decorator) are already deleted by the cleanup step.
+    // Use DISPLAY_NODE_LABELS — Parameter (the one pipeline-only label)
+    // has already been deleted by the cleanup step.
     for &label in super::schema::DISPLAY_NODE_LABELS {
         if SKIP_PROJECT_LABELS.contains(&label) {
             continue;
         }
 
-        // Some labels (Project, Community) lack source_file / line_start /
-        // line_end columns. Try the full column set first; on failure
-        // retry with the name-only subset that every label has.
-        let rows = db
-            .query(&format!(
-                "MATCH (n:{label}) WHERE n.project_id = '{pid}' \
-                 RETURN id(n), n.qualified_name, n.name, n.source_file, \
-                 n.line_start, n.line_end"
-            ))
-            .await;
-
-        match rows {
+        // First page decides whether this label supports the full column
+        // set. Project / Community / Process lack source_file / line_start
+        // / line_end — fall back to the name-only projection.
+        let uses_full_cols = match fetch_node_page(db, label, &pid, 0, BULK_PAGE_SIZE, true).await {
             Ok(rows) => {
-                for row in &rows {
-                    all_nodes.push(QueriedNode {
-                        id: val_i64(row.first()),
-                        qualified_name: val_str(row.get(1)),
-                        name: val_str(row.get(2)),
-                        label: label.to_string(),
-                        source_file: val_str_opt(row.get(3)),
-                        line_start: val_u32_opt(row.get(4)),
-                        line_end: val_u32_opt(row.get(5)),
-                        source: None,
-                        written_by: None,
-                        properties: HashMap::new(),
-                    });
+                all_nodes.extend(rows_to_nodes(&rows, label, true));
+                if rows.len() < BULK_PAGE_SIZE {
+                    continue;
                 }
+                true
             }
             Err(_) => {
-                // Fallback for labels without the file/line columns.
-                let fallback = db
-                    .query(&format!(
-                        "MATCH (n:{label}) WHERE n.project_id = '{pid}' \
-                         RETURN id(n), n.qualified_name, n.name"
-                    ))
-                    .await;
-                if let Ok(rows) = fallback {
-                    for row in &rows {
-                        all_nodes.push(QueriedNode {
-                            id: val_i64(row.first()),
-                            qualified_name: val_str(row.get(1)),
-                            name: val_str(row.get(2)),
-                            label: label.to_string(),
-                            source_file: None,
-                            line_start: None,
-                            line_end: None,
-                            source: None,
-                            written_by: None,
-                            properties: HashMap::new(),
-                        });
+                // Retry first page with narrow projection.
+                match fetch_node_page(db, label, &pid, 0, BULK_PAGE_SIZE, false).await {
+                    Ok(rows) => {
+                        all_nodes.extend(rows_to_nodes(&rows, label, false));
+                        if rows.len() < BULK_PAGE_SIZE {
+                            continue;
+                        }
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!(label, %e, "bulk-nodes: skipping label after query error");
+                        continue;
                     }
                 }
             }
+        };
+
+        // Continue paging with whichever projection the first page accepted.
+        let mut skip = BULK_PAGE_SIZE;
+        loop {
+            let rows = match fetch_node_page(db, label, &pid, skip, BULK_PAGE_SIZE, uses_full_cols)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(label, skip, %e, "bulk-nodes: page fetch failed, stopping label");
+                    break;
+                }
+            };
+            let fetched = rows.len();
+            all_nodes.extend(rows_to_nodes(&rows, label, uses_full_cols));
+            if fetched < BULK_PAGE_SIZE {
+                break;
+            }
+            skip += BULK_PAGE_SIZE;
         }
     }
 
-    let total_available = all_nodes.len();
-    let truncated = total_available > max_nodes;
+    Ok(all_nodes)
+}
 
-    if truncated {
-        // Stable sort by label priority — ties preserve insertion order so
-        // repeated calls return the same truncated subset.
-        all_nodes.sort_by_key(|n| label_priority(&n.label));
-        all_nodes.truncate(max_nodes);
-    }
+async fn fetch_node_page(
+    db: &SharedCodeGraphDb,
+    label: &str,
+    pid: &str,
+    skip: usize,
+    limit: usize,
+    full_cols: bool,
+) -> Result<Vec<Vec<lbug::Value>>> {
+    let projection = if full_cols {
+        "id(n), n.qualified_name, n.name, n.source_file, n.line_start, n.line_end"
+    } else {
+        "id(n), n.qualified_name, n.name"
+    };
+    db.query(&format!(
+        "MATCH (n:{label}) WHERE n.project_id = '{pid}' \
+         RETURN {projection} SKIP {skip} LIMIT {limit}"
+    ))
+    .await
+}
 
-    Ok((all_nodes, truncated, total_available))
+fn rows_to_nodes(rows: &[Vec<lbug::Value>], label: &str, full_cols: bool) -> Vec<QueriedNode> {
+    rows.iter()
+        .map(|row| QueriedNode {
+            id: val_i64(row.first()),
+            qualified_name: val_str(row.get(1)),
+            name: val_str(row.get(2)),
+            label: label.to_string(),
+            source_file: if full_cols { val_str_opt(row.get(3)) } else { None },
+            line_start: if full_cols { val_u32_opt(row.get(4)) } else { None },
+            line_end: if full_cols { val_u32_opt(row.get(5)) } else { None },
+            source: None,
+            written_by: None,
+            properties: HashMap::new(),
+        })
+        .collect()
 }
 
 /// Fetch every edge whose both endpoints are present in `node_qnames`, for
@@ -812,38 +852,181 @@ pub async fn query_bulk_edges(
                 continue;
             }
 
-            let rows = db
-                .query(&format!(
-                    "MATCH (a:{from_label})-[r:CodeRelation]->(b:{to_label}) \
-                     WHERE a.project_id = '{pid}' \
-                     RETURN a.qualified_name, a.name, b.qualified_name, b.name, r.type, r.confidence"
-                ))
-                .await;
+            let mut skip = 0usize;
+            loop {
+                let rows = db
+                    .query(&format!(
+                        "MATCH (a:{from_label})-[r:CodeRelation]->(b:{to_label}) \
+                         WHERE a.project_id = '{pid}' \
+                         RETURN a.qualified_name, a.name, b.qualified_name, b.name, r.type, r.confidence \
+                         SKIP {skip} LIMIT {BULK_PAGE_SIZE}"
+                    ))
+                    .await;
 
-            let rows = match rows {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+                let rows = match rows {
+                    Ok(r) => r,
+                    Err(_) => break,
+                };
+                let fetched = rows.len();
 
-            for row in &rows {
-                let from_qname = val_str(row.first());
-                let to_qname = val_str(row.get(2));
-                if !node_qnames.contains(&from_qname) || !node_qnames.contains(&to_qname) {
-                    continue;
+                for row in &rows {
+                    let from_qname = val_str(row.first());
+                    let to_qname = val_str(row.get(2));
+                    if !node_qnames.contains(&from_qname) || !node_qnames.contains(&to_qname) {
+                        continue;
+                    }
+                    all_edges.push(QueriedEdge {
+                        from_id: 0,
+                        from_name: from_qname,
+                        from_label: from_label.to_string(),
+                        to_id: 0,
+                        to_name: to_qname,
+                        to_label: to_label.to_string(),
+                        edge_type: val_str(row.get(4)),
+                        confidence: val_f64(row.get(5)),
+                    });
                 }
-                all_edges.push(QueriedEdge {
-                    from_id: 0,
-                    from_name: from_qname,  // Carry qualified_name in the name field for the bulk endpoint
-                    from_label: from_label.to_string(),
-                    to_id: 0,
-                    to_name: to_qname,
-                    to_label: to_label.to_string(),
-                    edge_type: val_str(row.get(4)),
-                    confidence: val_f64(row.get(5)),
-                });
+
+                if fetched < BULK_PAGE_SIZE {
+                    break;
+                }
+                skip += BULK_PAGE_SIZE;
             }
         }
     }
 
     Ok(all_edges)
+}
+
+// ---------------------------------------------------------------------------
+// Streaming bulk queries — cursor-backed, never materialize a full result set
+// ---------------------------------------------------------------------------
+
+/// Stream every node in the project row-by-row from the native Kuzu cursor.
+///
+/// Ports GitNexus's `streamGraphNdjson` per-label loop
+/// (`gitnexus/server/api.ts:300-317`). For each label in
+/// `DISPLAY_NODE_LABELS` we open a fresh `query_stream`; the flattened
+/// output stream yields `QueriedNode`s as the cursor advances. A single
+/// row is ever in memory per stream step.
+pub fn stream_bulk_nodes(
+    db: SharedCodeGraphDb,
+    project_id: String,
+) -> impl Stream<Item = Result<QueriedNode>> + Send + 'static {
+    async_stream::try_stream! {
+        let pid = esc(&project_id);
+        for &label in super::schema::DISPLAY_NODE_LABELS {
+            if SKIP_PROJECT_LABELS.contains(&label) {
+                continue;
+            }
+
+            // Probe with the wide projection first; on failure (labels like
+            // Community/Process/Project that lack file/line columns) fall
+            // back to the narrow one. Same shape as the non-streaming path
+            // in `query_bulk_nodes`, just cursor-driven.
+            let wide = format!(
+                "MATCH (n:{label}) WHERE n.project_id = '{pid}' \
+                 RETURN id(n), n.qualified_name, n.name, n.source_file, \
+                 n.line_start, n.line_end"
+            );
+            let narrow = format!(
+                "MATCH (n:{label}) WHERE n.project_id = '{pid}' \
+                 RETURN id(n), n.qualified_name, n.name"
+            );
+
+            let mut stream = Box::pin(db.query_stream(wide.clone()));
+            let mut first = stream.next().await;
+            let full_cols = match &first {
+                Some(Err(_)) => {
+                    // Wide projection rejected — swap to narrow.
+                    first = None;
+                    stream = Box::pin(db.query_stream(narrow));
+                    false
+                }
+                _ => true,
+            };
+
+            // Drain any buffered first row + the rest of the stream.
+            loop {
+                let next = if first.is_some() { first.take().unwrap() } else {
+                    match stream.next().await {
+                        Some(v) => v,
+                        None => break,
+                    }
+                };
+                match next {
+                    Ok(row) => yield row_to_queried_node(&row, label, full_cols),
+                    Err(e) => {
+                        tracing::warn!(label, %e, "stream_bulk_nodes: row error, stopping label");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Stream every edge in the project row-by-row. Iterates the label-pair
+/// permutations (same as `query_bulk_edges`) but drives each pair's query
+/// through the cursor — invalid pairs return zero rows and cost nothing.
+///
+/// Unlike the paged version, this does NOT filter by a qname HashSet.
+/// GitNexus's `GRAPH_RELATIONSHIP_QUERY` (`server/api.ts:258`) runs
+/// unfiltered too; dangling edges are a pipeline-cleanup concern, not a
+/// query-time concern. Dropping the filter also eliminates the full
+/// extra node pass the old `get_bulk_edges` handler used to make.
+pub fn stream_bulk_edges(
+    db: SharedCodeGraphDb,
+    project_id: String,
+) -> impl Stream<Item = Result<QueriedEdge>> + Send + 'static {
+    async_stream::try_stream! {
+        let pid = esc(&project_id);
+        for &from_label in super::schema::DISPLAY_NODE_LABELS {
+            if SKIP_PROJECT_LABELS.contains(&from_label) {
+                continue;
+            }
+            for &to_label in super::schema::DISPLAY_NODE_LABELS {
+                if SKIP_PROJECT_LABELS.contains(&to_label) {
+                    continue;
+                }
+                let cypher = format!(
+                    "MATCH (a:{from_label})-[r:CodeRelation]->(b:{to_label}) \
+                     WHERE a.project_id = '{pid}' \
+                     RETURN a.qualified_name, a.name, b.qualified_name, b.name, \
+                     r.type, r.confidence"
+                );
+                let mut stream = Box::pin(db.query_stream(cypher));
+                while let Some(row) = stream.next().await {
+                    match row {
+                        Ok(row) => yield QueriedEdge {
+                            from_id: 0,
+                            from_name: val_str(row.first()),
+                            from_label: from_label.to_string(),
+                            to_id: 0,
+                            to_name: val_str(row.get(2)),
+                            to_label: to_label.to_string(),
+                            edge_type: val_str(row.get(4)),
+                            confidence: val_f64(row.get(5)),
+                        },
+                        Err(_) => break, // invalid pair or transient — skip
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn row_to_queried_node(row: &[lbug::Value], label: &str, full_cols: bool) -> QueriedNode {
+    QueriedNode {
+        id: val_i64(row.first()),
+        qualified_name: val_str(row.get(1)),
+        name: val_str(row.get(2)),
+        label: label.to_string(),
+        source_file: if full_cols { val_str_opt(row.get(3)) } else { None },
+        line_start: if full_cols { val_u32_opt(row.get(4)) } else { None },
+        line_end: if full_cols { val_u32_opt(row.get(5)) } else { None },
+        source: None,
+        written_by: None,
+        properties: HashMap::new(),
+    }
 }

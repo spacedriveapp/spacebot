@@ -367,6 +367,17 @@ impl std::fmt::Display for IndexStatus {
 // Project registry
 // ---------------------------------------------------------------------------
 
+/// Per-language weight in the project breakdown. `name` uses the canonical
+/// GitHub linguist display name (e.g. "TypeScript", "C++") so the UI can
+/// look up colors in the bundled github-colors map. `count` is the summed
+/// file size in bytes — matching GitHub's repo language bar, where a large
+/// source file outweighs many tiny ones.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LanguageCount {
+    pub name: String,
+    pub count: u64,
+}
+
 /// Entry in the project registry (`.spacebot/codegraph/registry.json`).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RegisteredProject {
@@ -387,9 +398,12 @@ pub struct RegisteredProject {
     /// When the last index completed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_indexed_at: Option<DateTime<Utc>>,
-    /// Primary language detected.
+    /// Primary language detected (top entry of `language_breakdown`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_language: Option<String>,
+    /// Per-language file counts, sorted descending by count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub language_breakdown: Vec<LanguageCount>,
     /// Schema version of the graph database.
     pub schema_version: u32,
     /// Git commit hash at the time the index was built.
@@ -524,6 +538,11 @@ pub struct CodeGraphConfig {
     /// Auto-skip semantic embeddings above this node count.
     #[serde(default = "default_node_embedding_skip_threshold")]
     pub node_embedding_skip_threshold: u64,
+    /// Disable semantic embedding generation entirely. Set by tests
+    /// and air-gapped deployments to avoid the fastembed model
+    /// download on pipeline runs.
+    #[serde(default)]
+    pub skip_embeddings: bool,
     /// Auto-generate AGENTS.md when indexing finishes.
     #[serde(default = "default_true")]
     pub generate_agents_md: bool,
@@ -549,6 +568,7 @@ impl Default for CodeGraphConfig {
             stale_eviction_cadence_hours: 24,
             stale_relevance_threshold: 0.2,
             node_embedding_skip_threshold: 50_000,
+            skip_embeddings: false,
             generate_agents_md: true,
         }
     }

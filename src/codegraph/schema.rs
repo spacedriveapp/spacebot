@@ -12,30 +12,47 @@
 /// columns change. `ensure_schema` compares against the version stored
 /// in the DB; on mismatch it drops every table and recreates so the
 /// new columns are available.
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// v12 landed the consolidated Phase 5+8 schema additions in one
+/// bump: Middleware nodes (route-wrapping), SqlQuery / CicsCall /
+/// DliCall nodes (COBOL EXEC blocks, Phase 7), JclJob / JclStep
+/// nodes (JCL parser, Phase 7), plus the relationship pairs those
+/// node types need. Pre-adding everything here avoids four
+/// consecutive reindex cycles across the remaining phases.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
 pub const ALL_NODE_LABELS: &[&str] = &[
     "Project", "Package", "Module", "Folder", "File", "Class", "Function",
     "Method", "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
     "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
-    "Record", "Template", "Test", "Community", "Process", "Section", "Route",
+    "Record", "Template", "Test", "Community", "Process", "Section", "Route", "Tool",
+    "Property", "Constructor", "Typedef", "UnionType", "Static", "Delegate", "CodeElement",
+    // Phase 5 framework-layer: HTTP middleware wrapping routes.
+    "Middleware",
+    // Phase 7 mainframe: SQL/CICS/DLI embedded calls + JCL jobs.
+    "SqlQuery", "CicsCall", "DliCall", "JclJob", "JclStep",
+    "CodeEmbedding",
 ];
 
-/// Node labels for display, stats, and graph queries. Excludes the 4
-/// "pipeline-only" labels (Variable, Import, Parameter, Decorator) that
-/// are created temporarily for resolution and deleted before finalization.
+/// Node labels for display, stats, and graph queries. Excludes the
+/// pipeline-only labels that are created for resolution and deleted
+/// before finalization.
 pub const DISPLAY_NODE_LABELS: &[&str] = &[
     "Project", "Package", "Module", "Folder", "File", "Class", "Function",
-    "Method", "Interface", "Enum", "Type",
+    "Method", "Interface", "Enum", "Type", "Variable", "Import", "Decorator",
     "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
-    "Record", "Template", "Test", "Community", "Process", "Section", "Route",
+    "Record", "Template", "Test", "Community", "Process", "Section", "Route", "Tool",
+    "Property", "Constructor", "Typedef", "UnionType", "Static", "Delegate", "CodeElement",
+    "Middleware",
+    "SqlQuery", "CicsCall", "DliCall", "JclJob", "JclStep",
 ];
 
 /// Labels that exist only during pipeline execution and are deleted before
-/// the final graph is committed. They're needed for import resolution,
-/// call resolution, and type inference.
-pub const PIPELINE_ONLY_LABELS: &[&str] = &["Variable", "Import", "Parameter", "Decorator"];
+/// the final graph is committed. Parameters are needed to resolve argument
+/// types against callee signatures but would flood the graph with per-call
+/// noise, so they're purged after call resolution.
+pub const PIPELINE_ONLY_LABELS: &[&str] = &["Parameter"];
 
 /// Generate DROP statements for all tables so the schema can be rebuilt
 /// from scratch when the version changes. Rel table must be dropped
@@ -44,14 +61,12 @@ pub const PIPELINE_ONLY_LABELS: &[&str] = &["Variable", "Import", "Parameter", "
 pub fn schema_drop_ddl() -> Vec<String> {
     let mut ddl = Vec::new();
 
-    ddl.push("DROP REL TABLE IF EXISTS CodeRelation".to_string());
+    ddl.push("DROP TABLE IF EXISTS CodeRelation".to_string());
 
     for label in ALL_NODE_LABELS {
-        ddl.push(format!("DROP NODE TABLE IF EXISTS {label}"));
+        ddl.push(format!("DROP TABLE IF EXISTS {label}"));
     }
-    // The version sentinel table itself is dropped last so the version
-    // check that triggered the drop doesn't trip again on a retry.
-    ddl.push("DROP NODE TABLE IF EXISTS _SchemaVersion".to_string());
+    ddl.push("DROP TABLE IF EXISTS _SchemaVersion".to_string());
 
     ddl
 }
@@ -92,7 +107,12 @@ pub fn schema_ddl() -> Vec<String> {
         "Package", "Module", "Folder", "File", "Class", "Function", "Method",
         "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
         "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
-        "Record", "Template", "Test", "Route",
+        "Record", "Template", "Test", "Route", "Section", "Tool",
+        "Property", "Constructor", "Typedef", "UnionType", "Static", "Delegate", "CodeElement",
+        // Phase 5/7 additions — same column shape so queries that
+        // project generic `source_file` / `line_start` / etc. work
+        // uniformly across every symbol-shaped node.
+        "Middleware", "SqlQuery", "CicsCall", "DliCall", "JclJob", "JclStep",
     ] {
         ddl.push(node_table(
             label,
@@ -107,17 +127,19 @@ pub fn schema_ddl() -> Vec<String> {
                 ("written_by", "STRING"),
                 ("extends_type", "STRING"),
                 ("import_source", "STRING"),
-                // Declared type text for Parameters and Variables
-                // (e.g. "Foo", "Arc<Mutex<T>>", "map[string]int"). Empty
-                // string for nodes whose kind doesn't carry a type. The
-                // resolver in pipeline/calls.rs reads this to bind
-                // receivers to their class qnames for method lookup.
                 ("declared_type", "STRING"),
-                // Raw source code snippet (line_start..line_end).
-                // Used for FTS indexing and display.
                 ("content", "STRING"),
-                // LLM-generated or heuristic summary.
                 ("description", "STRING"),
+                // GitNexus-parity symbol metadata
+                ("is_exported", "BOOL"),
+                ("return_type", "STRING"),
+                ("visibility", "STRING"),
+                ("parameter_count", "INT32"),
+                ("is_static", "BOOL"),
+                ("is_readonly", "BOOL"),
+                ("is_abstract", "BOOL"),
+                ("is_final", "BOOL"),
+                ("annotations", "STRING"),
             ],
         ));
     }
@@ -133,6 +155,8 @@ pub fn schema_ddl() -> Vec<String> {
             ("file_count", "INT64"),
             ("function_count", "INT64"),
             ("density", "DOUBLE"),
+            ("cohesion", "DOUBLE"),
+            ("keywords", "STRING"),
             ("source", "STRING"),
         ],
     ));
@@ -146,22 +170,24 @@ pub fn schema_ddl() -> Vec<String> {
             ("entry_function", "STRING"),
             ("source_file", "STRING"),
             ("call_depth", "INT32"),
+            ("process_type", "STRING"),
+            ("communities", "STRING"),
+            ("entry_point_score", "DOUBLE"),
+            ("terminal_id", "STRING"),
             ("source", "STRING"),
         ],
     ));
 
-    ddl.push(node_table(
-        "Section",
-        &[
-            ("qualified_name", "STRING"),
-            ("name", "STRING"),
-            ("project_id", "STRING"),
-            ("source_file", "STRING"),
-            ("heading_level", "INT32"),
-            ("content", "STRING"),
-            ("source", "STRING"),
-        ],
-    ));
+    // -----------------------------------------------------------------------
+    // CodeEmbedding table for vector search (384-dim, all-MiniLM-L6-v2)
+    // -----------------------------------------------------------------------
+    ddl.push(
+        "CREATE NODE TABLE IF NOT EXISTS CodeEmbedding (\
+         nodeId STRING, \
+         embedding FLOAT[384], \
+         PRIMARY KEY (nodeId))"
+            .to_string(),
+    );
 
     // -----------------------------------------------------------------------
     // Single CodeRelation table
@@ -171,14 +197,16 @@ pub fn schema_ddl() -> Vec<String> {
 
     let structural = &["Project", "Folder"];
     let containers = &["File", "Class", "Interface", "Struct", "Trait", "Impl",
-                        "Enum", "Module", "Namespace", "Package"];
+                        "Enum", "Module", "Namespace", "Package", "UnionType"];
     let symbols = &["Function", "Method", "Variable", "Class", "Interface",
                      "Enum", "Struct", "Trait", "Impl", "MacroDef", "TypeAlias",
                      "Const", "Decorator", "Import", "Type", "Record",
-                     "Template", "Namespace", "Module", "Test"];
-    let callable = &["Function", "Method"];
+                     "Template", "Namespace", "Module", "Test",
+                     "Property", "Constructor", "Typedef", "UnionType", "Static",
+                     "Delegate", "CodeElement"];
+    let callable = &["Function", "Method", "Constructor"];
     let inheritable = &["Class", "Interface", "Struct", "Trait"];
-    let owners = &["Class", "Interface", "Struct", "Trait", "Impl"];
+    let owners = &["Class", "Interface", "Struct", "Trait", "Impl", "UnionType"];
 
     let mut pairs: Vec<(&str, &str)> = Vec::new();
 
@@ -208,7 +236,7 @@ pub fn schema_ddl() -> Vec<String> {
     // IMPORTS: File → File (cross-file import)
     pairs.push(("File", "File"));
 
-    // Heritage: EXTENDS, IMPLEMENTS, INHERITS
+    // Heritage: EXTENDS, IMPLEMENTS
     for &a in inheritable {
         for &b in inheritable {
             pairs.push((a, b));
@@ -218,15 +246,18 @@ pub fn schema_ddl() -> Vec<String> {
     // OVERRIDES: Method → Method
     pairs.push(("Method", "Method"));
 
-    // HAS_METHOD: owner → Method, HAS_PROPERTY: owner → Variable
+    // HAS_METHOD: owner → Method/Constructor, HAS_PROPERTY: owner → Variable/Property
     for &o in owners {
         pairs.push((o, "Method"));
+        pairs.push((o, "Constructor"));
         pairs.push((o, "Variable"));
+        pairs.push((o, "Property"));
     }
 
-    // ACCESSES: callable → Variable
+    // ACCESSES: callable → Variable/Property
     for &c in callable {
         pairs.push((c, "Variable"));
+        pairs.push((c, "Property"));
     }
 
     // HAS_PARAMETER: callable → Parameter (and File → Parameter for DEFINES)
@@ -236,7 +267,7 @@ pub fn schema_ddl() -> Vec<String> {
     pairs.push(("File", "Parameter"));
 
     // DECORATES: Decorator → targets
-    for &t in &["Class", "Function", "Method", "Variable"] {
+    for &t in &["Class", "Function", "Method", "Variable", "Constructor", "Property"] {
         pairs.push(("Decorator", t));
     }
 
@@ -255,6 +286,58 @@ pub fn schema_ddl() -> Vec<String> {
     for &c in callable {
         pairs.push((c, "Test"));
     }
+
+    // HANDLES_ROUTE: callable → Route
+    for &c in callable {
+        pairs.push((c, "Route"));
+    }
+
+    // HANDLES_TOOL: callable → Tool
+    for &c in callable {
+        pairs.push((c, "Tool"));
+    }
+
+    // WRAPS: Middleware → Route (middleware tracing for framework stacks)
+    pairs.push(("Middleware", "Route"));
+
+    // FETCHES: File → Route (template / JS file calls into a
+    // Route's URL; used by both the JS/TS fetch-call extractor and
+    // HTML form-action detection).
+    pairs.push(("File", "Route"));
+
+    // QUERIES: callable → SqlQuery / CicsCall / DliCall (COBOL EXEC blocks)
+    for &c in callable {
+        pairs.push((c, "SqlQuery"));
+        pairs.push((c, "CicsCall"));
+        pairs.push((c, "DliCall"));
+    }
+
+    // JCL topology: Job → Step → File (DD-statement cross-references)
+    pairs.push(("JclJob", "JclStep"));
+    pairs.push(("JclStep", "File"));
+    // JclStep → callable, to link step-executed programs to their
+    // COBOL entry points once the JCL processor resolves PGM=
+    // references.
+    for &c in callable {
+        pairs.push(("JclStep", c));
+    }
+
+    // ENTRY_POINT_OF: callable → Process
+    for &c in callable {
+        pairs.push((c, "Process"));
+    }
+
+    // Type-resolution edges: callable/Variable/Parameter → inheritable
+    // (receiver-type CALLS, declared_type lookups)
+    for &src in &["Function", "Method", "Variable", "Parameter"] {
+        for &tgt in inheritable {
+            pairs.push((src, tgt));
+        }
+    }
+
+    // CONTAINS: File → Section, Section → Section (markdown headings)
+    pairs.push(("File", "Section"));
+    pairs.push(("Section", "Section"));
 
     // Deduplicate pairs (some overlap from the loops above)
     pairs.sort();
