@@ -26,7 +26,7 @@ pub(super) const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.
 pub(super) const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
-pub(super) const GITHUB_COPILOT_DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
+pub(crate) const GITHUB_COPILOT_DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 
 /// App attribution headers sent with every OpenRouter API request.
 /// See <https://openrouter.ai/docs/app-attribution>.
@@ -283,6 +283,21 @@ pub(super) fn add_shorthand_provider(
                 api_version: None,
                 deployment: None,
             });
+    }
+}
+
+/// Returns the default ProviderConfig for GitHub Copilot with the given API key.
+/// Used by API tests and other code that needs Copilot provider configs.
+pub fn copilot_default_provider_config(api_key: impl Into<String>) -> super::ProviderConfig {
+    super::ProviderConfig {
+        api_type: super::ApiType::OpenAiChatCompletions,
+        base_url: GITHUB_COPILOT_DEFAULT_BASE_URL.to_string(),
+        api_key: api_key.into(),
+        name: Some("GitHub Copilot".to_string()),
+        use_bearer_auth: true,
+        extra_headers: vec![],
+        api_version: None,
+        deployment: None,
     }
 }
 

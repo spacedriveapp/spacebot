@@ -18,6 +18,10 @@ pub use permissions::{
     DiscordPermissions, MattermostPermissions, SignalPermissions, SlackPermissions,
     TelegramPermissions, TwitchPermissions,
 };
+// Only used in tests; #[allow(unused_imports)] prevents warnings during non-test builds.
+#[allow(unused_imports)]
+pub(crate) use providers::GITHUB_COPILOT_DEFAULT_BASE_URL;
+pub(crate) use providers::copilot_default_provider_config;
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
 pub use types::*;
@@ -1349,6 +1353,10 @@ id = "main"
                 "ollama",
                 "localhost:11434",
             ),
+            // Note: github_copilot_key is intentionally excluded — GitHub Copilot requires
+            // special token exchange handling and is registered via
+            // LlmManager::get_github_copilot_provider(), not via the standard shorthand
+            // provider registration mechanism used by other providers.
         ];
 
         for (toml_key, toml_value, provider_name, url_substr) in cases {
