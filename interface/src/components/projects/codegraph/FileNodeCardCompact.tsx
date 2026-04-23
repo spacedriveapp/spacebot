@@ -24,7 +24,7 @@ export const FileNodeCardCompact = memo(({ data }: NodeProps) => {
 
 	return (
 		<div className="relative min-w-[220px] max-w-[260px] cursor-pointer overflow-hidden rounded-md border border-app-line bg-app-darkBox text-ink shadow-[0_1px_4px_rgba(0,0,0,0.3)] hover:border-app-line/80">
-			<Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="target" position={Position.Top} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 			<span
 				aria-hidden
 				className="absolute inset-y-0 left-0 w-1"
@@ -47,7 +47,7 @@ export const FileNodeCardCompact = memo(({ data }: NodeProps) => {
 				</div>
 				<p className="truncate text-[10px] text-ink-dull leading-tight">{description}</p>
 			</div>
-			<Handle type="source" position={Position.Bottom} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="source" position={Position.Bottom} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 		</div>
 	);
 });

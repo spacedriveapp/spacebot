@@ -24,7 +24,7 @@ export const PortalNode = memo(({ data }: NodeProps) => {
 			className="group relative w-[180px] overflow-hidden rounded-lg border border-app-line bg-app-darkBox text-ink shadow-[0_2px_8px_rgba(0,0,0,0.4)] cursor-pointer transition-colors hover:border-accent/60"
 			onClick={() => onNavigate(targetLayerId)}
 		>
-			<Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="target" position={Position.Top} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 			<span
 				aria-hidden
 				className="absolute inset-y-0 left-0 w-1"
@@ -49,7 +49,7 @@ export const PortalNode = memo(({ data }: NodeProps) => {
 					{connectionCount} {connectionCount === 1 ? "connection" : "connections"}
 				</p>
 			</div>
-			<Handle type="source" position={Position.Bottom} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="source" position={Position.Bottom} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 		</div>
 	);
 });

@@ -25,7 +25,7 @@ export const LayerClusterNode = memo(({ data }: NodeProps) => {
 			className="group relative min-w-[260px] max-w-[320px] overflow-hidden rounded-xl border border-app-line bg-app-darkBox text-ink shadow-[0_4px_16px_rgba(0,0,0,0.4)] cursor-pointer transition-colors hover:border-accent/60"
 			onClick={() => onDrillIn(layerId)}
 		>
-			<Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="target" position={Position.Top} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 			<span
 				aria-hidden
 				className="absolute inset-y-0 left-0 w-1.5"
@@ -53,7 +53,7 @@ export const LayerClusterNode = memo(({ data }: NodeProps) => {
 					Click to explore →
 				</div>
 			</div>
-			<Handle type="source" position={Position.Bottom} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
+			<Handle type="source" position={Position.Bottom} isConnectable={false} className="!h-1.5 !w-1.5 !border-0 !bg-ink-faint opacity-40" />
 		</div>
 	);
 });
