@@ -49,7 +49,7 @@ export interface PortalEdgeStub {
 
 // Files with no directory (e.g. README.md at root) land in "root" so the
 // layer set is total: every file qualifies for exactly one layer.
-function firstSegment(path: string | undefined): string {
+export function firstSegment(path: string | undefined): string {
 	if (!path) return "root";
 	const clean = path.replace(/\\/g, "/").replace(/^\/+/, "");
 	const idx = clean.indexOf("/");

@@ -14,6 +14,28 @@
 		scrollbar-width: none;
 	}
 
+	// Visible, dark-theme-friendly scrollbar for overflow panels. Use
+	// where the default near-invisible scrollbar fails to cue that more
+	// content is below (e.g. the global search dropdown).
+	.scrollbar-app {
+		scrollbar-width: thin;
+		scrollbar-color: hsla(var(--color-app-explorer-scrollbar), 1) transparent;
+	}
+	.scrollbar-app::-webkit-scrollbar {
+		width: 8px;
+		height: 8px;
+	}
+	.scrollbar-app::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.scrollbar-app::-webkit-scrollbar-thumb {
+		background: hsla(var(--color-app-explorer-scrollbar), 1);
+		border-radius: 4px;
+	}
+	.scrollbar-app::-webkit-scrollbar-thumb:hover {
+		background: hsla(var(--color-app-explorer-scrollbar), 0.85);
+	}
+
 }
 
 html, body {

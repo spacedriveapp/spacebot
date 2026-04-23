@@ -2,11 +2,12 @@
 // the loaded node list with a dropdown of matches. Cmd+K focuses the
 // input. Selecting a result focuses the graph and opens the inspector.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon, RefreshIcon } from "@hugeicons/core-free-icons";
 import { getNodeColor, type LayoutMode } from "./graphAdapter";
+import type { NodeLabel } from "./constants";
 import type { BulkNode } from "./types";
 
 interface Props {
@@ -19,6 +20,10 @@ interface Props {
 	colorOverrides?: Record<string, string>;
 	layoutMode: LayoutMode;
 	onLayoutModeChange: (mode: LayoutMode) => void;
+	/** Effective label visibility. On mermaid the caller passes the full
+	 *  label set; on other layouts it mirrors the Filters-tab toggles, so
+	 *  hiding "File" in the sidebar also hides File results here. */
+	visibleLabels: NodeLabel[];
 }
 
 const LAYOUT_MODES: { key: LayoutMode; label: string }[] = [
@@ -28,7 +33,55 @@ const LAYOUT_MODES: { key: LayoutMode; label: string }[] = [
 	{ key: "mermaid", label: "Mermaid" },
 ];
 
-const MAX_RESULTS = 12;
+const MAX_RESULTS = 30;
+
+// Boost applied to Folder and File matches so they always rank above
+// symbol matches at the same match tier. Without this, typing a query
+// that matches many symbols exactly (e.g. "playlist" in a project where
+// a variable and a method share that name) floods the top of the list
+// with score-3 exacts and pushes the score-2 File prefix match
+// (playlist.tsx) out of the MAX_RESULTS window.
+const CONTAINER_BOOST = 10;
+
+// Character-subsequence fuzzy match. Returns 0 if any query character
+// is missing from `target`; otherwise a small positive score that
+// rewards earlier matches and consecutive runs. Deliberately weaker than
+// a substring hit — fuzzy is a typo-safety net ("plyist" still finds
+// playlist), not the primary ranking signal.
+function fuzzySubsequenceScore(target: string, query: string): number {
+	let qi = 0;
+	let consecutive = 0;
+	let score = 0;
+	for (let ti = 0; ti < target.length && qi < query.length; ti++) {
+		if (target.charCodeAt(ti) === query.charCodeAt(qi)) {
+			consecutive += 1;
+			// Earlier match position + run length = stronger signal.
+			score += consecutive + (ti === 0 ? 2 : 0);
+			qi += 1;
+		} else {
+			consecutive = 0;
+		}
+	}
+	return qi === query.length ? score : 0;
+}
+
+// Sort tiebreaker so when many nodes tie on relevance, the more
+// "container-shaped" types (folders, files, classes) surface above deep
+// symbols. Without this, a query like "mcp" can fill the dropdown with
+// twenty `Method`s before any Folder or File match is visible.
+const LABEL_PRIORITY: Record<string, number> = {
+	Folder: 0,
+	File: 1,
+	Class: 2,
+	Interface: 3,
+	Enum: 4,
+	Type: 5,
+	Function: 6,
+	Method: 7,
+	Variable: 8,
+	Decorator: 9,
+	Import: 10,
+};
 
 export function CodeGraphSearchBar({
 	nodes,
@@ -40,6 +93,7 @@ export function CodeGraphSearchBar({
 	colorOverrides,
 	layoutMode,
 	onLayoutModeChange,
+	visibleLabels,
 }: Props) {
 	const [query, setQuery] = useState("");
 	const [open, setOpen] = useState(false);
@@ -74,20 +128,77 @@ export function CodeGraphSearchBar({
 		return () => document.removeEventListener("mousedown", onClick);
 	}, []);
 
-	// Client-side filter. The bulk endpoint is small enough that scanning
-	// every node per keystroke is fine.
+	// Prebuilt lowercase index of the node list. Rebuilt only when `nodes`
+	// changes — not per keystroke — so a 15k-node graph doesn't pay the
+	// toLowerCase cost on every character typed. Includes the label-tie
+	// value for sort so the hot loop is purely numeric comparisons.
+	const nodeIndex = useMemo(
+		() =>
+			nodes.map((n) => ({
+				node: n,
+				name: n.name?.toLowerCase() ?? "",
+				qname: n.qualified_name?.toLowerCase() ?? "",
+				tie: LABEL_PRIORITY[n.label] ?? 99,
+			})),
+		[nodes],
+	);
+
+	// Defer the query so keystrokes stay responsive — React displays the
+	// last results while the new scan runs, then swaps. On large graphs
+	// this is the difference between typing feeling laggy and instant.
+	const deferredQuery = useDeferredValue(query);
+
+	// Client-side search. Explicitly scans every node regardless of the
+	// user's Filters-tab toggles — the search bar is the canonical way to
+	// jump to any file / folder / function in the graph, so visibility
+	// filters should never hide results. Matches are scored by how the
+	// query lines up (exact > prefix > substring) and tiebroken by label
+	// priority so Folder/File results aren't drowned out by deeper
+	// symbols when many names collide. In mermaid mode, only Folder and
+	// File nodes are navigable (symbols have no card on that canvas), so
+	// the dropdown is restricted to those two labels.
+	const isMermaid = layoutMode === "mermaid";
+	const visibleLabelSet = useMemo(() => new Set<string>(visibleLabels), [visibleLabels]);
 	const results = useMemo(() => {
-		if (!query.trim()) return [];
-		const q = query.toLowerCase();
-		const matches: BulkNode[] = [];
-		for (const n of nodes) {
-			if (matches.length >= MAX_RESULTS) break;
-			if (n.name?.toLowerCase().includes(q) || n.qualified_name?.toLowerCase().includes(q)) {
-				matches.push(n);
+		const raw = deferredQuery.trim();
+		if (!raw) return [];
+		const q = raw.toLowerCase();
+		const scored: { node: BulkNode; score: number; tie: number }[] = [];
+		for (const entry of nodeIndex) {
+			if (isMermaid) {
+				// Mermaid can only navigate to Folder/File cards.
+				if (entry.node.label !== "Folder" && entry.node.label !== "File") continue;
+			} else if (!visibleLabelSet.has(entry.node.label)) {
+				// Honour the Filters-tab toggles on non-mermaid layouts.
+				continue;
 			}
+			let score = 0;
+			if (entry.name === q || entry.qname === q) score = 3;
+			else if (entry.name.startsWith(q) || entry.qname.startsWith(q)) score = 2;
+			else if (entry.name.includes(q) || entry.qname.includes(q)) score = 1;
+			else {
+				// No substring hit — try fuzzy subsequence as a typo fallback.
+				// Normalized into (0, 1) so it always ranks below every real
+				// tier above but still competes against other fuzzy matches.
+				const fz = Math.max(
+					fuzzySubsequenceScore(entry.name, q),
+					fuzzySubsequenceScore(entry.qname, q),
+				);
+				if (fz > 0) score = fz / (fz + 10);
+			}
+			if (score === 0) continue;
+			if (entry.node.label === "Folder" || entry.node.label === "File") {
+				score += CONTAINER_BOOST;
+			}
+			scored.push({ node: entry.node, score, tie: entry.tie });
 		}
-		return matches;
-	}, [query, nodes]);
+		scored.sort((a, b) => {
+			if (b.score !== a.score) return b.score - a.score;
+			if (a.tie !== b.tie) return a.tie - b.tie;
+			return (a.node.name ?? "").localeCompare(b.node.name ?? "");
+		});
+		return scored.slice(0, MAX_RESULTS).map((s) => s.node);
+	}, [deferredQuery, nodeIndex, isMermaid, visibleLabelSet]);
 
 	const handleKeyDown = (e: React.KeyboardEvent) => {
 		if (!open || results.length === 0) return;
@@ -139,7 +250,7 @@ export function CodeGraphSearchBar({
 								No nodes found for &ldquo;{query}&rdquo;
 							</div>
 						) : (
-							<div className="max-h-80 overflow-y-auto">
+							<div className="max-h-80 overflow-y-auto scrollbar-app">
 								{results.map((node, i) => {
 									const color = getNodeColor(node.label, colorOverrides);
 									return (

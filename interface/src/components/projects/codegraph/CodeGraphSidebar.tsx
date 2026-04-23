@@ -251,6 +251,9 @@ interface Props {
 	onColorChange: (label: NodeLabel, color: string | null) => void;
 	edgeColorOverrides: Record<string, string>;
 	onEdgeColorChange: (edge: EdgeType, color: string | null) => void;
+	/** Whether the Filters tab is applicable to the current view. The mermaid
+	 *  view ignores label/edge/depth filters, so the tab is hidden there. */
+	showFilters?: boolean;
 }
 
 export function CodeGraphSidebar({
@@ -269,9 +272,19 @@ export function CodeGraphSidebar({
 	onColorChange,
 	edgeColorOverrides,
 	onEdgeColorChange,
+	showFilters = true,
 }: Props) {
 	const [isCollapsed, setIsCollapsed] = useState(false);
 	const [activeTab, setActiveTab] = useState<"files" | "filters">("files");
+
+	// If the Filters tab becomes inapplicable while it's open (user switched
+	// to mermaid with filters showing), fall back to the file explorer so
+	// the panel doesn't render an empty-shell tab.
+	useEffect(() => {
+		if (!showFilters && activeTab === "filters") {
+			setActiveTab("files");
+		}
+	}, [showFilters, activeTab]);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
 
@@ -354,21 +367,23 @@ export function CodeGraphSidebar({
 				>
 					<HugeiconsIcon icon={Folder01Icon} className="h-5 w-5" />
 				</button>
-				<button
-					onClick={() => {
-						setIsCollapsed(false);
-						setActiveTab("filters");
-					}}
-					className={clsx(
-						"rounded p-2 transition-colors",
-						activeTab === "filters"
-							? "bg-accent/15 text-accent"
-							: "text-ink-dull hover:bg-app-hover hover:text-ink",
-					)}
-					title="Filters"
-				>
-					<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-5 w-5" />
-				</button>
+				{showFilters && (
+					<button
+						onClick={() => {
+							setIsCollapsed(false);
+							setActiveTab("filters");
+						}}
+						className={clsx(
+							"rounded p-2 transition-colors",
+							activeTab === "filters"
+								? "bg-accent/15 text-accent"
+								: "text-ink-dull hover:bg-app-hover hover:text-ink",
+						)}
+						title="Filters"
+					>
+						<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-5 w-5" />
+					</button>
+				)}
 			</div>
 		);
 	}
@@ -389,17 +404,19 @@ export function CodeGraphSidebar({
 					>
 						Explorer
 					</button>
-					<button
-						onClick={() => setActiveTab("filters")}
-						className={clsx(
-							"rounded px-2 py-1 text-xs transition-colors",
-							activeTab === "filters"
-								? "bg-accent/20 text-accent"
-								: "text-ink-dull hover:bg-app-hover hover:text-ink",
-						)}
-					>
-						Filters
-					</button>
+					{showFilters && (
+						<button
+							onClick={() => setActiveTab("filters")}
+							className={clsx(
+								"rounded px-2 py-1 text-xs transition-colors",
+								activeTab === "filters"
+									? "bg-accent/20 text-accent"
+									: "text-ink-dull hover:bg-app-hover hover:text-ink",
+							)}
+						>
+							Filters
+						</button>
+					)}
 				</div>
 				<button
 					onClick={() => setIsCollapsed(true)}

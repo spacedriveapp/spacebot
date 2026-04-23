@@ -36,7 +36,7 @@ import {
 	type FileEdgeData,
 	type FileNodeData,
 } from "./mermaidGraphBuilder";
-import { findCrossLayerNeighbors } from "./layerBuilder";
+import { findCrossLayerNeighbors, firstSegment } from "./layerBuilder";
 import { describeLayer } from "./nodeDescription";
 import { COMMUNITY_COLORS, getCommunityColor } from "./constants";
 import type { BulkNode } from "./types";
@@ -517,7 +517,39 @@ function SelectionFitView({ selectedId, onCanvas }: { selectedId: string | null;
 
 function InnerFlow({ projectId, graph, selectedNode, onSelectFile }: Props) {
 	const { totalFiles, fileToLayer } = graph;
-	const selectedFileId = selectedNode?.label === "File" ? selectedNode.qualified_name : null;
+
+	// Resolve an incoming selection (from the search bar, the sidebar, or
+	// a click) into the two actionable views of it:
+	//
+	//   • `fileId` — the file qname whose card should be highlighted. Only
+	//     set for direct File selections or symbol selections where we can
+	//     find the parent file by matching `source_file`.
+	//   • `layerId` — the layer to drill into. Set for Folder selections
+	//     and derived from `fileId` when that's what came in.
+	//
+	// Folders have no card of their own in this view; selecting one just
+	// drills into the matching layer. Symbols have no card either but their
+	// containing file does — we redirect to that card so the search-bar UX
+	// always feels like a navigation.
+	const selectionTarget = useMemo(() => {
+		if (!selectedNode) return null;
+		if (selectedNode.label === "Folder") {
+			const layerId = firstSegment(selectedNode.source_file);
+			return { fileId: null as string | null, layerId };
+		}
+		if (selectedNode.label === "File") {
+			const fileId = selectedNode.qualified_name;
+			return { fileId, layerId: fileToLayer.get(fileId) ?? null };
+		}
+		const path = selectedNode.source_file;
+		if (!path) return null;
+		const parent = graph.fileNodes.find((f) => f.source_file === path);
+		if (!parent) return null;
+		const fileId = parent.qualified_name;
+		return { fileId, layerId: fileToLayer.get(fileId) ?? null };
+	}, [selectedNode, graph.fileNodes, fileToLayer]);
+
+	const selectedFileId = selectionTarget?.fileId ?? null;
 
 	const [navigationLevel, setNavigationLevel] = useState<"overview" | "detail">("overview");
 	const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
@@ -531,16 +563,18 @@ function InnerFlow({ projectId, graph, selectedNode, onSelectFile }: Props) {
 		setDrawerOpen(false);
 	}, [projectId]);
 
-	// Auto drill-in when a file is selected from elsewhere (search/right panel).
+	// Auto drill-in when something is selected from elsewhere (search bar,
+	// right panel, file tree). Covers Folder selections (layer only, no
+	// file card), File selections (drill + highlight), and symbol
+	// selections (redirected to parent file by selectionTarget).
 	useEffect(() => {
-		if (!selectedFileId) return;
-		const layerId = fileToLayer.get(selectedFileId);
+		const layerId = selectionTarget?.layerId;
 		if (!layerId) return;
 		if (navigationLevel !== "detail" || activeLayerId !== layerId) {
 			setNavigationLevel("detail");
 			setActiveLayerId(layerId);
 		}
-	}, [selectedFileId, fileToLayer, navigationLevel, activeLayerId]);
+	}, [selectionTarget, navigationLevel, activeLayerId]);
 
 	const drillIntoLayer = useCallback((layerId: string) => {
 		setNavigationLevel("detail");
@@ -567,6 +601,17 @@ function InnerFlow({ projectId, graph, selectedNode, onSelectFile }: Props) {
 	const overviewGraph = useOverviewGraph(graph, drillIntoLayer);
 	const detailTopology = useDetailTopology(graph, activeLayerId, drillIntoLayer, handleRecolorNode, nodeColors);
 	const detailGraph = useDetailGraph(detailTopology, selectedFileId);
+
+	// If the selected file has no intra-layer relationships it lives in the
+	// Other-files drawer, not the canvas. Open the drawer automatically so
+	// a search-bar selection is visible without a manual toggle.
+	useEffect(() => {
+		if (!selectedFileId) return;
+		const isOrphan = detailTopology.isolatedFiles.some(
+			(f) => f.qualified_name === selectedFileId,
+		);
+		if (isOrphan) setDrawerOpen(true);
+	}, [selectedFileId, detailTopology.isolatedFiles]);
 
 	const { nodes: displayNodes, edges: displayEdges } =
 		navigationLevel === "overview" ? overviewGraph : detailGraph;

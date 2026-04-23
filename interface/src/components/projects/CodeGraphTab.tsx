@@ -24,6 +24,8 @@ import { buildGraph } from "./codegraph/graphAdapter";
 import {
 	DEFAULT_VISIBLE_LABELS,
 	DEFAULT_VISIBLE_EDGES,
+	FILTERABLE_LABELS,
+	ALL_EDGE_TYPES,
 	type NodeLabel,
 	type EdgeType,
 } from "./codegraph/constants";
@@ -237,6 +239,16 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 		);
 	};
 
+	// Mermaid ignores the label/edge/depth filters — the view is all files
+	// and folders regardless of the stored toggle state. Derive an effective
+	// filter set that is fully permissive when layoutMode === "mermaid" so
+	// anything downstream that reads these values (e.g. a future filtered
+	// search) also sees "all on" without mutating the user's saved prefs.
+	const isMermaid = layoutMode === "mermaid";
+	const effectiveVisibleLabels = isMermaid ? FILTERABLE_LABELS : visibleLabels;
+	const effectiveVisibleEdgeTypes = isMermaid ? ALL_EDGE_TYPES : visibleEdgeTypes;
+	const effectiveDepthFilter = isMermaid ? null : depthFilter;
+
 	const handleSelectAndFocus = (node: BulkNode) => {
 		setSelectedNode(node);
 		canvasRef.current?.focusNode(node);
@@ -368,6 +380,7 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 				colorOverrides={colorOverrides}
 				layoutMode={layoutMode}
 				onLayoutModeChange={setLayoutMode}
+				visibleLabels={effectiveVisibleLabels}
 			/>
 
 			<div className="flex min-h-0 flex-1">
@@ -377,16 +390,17 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 					selectedNode={selectedNode}
 					onSelectNode={setSelectedNode}
 					onFocusNode={(node) => canvasRef.current?.focusNode(node)}
-					visibleLabels={visibleLabels}
+					visibleLabels={effectiveVisibleLabels}
 					onToggleLabel={handleToggleLabel}
-					visibleEdgeTypes={visibleEdgeTypes}
+					visibleEdgeTypes={effectiveVisibleEdgeTypes}
 					onToggleEdge={handleToggleEdge}
-					depthFilter={depthFilter}
+					depthFilter={effectiveDepthFilter}
 					onChangeDepthFilter={setDepthFilter}
 					colorOverrides={colorOverrides}
 					onColorChange={handleColorChange}
 					edgeColorOverrides={edgeColorOverrides}
 					onEdgeColorChange={handleEdgeColorChange}
+					showFilters={!isMermaid}
 				/>
 
 				<div className="relative min-w-0 flex-1">
@@ -407,9 +421,9 @@ export function CodeGraphTab({ projectId }: { projectId: string }) {
 							nodesByKey={nodesByKey}
 							selectedNode={selectedNode}
 							onSelectNode={setSelectedNode}
-							visibleLabels={visibleLabels}
-							visibleEdgeTypes={visibleEdgeTypes}
-							depthFilter={depthFilter}
+							visibleLabels={effectiveVisibleLabels}
+							visibleEdgeTypes={effectiveVisibleEdgeTypes}
+							depthFilter={effectiveDepthFilter}
 							colorOverrides={colorOverrides}
 							layoutMode={layoutMode}
 							onLayoutRunningChange={setIsLayoutRunning}
