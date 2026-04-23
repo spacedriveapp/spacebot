@@ -11,7 +11,7 @@ User-defined scheduled jobs. A cron job is a prompt that fires on a timer, gets 
 
 OpenClaw has a single heartbeat: one HEARTBEAT.md file, one timer, one LLM call that tries to do everything in a single turn. It runs in the main session, competes for context, and if it does too much work it triggers compaction. Two things can't run at different intervals. Everything is serialized.
 
-Spacebot separates the concerns. The cortex is the system's heartbeat — it runs on a fixed interval, monitors processes, and maintains the memory bulletin. Cron jobs are user-defined recurring tasks, each with its own interval, prompt, and delivery target. When a cron job fires, it gets a fresh short-lived channel — the same kind of channel that handles user conversations, with full branching and worker capabilities. Multiple cron jobs run concurrently without blocking each other or the cortex.
+Spacebot separates the concerns. The cortex is the system's heartbeat. It monitors processes, maintains working memory, and regenerates knowledge synthesis when the memory graph changes. Cron jobs are user-defined recurring tasks, each with its own interval, prompt, and delivery target. When a cron job fires, it gets a fresh short-lived channel with normal branching and worker capabilities. Multiple cron jobs run concurrently without blocking each other or the cortex.
 
 ## How It Works
 
@@ -209,7 +209,7 @@ When the scheduler fires a cron job:
 
 2. **Send prompt** — A synthetic `InboundMessage` with source `"cron"` is sent to the channel. The message contains the cron job's prompt text.
 
-3. **Run** — The channel processes the message through its normal LLM loop. It can use all channel tools (reply, branch, spawn_worker, memory_save, etc).
+3. **Run** -- The channel processes the message through its normal LLM loop. It can use channel tools such as `reply`, `branch`, and `spawn_worker`. Memory writes still go through branches or configured direct-mode tools, not the standard channel toolset.
 
 4. **Collect** — The scheduler reads from the channel's `response_tx`. The first user-visible delivery response becomes the terminal payload. Status updates and stream events are ignored.
 

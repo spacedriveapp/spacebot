@@ -9,7 +9,7 @@ LLM context windows are finite. A long conversation fills up. In OpenClaw, when 
 
 ## How It Works
 
-The compactor is a programmatic monitor — not an LLM process. It watches a channel's context size (estimated token count) and triggers compaction workers in the background. The channel keeps responding to messages the entire time.
+The compactor is a programmatic monitor, not an LLM process. It watches a channel's context size (estimated token count) and triggers compaction workers in the background. The channel keeps responding to messages the entire time.
 
 Every turn, after the channel's LLM call completes, the compactor checks context usage:
 
@@ -42,15 +42,14 @@ Only one compaction runs at a time per channel. If context is already being comp
 
 These are the normal path. A compaction worker runs in `tokio::spawn` alongside the channel:
 
-1. **Drain** — Write-lock the channel's history, remove the oldest N messages (30% for background, 50% for aggressive). Release the lock. The channel can immediately continue with the remaining history.
+1. **Drain** -- Write-lock the channel's history, remove the oldest N messages (30% for background, 50% for aggressive). Release the lock. The channel can immediately continue with the remaining history.
 
-2. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/en/compactor.md.j2` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
+2. **Summarize** -- Build a transcript from the removed messages and run a one-turn Rig agent with `prompts/en/compactor.md.j2` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, emotional context, and active tasks. It discards greetings, tool call mechanics, and intermediate reasoning.
 
-3. **Extract memories** — The compaction agent has access to the `memory_save` tool. While summarizing, it identifies facts, preferences, decisions, and observations worth keeping long-term and saves them directly to the memory store. These persist independently of the conversation.
+3. **Inject summary** -- Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
 
-4. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
+The compaction agent runs with `max_turns(1)`. It has no tool server and does not receive `memory_save`. Durable memory extraction is handled by persistence branches, direct memory tools, ingestion, and cortex workflows.
 
-The compaction agent runs with `max_turns(10)` — enough for the LLM to produce the summary and call `memory_save` a few times for extracted memories.
 
 ## Emergency Truncation
 
@@ -77,13 +76,13 @@ This gives the channel rolling awareness of what happened without carrying the f
 
 ## What the Compaction LLM Sees
 
-The compaction agent receives a rendered transcript of the removed messages. User messages, assistant responses, tool calls, and tool results — all formatted as readable text. The agent's system prompt (`prompts/en/compactor.md.j2`) tells it to:
+The compaction agent receives a rendered transcript of the removed messages. User messages, assistant responses, tool calls, and tool results are formatted as readable text. The agent's system prompt (`prompts/en/compactor.md.j2`) tells it to:
 
 **Preserve:** Key decisions, active topics, commitments, emotional context, active workers/tasks.
 
 **Discard:** Greetings, small talk, tool call details (results matter, not mechanics), intermediate reasoning, repeated information.
 
-**Extract as memories:** Facts, preferences, decisions, observations — anything that should outlive the conversation.
+It does not extract memories. The compactor's output is only the summary that replaces older history.
 
 ## Configuration
 
@@ -114,8 +113,8 @@ The `context_window` setting (default 128,000 tokens) determines the denominator
 | When it runs | Blocks the session | Background tokio task |
 | User experience | Typing indicator, 20s freeze | No interruption |
 | Summarization | Same session's LLM | Dedicated compaction worker |
-| Memory extraction | Separate pass | Same LLM call as summarization |
-| Raw transcript | Lost | Extracted as memories |
+| Memory extraction | Separate pass | Separate persistence paths (branches, tools, ingestion, cortex workflows) |
+| Raw transcript | Lost | Replaced by rolling summaries |
 | Multiple summaries | One summary replaces all | Summaries stack chronologically |
 | Emergency fallback | None (just hope it fits) | Hard truncation at 95% |
 

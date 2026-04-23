@@ -5,7 +5,7 @@ description: Structured memory system with graph associations and hybrid search.
 
 # Memory
 
-Memories in SpaceBot are structured objects in a database. Not markdown files, not daily logs, not a manually curated MEMORY.md. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB for search.
+Memories in SpaceBot are structured objects in a database. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB for search.
 
 ## Why Not Files
 
@@ -18,7 +18,7 @@ Memories live across two embedded databases, each doing what it's best at:
 - **SQLite** -- the memory graph. Rows with content, type, importance, timestamps, source. Association edges with weights and relation types. Relational queries for graph traversal, metadata filtering, and maintenance operations.
 - **LanceDB** -- embeddings and search. Vector storage in Lance columnar format with HNSW indexing. Built-in full-text search via Tantivy. Hybrid search (vector + FTS) in one system.
 
-The two are joined on memory ID. A recall worker queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. No server processes -- both are embedded, everything is files in a data directory.
+The two are joined on memory ID. During branch recall, the `memory_recall` tool queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. No server processes -- both are embedded, everything is files in a data directory.
 
 ## Memory Structure
 
@@ -62,11 +62,11 @@ Association types:
 - **CausedBy / ResultOf** -- causal chain
 - **PartOf** -- hierarchical relationship
 
-The graph enables traversal during recall. When a recall worker finds a relevant memory, it can walk the graph to find connected context -- related facts, the history of how a decision evolved, contradictions that need resolution.
+The graph enables traversal during recall. When branch recall finds a relevant memory, it can walk the graph to find connected context -- related facts, the history of how a decision evolved, contradictions that need resolution.
 
 ## How Memories Are Created
 
-Three paths:
+Four paths:
 
 ### 1. Branch-initiated (during conversation)
 
@@ -81,19 +81,23 @@ User: "Actually, let's switch to SQLite for the prototype. PostgreSQL is overkil
 
 Branches have a `memory_save` tool. They decide what to save, with what type and importance. The system handles embedding generation and auto-association.
 
-### 2. Compactor-initiated (during compaction)
+### 2. Persistence branches (during conversation)
 
-When the compactor triggers a compaction worker, that worker does two things in one pass: summarize the conversation and extract memories. This is where memories are harvested from conversation that's about to leave the context window.
+Spacebot runs silent memory persistence branches during conversation. These branches review recent channel history, recall existing memories first, save durable facts and decisions, and emit working-memory events for temporal awareness.
 
-This mirrors OpenClaw's memory flush pattern -- the best idea in OpenClaw's memory system. Before context is lost, an LLM pass pulls out anything worth keeping. But unlike OpenClaw, this happens in a background worker. The channel never blocks.
+This keeps durable memory creation tied to conversation signal instead of context pressure. The compactor summarizes old turns only. It does not receive memory tools and does not write durable memories.
 
 ### 3. Cortex-initiated (system-level)
 
 The cortex observes patterns across channels and can create memories at the system level. It consolidates related memories, creates observations ("James has been asking about authentication a lot this week"), and manages the graph.
 
+### 4. Ingestion
+
+Ingestion workflows can create durable memories from imported files, external source material, and connector-fed content. They use the same storage, embedding, and association pipeline as conversation-created memories, but the source is document or feed content rather than a live conversation turn.
+
 ## How Memories Are Recalled
 
-Memory recall is always delegated to a worker. No LLM process ever queries the database directly and dumps raw results into its own context.
+Memory recall is delegated to a branch. The channel does not query the database directly and does not receive raw search results.
 
 ### Search Modes
 
@@ -117,7 +121,7 @@ Sort options for non-hybrid modes: `recent` (created_at DESC), `importance` (imp
 
 ```
 Channel receives: "What do we know about the auth system?"
-    → Branch created with channel's context
+    → Branch created with channel context
         → Branch calls memory_recall tool (mode: hybrid, query: "auth system")
             Tool searches: vector similarity + full-text + graph traversal
             Tool gets 50 results
@@ -127,7 +131,7 @@ Channel receives: "What do we know about the auth system?"
     → Channel responds with clean, relevant information
 ```
 
-The branch is the recall intermediary. It has the channel's full context (so it knows what's relevant), and it picks the appropriate search mode. Hybrid for topic-specific queries, recent for temporal context, typed for structured retrieval.
+The branch is the recall intermediary. It has the channel context, knows what is relevant, and picks the appropriate search mode. Hybrid is for topic-specific queries, recent is for temporal context, and typed is for structured retrieval.
 
 RRF works on ranks rather than scores, which handles the different scales of vector and keyword results better than a weighted sum. After finding initial results, the branch can walk the memory graph in SQLite to pull in connected context. If the top result is "we decided to use JWT for auth tokens", the graph might surface "we considered session cookies but rejected them because of the mobile app" through a `ResultOf` edge.
 
@@ -137,7 +141,7 @@ The branch curates. 50 raw results become 5 relevant, contextualized memories. T
 
 In OpenClaw, the LLM calls `memory_search`, gets raw results in its context, and has to make sense of them. This pollutes the context with irrelevant matches, partial chunks, and search metadata. In Spacebot, the branch absorbs all that noise and returns only what matters. The branch is disposable -- its context gets thrown away after it returns. The channel stays clean.
 
-This costs an extra LLM call. But it keeps the channel's context clean, which means fewer compactions, which means fewer memory extractions, which means the system runs more efficiently overall.
+This costs an extra LLM call. It keeps the channel context clean, which reduces raw-result pollution and avoids pushing irrelevant search metadata into future compaction summaries.
 
 ## Importance and Decay
 
@@ -174,26 +178,28 @@ What's gone:
 
 ## Context Injection
 
-When a channel starts or a cron job fires, memories are injected into the system prompt. This isn't a raw dump -- it's a curated selection:
+When a channel starts or a cron job fires, the system prompt is assembled from layered context. This is not a raw dump.
 
-1. Identity-tagged memories are always included
-2. High-importance memories above a threshold are included
-3. Recently accessed memories get a boost
-4. The rest depends on what the conversation is about (populated by recall workers during the session)
+The main layers are:
 
-The injected memories are grouped by type and formatted cleanly. The channel sees something like:
+1. Identity files from the agent root (identity layer).
+2. Working memory, rendered from recent events and summaries (memory-derived layer).
+3. Channel activity, rendered from the channel registry and recent messages (activity layer).
+4. Participant context, when there is useful per-person context (participant layer).
+5. Knowledge context, synthesized from the long-term memory graph (memory-derived layer).
+
+The channel sees structured sections like:
 
 ```
-## Identity
-- My name is Spacebot
-- James is a software engineer who works on SpaceDrive
+## Working Memory
+- Today: worker completed the OAuth config review.
+- Decision: keep the prototype on SQLite.
 
-## Recent Context
-- We decided to use SQLite for the prototype (2 days ago)
-- James prefers short, direct responses (preference)
+## Knowledge Context
+The prototype uses SQLite. The team prefers short, direct implementation notes.
 ```
 
-Not a wall of raw search results. Not everything in the database. Just what matters right now.
+The `memory_bulletin` runtime field remains as a compatibility surface during the transition, but the prompt prefers the narrower `## Knowledge Context` section when knowledge synthesis exists.
 
 ## Maintenance
 

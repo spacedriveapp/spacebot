@@ -162,9 +162,9 @@ Workers executing a task get a restricted version of the `task_update` tool. The
 
 They cannot change the task's status, priority, title, description, or worker binding. These fields are managed by the cortex and the API. This prevents a worker from marking its own task as `done` — only the cortex does that based on whether the worker succeeded or failed.
 
-## Bulletin Integration
+## Knowledge Context Integration
 
-Active tasks (non-done) are included in the cortex memory bulletin under an "Active Tasks" section. Each task is listed with its number, status, priority, title, and subtask progress:
+Active tasks (non-done) are included in the cortex knowledge context. Each task is listed with its number, status, priority, title, and subtask progress:
 
 ```
 ### Active Tasks
@@ -323,7 +323,7 @@ src/
 │
 ├── agent/
 │   └── cortex.rs           — spawn_ready_task_loop, pickup_one_ready_task,
-│                             gather_active_tasks (bulletin integration)
+│                             gather_active_tasks (knowledge context integration)
 │
 └── migrations/
     └── 20260219000001_tasks.sql
@@ -333,7 +333,7 @@ src/
 
 The channel, branch, and cortex chat prompts are all task-aware:
 
-- **Channel prompt** (`channel.md.j2`) — has a dedicated "Task Board" section explaining spec-driven tasks and the kanban board. The Delegation section tells the channel to branch for task management. Active tasks appear in the Memory Context via the bulletin.
+- **Channel prompt** (`channel.md.j2`) -- has a dedicated "Task Board" section explaining spec-driven tasks and the kanban board. The Delegation section tells the channel to branch for task management. Active tasks appear in the Knowledge Context when synthesis is available.
 - **Branch prompt** (`branch.md.j2`) — documents all three task tools (`task_create`, `task_list`, `task_update`) with spec-driven guidance. `task_create` emphasizes rich markdown descriptions and pre-filled subtasks. `task_update` is framed as iterative spec refinement. Moving to `ready` triggers cortex auto-pickup.
 - **Cortex chat prompt** (`cortex_chat.md.j2`) — lists task board management as a core capability with spec-driven language. The cortex chat has all three task tools.
 - **Tool descriptions** — each task tool has a description template in `prompts/en/tools/` that reinforces the spec-driven philosophy: `task_create` tells the LLM to write full markdown specs with subtask execution plans, `task_update` tells it to refine specs as scope evolves.

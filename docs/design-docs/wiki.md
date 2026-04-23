@@ -10,7 +10,7 @@ The wiki is not per-agent. It belongs to the instance. A company running Spacebo
 
 - **Not a replacement for the memory graph.** Atomic facts, preferences, and decisions stay in the graph. The wiki is for long-form structured knowledge that would be awkward as graph nodes — entity pages, concept docs, decision records, project syntheses.
 - **Not the file system.** Agents never write wiki content by editing files directly. All mutations go through wiki tools. The content lives in the database.
-- **Not the bulletin.** The bulletin is ephemeral, per-agent, and auto-generated. Wiki pages are persistent, instance-wide, and intentionally authored.
+- **Not the legacy bulletin fallback.** Knowledge synthesis and the legacy `bulletin_*` compatibility surfaces are ephemeral, per-agent, and auto-generated. Wiki pages are persistent, instance-wide, and intentionally authored.
 
 ---
 
@@ -147,7 +147,7 @@ struct WikiHistoryInput {
 
 **Workers** can be granted wiki write access via a `wiki_write: bool` flag on `WorkerContextMode` (default: `false`). Enable it when the worker is explicitly tasked with wiki creation so it can read and write in one pass. Workers doing background task enrichment for the autonomy loop leave this off and surface findings via task comments instead.
 
-**The autonomy channel** has full wiki access — memory escalation, ingest-triggered synthesis, and wiki maintenance (stale pages, broken links, contradictions). It has the context to do all of this meaningfully: memory bulletin, working memory events, and run history.
+**The autonomy channel** has full wiki access -- memory escalation, ingest-triggered synthesis, and wiki maintenance (stale pages, broken links, contradictions). It has the context to do all of this meaningfully: knowledge synthesis, working memory events, and run history.
 
 ---
 
@@ -307,7 +307,7 @@ who knows nothing about the current conversation.
 
 Agents do not get all wiki pages injected into every conversation. The agent knows what exists; it fetches what it needs.
 
-**Index in bulletin.** The memory bulletin includes a compact wiki index: page titles and types only, no content. The agent sees what pages exist and can fetch any of them with `wiki_read`.
+**Index in knowledge context.** Knowledge synthesis can include a compact wiki index: page titles and types only, no content. The agent sees what pages exist and can fetch any of them with `wiki_read`.
 
 ```
 ## Wiki (14 pages)
@@ -371,7 +371,7 @@ max_pages = 1000              # Soft cap — lint warns above this
 - Branch tool registration: add `file_read`, `wiki_read`, `wiki_write` to branch toolset
 - Cortex + autonomy channel tool registration
 - `wiki_write: bool` field on `WorkerContextMode` (default: `false`) — enables wiki write tools on a per-spawn basis
-- Wiki index block in bulletin template
+- Wiki index block in knowledge-synthesis template
 - Writing guide in branch system prompt when wiki tools are in scope
 - API endpoints: CRUD + version history + restore
 
