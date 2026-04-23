@@ -133,6 +133,14 @@ RRF works on ranks rather than scores, which handles the different scales of vec
 
 The branch curates. 50 raw results become 5 relevant, contextualized memories. The channel never sees the noise -- it only gets the branch's conclusion.
 
+### Active Recall
+
+Active recall is a silent branch profile for obvious memory cues like "remember", "last time", "that thing", or "what did we decide". It gives Spacebot a better memory feel without putting raw recall output into the channel.
+
+An active recall branch can only call `memory_recall`. It returns exactly `NONE` or `BACKGROUND_NOTE: <compact note>`. `NONE` is discarded. A background note is stored as read-only context for the next channel turn and is fenced under `Background Recall`.
+
+Active recall branches never answer the user, never save memories, never spawn workers, and never trigger a duplicate user-facing reply. Raw memory rows, memory IDs, relevance scores, importance scores, JSON, and tool output are rejected before they can be injected.
+
 ### Why Not Search Directly?
 
 In OpenClaw, the LLM calls `memory_search`, gets raw results in its context, and has to make sense of them. This pollutes the context with irrelevant matches, partial chunks, and search metadata. In Spacebot, the branch absorbs all that noise and returns only what matters. The branch is disposable -- its context gets thrown away after it returns. The channel stays clean.

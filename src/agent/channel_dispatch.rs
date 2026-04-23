@@ -207,6 +207,48 @@ pub(crate) async fn spawn_memory_persistence_branch(
     .await
 }
 
+/// Spawn a silent active-recall branch.
+///
+/// The branch can only use memory recall. Its result is handled specially by
+/// the channel: `NONE` is discarded, while `BACKGROUND_NOTE:` is stored as
+/// read-only context for the next channel turn.
+pub(crate) async fn spawn_active_recall_branch(
+    state: &ChannelState,
+    latest_user_message: &str,
+) -> std::result::Result<BranchId, AgentError> {
+    let prompt_engine = state.deps.runtime_config.prompts.load();
+    let routing = state.deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+    let tool_use_enforcement = state.deps.runtime_config.tool_use_enforcement.load();
+    let system_prompt = prompt_engine
+        .render_static("active_recall")
+        .and_then(|prompt| {
+            prompt_engine.maybe_append_tool_use_enforcement(
+                prompt,
+                tool_use_enforcement.as_ref(),
+                &model_name,
+            )
+        })
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
+    let prompt = format!(
+        "Latest user message:\n\n{}\n\nReturn exactly `NONE` or `BACKGROUND_NOTE: <one compact note>`.",
+        latest_user_message.trim()
+    );
+
+    spawn_branch(
+        state,
+        "active recall",
+        &prompt,
+        &system_prompt,
+        "recalling relevant context...",
+        "active_recall_branch",
+        BranchSpawnOptions {
+            profile: BranchToolProfile::ActiveRecall,
+        },
+    )
+    .await
+}
+
 fn ensure_dispatch_readiness(state: &ChannelState, dispatch_type: &'static str) {
     let readiness = state.deps.runtime_config.work_readiness();
     if readiness.ready {
@@ -261,7 +303,7 @@ async fn spawn_branch(
     let BranchSpawnOptions { profile } = branch_options;
     let memory_persistence_contract = match &profile {
         BranchToolProfile::MemoryPersistence { contract_state, .. } => Some(contract_state.clone()),
-        BranchToolProfile::Default => None,
+        BranchToolProfile::Default | BranchToolProfile::ActiveRecall => None,
     };
 
     let max_branches = **state.deps.runtime_config.max_concurrent_branches.load();
