@@ -25,14 +25,14 @@ function formatCount(n: number): string {
 }
 
 export function ProjectOverviewCard({ projectName, graph, allNodes, edgeCount, onSelectFile }: Props) {
-	const { fileNodes, fileDegree, groups } = graph;
+	const { fileNodes, fileDegree, layers } = graph;
 
 	const stats: Stat[] = useMemo(() => [
 		{ label: "Files", value: formatCount(fileNodes.length) },
 		{ label: "Edges", value: formatCount(edgeCount) },
-		{ label: "Groups", value: formatCount(groups.length) },
+		{ label: "Layers", value: formatCount(layers.length) },
 		{ label: "Nodes", value: formatCount(allNodes.length) },
-	], [fileNodes.length, edgeCount, groups.length, allNodes.length]);
+	], [fileNodes.length, edgeCount, layers.length, allNodes.length]);
 
 	const typeDistribution = useMemo(() => {
 		const counts = new Map<NodeLabel, number>();
@@ -69,9 +69,9 @@ export function ProjectOverviewCard({ projectName, graph, allNodes, edgeCount, o
 					{projectName}
 				</h2>
 				<p className="mt-1 text-xs leading-relaxed text-ink-dull">
-					Files are grouped by connected-relationship clusters. Rename a
-					group with the pencil icon, and recolor groups or cards from
-					their palette swatch.
+					Files are organized into layers by top-level folder. Click a
+					layer to drill into its files, click a file to focus its
+					connections, and recolor any card from its palette swatch.
 				</p>
 			</div>
 

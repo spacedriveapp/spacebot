@@ -1,5 +1,5 @@
 // Shared color picker popover. Used by CodeGraphSidebar (node + edge color
-// overrides), GroupContainer, and FileNodeCard.
+// overrides) and FileNodeCard.
 //
 // Two tabs: Swatches (fixed palette grid) and Spectrum (continuous HSV with
 // a brightness slider). An alpha slider lives below the tab body so it

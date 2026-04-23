@@ -1,13 +1,20 @@
 // Pure helpers that transform the bulk code-graph payload into React Flow
-// data for the mermaid view. Files become card nodes grouped into
-// relationship clusters; symbol-level edges are lifted to file-to-file
-// edges and aggregated so edge thickness scales with the number of
-// underlying relationships.
+// data for the mermaid view. Files become card nodes; symbol-level edges
+// are lifted to file-to-file edges and aggregated so edge thickness
+// scales with the number of underlying relationships. Layer metadata
+// (folder-based) is computed alongside so the overview can render one
+// cluster card per folder and the detail view can draw portals to the
+// other layers.
 
 import type { Edge, Node } from "@xyflow/react";
 import type { CodeGraphBulkEdgeSummary } from "@/api/client";
 import type { BulkNode } from "./types";
-import { groupFilesByRelationships, type FileGroup } from "./componentGrouper";
+import {
+	buildLayers,
+	type AggregatedEdge,
+	type CrossLayerBundle,
+	type Layer,
+} from "./layerBuilder";
 
 const FILE_EDGE_TYPES = new Set(["IMPORTS", "CALLS", "EXTENDS", "IMPLEMENTS"]);
 
@@ -30,7 +37,6 @@ const SYMBOL_LABELS = new Set([
 
 export interface FileNodeData extends Record<string, unknown> {
 	file: BulkNode;
-	groupId: string;
 	symbols: BulkNode[];
 	selected?: boolean;
 }
@@ -47,7 +53,10 @@ export interface BuildResult {
 	fileNodes: BulkNode[];
 	symbolsByFile: Map<string, BulkNode[]>;
 	fileDegree: Map<string, number>;
-	groups: FileGroup[];
+	layers: Layer[];
+	fileToLayer: Map<string, string>;
+	crossLayerBundles: CrossLayerBundle[];
+	aggregatedEdges: AggregatedEdge[];
 }
 
 function edgeKey(from: string, to: string, type: string): string {
@@ -88,7 +97,7 @@ export function buildFileGraph(
 	for (const f of files) qnameToFileQname.set(f.qualified_name, f.qualified_name);
 
 	// Aggregate file-to-file edges per (from, to, type) triple.
-	const aggregated = new Map<string, { fromQname: string; toQname: string; type: string; count: number }>();
+	const aggregated = new Map<string, AggregatedEdge>();
 	const fileDegree = new Map<string, number>();
 	for (const edge of allEdges) {
 		if (!FILE_EDGE_TYPES.has(edge.edge_type)) continue;
@@ -106,12 +115,8 @@ export function buildFileGraph(
 		}
 	}
 
-	// Relationship-based grouping.
-	const groups = groupFilesByRelationships(allNodes, allEdges);
-	const fileGroupId = new Map<string, string>();
-	for (const g of groups) {
-		for (const f of g.files) fileGroupId.set(f.qualified_name, g.id);
-	}
+	const aggregatedEdges = Array.from(aggregated.values());
+	const { layers, fileToLayer, crossLayerBundles } = buildLayers(files, aggregatedEdges);
 
 	const rfNodes: Node<FileNodeData>[] = files.map((file) => ({
 		id: file.qualified_name,
@@ -119,20 +124,16 @@ export function buildFileGraph(
 		position: { x: 0, y: 0 },
 		data: {
 			file,
-			groupId: fileGroupId.get(file.qualified_name) ?? "g_isolated",
 			symbols: symbolsByFile.get(file.qualified_name) ?? [],
 		},
 	}));
 
-	const rfEdges: Edge<FileEdgeData>[] = [];
-	for (const { fromQname, toQname, type, count } of aggregated.values()) {
-		rfEdges.push({
-			id: `${fromQname}__${type}__${toQname}`,
-			source: fromQname,
-			target: toQname,
-			data: { edgeType: type, count },
-		});
-	}
+	const rfEdges: Edge<FileEdgeData>[] = aggregatedEdges.map((e) => ({
+		id: `${e.fromQname}__${e.type}__${e.toQname}`,
+		source: e.fromQname,
+		target: e.toQname,
+		data: { edgeType: e.type, count: e.count },
+	}));
 
 	return {
 		nodes: rfNodes,
@@ -141,6 +142,9 @@ export function buildFileGraph(
 		fileNodes: files,
 		symbolsByFile,
 		fileDegree,
-		groups,
+		layers,
+		fileToLayer,
+		crossLayerBundles,
+		aggregatedEdges,
 	};
 }
