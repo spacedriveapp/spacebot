@@ -1114,6 +1114,8 @@ mod tests {
 
         assert_eq!(result.previous_task.title, "old title");
         assert_eq!(result.previous_task.priority, TaskPriority::Medium);
+        assert_eq!(result.previous_task.status, TaskStatus::Backlog);
+        assert_eq!(result.task.status, TaskStatus::Backlog);
         assert_eq!(result.task.title, "new title");
         assert_eq!(result.task.priority, TaskPriority::High);
     }

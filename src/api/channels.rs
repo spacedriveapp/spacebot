@@ -765,7 +765,11 @@ pub(super) async fn inspect_prompt(
             .list_projects(Some(crate::projects::ProjectStatus::Active))
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "failed to list active projects for prompt inspection");
+                tracing::warn!(
+                    %error,
+                    projects_count = 0usize,
+                    "failed to list active projects for prompt inspection"
+                );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         if projects.is_empty() {
@@ -826,10 +830,19 @@ pub(super) async fn inspect_prompt(
                         .collect(),
                 });
             }
-            Some(prompt_engine.render_projects_context(contexts).map_err(|error| {
-                tracing::warn!(%error, "failed to render projects context for prompt inspection");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?)
+            let projects_count = contexts.len();
+            Some(
+                prompt_engine
+                    .render_projects_context(contexts)
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            projects_count,
+                            "failed to render projects context for prompt inspection"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            )
         }
     };
 

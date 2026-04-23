@@ -3731,38 +3731,39 @@ impl Channel {
 
         let wm_config = **self.deps.runtime_config.working_memory.load();
         let elapsed = self.last_persistence_at.elapsed();
-        let event_count_since_last = if memory_persistence_trigger_kind(
+        let elapsed_secs = elapsed.as_secs();
+        let trigger = match memory_persistence_trigger_kind(
             self.message_count,
-            elapsed.as_secs(),
+            elapsed_secs,
             None,
             &wm_config,
-        )
-        .is_none()
-        {
-            let since = chrono::Utc::now() - chrono::Duration::seconds(elapsed.as_secs() as i64);
-            match self
-                .deps
-                .working_memory
-                .count_events_since(self.id.as_ref(), since)
-                .await
-            {
-                Ok(count) => Some(count as usize),
-                Err(error) => {
-                    tracing::debug!(%error, "event density check failed, skipping");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        ) {
+            Some(kind) => kind,
+            None => {
+                let since = chrono::Utc::now() - chrono::Duration::seconds(elapsed_secs as i64);
+                let event_count_since_last = match self
+                    .deps
+                    .working_memory
+                    .count_events_since(self.id.as_ref(), since)
+                    .await
+                {
+                    Ok(count) => Some(count as usize),
+                    Err(error) => {
+                        tracing::debug!(%error, "event density check failed, skipping");
+                        None
+                    }
+                };
 
-        let Some(trigger) = memory_persistence_trigger_kind(
-            self.message_count,
-            elapsed.as_secs(),
-            event_count_since_last,
-            &wm_config,
-        ) else {
-            return;
+                let Some(kind) = memory_persistence_trigger_kind(
+                    self.message_count,
+                    elapsed_secs,
+                    event_count_since_last,
+                    &wm_config,
+                ) else {
+                    return;
+                };
+                kind
+            }
         };
 
         // Reset counters before spawning so subsequent messages don't pile up.

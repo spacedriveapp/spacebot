@@ -44,16 +44,6 @@ fn summarize_duplicate_task(task: &str) -> String {
     }
 }
 
-const WORKING_MEMORY_TASK_MAX_CHARS: usize = 500;
-
-fn sanitize_worker_memory_task(task: &str, tool_secret_pairs: &[(String, String)]) -> String {
-    crate::secrets::scrub::scrub_working_memory_text(
-        task,
-        tool_secret_pairs,
-        WORKING_MEMORY_TASK_MAX_CHARS,
-    )
-}
-
 /// Error type for spawn worker tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Worker spawn failed: {0}")]
@@ -291,17 +281,23 @@ impl Tool for SpawnWorkerTool {
         }
 
         let worker_type_label = if is_opencode { "OpenCode" } else { "builtin" };
+        let tool_secret_pairs = match self.state.deps.runtime_config.secrets.load().as_ref() {
+            Some(store) => store.tool_secret_pairs(),
+            None => Vec::new(),
+        };
+        let safe_task =
+            crate::secrets::scrub::scrub_worker_task_for_memory(&args.task, &tool_secret_pairs);
         // OpenCode workers are always interactive regardless of args.interactive.
         let effectively_interactive = args.interactive || is_opencode;
         let message = if effectively_interactive {
             format!(
                 "Interactive {worker_type_label} worker {worker_id} spawned for: {}. Route follow-ups with route_to_worker.",
-                args.task
+                safe_task
             )
         } else {
             format!(
                 "{worker_type_label} worker {worker_id} spawned for: {}. It will report back when done.",
-                args.task
+                safe_task
             )
         };
         let readiness_note = if readiness.ready {
@@ -512,17 +508,18 @@ impl Tool for DetachedSpawnWorkerTool {
         let worker_id = worker.id;
 
         // Emit WorkerStarted event so the UI can track it.
+        let memory_task =
+            crate::secrets::scrub::scrub_worker_task_for_memory(&args.task, &tool_secret_pairs);
         let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
             agent_id: self.deps.agent_id.clone(),
             worker_id,
             channel_id: None,
-            task: args.task.clone(),
+            task: memory_task.clone(),
             worker_type: "cortex".into(),
             interactive: false,
             directory: None,
         });
 
-        let memory_task = sanitize_worker_memory_task(&args.task, &tool_secret_pairs);
         self.deps
             .working_memory
             .emit(
@@ -538,7 +535,7 @@ impl Tool for DetachedSpawnWorkerTool {
         run_logger.log_worker_started(
             None,
             worker_id,
-            &args.task,
+            &memory_task,
             "cortex",
             &self.deps.agent_id,
             false,
@@ -578,7 +575,11 @@ impl Tool for DetachedSpawnWorkerTool {
             }
         }
 
-        tracing::info!(worker_id = %worker_id, task = %args.task, "cortex chat spawned detached worker");
+        tracing::info!(
+            worker_id = %worker_id,
+            task = %memory_task,
+            "cortex chat spawned detached worker"
+        );
 
         Ok(SpawnWorkerOutput {
             worker_id,
@@ -586,7 +587,7 @@ impl Tool for DetachedSpawnWorkerTool {
             interactive: false,
             message: format!(
                 "Worker {worker_id} spawned for: {}. It will report back when done.",
-                args.task
+                memory_task
             ),
         })
     }

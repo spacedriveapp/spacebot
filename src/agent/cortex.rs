@@ -5100,6 +5100,13 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_synthesis_trigger_allows_zero_debounce_at_change_instant() {
+        assert!(should_regenerate_knowledge_synthesis_state(
+            5, 4, 2_000, 0, 2_000
+        ));
+    }
+
+    #[test]
     fn gathered_sections_fail_when_any_section_query_failed() {
         let gathered = GatheredSections {
             text: String::new(),
