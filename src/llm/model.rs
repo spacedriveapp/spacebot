@@ -833,6 +833,7 @@ impl SpacebotModel {
         let mut messages = Vec::new();
 
         if let Some(preamble) = &request.preamble {
+            let preamble = crate::prompts::strip_system_prompt_cache_boundary(preamble);
             messages.push(serde_json::json!({
                 "role": "system",
                 "content": preamble,
@@ -945,6 +946,7 @@ impl SpacebotModel {
         });
 
         if let Some(preamble) = &request.preamble {
+            let preamble = crate::prompts::strip_system_prompt_cache_boundary(preamble);
             body["instructions"] = serde_json::json!(preamble);
         } else if is_chatgpt_codex {
             body["instructions"] = serde_json::json!(
@@ -1071,6 +1073,7 @@ impl SpacebotModel {
         });
 
         if let Some(preamble) = &request.preamble {
+            let preamble = crate::prompts::strip_system_prompt_cache_boundary(preamble);
             body["instructions"] = serde_json::json!(preamble);
         } else if is_chatgpt_codex {
             body["instructions"] = serde_json::json!(
@@ -1380,6 +1383,7 @@ impl SpacebotModel {
         let mut messages = Vec::new();
 
         if let Some(preamble) = &request.preamble {
+            let preamble = crate::prompts::strip_system_prompt_cache_boundary(preamble);
             messages.push(serde_json::json!({
                 "role": "system",
                 "content": preamble,
@@ -1472,6 +1476,7 @@ impl SpacebotModel {
         let mut messages = Vec::new();
 
         if let Some(preamble) = &request.preamble {
+            let preamble = crate::prompts::strip_system_prompt_cache_boundary(preamble);
             messages.push(serde_json::json!({
                 "role": "system",
                 "content": preamble,

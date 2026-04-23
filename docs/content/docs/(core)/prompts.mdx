@@ -124,6 +124,22 @@ The channel system prompt is the most complex, assembled from multiple dynamic c
 
 {{ worker_capabilities }}
 
+{{ system_prompt_cache_boundary }}
+
+{%- if available_channels %}
+{{ available_channels }}
+{%- endif %}
+
+{%- if working_memory %}
+{{ working_memory }}
+{%- endif %}
+
+{%- if knowledge_synthesis %}
+## Knowledge Context
+
+{{ knowledge_synthesis }}
+{%- endif %}
+
 {%- if conversation_context %}
 ## Conversation Context
 
@@ -136,6 +152,35 @@ The channel system prompt is the most complex, assembled from multiple dynamic c
 {{ status_text }}
 {%- endif %}
 ```
+
+## Prompt Cache Boundary
+
+The channel prompt includes a cache boundary after the stable instruction prefix and before volatile runtime context. Anthropic requests split the system prompt at that marker. The stable prefix receives `cache_control`. Status, working memory, knowledge context, channel activity, and conversation context do not.
+
+Other providers strip the marker before sending instructions.
+
+Keep stable sections above the boundary:
+
+- identity context
+- base channel rules
+- adapter guidance
+- skills
+- worker capabilities
+
+Keep volatile sections below it:
+
+- available channels
+- org and project context
+- working memory
+- channel activity
+- participant context
+- knowledge context
+- conversation context
+- current status
+- message coalescing hints
+- backfilled transcript data
+
+The `token_usage` table records `cache_read_tokens` and `cache_write_tokens`. Use those fields to check whether prompt-cache changes are paying off.
 
 ## Adding a New Language
 

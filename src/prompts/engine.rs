@@ -5,6 +5,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub const SYSTEM_PROMPT_CACHE_BOUNDARY: &str = "<!-- spacebot-system-prompt-cache-boundary -->";
+
 /// A completed background process result, passed to the retrigger template.
 #[derive(Clone, Debug, Serialize)]
 pub struct RetriggerResult {
@@ -30,6 +32,14 @@ pub struct PromptEngine {
     env: Arc<Environment<'static>>,
     /// Selected language code (e.g., "en").
     language: String,
+}
+
+pub fn split_system_prompt_cache_boundary(prompt: &str) -> Option<(&str, &str)> {
+    prompt.split_once(SYSTEM_PROMPT_CACHE_BOUNDARY)
+}
+
+pub fn strip_system_prompt_cache_boundary(prompt: &str) -> String {
+    prompt.replace(SYSTEM_PROMPT_CACHE_BOUNDARY, "")
 }
 
 impl PromptEngine {
@@ -704,6 +714,7 @@ impl PromptEngine {
                 participant_context => participant_context,
                 knowledge_synthesis => knowledge_synthesis,
                 direct_mode => direct_mode,
+                system_prompt_cache_boundary => SYSTEM_PROMPT_CACHE_BOUNDARY,
             },
         )
     }
@@ -790,7 +801,9 @@ pub struct ProjectWorktreeContext {
 
 #[cfg(test)]
 mod tests {
-    use super::PromptEngine;
+    use super::{
+        PromptEngine, split_system_prompt_cache_boundary, strip_system_prompt_cache_boundary,
+    };
     use crate::config::ToolUseEnforcement;
 
     #[test]
@@ -851,6 +864,79 @@ mod tests {
         assert!(prompt.contains("## Memory Context"));
         assert!(prompt.contains("Bulletin fallback"));
         assert!(!prompt.contains("## Knowledge Context"));
+    }
+
+    #[test]
+    fn channel_prompt_cache_boundary_keeps_volatile_sections_out_of_stable_prefix() {
+        let engine = PromptEngine::new("en").expect("prompt engine should build");
+        let first_prompt = engine
+            .render_channel_prompt_with_links(
+                None,
+                None,
+                Some("Knowledge A".to_string()),
+                None,
+                "## Worker Capabilities\nstable capabilities".to_string(),
+                Some("Conversation A".to_string()),
+                Some("Status A".to_string()),
+                None,
+                Some("## Other Channels\nchannel A".to_string()),
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some("## Working Memory\nworking A".to_string()),
+                Some("## Channel Activity\nactivity A".to_string()),
+                Some("## Participants\nparticipant A".to_string()),
+                false,
+            )
+            .expect("channel prompt should render");
+        let second_prompt = engine
+            .render_channel_prompt_with_links(
+                None,
+                None,
+                Some("Knowledge B".to_string()),
+                None,
+                "## Worker Capabilities\nstable capabilities".to_string(),
+                Some("Conversation B".to_string()),
+                Some("Status B".to_string()),
+                None,
+                Some("## Other Channels\nchannel B".to_string()),
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some("## Working Memory\nworking B".to_string()),
+                Some("## Channel Activity\nactivity B".to_string()),
+                Some("## Participants\nparticipant B".to_string()),
+                false,
+            )
+            .expect("channel prompt should render");
+
+        let (first_stable, first_volatile) = split_system_prompt_cache_boundary(&first_prompt)
+            .expect("channel prompt should include cache boundary");
+        let (second_stable, second_volatile) = split_system_prompt_cache_boundary(&second_prompt)
+            .expect("channel prompt should include cache boundary");
+
+        assert_eq!(first_stable, second_stable);
+        assert_ne!(first_volatile, second_volatile);
+        assert!(first_stable.contains("stable capabilities"));
+        assert!(!first_stable.contains("working A"));
+        assert!(!first_stable.contains("Status A"));
+        assert!(first_volatile.contains("working A"));
+        assert!(first_volatile.contains("Status A"));
+        assert!(first_volatile.contains("Knowledge A"));
+    }
+
+    #[test]
+    fn strip_system_prompt_cache_boundary_removes_marker_only() {
+        let prompt = "stable\n<!-- spacebot-system-prompt-cache-boundary -->\nvolatile";
+
+        assert_eq!(
+            strip_system_prompt_cache_boundary(prompt),
+            "stable\n\nvolatile"
+        );
     }
 
     #[test]
