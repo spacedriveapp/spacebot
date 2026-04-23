@@ -254,6 +254,47 @@ pub fn scrub_leaks(content: &str) -> String {
     result
 }
 
+/// Scrub and bound text before storing it in working memory.
+///
+/// Working memory is replayed into future LLM context, so it must not persist
+/// exact tool secrets, known plaintext leak patterns, encoded leak patterns,
+/// or unbounded payloads.
+pub fn scrub_working_memory_text(
+    text: &str,
+    tool_secrets: &[(String, String)],
+    max_chars: usize,
+) -> String {
+    let scrubbed = scrub_secrets(text, tool_secrets);
+    let scrubbed = scrub_leaks(&scrubbed);
+    let scrubbed = redact_working_memory_encoded_leaks(&scrubbed);
+    truncate_for_working_memory(&scrubbed, max_chars)
+}
+
+fn redact_working_memory_encoded_leaks(text: &str) -> String {
+    if scan_for_leaks(text).is_some() {
+        return "[WORKING_MEMORY_REDACTED:encoded-secret]".to_string();
+    }
+    text.to_string()
+}
+
+fn truncate_for_working_memory(text: &str, max_chars: usize) -> String {
+    const TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let suffix_len = TRUNCATED_SUFFIX.chars().count();
+    if max_chars <= suffix_len {
+        return TRUNCATED_SUFFIX.chars().take(max_chars).collect();
+    }
+
+    let kept_chars = max_chars - suffix_len;
+    let mut result: String = text.chars().take(kept_chars).collect();
+    result.push_str(TRUNCATED_SUFFIX);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +420,84 @@ mod tests {
             result.contains("more text"),
             "surrounding text should be preserved in: {result}"
         );
+    }
+
+    #[test]
+    fn scrub_working_memory_text_redacts_exact_and_pattern_secrets() {
+        let tool_secrets = vec![("API_KEY".to_string(), "stored-secret".to_string())];
+        let input = "stored-secret and sk-ant-abc123456789012345678";
+        let result = scrub_working_memory_text(input, &tool_secrets, 200);
+
+        assert!(
+            !result.contains("stored-secret"),
+            "stored secret should be redacted in: {result}"
+        );
+        assert!(
+            !result.contains("sk-ant-"),
+            "leak pattern should be redacted in: {result}"
+        );
+        assert!(
+            result.contains("[REDACTED:API_KEY]"),
+            "exact redaction marker missing in: {result}"
+        );
+        assert!(
+            result.contains("[LEAKED_SECRET_REDACTED]"),
+            "leak redaction marker missing in: {result}"
+        );
+    }
+
+    #[test]
+    fn scrub_working_memory_text_truncates_on_character_boundaries() {
+        let input = "é".repeat(100);
+        let result = scrub_working_memory_text(&input, &[], 20);
+
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.ends_with(" ... [truncated]"));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_url_encoded_secret() {
+        let input = "worker task has sk%2Dant%2Dabc123456789012345678 and context";
+        let result = scrub_working_memory_text(input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains("sk%2Dant"),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_base64_encoded_secret() {
+        use base64::Engine as _;
+
+        let secret = "sk-ant-abc123456789012345678";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(secret);
+        let input = format!("cron error included {encoded}");
+        let result = scrub_working_memory_text(&input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains(&encoded),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_hex_encoded_secret() {
+        let secret = "sk-ant-abc123456789012345678";
+        let encoded = hex::encode(secret);
+        let input = format!("cron error included {encoded}");
+        let result = scrub_working_memory_text(&input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains(&encoded),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
     }
 }

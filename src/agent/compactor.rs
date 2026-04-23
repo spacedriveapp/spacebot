@@ -440,3 +440,36 @@ pub enum CompactionAction {
     /// Emergency truncation (no LLM, drop oldest 50%).
     EmergencyTruncate,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_summary_section;
+
+    #[test]
+    fn extract_summary_section_strips_markdown_header() {
+        let response = "## Summary\n\nCondensed thread narrative";
+        assert_eq!(
+            extract_summary_section(response),
+            "Condensed thread narrative".to_string()
+        );
+    }
+
+    #[test]
+    fn run_compaction_path_remains_toolless_and_one_turn() {
+        let source = include_str!("compactor.rs");
+        let run_compaction_start = source
+            .find("async fn run_compaction")
+            .expect("run_compaction should exist");
+        let run_compaction_end = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let run_compaction_source = &source[run_compaction_start..run_compaction_end];
+
+        assert!(
+            !run_compaction_source.contains(".tool_server_handle("),
+            "compactor summary path must stay toolless"
+        );
+        assert!(
+            run_compaction_source.contains(".default_max_turns(1)"),
+            "compactor summary path must stay single-turn"
+        );
+    }
+}

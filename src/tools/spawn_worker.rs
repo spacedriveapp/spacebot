@@ -44,6 +44,16 @@ fn summarize_duplicate_task(task: &str) -> String {
     }
 }
 
+const WORKING_MEMORY_TASK_MAX_CHARS: usize = 500;
+
+fn sanitize_worker_memory_task(task: &str, tool_secret_pairs: &[(String, String)]) -> String {
+    crate::secrets::scrub::scrub_working_memory_text(
+        task,
+        tool_secret_pairs,
+        WORKING_MEMORY_TASK_MAX_CHARS,
+    )
+}
+
 /// Error type for spawn worker tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Worker spawn failed: {0}")]
@@ -443,9 +453,9 @@ impl Tool for DetachedSpawnWorkerTool {
         let sandbox_write_allowlist = self.deps.sandbox.prompt_write_allowlist();
 
         let secrets_guard = rc.secrets.load();
-        let tool_secret_names = match (*secrets_guard).as_ref() {
-            Some(store) => store.tool_secret_names(),
-            None => Vec::new(),
+        let (tool_secret_names, tool_secret_pairs) = match (*secrets_guard).as_ref() {
+            Some(store) => (store.tool_secret_names(), store.tool_secret_pairs()),
+            None => (Vec::new(), Vec::new()),
         };
 
         let browser_config = (**rc.browser_config.load()).clone();
@@ -512,11 +522,12 @@ impl Tool for DetachedSpawnWorkerTool {
             directory: None,
         });
 
+        let memory_task = sanitize_worker_memory_task(&args.task, &tool_secret_pairs);
         self.deps
             .working_memory
             .emit(
                 crate::memory::WorkingMemoryEventType::WorkerSpawned,
-                format!("Worker spawned (cortex): {}", &args.task),
+                format!("Worker spawned (cortex): {memory_task}"),
             )
             .importance(0.5)
             .record();

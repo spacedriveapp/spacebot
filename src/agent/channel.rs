@@ -218,6 +218,31 @@ fn branch_working_memory_event_summary(
     )
 }
 
+fn memory_persistence_trigger_kind(
+    message_count: usize,
+    elapsed_secs: u64,
+    event_count_since_last: Option<usize>,
+    wm_config: &crate::config::WorkingMemoryConfig,
+) -> Option<&'static str> {
+    let message_trigger = message_count >= wm_config.persistence_message_threshold;
+    let time_trigger =
+        message_count > 0 && elapsed_secs >= wm_config.persistence_time_threshold_secs;
+    let density_trigger = !message_trigger
+        && !time_trigger
+        && event_count_since_last
+            .is_some_and(|count| count >= wm_config.persistence_event_density_threshold);
+
+    if message_trigger {
+        Some("message_count")
+    } else if time_trigger {
+        Some("time")
+    } else if density_trigger {
+        Some("event_density")
+    } else {
+        None
+    }
+}
+
 fn parse_branch_cancellation_reason(conclusion: &str) -> Option<&str> {
     let trimmed = conclusion.trim();
     if let Some(rest) = trimmed.strip_prefix(BRANCH_CANCELLED_PREFIX) {
@@ -3706,17 +3731,14 @@ impl Channel {
 
         let wm_config = **self.deps.runtime_config.working_memory.load();
         let elapsed = self.last_persistence_at.elapsed();
-
-        // Trigger 1: Message count threshold.
-        let message_trigger = self.message_count >= wm_config.persistence_message_threshold;
-
-        // Trigger 2: Time-based — only if conversation is active (message_count > 0).
-        let time_trigger = self.message_count > 0
-            && elapsed.as_secs() >= wm_config.persistence_time_threshold_secs;
-
-        // Trigger 3: Event density — working memory events from this channel.
-        let density_trigger = if !message_trigger && !time_trigger {
-            // Only check DB if the cheap triggers didn't fire.
+        let event_count_since_last = if memory_persistence_trigger_kind(
+            self.message_count,
+            elapsed.as_secs(),
+            None,
+            &wm_config,
+        )
+        .is_none()
+        {
             let since = chrono::Utc::now() - chrono::Duration::seconds(elapsed.as_secs() as i64);
             match self
                 .deps
@@ -3724,26 +3746,23 @@ impl Channel {
                 .count_events_since(self.id.as_ref(), since)
                 .await
             {
-                Ok(count) => count as usize >= wm_config.persistence_event_density_threshold,
+                Ok(count) => Some(count as usize),
                 Err(error) => {
                     tracing::debug!(%error, "event density check failed, skipping");
-                    false
+                    None
                 }
             }
         } else {
-            false
+            None
         };
 
-        if !message_trigger && !time_trigger && !density_trigger {
+        let Some(trigger) = memory_persistence_trigger_kind(
+            self.message_count,
+            elapsed.as_secs(),
+            event_count_since_last,
+            &wm_config,
+        ) else {
             return;
-        }
-
-        let trigger = if message_trigger {
-            "message_count"
-        } else if time_trigger {
-            "time"
-        } else {
-            "event_density"
         };
 
         // Reset counters before spawning so subsequent messages don't pile up.
@@ -3993,9 +4012,11 @@ mod tests {
         ObserveModeFallbackState, branch_working_memory_event_summary,
         classify_conversational_event_summary, compute_listen_mode_invocation, decision_user_id,
         extract_decision_summary_from_reply, format_conversational_event_summary,
-        is_dm_conversation_id, recv_channel_event, should_process_event_for_channel,
-        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
+        is_dm_conversation_id, memory_persistence_trigger_kind, recv_channel_event,
+        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
+        should_send_quiet_mode_fallback,
     };
+    use crate::config::WorkingMemoryConfig;
     use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
     use std::collections::HashMap;
@@ -4108,6 +4129,58 @@ mod tests {
                 .as_deref(),
             Some("We'll switch to the new routing config")
         );
+    }
+
+    #[test]
+    fn memory_persistence_trigger_prefers_message_count() {
+        let config = WorkingMemoryConfig {
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+            ..WorkingMemoryConfig::default()
+        };
+
+        let trigger = memory_persistence_trigger_kind(20, 900, Some(10), &config);
+        assert_eq!(trigger, Some("message_count"));
+    }
+
+    #[test]
+    fn memory_persistence_trigger_uses_time_for_active_channels() {
+        let config = WorkingMemoryConfig {
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+            ..WorkingMemoryConfig::default()
+        };
+
+        let trigger = memory_persistence_trigger_kind(3, 900, Some(10), &config);
+        assert_eq!(trigger, Some("time"));
+    }
+
+    #[test]
+    fn memory_persistence_trigger_uses_event_density_when_other_triggers_miss() {
+        let config = WorkingMemoryConfig {
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+            ..WorkingMemoryConfig::default()
+        };
+
+        let trigger = memory_persistence_trigger_kind(3, 120, Some(5), &config);
+        assert_eq!(trigger, Some("event_density"));
+    }
+
+    #[test]
+    fn memory_persistence_trigger_requires_activity_for_time_fallback() {
+        let config = WorkingMemoryConfig {
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+            ..WorkingMemoryConfig::default()
+        };
+
+        let trigger = memory_persistence_trigger_kind(0, 5000, Some(0), &config);
+        assert_eq!(trigger, None);
     }
 
     #[test]

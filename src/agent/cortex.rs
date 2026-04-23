@@ -3148,6 +3148,25 @@ async fn gather_sections_from_list(
     gathered
 }
 
+fn should_regenerate_knowledge_synthesis_state(
+    current_version: u64,
+    last_version: u64,
+    last_change_unix_secs: i64,
+    debounce_secs: u64,
+    now_unix_secs: i64,
+) -> bool {
+    if current_version <= last_version {
+        return false;
+    }
+
+    let elapsed = if now_unix_secs <= last_change_unix_secs {
+        0
+    } else {
+        (now_unix_secs - last_change_unix_secs) as u64
+    };
+    elapsed >= debounce_secs
+}
+
 /// Check if knowledge synthesis needs regeneration based on dirty flag and debounce.
 pub fn should_regenerate_knowledge_synthesis(deps: &AgentDeps) -> bool {
     let current_version = deps
@@ -3158,21 +3177,24 @@ pub fn should_regenerate_knowledge_synthesis(deps: &AgentDeps) -> bool {
         .runtime_config
         .knowledge_synthesis_last_version
         .load(std::sync::atomic::Ordering::Acquire);
-
-    if current_version == last_version {
-        return false;
-    }
-
-    // Debounce: wait for activity to settle.
-    let cortex_config = **deps.runtime_config.cortex.load();
     let last_change = deps
         .runtime_config
         .knowledge_synthesis_last_change
         .load(std::sync::atomic::Ordering::Acquire);
+    let debounce_secs = deps
+        .runtime_config
+        .cortex
+        .load()
+        .knowledge_synthesis_debounce_secs;
     let now = chrono::Utc::now().timestamp();
-    let elapsed = now.saturating_sub(last_change) as u64;
 
-    elapsed >= cortex_config.knowledge_synthesis_debounce_secs
+    should_regenerate_knowledge_synthesis_state(
+        current_version,
+        last_version,
+        last_change,
+        debounce_secs,
+        now,
+    )
 }
 
 // -- Intra-Day Synthesis + Daily Summaries --
@@ -4635,8 +4657,9 @@ mod tests {
         mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
         maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
         parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
-        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
-        summarize_signal_text, take_lagged_control_flag,
+        should_execute_warmup, should_generate_bulletin_from_bulletin_loop,
+        should_regenerate_knowledge_synthesis_state, signal_from_event, summarize_signal_text,
+        take_lagged_control_flag,
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
@@ -5034,6 +5057,46 @@ mod tests {
             "newer dirty version should still be pending"
         );
         assert_eq!(last_version.load(Ordering::Acquire), target_version);
+    }
+
+    #[test]
+    fn knowledge_synthesis_trigger_requires_newer_version() {
+        assert!(!should_regenerate_knowledge_synthesis_state(
+            3, 3, 10, 60, 500
+        ));
+        assert!(!should_regenerate_knowledge_synthesis_state(
+            2, 3, 10, 60, 500
+        ));
+    }
+
+    #[test]
+    fn knowledge_synthesis_trigger_respects_debounce_window() {
+        let current_version = 4;
+        let last_version = 3;
+        let last_change = 1_000;
+        let debounce_secs = 60;
+
+        assert!(!should_regenerate_knowledge_synthesis_state(
+            current_version,
+            last_version,
+            last_change,
+            debounce_secs,
+            1_050
+        ));
+        assert!(should_regenerate_knowledge_synthesis_state(
+            current_version,
+            last_version,
+            last_change,
+            debounce_secs,
+            1_060
+        ));
+    }
+
+    #[test]
+    fn knowledge_synthesis_trigger_handles_clock_skew_safely() {
+        assert!(!should_regenerate_knowledge_synthesis_state(
+            5, 4, 2_000, 30, 1_900
+        ));
     }
 
     #[test]

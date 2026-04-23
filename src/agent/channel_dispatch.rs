@@ -40,6 +40,8 @@ enum WorkerCompletionKind {
     Failed,
 }
 
+const WORKING_MEMORY_TASK_MAX_CHARS: usize = 500;
+
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerCompletionError {
     Cancelled { reason: String },
@@ -97,6 +99,14 @@ pub(crate) fn map_worker_completion_result(
     let (result_text, kind) = classify_worker_completion_result(result);
     let (notify, success) = completion_flags(kind);
     (result_text, notify, success)
+}
+
+fn sanitize_worker_memory_task(task: &str, tool_secret_pairs: &[(String, String)]) -> String {
+    crate::secrets::scrub::scrub_working_memory_text(
+        task,
+        tool_secret_pairs,
+        WORKING_MEMORY_TASK_MAX_CHARS,
+    )
 }
 
 /// Build the worker status text (time + system info) used in worker system prompts.
@@ -597,9 +607,9 @@ async fn spawn_worker_inner(
     let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
     // Collect tool secret names so the worker template can list available credentials.
     let secrets_guard = rc.secrets.load();
-    let tool_secret_names = match (*secrets_guard).as_ref() {
-        Some(store) => store.tool_secret_names(),
-        None => Vec::new(),
+    let (tool_secret_names, tool_secret_pairs) = match (*secrets_guard).as_ref() {
+        Some(store) => (store.tool_secret_names(), store.tool_secret_pairs()),
+        None => (Vec::new(), Vec::new()),
     };
 
     let browser_config = (**rc.browser_config.load()).clone();
@@ -793,12 +803,13 @@ async fn spawn_worker_inner(
         })
         .ok();
 
+    let memory_task = sanitize_worker_memory_task(task, &tool_secret_pairs);
     state
         .deps
         .working_memory
         .emit(
             crate::memory::WorkingMemoryEventType::WorkerSpawned,
-            format!("Worker spawned: {task}"),
+            format!("Worker spawned: {memory_task}"),
         )
         .channel(state.channel_id.to_string())
         .importance(0.6)
@@ -872,6 +883,9 @@ async fn spawn_opencode_worker_inner(
     let persist_directory = directory.clone();
 
     let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
+    let oc_tool_secret_pairs = oc_secrets_store
+        .as_ref()
+        .map_or_else(Vec::new, |store| store.tool_secret_pairs());
 
     // Build temporal/status context so OpenCode workers get the same system
     // info (time, model, context window) as builtin workers.
@@ -996,12 +1010,13 @@ async fn spawn_opencode_worker_inner(
         })
         .ok();
 
+    let memory_task = sanitize_worker_memory_task(task, &oc_tool_secret_pairs);
     state
         .deps
         .working_memory
         .emit(
             crate::memory::WorkingMemoryEventType::WorkerSpawned,
-            format!("Worker spawned (opencode): {task}"),
+            format!("Worker spawned (opencode): {memory_task}"),
         )
         .channel(state.channel_id.to_string())
         .importance(0.6)
@@ -1396,7 +1411,10 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerCompletionError, map_worker_completion_result, spawn_worker_task};
+    use super::{
+        WORKING_MEMORY_TASK_MAX_CHARS, WorkerCompletionError, map_worker_completion_result,
+        sanitize_worker_memory_task, spawn_worker_task,
+    };
     use crate::{ProcessEvent, WorkerId};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1412,6 +1430,39 @@ mod tests {
         assert_eq!(text, "Worker cancelled: user requested");
         assert!(notify);
         assert!(!success);
+    }
+
+    #[test]
+    fn worker_spawned_memory_task_redacts_secrets() {
+        let tool_secret_pairs = vec![("API_KEY".to_string(), "stored-secret".to_string())];
+        let task = "use stored-secret and sk-ant-abc123456789012345678";
+        let result = sanitize_worker_memory_task(task, &tool_secret_pairs);
+
+        assert!(
+            !result.contains("stored-secret"),
+            "stored secret should be redacted in: {result}"
+        );
+        assert!(
+            !result.contains("sk-ant-"),
+            "leak pattern should be redacted in: {result}"
+        );
+        assert!(
+            result.contains("[REDACTED:API_KEY]"),
+            "stored secret marker missing in: {result}"
+        );
+        assert!(
+            result.contains("[LEAKED_SECRET_REDACTED]"),
+            "leak marker missing in: {result}"
+        );
+    }
+
+    #[test]
+    fn worker_spawned_memory_task_is_bounded() {
+        let task = "a".repeat(WORKING_MEMORY_TASK_MAX_CHARS + 100);
+        let result = sanitize_worker_memory_task(&task, &[]);
+
+        assert_eq!(result.chars().count(), WORKING_MEMORY_TASK_MAX_CHARS);
+        assert!(result.ends_with(" ... [truncated]"));
     }
 
     #[tokio::test]
