@@ -694,6 +694,7 @@ pub async fn render_channel_activity_map(
 
     let inactive_threshold = format!("-{} hours", config.channel_map_inactive_hours);
     let max_channels = config.channel_map_max_channels as i64;
+    let token_budget = config.channel_map_token_budget;
 
     // Single query: last message per channel, excluding current channel.
     let rows = sqlx::query(
@@ -722,7 +723,7 @@ pub async fn render_channel_activity_map(
     .fetch_all(pool)
     .await?;
 
-    if rows.is_empty() {
+    if rows.is_empty() || token_budget == 0 {
         return Ok(String::new());
     }
 
@@ -735,9 +736,17 @@ pub async fn render_channel_activity_map(
     // Batch query: most recent BranchCompleted event per channel for topic hints.
     let topic_hints = get_topic_hints(pool, &channel_ids).await?;
 
+    let header = "## Other Channels\n\n";
+    let header_tokens = estimate_tokens(header);
+    if header_tokens >= token_budget {
+        return Ok(String::new());
+    }
+
     let now = Utc::now();
     let mut output = String::with_capacity(512);
-    writeln!(output, "## Other Channels\n").ok();
+    output.push_str(header);
+    let mut tokens_used = header_tokens;
+    let mut rendered_channels = 0usize;
 
     for row in &rows {
         let channel_id: String = row.get("id");
@@ -767,7 +776,18 @@ pub async fn render_channel_activity_map(
             };
             write!(line, ": {truncated}").ok();
         }
-        writeln!(output, "{line}").ok();
+        let candidate = format!("{line}\n");
+        let candidate_tokens = estimate_tokens(&candidate);
+        if tokens_used + candidate_tokens > token_budget {
+            break;
+        }
+        write!(output, "{candidate}").ok();
+        tokens_used += candidate_tokens;
+        rendered_channels += 1;
+    }
+
+    if rendered_channels == 0 {
+        return Ok(String::new());
     }
 
     Ok(output)
@@ -1560,6 +1580,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_record_fire_and_forget_event_accumulates() {
+        let store = setup_test_store().await;
+        let today = store.today();
+
+        store
+            .emit(
+                WorkingMemoryEventType::WorkerCompleted,
+                "Worker completed: fire-and-forget write",
+            )
+            .channel("chan-1")
+            .record();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let events = store.get_events_for_day(&today).await.unwrap();
+                if events.iter().any(|event| {
+                    event.summary == "Worker completed: fire-and-forget write"
+                        && event.channel_id.as_deref() == Some("chan-1")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fire-and-forget event should persist");
+    }
+
+    #[tokio::test]
+    async fn test_render_working_memory_prefixes_other_channel_events() {
+        let store = setup_test_store().await;
+        let config = test_config();
+        let today = store.today();
+
+        let other_channel_event = WorkingMemoryEvent {
+            id: Uuid::new_v4().to_string(),
+            event_type: WorkingMemoryEventType::WorkerCompleted,
+            timestamp: Utc::now(),
+            channel_id: Some("chan-2".to_string()),
+            user_id: None,
+            summary: "recompiled dependency cache".to_string(),
+            detail: None,
+            importance: 0.6,
+            day: today,
+        };
+        insert_event(&store.pool, &other_channel_event)
+            .await
+            .unwrap();
+
+        let rendered = render_working_memory(&store, "chan-1", &config, Tz::UTC)
+            .await
+            .unwrap();
+
+        assert!(
+            rendered.contains("[chan-2] Worker completed: recompiled dependency cache"),
+            "other-channel events should be prefixed for cross-channel awareness"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_day_for_timestamp_respects_timezone_rollover() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let tokyo_timezone: Tz = "Asia/Tokyo".parse().unwrap();
+        let tokyo_store = WorkingMemoryStore::new(pool.clone(), tokyo_timezone);
+        let late_utc = DateTime::parse_from_rfc3339("2026-03-18T23:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(tokyo_store.day_for_timestamp(late_utc), "2026-03-19");
+
+        let la_timezone: Tz = "America/Los_Angeles".parse().unwrap();
+        let la_store = WorkingMemoryStore::new(pool, la_timezone);
+        let early_utc = DateTime::parse_from_rfc3339("2026-03-18T02:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(la_store.day_for_timestamp(early_utc), "2026-03-17");
+    }
+
+    #[tokio::test]
     async fn test_render_working_memory_with_synthesis_and_tail() {
         let store = setup_test_store().await;
         let config = test_config();
@@ -1695,6 +1795,171 @@ mod tests {
 
         // No channels in DB, so should be empty.
         assert!(rendered.is_empty(), "should be empty with no channels");
+    }
+
+    #[tokio::test]
+    async fn test_render_channel_activity_map_formats_and_respects_max_channels() {
+        let store = setup_test_store().await;
+        let mut config = test_config();
+        config.channel_map_max_channels = 2;
+        config.channel_map_token_budget = 2_000;
+        config.channel_map_inactive_hours = 72;
+
+        for (id, name) in [
+            ("chan-1", "Current Channel"),
+            ("chan-2", "Channel Two"),
+            ("chan-3", "Channel Three"),
+            ("chan-4", "Channel Four"),
+        ] {
+            sqlx::query(
+                "INSERT INTO channels (id, platform, display_name, is_active, last_activity_at) \
+                 VALUES (?, 'discord', ?, 1, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        for (id, channel, sender, minutes_ago) in [
+            ("msg-1", "chan-2", "Alice", 1_i64),
+            ("msg-2", "chan-3", "Bob", 2_i64),
+            ("msg-3", "chan-4", "Carol", 3_i64),
+        ] {
+            sqlx::query(
+                "INSERT INTO conversation_messages \
+                 (id, channel_id, role, sender_name, sender_id, content, created_at) \
+                 VALUES (?, ?, 'user', ?, 'sender', 'hello', ?)",
+            )
+            .bind(id)
+            .bind(channel)
+            .bind(sender)
+            .bind(Utc::now() - chrono::Duration::minutes(minutes_ago))
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        let branch_topic = WorkingMemoryEvent {
+            id: Uuid::new_v4().to_string(),
+            event_type: WorkingMemoryEventType::BranchCompleted,
+            timestamp: Utc::now(),
+            channel_id: Some("chan-2".to_string()),
+            user_id: None,
+            summary: "Branch outcome: stabilized memory trigger ordering".to_string(),
+            detail: None,
+            importance: 0.8,
+            day: store.today(),
+        };
+        insert_event(&store.pool, &branch_topic).await.unwrap();
+
+        let rendered = render_channel_activity_map(&store.pool, &store, "chan-1", &config, Tz::UTC)
+            .await
+            .unwrap();
+
+        assert!(rendered.starts_with("## Other Channels\n"));
+        let channel_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains(" -- "))
+            .collect();
+        assert_eq!(
+            channel_lines.len(),
+            2,
+            "should include only max_channels entries"
+        );
+        assert!(rendered.contains("Channel Two --"));
+        assert!(rendered.contains("Channel Three --"));
+        assert!(!rendered.contains("Channel Four --"));
+        assert!(
+            rendered.contains("Branch outcome: stabilized memory trigger ordering"),
+            "topic hints should be surfaced for recent branch outcomes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_channel_activity_map_respects_token_budget() {
+        let store = setup_test_store().await;
+        let mut config = test_config();
+        config.channel_map_max_channels = 3;
+        config.channel_map_token_budget = 2_000;
+        config.channel_map_inactive_hours = 72;
+
+        for (id, name, sender) in [
+            ("chan-1", "Current Channel", "Current Sender"),
+            (
+                "chan-2",
+                "A Very Long Channel Name For Budget Tests",
+                "A Very Long Sender Name",
+            ),
+            (
+                "chan-3",
+                "Another Very Long Channel Name For Budget Tests",
+                "Another Very Long Sender Name",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO channels (id, platform, display_name, is_active, last_activity_at) \
+                 VALUES (?, 'discord', ?, 1, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO conversation_messages \
+                 (id, channel_id, role, sender_name, sender_id, content, created_at) \
+                 VALUES (?, ?, 'user', ?, 'sender', 'hello', ?)",
+            )
+            .bind(format!("msg-{id}"))
+            .bind(id)
+            .bind(sender)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        let full = render_channel_activity_map(&store.pool, &store, "chan-1", &config, Tz::UTC)
+            .await
+            .unwrap();
+        let mut full_lines = full.lines().filter(|line| line.contains(" -- "));
+        let first_line = full_lines
+            .next()
+            .expect("should render at least one channel line");
+        let second_line = full_lines
+            .next()
+            .expect("should render at least two channel lines");
+
+        let one_line_budget = estimate_tokens(&format!("## Other Channels\n\n{first_line}\n"));
+        let two_line_tokens = estimate_tokens(&format!(
+            "## Other Channels\n\n{first_line}\n{second_line}\n"
+        ));
+        assert!(two_line_tokens > one_line_budget);
+
+        config.channel_map_token_budget = one_line_budget;
+        let constrained =
+            render_channel_activity_map(&store.pool, &store, "chan-1", &config, Tz::UTC)
+                .await
+                .unwrap();
+
+        let constrained_lines: Vec<&str> = constrained
+            .lines()
+            .filter(|line| line.contains(" -- "))
+            .collect();
+        assert_eq!(
+            constrained_lines.len(),
+            1,
+            "token budget should cap rendered channel lines"
+        );
+        assert!(
+            estimate_tokens(&constrained) <= one_line_budget,
+            "rendered map should stay within token budget"
+        );
     }
 
     #[tokio::test]

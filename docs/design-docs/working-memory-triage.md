@@ -17,8 +17,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R3 — Don't exclude participant-role facts yet** (`prompts/en/cortex_knowledge_synthesis.md.j2:21`)
   Exclusion of "The user is the CEO" drops participant context with nowhere else to live until Phase 6 ships. **Fixed in this slice:** knowledge synthesis now preserves concise participant/user role facts when they affect future routing, authority, relationships, or interpretation.
 
-- [ ] **R4 — Raw worker task in working memory** (`src/agent/channel_dispatch.rs:596`)
-  `task` from user input persisted verbatim; could capture secrets/PII. Truncate and scrub.
+- [x] **R4 — Raw worker task in working memory** (`src/agent/channel_dispatch.rs:596`)
+  `task` from user input persisted verbatim; could capture secrets/PII. **Fixed in this slice:** worker-spawn task text is now redacted and bounded via shared working-memory scrub helpers.
 
 - [ ] **R5 — Dirty flag only bumps on merges** (`src/agent/cortex.rs:1958`)
   Prunes and decays also change the memory set but don't trigger knowledge synthesis re-gen. Add `report.pruned > 0 || report.decayed > 0`. **Partial in PR #570:** prunes and merges now dirty synthesis; decay remains intentionally importance-only and needs a follow-up decision.
@@ -41,11 +41,11 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R11 — Unsynthesized yesterday events dropped** (`src/agent/cortex.rs:2916`)
   Raw events that didn't hit count/time trigger before midnight are lost from daily summary. Roll them into the summary. **Fixed:** daily summary now fetches all raw events, filters to the unsynthesized tail after the last intra-day synthesis, and includes them in the LLM input.
 
-- [ ] **R12 — Silent error swallowing in inspect_prompt** (`src/api/channels.rs:649`)
-  `unwrap_or_default()` / `.ok()` hides DB/template errors. Log and propagate per coding guidelines.
+- [x] **R12 — Silent error swallowing in inspect_prompt** (`src/api/channels.rs:649`)
+  `unwrap_or_default()` / `.ok()` hides DB/template errors. **Fixed in this slice:** inspect prompt now logs and returns internal errors when DB/template rendering fails.
 
-- [ ] **R13 — Raw error strings in working memory** (`src/cron/scheduler.rs:386`)
-  Full error text persisted; could contain sensitive internals. Emit redacted summary only.
+- [x] **R13 — Raw error strings in working memory** (`src/cron/scheduler.rs:386`)
+  Full error text persisted; could contain sensitive internals. **Fixed in this slice:** cron error events now persist scrubbed and bounded summaries (including encoded leak fail-closed redaction).
 
 - [ ] **R14 — Timezone fallback drops valid `cron_timezone`** (`src/main.rs:2559`)
   If `user_timezone` is present but unparseable, `cron_timezone` is never tried. Parse each independently.
@@ -53,8 +53,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R15 — UTF-8 panic on topic truncation** (`src/memory/working.rs:739`)
   Byte-index slice at 80 can split multibyte chars. **Fixed:** `floor_char_boundary(80)`.
 
-- [ ] **R16 — Task update event always says "status change"** (`src/tools/task_update.rs:246`)
-  Every update emits `"updated to <status>"` even for title/description edits. Compute actual delta.
+- [x] **R16 — Task update event always says "status change"** (`src/tools/task_update.rs:246`)
+  Every update emits `"updated to <status>"` even for title/description edits. **Fixed in this slice:** working-memory task updates now describe actual field deltas and preserve status-only wording when only status changed.
 
 ## Live Observations (from prompt inspect, March 19)
 

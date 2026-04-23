@@ -527,7 +527,10 @@ pub(super) async fn inspect_prompt(
     let skills = rc.skills.load();
     let skills_prompt = skills
         .render_channel_prompt(&prompt_engine)
-        .unwrap_or_default();
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to render skills prompt for inspect");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
@@ -540,7 +543,10 @@ pub(super) async fn inspect_prompt(
             opencode_enabled,
             &mcp_tool_names,
         )
-        .unwrap_or_default();
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to render worker capabilities for inspect");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let system_info = crate::agent::status::SystemInfo::from_runtime_config(
         rc.as_ref(),
@@ -563,16 +569,25 @@ pub(super) async fn inspect_prompt(
                         .or_else(|| meta.get("slack_workspace_id"))
                 })
                 .and_then(|v| v.as_str());
-            prompt_engine
-                .render_conversation_context(
-                    &info.platform,
-                    server_name,
-                    info.display_name.as_deref(),
-                    Some(&info.id),
-                )
-                .ok()
+            Some(
+                prompt_engine
+                    .render_conversation_context(
+                        &info.platform,
+                        server_name,
+                        info.display_name.as_deref(),
+                        Some(&info.id),
+                    )
+                    .map_err(|error| {
+                        tracing::warn!(%error, "failed to render conversation context for inspect");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            )
         }
-        _ => None,
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to fetch channel metadata for inspect");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     };
 
     let sandbox_enabled = channel_state.deps.sandbox.containment_active();
@@ -588,7 +603,10 @@ pub(super) async fn inspect_prompt(
         wm_timezone,
     )
     .await
-    .unwrap_or_default();
+    .map_err(|error| {
+        tracing::warn!(%error, "failed to render working memory for prompt inspection");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let channel_activity_map = crate::memory::working::render_channel_activity_map(
         &channel_state.deps.sqlite_pool,
@@ -598,7 +616,10 @@ pub(super) async fn inspect_prompt(
         wm_timezone,
     )
     .await
-    .unwrap_or_default();
+    .map_err(|error| {
+        tracing::warn!(%error, "failed to render channel activity map for prompt inspection");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let participant_config = **rc.participant_context.load();
     let tracked_participants = {
@@ -612,14 +633,14 @@ pub(super) async fn inspect_prompt(
         &participant_config,
     )
     .await
-    .unwrap_or_else(|error| {
+    .map_err(|error| {
         tracing::warn!(
             %error,
             channel_id = %query.channel_id,
             "failed to render participant context for prompt inspection"
         );
-        String::new()
-    });
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // ── Available channels ──
     let available_channels = {
@@ -627,7 +648,10 @@ pub(super) async fn inspect_prompt(
             .channel_store
             .list_active()
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::warn!(%error, "failed to list channels for prompt inspection");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         let entries: Vec<crate::prompts::engine::ChannelEntry> = channels
             .into_iter()
             .filter(|channel| {
@@ -644,7 +668,10 @@ pub(super) async fn inspect_prompt(
         if entries.is_empty() {
             None
         } else {
-            prompt_engine.render_available_channels(entries).ok()
+            Some(prompt_engine.render_available_channels(entries).map_err(|error| {
+                tracing::warn!(%error, "failed to render available channels for prompt inspection");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?)
         }
     };
 
@@ -710,13 +737,18 @@ pub(super) async fn inspect_prompt(
             if superiors.is_empty() && subordinates.is_empty() && peers.is_empty() {
                 None
             } else {
-                prompt_engine
-                    .render_org_context(crate::prompts::engine::OrgContext {
-                        superiors,
-                        subordinates,
-                        peers,
-                    })
-                    .ok()
+                Some(
+                    prompt_engine
+                        .render_org_context(crate::prompts::engine::OrgContext {
+                            superiors,
+                            subordinates,
+                            peers,
+                        })
+                        .map_err(|error| {
+                            tracing::warn!(%error, "failed to render org context for inspect");
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?,
+                )
             }
         }
     };
@@ -732,17 +764,39 @@ pub(super) async fn inspect_prompt(
         let projects = store
             .list_projects(Some(crate::projects::ProjectStatus::Active))
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    projects_count = 0usize,
+                    "failed to list active projects for prompt inspection"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         if projects.is_empty() {
             None
         } else {
             let mut contexts = Vec::with_capacity(projects.len());
             for project in &projects {
-                let repos = store.list_repos(&project.id).await.unwrap_or_default();
-                let worktrees = store
-                    .list_worktrees_with_repos(&project.id)
-                    .await
-                    .unwrap_or_default();
+                let repos = store.list_repos(&project.id).await.map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        project_id = %project.id,
+                        "failed to list project repos for prompt inspection"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+                let worktrees =
+                    store
+                        .list_worktrees_with_repos(&project.id)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(
+                                %error,
+                                project_id = %project.id,
+                                "failed to list project worktrees for prompt inspection"
+                            );
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?;
                 contexts.push(ProjectContext {
                     name: project.name.clone(),
                     root_path: project.root_path.clone(),
@@ -776,7 +830,19 @@ pub(super) async fn inspect_prompt(
                         .collect(),
                 });
             }
-            prompt_engine.render_projects_context(contexts).ok()
+            let projects_count = contexts.len();
+            Some(
+                prompt_engine
+                    .render_projects_context(contexts)
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            projects_count,
+                            "failed to render projects context for prompt inspection"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            )
         }
     };
 
@@ -803,7 +869,10 @@ pub(super) async fn inspect_prompt(
             empty_to_none(participant_context),
             false, // direct_mode — resolved at runtime by the channel, not available here
         )
-        .unwrap_or_default();
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to render full channel prompt for inspect");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let total_chars = system_prompt.chars().count();
 

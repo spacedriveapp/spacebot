@@ -47,6 +47,12 @@ static BASE64_SEGMENT: LazyLock<Regex> =
 static HEX_SEGMENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:0x)?([0-9a-f]{40,})").expect("hardcoded regex"));
 
+/// Default character bound for worker task text written to working memory.
+pub const WORKING_MEMORY_TASK_MAX_CHARS: usize = 500;
+
+/// Extra chars to include in the pre-scrub scan window beyond the persisted bound.
+const WORKING_MEMORY_SCAN_MARGIN_CHARS: usize = 256;
+
 /// Check content against known API key patterns (plaintext only).
 pub fn match_leak_patterns(content: &str) -> Option<String> {
     for pattern in LEAK_PATTERNS.iter() {
@@ -254,6 +260,94 @@ pub fn scrub_leaks(content: &str) -> String {
     result
 }
 
+/// Scrub and bound text before storing it in working memory.
+///
+/// Working memory is replayed into future LLM context, so it must not persist
+/// exact tool secrets, known plaintext leak patterns, encoded leak patterns,
+/// or unbounded payloads.
+pub fn scrub_working_memory_text(
+    text: &str,
+    tool_secrets: &[(String, String)],
+    max_chars: usize,
+) -> String {
+    let bounded_input = limit_working_memory_scan_input(text, max_chars);
+    let scrubbed = scrub_secrets(bounded_input, tool_secrets);
+    let scrubbed = scrub_leaks(&scrubbed);
+    let scrubbed = redact_working_memory_encoded_leaks(&scrubbed, tool_secrets);
+    truncate_for_working_memory(&scrubbed, max_chars)
+}
+
+pub fn scrub_worker_task_for_memory(task: &str, tool_secrets: &[(String, String)]) -> String {
+    scrub_working_memory_text(task, tool_secrets, WORKING_MEMORY_TASK_MAX_CHARS)
+}
+
+fn limit_working_memory_scan_input(text: &str, max_chars: usize) -> &str {
+    let scan_limit_chars = max_chars.saturating_add(WORKING_MEMORY_SCAN_MARGIN_CHARS);
+    if let Some((byte_index, _)) = text.char_indices().nth(scan_limit_chars) {
+        &text[..byte_index]
+    } else {
+        text
+    }
+}
+
+fn redact_working_memory_encoded_leaks(text: &str, tool_secrets: &[(String, String)]) -> String {
+    if scan_for_leaks(text).is_some() || contains_encoded_tool_secret(text, tool_secrets) {
+        return "[WORKING_MEMORY_REDACTED:encoded-secret]".to_string();
+    }
+    text.to_string()
+}
+
+fn contains_encoded_tool_secret(text: &str, tool_secrets: &[(String, String)]) -> bool {
+    use base64::Engine;
+
+    let text_lower = text.to_ascii_lowercase();
+    for (_, secret) in tool_secrets {
+        if secret.len() < 8 {
+            continue;
+        }
+
+        let base64_standard = base64::engine::general_purpose::STANDARD.encode(secret);
+        if text.contains(&base64_standard) || text.contains(base64_standard.trim_end_matches('=')) {
+            return true;
+        }
+
+        let base64_url_safe = base64::engine::general_purpose::URL_SAFE.encode(secret);
+        if text.contains(&base64_url_safe) || text.contains(base64_url_safe.trim_end_matches('=')) {
+            return true;
+        }
+
+        let hex_lower = hex::encode(secret);
+        if text_lower.contains(&hex_lower) {
+            return true;
+        }
+
+        let url_encoded = urlencoding::encode(secret);
+        if text.contains(url_encoded.as_ref()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn truncate_for_working_memory(text: &str, max_chars: usize) -> String {
+    const TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+    if text.chars().nth(max_chars).is_none() {
+        return text.to_string();
+    }
+
+    let suffix_len = TRUNCATED_SUFFIX.chars().count();
+    if max_chars <= suffix_len {
+        return TRUNCATED_SUFFIX.chars().take(max_chars).collect();
+    }
+
+    let kept_chars = max_chars - suffix_len;
+    let mut result: String = text.chars().take(kept_chars).collect();
+    result.push_str(TRUNCATED_SUFFIX);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +473,114 @@ mod tests {
             result.contains("more text"),
             "surrounding text should be preserved in: {result}"
         );
+    }
+
+    #[test]
+    fn scrub_working_memory_text_redacts_exact_and_pattern_secrets() {
+        let tool_secrets = vec![("API_KEY".to_string(), "stored-secret".to_string())];
+        let input = "stored-secret and sk-ant-abc123456789012345678";
+        let result = scrub_working_memory_text(input, &tool_secrets, 200);
+
+        assert!(
+            !result.contains("stored-secret"),
+            "stored secret should be redacted in: {result}"
+        );
+        assert!(
+            !result.contains("sk-ant-"),
+            "leak pattern should be redacted in: {result}"
+        );
+        assert!(
+            result.contains("[REDACTED:API_KEY]"),
+            "exact redaction marker missing in: {result}"
+        );
+        assert!(
+            result.contains("[LEAKED_SECRET_REDACTED]"),
+            "leak redaction marker missing in: {result}"
+        );
+    }
+
+    #[test]
+    fn scrub_working_memory_text_truncates_on_character_boundaries() {
+        let input = "é".repeat(100);
+        let result = scrub_working_memory_text(&input, &[], 20);
+
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.ends_with(" ... [truncated]"));
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_url_encoded_secret() {
+        let input = "worker task has sk%2Dant%2Dabc123456789012345678 and context";
+        let result = scrub_working_memory_text(input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains("sk%2Dant"),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_base64_encoded_secret() {
+        use base64::Engine as _;
+
+        let secret = "sk-ant-abc123456789012345678";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(secret);
+        let input = format!("cron error included {encoded}");
+        let result = scrub_working_memory_text(&input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains(&encoded),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_hex_encoded_secret() {
+        let secret = "sk-ant-abc123456789012345678";
+        let encoded = hex::encode(secret);
+        let input = format!("cron error included {encoded}");
+        let result = scrub_working_memory_text(&input, &[], 200);
+
+        assert_eq!(result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert!(
+            !result.contains(&encoded),
+            "encoded secret should not appear in: {result}"
+        );
+        assert!(scan_for_leaks(&result).is_none());
+    }
+
+    #[test]
+    fn scrub_working_memory_text_fails_closed_for_encoded_tool_secret_variants() {
+        use base64::Engine as _;
+
+        let tool_secrets = vec![
+            (
+                "STORE_SECRET".to_string(),
+                "my-tool-secret-12345".to_string(),
+            ),
+            ("URL_SECRET".to_string(), "url/secret+value".to_string()),
+        ];
+        let base64_encoded = base64::engine::general_purpose::STANDARD.encode(&tool_secrets[0].1);
+        let hex_encoded = hex::encode(&tool_secrets[0].1);
+        let url_encoded = urlencoding::encode(&tool_secrets[1].1).to_string();
+
+        let base64_result = scrub_working_memory_text(
+            &format!("task payload: {base64_encoded}"),
+            &tool_secrets,
+            200,
+        );
+        let hex_result =
+            scrub_working_memory_text(&format!("task payload: {hex_encoded}"), &tool_secrets, 200);
+        let url_result =
+            scrub_working_memory_text(&format!("task payload: {url_encoded}"), &tool_secrets, 200);
+
+        assert_eq!(base64_result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert_eq!(hex_result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
+        assert_eq!(url_result, "[WORKING_MEMORY_REDACTED:encoded-secret]");
     }
 }

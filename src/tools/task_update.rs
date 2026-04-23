@@ -1,7 +1,7 @@
 //! Task update tool for branch and worker processes.
 
 use crate::tasks::{
-    TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput, WorkerTaskUpdateResult,
+    Task, TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput, WorkerTaskUpdateResult,
 };
 use crate::{AgentId, WorkerId};
 use rig::completion::ToolDefinition;
@@ -235,6 +235,7 @@ impl Tool for TaskUpdateTool {
                 }
             },
         };
+        let previous_task = update_result.previous_task;
         let previous_status = update_result.previous_status;
         let updated = update_result.task;
 
@@ -250,10 +251,7 @@ impl Tool for TaskUpdateTool {
             } else {
                 (
                     crate::memory::WorkingMemoryEventType::TaskUpdate,
-                    format!(
-                        "Task #{} updated to {}",
-                        updated.task_number, updated.status
-                    ),
+                    task_update_memory_summary(&previous_task, &updated),
                     0.4,
                 )
             };
@@ -272,6 +270,62 @@ impl Tool for TaskUpdateTool {
     }
 }
 
+fn task_update_memory_summary(previous: &Task, updated: &Task) -> String {
+    let mut changes = Vec::new();
+
+    if previous.status != updated.status {
+        changes.push(format!("status {} -> {}", previous.status, updated.status));
+    }
+    if previous.priority != updated.priority {
+        changes.push(format!(
+            "priority {} -> {}",
+            previous.priority, updated.priority
+        ));
+    }
+    if previous.title != updated.title {
+        changes.push("title".to_string());
+    }
+    if previous.description != updated.description {
+        changes.push("description".to_string());
+    }
+    if previous.subtasks != updated.subtasks {
+        changes.push("subtasks".to_string());
+    }
+    if previous.metadata != updated.metadata {
+        changes.push("metadata".to_string());
+    }
+    if previous.worker_id != updated.worker_id {
+        changes.push(match (&previous.worker_id, &updated.worker_id) {
+            (None, Some(_)) => "worker assigned".to_string(),
+            (Some(_), None) => "worker unassigned".to_string(),
+            _ => "worker binding".to_string(),
+        });
+    }
+    if previous.approved_by != updated.approved_by {
+        changes.push("approval".to_string());
+    }
+    if previous.assigned_agent_id != updated.assigned_agent_id {
+        changes.push("assignment".to_string());
+    }
+
+    if changes.is_empty() {
+        return format!("Task #{} updated", updated.task_number);
+    }
+
+    if changes.len() == 1 && previous.status != updated.status {
+        return format!(
+            "Task #{} updated to {}",
+            updated.task_number, updated.status
+        );
+    }
+
+    format!(
+        "Task #{} updated: {}",
+        updated.task_number,
+        changes.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +333,7 @@ mod tests {
     use crate::memory::working::WorkingMemoryEvent;
     use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
     use crate::tasks::store::setup_test_store;
+    use crate::tasks::{Task, TaskPriority, TaskStatus, TaskSubtask};
     use chrono_tz::Tz;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
@@ -311,6 +366,72 @@ mod tests {
         })
         .await
         .expect("timed out waiting for working memory event")
+    }
+
+    fn task_fixture() -> Task {
+        Task {
+            id: "task-id".to_string(),
+            task_number: 7,
+            title: "Original title".to_string(),
+            description: Some("Original description".to_string()),
+            status: TaskStatus::Backlog,
+            priority: TaskPriority::Medium,
+            owner_agent_id: "agent".to_string(),
+            assigned_agent_id: "agent".to_string(),
+            subtasks: Vec::new(),
+            metadata: serde_json::json!({}),
+            source_memory_id: None,
+            worker_id: None,
+            created_by: "branch".to_string(),
+            approved_at: None,
+            approved_by: None,
+            created_at: "2026-04-19T00:00:00Z".to_string(),
+            updated_at: "2026-04-19T00:00:00Z".to_string(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn task_update_memory_summary_preserves_status_update_wording() {
+        let previous = task_fixture();
+        let mut updated = previous.clone();
+        updated.status = TaskStatus::Ready;
+
+        assert_eq!(
+            task_update_memory_summary(&previous, &updated),
+            "Task #7 updated to ready"
+        );
+    }
+
+    #[test]
+    fn task_update_memory_summary_names_non_status_changes() {
+        let previous = task_fixture();
+        let mut updated = previous.clone();
+        updated.title = "New title".to_string();
+        updated.description = Some("New description".to_string());
+        updated.priority = TaskPriority::High;
+        updated.subtasks = vec![TaskSubtask {
+            title: "Check output".to_string(),
+            completed: true,
+        }];
+        updated.metadata = serde_json::json!({"source": "review"});
+        updated.worker_id = Some("worker-1".to_string());
+        updated.approved_by = Some("victor".to_string());
+
+        assert_eq!(
+            task_update_memory_summary(&previous, &updated),
+            "Task #7 updated: priority medium -> high, title, description, subtasks, metadata, worker assigned, approval"
+        );
+    }
+
+    #[test]
+    fn task_update_memory_summary_handles_no_actual_delta() {
+        let previous = task_fixture();
+
+        assert_eq!(
+            task_update_memory_summary(&previous, &previous),
+            "Task #7 updated"
+        );
     }
 
     #[tokio::test]
@@ -409,7 +530,7 @@ mod tests {
         assert_eq!(event.event_type, WorkingMemoryEventType::TaskUpdate);
         assert_eq!(
             event.summary,
-            format!("Task #{} updated to done", created.task_number)
+            format!("Task #{} updated: title", created.task_number)
         );
     }
 
