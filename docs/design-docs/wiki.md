@@ -10,7 +10,7 @@ The wiki is not per-agent. It belongs to the instance. A company running Spacebo
 
 - **Not a replacement for the memory graph.** Atomic facts, preferences, and decisions stay in the graph. The wiki is for long-form structured knowledge that would be awkward as graph nodes — entity pages, concept docs, decision records, project syntheses.
 - **Not the file system.** Agents never write wiki content by editing files directly. All mutations go through wiki tools. The content lives in the database.
-- **Not the bulletin.** The bulletin is ephemeral, per-agent, and auto-generated. Wiki pages are persistent, instance-wide, and intentionally authored.
+- **Not the legacy bulletin fallback.** Knowledge synthesis and the legacy `bulletin_*` compatibility surfaces are ephemeral, per-agent, and auto-generated. Wiki pages are persistent, instance-wide, and intentionally authored.
 
 ---
 
@@ -371,7 +371,7 @@ max_pages = 1000              # Soft cap — lint warns above this
 - Branch tool registration: add `file_read`, `wiki_read`, `wiki_write` to branch toolset
 - Cortex + autonomy channel tool registration
 - `wiki_write: bool` field on `WorkerContextMode` (default: `false`) — enables wiki write tools on a per-spawn basis
-- Wiki index block in bulletin template
+- Wiki index block in knowledge-synthesis template
 - Writing guide in branch system prompt when wiki tools are in scope
 - API endpoints: CRUD + version history + restore
 

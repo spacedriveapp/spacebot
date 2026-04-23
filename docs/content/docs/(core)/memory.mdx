@@ -18,7 +18,7 @@ Memories live across two embedded databases, each doing what it's best at:
 - **SQLite** -- the memory graph. Rows with content, type, importance, timestamps, source. Association edges with weights and relation types. Relational queries for graph traversal, metadata filtering, and maintenance operations.
 - **LanceDB** -- embeddings and search. Vector storage in Lance columnar format with HNSW indexing. Built-in full-text search via Tantivy. Hybrid search (vector + FTS) in one system.
 
-The two are joined on memory ID. A recall worker queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. No server processes -- both are embedded, everything is files in a data directory.
+The two are joined on memory ID. During branch recall, the `memory_recall` tool queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. No server processes -- both are embedded, everything is files in a data directory.
 
 ## Memory Structure
 
@@ -62,11 +62,11 @@ Association types:
 - **CausedBy / ResultOf** -- causal chain
 - **PartOf** -- hierarchical relationship
 
-The graph enables traversal during recall. When a recall worker finds a relevant memory, it can walk the graph to find connected context -- related facts, the history of how a decision evolved, contradictions that need resolution.
+The graph enables traversal during recall. When branch recall finds a relevant memory, it can walk the graph to find connected context -- related facts, the history of how a decision evolved, contradictions that need resolution.
 
 ## How Memories Are Created
 
-Three paths:
+Four paths:
 
 ### 1. Branch-initiated (during conversation)
 
@@ -90,6 +90,10 @@ This keeps durable memory creation tied to conversation signal instead of contex
 ### 3. Cortex-initiated (system-level)
 
 The cortex observes patterns across channels and can create memories at the system level. It consolidates related memories, creates observations ("James has been asking about authentication a lot this week"), and manages the graph.
+
+### 4. Ingestion
+
+Ingestion workflows can create durable memories from imported files, external source material, and connector-fed content. They use the same storage, embedding, and association pipeline as conversation-created memories, but the source is document or feed content rather than a live conversation turn.
 
 ## How Memories Are Recalled
 

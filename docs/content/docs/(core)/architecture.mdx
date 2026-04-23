@@ -316,7 +316,7 @@ Rig defaults to 0 (single call). Spacebot sets explicit limits per process type:
 | Branch | 10 | A few iterations to think, recall, and conclude. |
 | Worker | 50 | Many iterations for complex tasks. Segmented into 25-turn blocks. |
 | Compactor | 10 | Summarize and extract memories. Bounded. |
-| Cortex | 10 | Bulletin generation. Single-pass with tool calls. |
+| Cortex | 10 | Knowledge synthesis generation. Single-pass with tool calls. |
 
 ## Control API
 
@@ -329,7 +329,7 @@ An embedded Axum HTTP server provides the control API for the dashboard and exte
 | Agents | `/api/agents` | CRUD for agent definitions |
 | Channels | `/api/channels` | Channel listing, history, settings, deletion |
 | Workers | `/api/workers` | Worker status, history, timeline |
-| Cortex | `/api/cortex` | Bulletin, profile, cortex chat |
+| Cortex | `/api/cortex` | Knowledge synthesis, profile, cortex chat |
 | Memory | `/api/memories` | Memory CRUD, graph queries |
 | Config | `/api/config` | Runtime configuration read/write |
 | Providers | `/api/providers` | LLM provider key management |

@@ -127,7 +127,7 @@ All processes emit events to a shared broadcast channel. The cortex maps events 
 ```
 Channel A emits: WorkerComplete { result: "...", ... }   -> cortex maps to WorkerCompleted signal
 Worker 7 emits: StatusUpdate { status: "stuck on..." }   -> cortex maps to WorkerStatusUpdate signal
-Branch 3 emits: ToolCompleted { tool: "memory_save" }    -> cortex maps to MemorySaved signal
+Branch 3 emits: MemorySaved { memory_id: "...", ... }    -> cortex maps to MemorySaved signal
 ```
 
 ## How It Differs From Other Processes
@@ -177,7 +177,7 @@ tick_interval_secs = 30
 bulletin_interval_secs = 3600
 
 # Legacy target word count for compatibility surfaces that still use bulletin names.
-bulletin_max_words = 500
+bulletin_max_words = 1500
 
 # Target word count for knowledge synthesis.
 knowledge_synthesis_max_words = 500

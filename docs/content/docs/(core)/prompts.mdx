@@ -45,8 +45,13 @@ let channel_prompt = engine.render_channel_prompt(
     worker_capabilities,         // String
     conversation_context,        // Option<String>
     status_text,                 // Option<String>
+    coalesce_hint,               // Option<String>
+    available_channels,          // Option<String>
+    sandbox_enabled,             // bool
 )?;
 ```
+
+`memory_bulletin` remains a legacy fallback. When `knowledge_synthesis` is available, the channel prompt renders `## Knowledge Context`; `## Memory Context` only renders when knowledge synthesis is absent.
 
 ### Fragment Templates
 

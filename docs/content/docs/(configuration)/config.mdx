@@ -538,6 +538,9 @@ Thresholds are fractions of `context_window`.
 | `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
 | `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
+| `bulletin_interval_secs` | integer | 3600 | Legacy compatibility interval for bulletin-named synthesis surfaces |
+| `bulletin_max_words` | integer | 1500 | Legacy compatibility word budget for bulletin-named synthesis surfaces |
+| `bulletin_max_turns` | integer | 15 | Legacy compatibility max-turn budget for bulletin generation passes |
 | `knowledge_synthesis_max_words` | integer | 500 | Target size for the long-term knowledge synthesis section |
 | `knowledge_synthesis_debounce_secs` | integer | 60 | Delay after memory graph changes before regenerating knowledge synthesis |
 

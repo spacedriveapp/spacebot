@@ -113,7 +113,7 @@ The `context_window` setting (default 128,000 tokens) determines the denominator
 | When it runs | Blocks the session | Background tokio task |
 | User experience | Typing indicator, 20s freeze | No interruption |
 | Summarization | Same session's LLM | Dedicated compaction worker |
-| Memory extraction | Separate pass | Separate persistence branches |
+| Memory extraction | Separate pass | Separate persistence paths (branches, tools, ingestion, cortex workflows) |
 | Raw transcript | Lost | Replaced by rolling summaries |
 | Multiple summaries | One summary replaces all | Summaries stack chronologically |
 | Emergency fallback | None (just hope it fits) | Hard truncation at 95% |

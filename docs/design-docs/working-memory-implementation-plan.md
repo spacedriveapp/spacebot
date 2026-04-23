@@ -904,26 +904,26 @@ When `events` is present, write each to the working memory store with the curren
 
 ---
 
-### Phase 5b: Sunset Compactor Memory Extraction
+### Phase 5b: Completed — Compactor Memory Extraction Remains Sunset
 
 **Dependencies:** Phase 5a deployed and validated (new persistence triggers confirmed adequate)
-**Risk:** Medium — removes a memory creation path. Only deploy after Phase 5a monitoring confirms coverage.
+**Risk:** Medium — validate that persistence coverage remains adequate now that the compactor is summary-only.
 
-#### 5b.1 Remove Memory Save from Compactor
+#### 5b.1 Keep Memory Save Out of Compactor
 
 Update `src/agent/compactor.rs`:
-- Remove durable memory-write access from the compaction worker
+- Verify the compaction worker has no durable memory-write access
 - The compactor's only output is the compaction summary injected into history
 
 Update `prompts/en/compactor.md.j2`:
-- Remove all `memory_save` instructions
+- Keep all `memory_save` instructions removed
 - The compactor's sole responsibility is producing a compaction summary
 
 #### 5b.2 Verification
 
-- Integration test: run compaction, verify no durable memory-write calls in tool output
-- Regression test: verify memory quality doesn't degrade — compare memories saved before/after
-- Monitor: memory count growth rate should remain stable compared to Phase 5a baseline
+- Verified by inspection: `src/agent/compactor.rs` no longer exposes durable memory-write access
+- Verified by inspection: `prompts/en/compactor.md.j2` contains no `memory_save` instructions
+- Regression coverage continues through compaction and persistence branch verification rather than a compactor durable-write path
 
 ---
 
