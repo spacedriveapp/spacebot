@@ -386,7 +386,7 @@ async fn spawn_branch(
                 // Layer 2: regex-based redaction of unknown secret patterns.
                 let raw = format!("Branch failed: {error}");
                 let conclusion = if let Some(store) = secrets_snapshot.as_ref() {
-                    crate::secrets::scrub::scrub_with_store(&raw, store)
+                    crate::secrets::scrub::scrub_with_store(&raw, store, &agent_id)
                 } else {
                     raw
                 };
@@ -637,7 +637,7 @@ async fn spawn_worker_inner(
     // Collect tool secret names so the worker template can list available credentials.
     let secrets_guard = rc.secrets.load();
     let tool_secret_names = match (*secrets_guard).as_ref() {
-        Some(store) => store.tool_secret_names(),
+        Some(store) => store.tool_secret_names(&state.deps.agent_id),
         None => Vec::new(),
     };
 
@@ -1087,7 +1087,7 @@ where
         let raw = std::panic::AssertUnwindSafe(future).catch_unwind().await;
         let scrub = |text: String| -> String {
             let layer1 = if let Some(store) = &secrets_store {
-                crate::secrets::scrub::scrub_with_store(&text, store)
+                crate::secrets::scrub::scrub_with_store(&text, store, &agent_id)
             } else {
                 text
             };
@@ -1359,7 +1359,7 @@ pub async fn resume_idle_worker_into_state(
             let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
             let secrets_guard = rc.secrets.load();
             let tool_secret_names = match (*secrets_guard).as_ref() {
-                Some(store) => store.tool_secret_names(),
+                Some(store) => store.tool_secret_names(&state.deps.agent_id),
                 None => Vec::new(),
             };
             let browser_config = (**rc.browser_config.load()).clone();

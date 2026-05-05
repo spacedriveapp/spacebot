@@ -38,7 +38,7 @@ pub(crate) fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
         let guard = RESOLVE_SECRETS_STORE.load();
         match (*guard).as_ref() {
-            Some(store) => match store.get(alias) {
+            Some(store) => match store.get(&crate::secrets::store::SecretScope::shared(), alias) {
                 Ok(secret) => Some(secret.expose().to_string()),
                 Err(error) => {
                     tracing::warn!(%error, alias, "failed to resolve secret: reference");

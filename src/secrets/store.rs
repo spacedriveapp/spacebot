@@ -10,6 +10,7 @@
 //!   The master key lives in the OS credential store (Keychain / kernel keyring),
 //!   never on disk.
 
+use crate::AgentId;
 use crate::error::SecretsError;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use rand::RngCore;
@@ -65,6 +66,96 @@ impl Debug for DecryptedSecret {
 impl Display for DecryptedSecret {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "***")
+    }
+}
+
+/// Secret scope determines visibility across agents on a shared instance.
+///
+/// Orthogonal to `SecretCategory` — `System` secrets are always
+/// `InstanceShared` (singleton consumers like `LlmManager` /
+/// `MessagingManager`); `Tool` secrets default to `Agent(...)` for
+/// agentic-backend deployments where each tenant's worker subprocess must
+/// not see another tenant's credentials, but can also be `InstanceShared`
+/// when a single-tenant deployment legitimately wants every agent to share
+/// the same `Tool` secret (e.g. one repo-wide `GH_TOKEN`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretScope {
+    /// Visible to every agent on the instance.
+    InstanceShared,
+    /// Visible only to the named agent.
+    Agent {
+        #[serde(rename = "agent_id")]
+        id: String,
+    },
+}
+
+impl SecretScope {
+    pub fn shared() -> Self {
+        Self::InstanceShared
+    }
+
+    pub fn agent(id: &AgentId) -> Self {
+        Self::Agent {
+            id: id.as_ref().to_string(),
+        }
+    }
+
+    pub fn is_shared(&self) -> bool {
+        matches!(self, Self::InstanceShared)
+    }
+
+    /// Returns true when this scope is visible to the given agent — either
+    /// because it's instance-shared or it's that specific agent's scope.
+    pub fn visible_to(&self, agent_id: &AgentId) -> bool {
+        match self {
+            Self::InstanceShared => true,
+            Self::Agent { id } => id == agent_id.as_ref(),
+        }
+    }
+}
+
+impl std::fmt::Display for SecretScope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InstanceShared => write!(f, "shared"),
+            Self::Agent { id } => write!(f, "agent:{id}"),
+        }
+    }
+}
+
+/// Encode `(scope, name)` into the redb key. Uses `\x00` (NUL) as the
+/// delimiter — env-var names cannot contain NUL, and agent IDs are UUID-
+/// shaped strings, so the encoding is unambiguous and round-trips cleanly.
+///
+/// Layout:
+/// - Shared: `s\x00<NAME>`
+/// - Agent:  `a\x00<AGENT_ID>\x00<NAME>`
+///
+/// Legacy unprefixed keys (pre-migration) match neither pattern (no NUL
+/// byte) and are rewritten as `s\x00<NAME>` on first store open.
+fn encode_key(scope: &SecretScope, name: &str) -> String {
+    match scope {
+        SecretScope::InstanceShared => format!("s\x00{name}"),
+        SecretScope::Agent { id } => format!("a\x00{id}\x00{name}"),
+    }
+}
+
+/// Inverse of `encode_key`. Returns `None` for legacy unprefixed keys (so
+/// the migration path can detect them) and for malformed keys.
+fn decode_key(key: &str) -> Option<(SecretScope, String)> {
+    let mut parts = key.splitn(2, '\x00');
+    let tag = parts.next()?;
+    let rest = parts.next()?;
+    match tag {
+        "s" => Some((SecretScope::InstanceShared, rest.to_string())),
+        "a" => {
+            let mut sub = rest.splitn(2, '\x00');
+            let id = sub.next()?.to_string();
+            let name = sub.next()?.to_string();
+            Some((SecretScope::Agent { id }, name))
+        }
+        _ => None,
     }
 }
 
@@ -231,12 +322,125 @@ impl SecretsStore {
             }
         };
 
-        Ok(Self {
+        let store = Self {
             db,
             cipher_state: RwLock::new(None),
             encrypted: RwLock::new(encrypted),
             mutation_guard: Mutex::new(()),
-        })
+        };
+
+        store.migrate_legacy_keys_to_shared()?;
+
+        Ok(store)
+    }
+
+    /// Rewrite any pre-scope keys (no `s\x00` / `a\x00` prefix) as
+    /// `InstanceShared`. Idempotent: subsequent opens skip rows that already
+    /// decode cleanly. Preserves stored values verbatim — encryption state
+    /// transfers regardless of key format.
+    fn migrate_legacy_keys_to_shared(&self) -> Result<(), SecretsError> {
+        // Collect legacy keys first via a read transaction so we don't iterate
+        // and write under the same transaction (redb doesn't allow that).
+        let legacy_keys: Vec<String> = {
+            let read_txn = self.db.begin_read().map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to begin read transaction: {error}"))
+            })?;
+            let metadata = read_txn.open_table(METADATA_TABLE).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
+            })?;
+            let iter = metadata.iter().map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to iterate metadata: {error}"))
+            })?;
+            let mut legacy = Vec::new();
+            for entry in iter {
+                let (key, _) = entry.map_err(|error| {
+                    SecretsError::Other(anyhow::anyhow!("failed to read metadata entry: {error}"))
+                })?;
+                let key_str = key.value().to_string();
+                if decode_key(&key_str).is_none() {
+                    legacy.push(key_str);
+                }
+            }
+            legacy
+        };
+
+        if legacy_keys.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            count = legacy_keys.len(),
+            "migrating legacy unscoped secrets → InstanceShared scope"
+        );
+
+        let write_txn = self.db.begin_write().map_err(|error| {
+            SecretsError::Other(anyhow::anyhow!(
+                "failed to begin migration write transaction: {error}"
+            ))
+        })?;
+        {
+            let mut secrets = write_txn.open_table(SECRETS_TABLE).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
+            })?;
+            let mut metadata = write_txn.open_table(METADATA_TABLE).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
+            })?;
+            for old_key in &legacy_keys {
+                let new_key = encode_key(&SecretScope::InstanceShared, old_key);
+                let value_bytes = secrets
+                    .get(old_key.as_str())
+                    .map_err(|error| {
+                        SecretsError::Other(anyhow::anyhow!(
+                            "failed to read legacy value '{old_key}': {error}"
+                        ))
+                    })?
+                    .map(|v| v.value().to_vec());
+                let metadata_str = metadata
+                    .get(old_key.as_str())
+                    .map_err(|error| {
+                        SecretsError::Other(anyhow::anyhow!(
+                            "failed to read legacy metadata '{old_key}': {error}"
+                        ))
+                    })?
+                    .map(|m| m.value().to_string());
+
+                if let Some(bytes) = value_bytes {
+                    secrets
+                        .insert(new_key.as_str(), bytes.as_slice())
+                        .map_err(|error| {
+                            SecretsError::Other(anyhow::anyhow!(
+                                "failed to write migrated value '{old_key}': {error}"
+                            ))
+                        })?;
+                    secrets.remove(old_key.as_str()).map_err(|error| {
+                        SecretsError::Other(anyhow::anyhow!(
+                            "failed to remove legacy value '{old_key}': {error}"
+                        ))
+                    })?;
+                }
+                if let Some(meta) = metadata_str {
+                    metadata
+                        .insert(new_key.as_str(), meta.as_str())
+                        .map_err(|error| {
+                            SecretsError::Other(anyhow::anyhow!(
+                                "failed to write migrated metadata '{old_key}': {error}"
+                            ))
+                        })?;
+                    metadata.remove(old_key.as_str()).map_err(|error| {
+                        SecretsError::Other(anyhow::anyhow!(
+                            "failed to remove legacy metadata '{old_key}': {error}"
+                        ))
+                    })?;
+                }
+            }
+        }
+        write_txn.commit().map_err(|error| {
+            SecretsError::Other(anyhow::anyhow!(
+                "failed to commit secret scope migration: {error}"
+            ))
+        })?;
+
+        Ok(())
     }
 
     /// Current store state.
@@ -264,7 +468,7 @@ impl SecretsStore {
 
     /// Full status snapshot for the API.
     pub fn status(&self, platform_managed: bool) -> Result<StoreStatus, SecretsError> {
-        let all_metadata = self.list_metadata()?;
+        let all_metadata = self.list_metadata(None)?;
         let system_count = all_metadata
             .values()
             .filter(|m| m.category == SecretCategory::System)
@@ -284,9 +488,11 @@ impl SecretsStore {
         })
     }
 
-    /// Store a secret with the given category. Creates or updates.
+    /// Store a secret in the given scope with the given category. Creates or
+    /// updates.
     pub fn set(
         &self,
+        scope: &SecretScope,
         name: &str,
         value: &str,
         category: SecretCategory,
@@ -301,9 +507,10 @@ impl SecretsStore {
 
         let stored_value = self.encode_value(value)?;
         let now = chrono::Utc::now();
+        let key = encode_key(scope, name);
 
         // Check if updating an existing secret (preserve created_at).
-        let existing_meta = self.get_metadata(name).ok();
+        let existing_meta = self.get_metadata(scope, name).ok();
         let metadata = SecretMetadata {
             category,
             created_at: existing_meta.as_ref().map(|m| m.created_at).unwrap_or(now),
@@ -323,31 +530,34 @@ impl SecretsStore {
                 SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
             })?;
             secrets
-                .insert(name, stored_value.as_slice())
+                .insert(key.as_str(), stored_value.as_slice())
                 .map_err(|error| {
                     SecretsError::Other(anyhow::anyhow!(
-                        "failed to insert secret '{name}': {error}"
+                        "failed to insert secret '{name}' ({scope}): {error}"
                     ))
                 })?;
 
             let mut meta = write_txn.open_table(METADATA_TABLE).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
             })?;
-            meta.insert(name, metadata_json.as_str()).map_err(|error| {
-                SecretsError::Other(anyhow::anyhow!(
-                    "failed to insert metadata for '{name}': {error}"
-                ))
-            })?;
+            meta.insert(key.as_str(), metadata_json.as_str())
+                .map_err(|error| {
+                    SecretsError::Other(anyhow::anyhow!(
+                        "failed to insert metadata for '{name}' ({scope}): {error}"
+                    ))
+                })?;
         }
         write_txn.commit().map_err(|error| {
-            SecretsError::Other(anyhow::anyhow!("failed to commit secret '{name}': {error}"))
+            SecretsError::Other(anyhow::anyhow!(
+                "failed to commit secret '{name}' ({scope}): {error}"
+            ))
         })?;
 
         Ok(())
     }
 
-    /// Retrieve a decrypted secret value.
-    pub fn get(&self, name: &str) -> Result<DecryptedSecret, SecretsError> {
+    /// Retrieve a decrypted secret value from the given scope.
+    pub fn get(&self, scope: &SecretScope, name: &str) -> Result<DecryptedSecret, SecretsError> {
         let state = self.state();
         if state == StoreState::Locked {
             return Err(SecretsError::Other(anyhow::anyhow!(
@@ -362,54 +572,64 @@ impl SecretsStore {
             SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
         })?;
 
+        let key = encode_key(scope, name);
         let value = table
-            .get(name)
+            .get(key.as_str())
             .map_err(|error| {
-                SecretsError::Other(anyhow::anyhow!("failed to read key '{name}': {error}"))
+                SecretsError::Other(anyhow::anyhow!(
+                    "failed to read key '{name}' ({scope}): {error}"
+                ))
             })?
             .ok_or_else(|| SecretsError::NotFound {
-                key: name.to_string(),
+                key: format!("{scope}:{name}"),
             })?;
 
         let raw = value.value();
         self.decode_value(raw)
     }
 
-    /// Delete a secret.
-    pub fn delete(&self, name: &str) -> Result<(), SecretsError> {
+    /// Delete a secret from the given scope.
+    pub fn delete(&self, scope: &SecretScope, name: &str) -> Result<(), SecretsError> {
         let write_txn = self.db.begin_write().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!(
                 "failed to begin write transaction: {error}"
             ))
         })?;
+        let key = encode_key(scope, name);
         {
             let mut secrets = write_txn.open_table(SECRETS_TABLE).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
             })?;
-            secrets.remove(name).map_err(|error| {
-                SecretsError::Other(anyhow::anyhow!("failed to remove key '{name}': {error}"))
+            secrets.remove(key.as_str()).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!(
+                    "failed to remove key '{name}' ({scope}): {error}"
+                ))
             })?;
 
             let mut meta = write_txn.open_table(METADATA_TABLE).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
             })?;
-            meta.remove(name).map_err(|error| {
+            meta.remove(key.as_str()).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!(
-                    "failed to remove metadata for '{name}': {error}"
+                    "failed to remove metadata for '{name}' ({scope}): {error}"
                 ))
             })?;
         }
         write_txn.commit().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!(
-                "failed to commit delete for '{name}': {error}"
+                "failed to commit delete for '{name}' ({scope}): {error}"
             ))
         })?;
 
         Ok(())
     }
 
-    /// List all secret names.
-    pub fn list(&self) -> Result<Vec<String>, SecretsError> {
+    /// List `(scope, name)` pairs. With `scope_filter = None`, returns every
+    /// secret across all scopes.
+    pub fn list(
+        &self,
+        scope_filter: Option<&SecretScope>,
+    ) -> Result<Vec<(SecretScope, String)>, SecretsError> {
         let read_txn = self.db.begin_read().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!("failed to begin read transaction: {error}"))
         })?;
@@ -417,7 +637,7 @@ impl SecretsStore {
             SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
         })?;
 
-        let mut names = Vec::new();
+        let mut entries = Vec::new();
         let iter = table.iter().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!("failed to iterate metadata table: {error}"))
         })?;
@@ -425,14 +645,28 @@ impl SecretsStore {
             let (key, _) = entry.map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to read metadata entry: {error}"))
             })?;
-            names.push(key.value().to_string());
+            let key_str = key.value();
+            let Some((scope, name)) = decode_key(key_str) else {
+                tracing::warn!(key = key_str, "skipping malformed secret key during list");
+                continue;
+            };
+            if let Some(filter) = scope_filter
+                && scope != *filter
+            {
+                continue;
+            }
+            entries.push((scope, name));
         }
 
-        Ok(names)
+        Ok(entries)
     }
 
-    /// Get metadata for a specific secret.
-    pub fn get_metadata(&self, name: &str) -> Result<SecretMetadata, SecretsError> {
+    /// Get metadata for a specific secret in the given scope.
+    pub fn get_metadata(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+    ) -> Result<SecretMetadata, SecretsError> {
         let read_txn = self.db.begin_read().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!("failed to begin read transaction: {error}"))
         })?;
@@ -440,27 +674,32 @@ impl SecretsStore {
             SecretsError::Other(anyhow::anyhow!("failed to open metadata table: {error}"))
         })?;
 
+        let key = encode_key(scope, name);
         let value = table
-            .get(name)
+            .get(key.as_str())
             .map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!(
-                    "failed to read metadata for '{name}': {error}"
+                    "failed to read metadata for '{name}' ({scope}): {error}"
                 ))
             })?
             .ok_or_else(|| SecretsError::NotFound {
-                key: name.to_string(),
+                key: format!("{scope}:{name}"),
             })?;
 
         serde_json::from_str(value.value()).map_err(|error| {
             SecretsError::Other(anyhow::anyhow!(
-                "failed to parse metadata for '{name}': {error}"
+                "failed to parse metadata for '{name}' ({scope}): {error}"
             ))
         })
     }
 
-    /// List all secrets with their metadata. Works in all states (names and
-    /// categories are stored as unencrypted metadata).
-    pub fn list_metadata(&self) -> Result<HashMap<String, SecretMetadata>, SecretsError> {
+    /// List `(scope, name) → metadata` for every secret matching the filter.
+    /// `scope_filter = None` returns every secret across all scopes. Works in
+    /// all states (names, scopes, and categories live in unencrypted metadata).
+    pub fn list_metadata(
+        &self,
+        scope_filter: Option<&SecretScope>,
+    ) -> Result<HashMap<(SecretScope, String), SecretMetadata>, SecretsError> {
         let read_txn = self.db.begin_read().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!("failed to begin read transaction: {error}"))
         })?;
@@ -476,13 +715,26 @@ impl SecretsStore {
             let (key, value) = entry.map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to read metadata entry: {error}"))
             })?;
+            let key_str = key.value();
+            let Some((scope, name)) = decode_key(key_str) else {
+                tracing::warn!(
+                    key = key_str,
+                    "skipping malformed secret key during list_metadata"
+                );
+                continue;
+            };
+            if let Some(filter) = scope_filter
+                && scope != *filter
+            {
+                continue;
+            }
             match serde_json::from_str::<SecretMetadata>(value.value()) {
                 Ok(meta) => {
-                    result.insert(key.value().to_string(), meta);
+                    result.insert((scope, name), meta);
                 }
                 Err(error) => {
                     tracing::warn!(
-                        key = key.value(),
+                        key = key_str,
                         %error,
                         "skipping secret with corrupted metadata"
                     );
@@ -493,15 +745,18 @@ impl SecretsStore {
         Ok(result)
     }
 
-    /// Get all tool secrets as name→value pairs for `Sandbox::wrap()` injection.
+    /// Get all tool secrets visible to `agent_id` as name→value pairs for
+    /// `Sandbox::wrap()` injection. Visibility is the union of every
+    /// `InstanceShared(Tool)` row and every `Agent(agent_id, Tool)` row;
+    /// agent-scoped values shadow shared values when names collide.
     ///
     /// Returns an empty map when locked (tool secrets unavailable).
-    pub fn tool_env_vars(&self) -> HashMap<String, String> {
+    pub fn tool_env_vars(&self, agent_id: &AgentId) -> HashMap<String, String> {
         if self.state() == StoreState::Locked {
             return HashMap::new();
         }
 
-        let metadata = match self.list_metadata() {
+        let metadata = match self.list_metadata(None) {
             Ok(m) => m,
             Err(error) => {
                 tracing::warn!(%error, "failed to list secret metadata for tool env vars");
@@ -509,33 +764,51 @@ impl SecretsStore {
             }
         };
 
+        // Two-pass insert so agent-scoped values shadow same-named shared values.
         let mut result = HashMap::new();
-        for (name, meta) in &metadata {
-            if meta.category == SecretCategory::Tool {
-                match self.get(name) {
-                    Ok(secret) => {
-                        result.insert(name.clone(), secret.expose().to_string());
-                    }
-                    Err(error) => {
-                        tracing::warn!(secret = %name, %error, "failed to decrypt tool secret — skipping");
-                    }
-                }
+        for ((scope, name), _meta) in metadata
+            .iter()
+            .filter(|(_, m)| m.category == SecretCategory::Tool)
+        {
+            if !scope.is_shared() {
+                continue;
+            }
+            if let Some(value) = self.read_value(scope, name) {
+                result.insert(name.clone(), value);
             }
         }
-
+        for ((scope, name), _meta) in metadata
+            .iter()
+            .filter(|(_, m)| m.category == SecretCategory::Tool)
+        {
+            if !matches!(scope, SecretScope::Agent { id } if id == agent_id.as_ref()) {
+                continue;
+            }
+            if let Some(value) = self.read_value(scope, name) {
+                result.insert(name.clone(), value);
+            }
+        }
         result
     }
 
-    /// Get names of all tool secrets for injection into worker system prompts.
+    /// Get names of all tool secrets visible to `agent_id` for injection
+    /// into worker system prompts.
     ///
     /// Returns names even when locked (metadata is always accessible).
-    pub fn tool_secret_names(&self) -> Vec<String> {
-        match self.list_metadata() {
-            Ok(metadata) => metadata
-                .into_iter()
-                .filter(|(_, meta)| meta.category == SecretCategory::Tool)
-                .map(|(name, _)| name)
-                .collect(),
+    pub fn tool_secret_names(&self, agent_id: &AgentId) -> Vec<String> {
+        match self.list_metadata(None) {
+            Ok(metadata) => {
+                let mut names = std::collections::BTreeSet::new();
+                for ((scope, name), meta) in &metadata {
+                    if meta.category != SecretCategory::Tool {
+                        continue;
+                    }
+                    if scope.visible_to(agent_id) {
+                        names.insert(name.clone());
+                    }
+                }
+                names.into_iter().collect()
+            }
             Err(error) => {
                 tracing::warn!(%error, "failed to list secret metadata for tool secret names");
                 Vec::new()
@@ -543,11 +816,28 @@ impl SecretsStore {
         }
     }
 
-    /// Get all tool secret name→value pairs for the output scrubber.
-    ///
-    /// Returns pairs suitable for `StreamScrubber::new()`.
-    pub fn tool_secret_pairs(&self) -> Vec<(String, String)> {
-        self.tool_env_vars().into_iter().collect()
+    /// Get tool secret name→value pairs visible to `agent_id` for the
+    /// output scrubber.
+    pub fn tool_secret_pairs(&self, agent_id: &AgentId) -> Vec<(String, String)> {
+        self.tool_env_vars(agent_id).into_iter().collect()
+    }
+
+    /// Read the raw value for a `(scope, name)` pair, returning `None` when
+    /// the value is missing or fails to decrypt. Used by the tool-secret
+    /// readers above where a single bad row should not poison the rest.
+    fn read_value(&self, scope: &SecretScope, name: &str) -> Option<String> {
+        match self.get(scope, name) {
+            Ok(secret) => Some(secret.expose().to_string()),
+            Err(error) => {
+                tracing::warn!(
+                    secret = %name,
+                    %scope,
+                    %error,
+                    "failed to read tool secret value — skipping"
+                );
+                None
+            }
+        }
     }
 
     /// Enable encryption. Generates a random master key, encrypts all existing
@@ -575,25 +865,28 @@ impl SecretsStore {
         // Encrypt sentinel value.
         let encrypted_sentinel = encrypt_bytes(&cipher, SENTINEL_PLAINTEXT)?;
 
-        // Re-encrypt all existing secrets.
-        let names = self.list()?;
-        let mut plain_values: Vec<(String, Vec<u8>)> = Vec::with_capacity(names.len());
-        {
+        // Re-encrypt every stored value. We iterate the SECRETS_TABLE
+        // directly with raw redb keys (the encrypted blob is opaque, scope
+        // structure doesn't matter for the bulk re-encrypt).
+        let plain_values: Vec<(String, Vec<u8>)> = {
             let read_txn = self.db.begin_read().map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to begin read transaction: {error}"))
             })?;
             let table = read_txn.open_table(SECRETS_TABLE).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
             })?;
-            for name in &names {
-                if let Some(val) = table.get(name.as_str()).map_err(|error| {
-                    SecretsError::Other(anyhow::anyhow!("failed to read secret '{name}': {error}"))
-                })? {
-                    // Current values are plaintext UTF-8.
-                    plain_values.push((name.clone(), val.value().to_vec()));
-                }
+            let mut entries = Vec::new();
+            let iter = table.iter().map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("failed to iterate secrets table: {error}"))
+            })?;
+            for entry in iter {
+                let (key, value) = entry.map_err(|error| {
+                    SecretsError::Other(anyhow::anyhow!("failed to read secret entry: {error}"))
+                })?;
+                entries.push((key.value().to_string(), value.value().to_vec()));
             }
-        }
+            entries
+        };
 
         // Write everything in one transaction.
         let write_txn = self.db.begin_write().map_err(|error| {
@@ -606,13 +899,13 @@ impl SecretsStore {
                 SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
             })?;
             // Re-encrypt each secret value.
-            for (name, plaintext_bytes) in &plain_values {
+            for (raw_key, plaintext_bytes) in &plain_values {
                 let encrypted = encrypt_bytes(&cipher, plaintext_bytes)?;
                 secrets
-                    .insert(name.as_str(), encrypted.as_slice())
+                    .insert(raw_key.as_str(), encrypted.as_slice())
                     .map_err(|error| {
                         SecretsError::Other(anyhow::anyhow!(
-                            "failed to write encrypted secret '{name}': {error}"
+                            "failed to write encrypted secret '{raw_key}': {error}"
                         ))
                     })?;
             }
@@ -752,13 +1045,14 @@ impl SecretsStore {
 
         let new_cipher = derive_cipher(&new_master_key, &new_salt)?;
 
-        // Decrypt all secrets with old cipher, re-encrypt with new.
-        let names = self.list()?;
-        let mut re_encrypted: Vec<(String, Vec<u8>)> = Vec::with_capacity(names.len());
-        for name in &names {
-            let decrypted = self.get(name)?;
+        // Decrypt every secret with the old cipher, re-encrypt with the new
+        // one, key-by-key over the raw redb keys.
+        let entries = self.list(None)?;
+        let mut re_encrypted: Vec<(String, Vec<u8>)> = Vec::with_capacity(entries.len());
+        for (scope, name) in &entries {
+            let decrypted = self.get(scope, name)?;
             let encrypted = encrypt_bytes(&new_cipher, decrypted.expose().as_bytes())?;
-            re_encrypted.push((name.clone(), encrypted));
+            re_encrypted.push((encode_key(scope, name), encrypted));
         }
 
         // Re-encrypt sentinel.
@@ -774,12 +1068,12 @@ impl SecretsStore {
             let mut secrets = write_txn.open_table(SECRETS_TABLE).map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to open secrets table: {error}"))
             })?;
-            for (name, encrypted) in &re_encrypted {
+            for (raw_key, encrypted) in &re_encrypted {
                 secrets
-                    .insert(name.as_str(), encrypted.as_slice())
+                    .insert(raw_key.as_str(), encrypted.as_slice())
                     .map_err(|error| {
                         SecretsError::Other(anyhow::anyhow!(
-                            "failed to write re-encrypted secret '{name}': {error}"
+                            "failed to write re-encrypted secret '{raw_key}': {error}"
                         ))
                     })?;
             }
@@ -813,9 +1107,9 @@ impl SecretsStore {
         Ok(new_master_key)
     }
 
-    /// Check if a secret exists.
-    pub fn exists(&self, name: &str) -> bool {
-        self.get_metadata(name).is_ok()
+    /// Check if a secret exists in the given scope.
+    pub fn exists(&self, scope: &SecretScope, name: &str) -> bool {
+        self.get_metadata(scope, name).is_ok()
     }
 
     /// Export all secrets as a portable backup.
@@ -831,12 +1125,13 @@ impl SecretsStore {
             )));
         }
 
-        let metadata = self.list_metadata()?;
+        let metadata = self.list_metadata(None)?;
         let mut entries = Vec::with_capacity(metadata.len());
 
-        for (name, meta) in &metadata {
-            let value = self.get(name)?;
+        for ((scope, name), meta) in &metadata {
+            let value = self.get(scope, name)?;
             entries.push(ExportEntry {
+                scope: scope.clone(),
                 name: name.clone(),
                 value: value.expose().to_string(),
                 category: meta.category,
@@ -845,7 +1140,9 @@ impl SecretsStore {
             });
         }
 
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.sort_by(|a, b| {
+            (a.scope.to_string(), a.name.clone()).cmp(&(b.scope.to_string(), b.name.clone()))
+        });
 
         Ok(ExportData {
             version: 1,
@@ -873,12 +1170,12 @@ impl SecretsStore {
         let mut skipped = Vec::new();
 
         for entry in &data.entries {
-            if self.exists(&entry.name) && !overwrite {
-                skipped.push(entry.name.clone());
+            if self.exists(&entry.scope, &entry.name) && !overwrite {
+                skipped.push(format!("{}:{}", entry.scope, entry.name));
                 continue;
             }
 
-            self.set(&entry.name, &entry.value, entry.category)?;
+            self.set(&entry.scope, &entry.name, &entry.value, entry.category)?;
             imported += 1;
         }
 
@@ -934,11 +1231,19 @@ pub struct ExportData {
 /// A single secret in the export format.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ExportEntry {
+    /// Scope this secret belongs to. Older exports without a `scope` field
+    /// import as `InstanceShared` so existing backups continue to load.
+    #[serde(default = "default_export_scope")]
+    pub scope: SecretScope,
     pub name: String,
     pub value: String,
     pub category: SecretCategory,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_export_scope() -> SecretScope {
+    SecretScope::InstanceShared
 }
 
 /// Result of an import operation.
@@ -1174,35 +1479,155 @@ mod tests {
         (store, file)
     }
 
+    fn shared() -> SecretScope {
+        SecretScope::InstanceShared
+    }
+
+    fn test_agent() -> AgentId {
+        std::sync::Arc::from("test-agent")
+    }
+
     #[test]
     fn unencrypted_set_get_delete() {
         let (store, _file) = temp_store();
         assert_eq!(store.state(), StoreState::Unencrypted);
 
         store
-            .set("MY_KEY", "my_value", SecretCategory::Tool)
+            .set(&shared(), "MY_KEY", "my_value", SecretCategory::Tool)
             .expect("set");
-        let secret = store.get("MY_KEY").expect("get");
+        let secret = store.get(&shared(), "MY_KEY").expect("get");
         assert_eq!(secret.expose(), "my_value");
 
-        let meta = store.get_metadata("MY_KEY").expect("metadata");
+        let meta = store.get_metadata(&shared(), "MY_KEY").expect("metadata");
         assert_eq!(meta.category, SecretCategory::Tool);
 
-        store.delete("MY_KEY").expect("delete");
-        assert!(store.get("MY_KEY").is_err());
+        store.delete(&shared(), "MY_KEY").expect("delete");
+        assert!(store.get(&shared(), "MY_KEY").is_err());
+    }
+
+    #[test]
+    fn agent_scoped_secret_invisible_to_other_agent() {
+        let (store, _file) = temp_store();
+        let alice: AgentId = std::sync::Arc::from("alice");
+        let bob: AgentId = std::sync::Arc::from("bob");
+        store
+            .set(
+                &SecretScope::agent(&alice),
+                "DEPLOY_TOKEN",
+                "alice-deploy",
+                SecretCategory::Tool,
+            )
+            .expect("set alice");
+        store
+            .set(
+                &SecretScope::agent(&bob),
+                "DEPLOY_TOKEN",
+                "bob-deploy",
+                SecretCategory::Tool,
+            )
+            .expect("set bob");
+
+        let alice_env = store.tool_env_vars(&alice);
+        assert_eq!(
+            alice_env.get("DEPLOY_TOKEN").map(String::as_str),
+            Some("alice-deploy")
+        );
+
+        let bob_env = store.tool_env_vars(&bob);
+        assert_eq!(
+            bob_env.get("DEPLOY_TOKEN").map(String::as_str),
+            Some("bob-deploy")
+        );
+
+        // alice should NOT see bob's value, and vice versa.
+        assert_ne!(alice_env.get("DEPLOY_TOKEN"), bob_env.get("DEPLOY_TOKEN"));
+    }
+
+    #[test]
+    fn agent_scoped_value_shadows_shared_value_with_same_name() {
+        let (store, _file) = temp_store();
+        let alice: AgentId = std::sync::Arc::from("alice");
+        store
+            .set(&shared(), "GH_TOKEN", "shared-token", SecretCategory::Tool)
+            .expect("set shared");
+        store
+            .set(
+                &SecretScope::agent(&alice),
+                "GH_TOKEN",
+                "alice-token",
+                SecretCategory::Tool,
+            )
+            .expect("set alice");
+
+        let alice_env = store.tool_env_vars(&alice);
+        assert_eq!(
+            alice_env.get("GH_TOKEN").map(String::as_str),
+            Some("alice-token")
+        );
+
+        let bob: AgentId = std::sync::Arc::from("bob");
+        let bob_env = store.tool_env_vars(&bob);
+        assert_eq!(
+            bob_env.get("GH_TOKEN").map(String::as_str),
+            Some("shared-token")
+        );
+    }
+
+    #[test]
+    fn legacy_unprefixed_keys_migrate_to_shared_on_open() {
+        let file = NamedTempFile::new().expect("create temp file");
+        let path = file.path().to_path_buf();
+
+        // Inject a legacy unprefixed key directly into the redb store.
+        {
+            let db = redb::Database::create(&path).expect("create db");
+            let txn = db.begin_write().expect("write txn");
+            {
+                let mut secrets = txn.open_table(SECRETS_TABLE).expect("open secrets");
+                secrets
+                    .insert("LEGACY_KEY", b"legacy_value".as_slice())
+                    .expect("insert");
+                let mut metadata = txn.open_table(METADATA_TABLE).expect("open meta");
+                let meta = SecretMetadata {
+                    category: SecretCategory::Tool,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                };
+                metadata
+                    .insert("LEGACY_KEY", serde_json::to_string(&meta).unwrap().as_str())
+                    .expect("insert meta");
+            }
+            txn.commit().expect("commit");
+        }
+
+        // Reopen — migration should run.
+        let store = SecretsStore::new(&path).expect("reopen");
+        let value = store.get(&shared(), "LEGACY_KEY").expect("get migrated");
+        assert_eq!(value.expose(), "legacy_value");
+
+        // Listing returns one entry under InstanceShared.
+        let entries = store.list(None).expect("list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, SecretScope::InstanceShared);
+        assert_eq!(entries[0].1, "LEGACY_KEY");
     }
 
     #[test]
     fn tool_env_vars_returns_only_tool_secrets() {
         let (store, _file) = temp_store();
         store
-            .set("ANTHROPIC_API_KEY", "sk-ant-xxx", SecretCategory::System)
+            .set(
+                &shared(),
+                "ANTHROPIC_API_KEY",
+                "sk-ant-xxx",
+                SecretCategory::System,
+            )
             .expect("set system");
         store
-            .set("GH_TOKEN", "ghp_abc123", SecretCategory::Tool)
+            .set(&shared(), "GH_TOKEN", "ghp_abc123", SecretCategory::Tool)
             .expect("set tool");
 
-        let env_vars = store.tool_env_vars();
+        let env_vars = store.tool_env_vars(&test_agent());
         assert_eq!(env_vars.len(), 1);
         assert_eq!(env_vars.get("GH_TOKEN").unwrap(), "ghp_abc123");
         assert!(!env_vars.contains_key("ANTHROPIC_API_KEY"));
@@ -1212,16 +1637,21 @@ mod tests {
     fn tool_secret_names_returns_only_tool_names() {
         let (store, _file) = temp_store();
         store
-            .set("OPENAI_API_KEY", "sk-xxx", SecretCategory::System)
+            .set(
+                &shared(),
+                "OPENAI_API_KEY",
+                "sk-xxx",
+                SecretCategory::System,
+            )
             .expect("set system");
         store
-            .set("NPM_TOKEN", "npm_xxx", SecretCategory::Tool)
+            .set(&shared(), "NPM_TOKEN", "npm_xxx", SecretCategory::Tool)
             .expect("set tool");
         store
-            .set("GH_TOKEN", "ghp_xxx", SecretCategory::Tool)
+            .set(&shared(), "GH_TOKEN", "ghp_xxx", SecretCategory::Tool)
             .expect("set tool");
 
-        let names = store.tool_secret_names();
+        let names = store.tool_secret_names(&test_agent());
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"NPM_TOKEN".to_string()));
         assert!(names.contains(&"GH_TOKEN".to_string()));
@@ -1233,7 +1663,12 @@ mod tests {
 
         // Store a secret in unencrypted mode.
         store
-            .set("MY_SECRET", "plaintext_value", SecretCategory::System)
+            .set(
+                &shared(),
+                "MY_SECRET",
+                "plaintext_value",
+                SecretCategory::System,
+            )
             .expect("set");
 
         // Enable encryption.
@@ -1241,18 +1676,20 @@ mod tests {
         assert_eq!(store.state(), StoreState::Unlocked);
 
         // Secret is still readable.
-        let secret = store.get("MY_SECRET").expect("get after encrypt");
+        let secret = store
+            .get(&shared(), "MY_SECRET")
+            .expect("get after encrypt");
         assert_eq!(secret.expose(), "plaintext_value");
 
         // Lock the store.
         store.lock().expect("lock");
         assert_eq!(store.state(), StoreState::Locked);
-        assert!(store.get("MY_SECRET").is_err());
+        assert!(store.get(&shared(), "MY_SECRET").is_err());
 
         // Unlock with correct key.
         store.unlock(&master_key).expect("unlock");
         assert_eq!(store.state(), StoreState::Unlocked);
-        let secret = store.get("MY_SECRET").expect("get after unlock");
+        let secret = store.get(&shared(), "MY_SECRET").expect("get after unlock");
         assert_eq!(secret.expose(), "plaintext_value");
 
         // Wrong key fails.
@@ -1264,7 +1701,7 @@ mod tests {
     fn key_rotation() {
         let (store, _file) = temp_store();
         store
-            .set("MY_SECRET", "value123", SecretCategory::Tool)
+            .set(&shared(), "MY_SECRET", "value123", SecretCategory::Tool)
             .expect("set");
         let _old_key = store.enable_encryption().expect("encrypt");
 
@@ -1272,13 +1709,15 @@ mod tests {
         let new_key = store.rotate_key().expect("rotate");
 
         // Secret still readable with new cipher.
-        let secret = store.get("MY_SECRET").expect("get after rotate");
+        let secret = store.get(&shared(), "MY_SECRET").expect("get after rotate");
         assert_eq!(secret.expose(), "value123");
 
         // Lock and unlock with new key.
         store.lock().expect("lock");
         store.unlock(&new_key).expect("unlock with new key");
-        let secret = store.get("MY_SECRET").expect("get after re-unlock");
+        let secret = store
+            .get(&shared(), "MY_SECRET")
+            .expect("get after re-unlock");
         assert_eq!(secret.expose(), "value123");
     }
 
@@ -1394,44 +1833,44 @@ mod tests {
     fn list_metadata_works_in_all_states() {
         let (store, _file) = temp_store();
         store
-            .set("KEY1", "val1", SecretCategory::System)
+            .set(&shared(), "KEY1", "val1", SecretCategory::System)
             .expect("set");
         store
-            .set("KEY2", "val2", SecretCategory::Tool)
+            .set(&shared(), "KEY2", "val2", SecretCategory::Tool)
             .expect("set");
 
         // Unencrypted: metadata readable.
-        let meta = store.list_metadata().expect("list");
+        let meta = store.list_metadata(None).expect("list");
         assert_eq!(meta.len(), 2);
 
         // Enable encryption.
         let master_key = store.enable_encryption().expect("encrypt");
 
         // Unlocked: metadata readable.
-        let meta = store.list_metadata().expect("list");
+        let meta = store.list_metadata(None).expect("list");
         assert_eq!(meta.len(), 2);
 
         // Locked: metadata still readable.
         store.lock().expect("lock");
-        let meta = store.list_metadata().expect("list");
+        let meta = store.list_metadata(None).expect("list");
         assert_eq!(meta.len(), 2);
 
         // But values are not.
-        assert!(store.get("KEY1").is_err());
+        assert!(store.get(&shared(), "KEY1").is_err());
 
         // Unlock restores access.
         store.unlock(&master_key).expect("unlock");
-        assert_eq!(store.get("KEY1").expect("get").expose(), "val1");
+        assert_eq!(store.get(&shared(), "KEY1").expect("get").expose(), "val1");
     }
 
     #[test]
     fn export_import_roundtrip() {
         let (store1, _file1) = temp_store();
         store1
-            .set("KEY_A", "value_a", SecretCategory::System)
+            .set(&shared(), "KEY_A", "value_a", SecretCategory::System)
             .expect("set");
         store1
-            .set("KEY_B", "value_b", SecretCategory::Tool)
+            .set(&shared(), "KEY_B", "value_b", SecretCategory::Tool)
             .expect("set");
 
         let export = store1.export_all().expect("export");
@@ -1444,10 +1883,19 @@ mod tests {
         assert_eq!(result.imported, 2);
         assert!(result.skipped.is_empty());
 
-        assert_eq!(store2.get("KEY_A").expect("get").expose(), "value_a");
-        assert_eq!(store2.get("KEY_B").expect("get").expose(), "value_b");
         assert_eq!(
-            store2.get_metadata("KEY_B").expect("meta").category,
+            store2.get(&shared(), "KEY_A").expect("get").expose(),
+            "value_a"
+        );
+        assert_eq!(
+            store2.get(&shared(), "KEY_B").expect("get").expose(),
+            "value_b"
+        );
+        assert_eq!(
+            store2
+                .get_metadata(&shared(), "KEY_B")
+                .expect("meta")
+                .category,
             SecretCategory::Tool
         );
     }
@@ -1456,7 +1904,7 @@ mod tests {
     fn import_skips_existing_without_overwrite() {
         let (store, _file) = temp_store();
         store
-            .set("EXISTING", "original", SecretCategory::System)
+            .set(&shared(), "EXISTING", "original", SecretCategory::System)
             .expect("set");
 
         let export = ExportData {
@@ -1464,6 +1912,7 @@ mod tests {
             encrypted: false,
             entries: vec![
                 ExportEntry {
+                    scope: shared(),
                     name: "EXISTING".to_string(),
                     value: "new_value".to_string(),
                     category: SecretCategory::Tool,
@@ -1471,6 +1920,7 @@ mod tests {
                     updated_at: chrono::Utc::now(),
                 },
                 ExportEntry {
+                    scope: shared(),
                     name: "FRESH".to_string(),
                     value: "fresh_value".to_string(),
                     category: SecretCategory::Tool,
@@ -1482,25 +1932,32 @@ mod tests {
 
         let result = store.import_all(&export, false).expect("import");
         assert_eq!(result.imported, 1);
-        assert_eq!(result.skipped, vec!["EXISTING"]);
+        assert_eq!(result.skipped, vec!["shared:EXISTING"]);
 
         // Original value preserved.
-        assert_eq!(store.get("EXISTING").expect("get").expose(), "original");
+        assert_eq!(
+            store.get(&shared(), "EXISTING").expect("get").expose(),
+            "original"
+        );
         // New secret imported.
-        assert_eq!(store.get("FRESH").expect("get").expose(), "fresh_value");
+        assert_eq!(
+            store.get(&shared(), "FRESH").expect("get").expose(),
+            "fresh_value"
+        );
     }
 
     #[test]
     fn import_overwrites_existing_when_requested() {
         let (store, _file) = temp_store();
         store
-            .set("EXISTING", "original", SecretCategory::System)
+            .set(&shared(), "EXISTING", "original", SecretCategory::System)
             .expect("set");
 
         let export = ExportData {
             version: 1,
             encrypted: false,
             entries: vec![ExportEntry {
+                scope: shared(),
                 name: "EXISTING".to_string(),
                 value: "overwritten".to_string(),
                 category: SecretCategory::Tool,
@@ -1513,27 +1970,30 @@ mod tests {
         assert_eq!(result.imported, 1);
         assert!(result.skipped.is_empty());
 
-        assert_eq!(store.get("EXISTING").expect("get").expose(), "overwritten");
+        assert_eq!(
+            store.get(&shared(), "EXISTING").expect("get").expose(),
+            "overwritten"
+        );
     }
 
     #[test]
     fn set_updates_existing_preserves_created_at() {
         let (store, _file) = temp_store();
         store
-            .set("MY_KEY", "v1", SecretCategory::Tool)
+            .set(&shared(), "MY_KEY", "v1", SecretCategory::Tool)
             .expect("set");
-        let meta1 = store.get_metadata("MY_KEY").expect("meta");
+        let meta1 = store.get_metadata(&shared(), "MY_KEY").expect("meta");
 
         // Update value and category.
         store
-            .set("MY_KEY", "v2", SecretCategory::System)
+            .set(&shared(), "MY_KEY", "v2", SecretCategory::System)
             .expect("update");
-        let meta2 = store.get_metadata("MY_KEY").expect("meta");
+        let meta2 = store.get_metadata(&shared(), "MY_KEY").expect("meta");
 
         assert_eq!(meta2.created_at, meta1.created_at);
         assert!(meta2.updated_at >= meta1.updated_at);
         assert_eq!(meta2.category, SecretCategory::System);
-        assert_eq!(store.get("MY_KEY").expect("get").expose(), "v2");
+        assert_eq!(store.get(&shared(), "MY_KEY").expect("get").expose(), "v2");
     }
 
     #[test]

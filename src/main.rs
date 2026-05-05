@@ -2972,6 +2972,7 @@ async fn initialize_agents(
                 agent_config.workspace.clone(),
                 &config.instance_dir,
                 agent_config.data_dir.clone(),
+                agent_id.clone(),
             )
             .await,
         );

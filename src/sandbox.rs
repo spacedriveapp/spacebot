@@ -163,6 +163,10 @@ pub struct Sandbox {
     data_dir: PathBuf,
     tools_bin: PathBuf,
     backend: InternalBackend,
+    /// Owning agent for this sandbox. Used to scope tool-secret reads when
+    /// the secrets store is wired in (see `tool_secrets`). Sandbox is per-
+    /// agent in production; the test constructor uses a placeholder ID.
+    agent_id: crate::AgentId,
     /// Reference to the secrets store for injecting tool secrets into worker
     /// subprocesses. When set, `wrap()` reads tool secrets from the store and
     /// injects them as env vars via `--setenv` (bubblewrap) or `Command::env()`
@@ -193,6 +197,7 @@ impl Sandbox {
         workspace: PathBuf,
         instance_dir: &Path,
         data_dir: PathBuf,
+        agent_id: crate::AgentId,
     ) -> Self {
         let tools_bin = instance_dir.join("tools/bin");
 
@@ -240,6 +245,7 @@ impl Sandbox {
             data_dir,
             tools_bin,
             backend,
+            agent_id,
             secrets_store: ArcSwap::from_pointee(None),
         }
     }
@@ -252,11 +258,12 @@ impl Sandbox {
         self.secrets_store.store(Arc::new(Some(store)));
     }
 
-    /// Read tool secrets from the store for injection into subprocess environment.
+    /// Read tool secrets visible to this sandbox's owning agent for injection
+    /// into subprocess environment.
     fn tool_secrets(&self) -> HashMap<String, String> {
         let guard = self.secrets_store.load();
         match guard.as_ref() {
-            Some(store) => store.tool_env_vars(),
+            Some(store) => store.tool_env_vars(&self.agent_id),
             None => HashMap::new(),
         }
     }
@@ -898,6 +905,7 @@ impl Sandbox {
             data_dir: PathBuf::new(),
             tools_bin: PathBuf::new(),
             backend: InternalBackend::None,
+            agent_id: std::sync::Arc::from("test-agent"),
             secrets_store: ArcSwap::from_pointee(None),
         }
     }

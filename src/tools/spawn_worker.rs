@@ -444,7 +444,7 @@ impl Tool for DetachedSpawnWorkerTool {
 
         let secrets_guard = rc.secrets.load();
         let tool_secret_names = match (*secrets_guard).as_ref() {
-            Some(store) => store.tool_secret_names(),
+            Some(store) => store.tool_secret_names(&self.deps.agent_id),
             None => Vec::new(),
         };
 

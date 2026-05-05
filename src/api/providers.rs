@@ -417,7 +417,7 @@ pub(super) async fn get_providers(
         let resolve_value = |value: &str| -> Option<String> {
             if let Some(alias) = value.strip_prefix("secret:") {
                 let store = secrets_store.as_ref().as_ref()?;
-                return match store.get(alias) {
+                return match store.get(&crate::secrets::store::SecretScope::shared(), alias) {
                     Ok(secret) => Some(secret.expose().to_string()),
                     Err(error) => {
                         tracing::warn!(%error, alias, "failed to resolve secret reference");

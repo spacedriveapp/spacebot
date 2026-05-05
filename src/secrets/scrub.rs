@@ -222,11 +222,18 @@ pub fn scrub_secrets(text: &str, tool_secrets: &[(String, String)]) -> String {
 
 /// Scrub tool secret values from text using a `SecretsStore`.
 ///
-/// Reads the current tool secrets from the store and performs exact-match
-/// redaction. For use in result paths where a `SecretsStore` reference is
-/// available.
-pub fn scrub_with_store(text: &str, store: &crate::secrets::store::SecretsStore) -> String {
-    let pairs = store.tool_secret_pairs();
+/// Reads the tool secrets visible to `agent_id` (the union of
+/// `InstanceShared(Tool)` and the agent's own scope) and performs
+/// exact-match redaction. Scoped per agent so a worker's output is only
+/// scrubbed against the secret values that worker could plausibly have
+/// seen — avoids incidentally redacting another tenant's secret value
+/// that happened to appear verbatim in the text.
+pub fn scrub_with_store(
+    text: &str,
+    store: &crate::secrets::store::SecretsStore,
+    agent_id: &crate::AgentId,
+) -> String {
+    let pairs = store.tool_secret_pairs(agent_id);
     scrub_secrets(text, &pairs)
 }
 

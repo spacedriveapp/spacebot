@@ -3,7 +3,8 @@
 //! Useful for autonomous workflows where a worker creates accounts, generates
 //! API keys, or obtains credentials that should be persisted for future use.
 
-use crate::secrets::store::{SecretCategory, SecretsStore, auto_categorize};
+use crate::AgentId;
+use crate::secrets::store::{SecretCategory, SecretScope, SecretsStore, auto_categorize};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -14,12 +15,21 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct SecretSetTool {
     secrets_store: Arc<SecretsStore>,
+    /// Owning agent — secrets created via this tool land in
+    /// `SecretScope::Agent(self.agent_id)` so a tenant's worker cannot leak
+    /// credentials into another tenant's view. Promoting a `Tool` secret to
+    /// `InstanceShared` is an admin-only operation done via the dashboard.
+    agent_id: AgentId,
 }
 
 impl SecretSetTool {
-    /// Create a new secret set tool with access to the instance-level store.
-    pub fn new(secrets_store: Arc<SecretsStore>) -> Self {
-        Self { secrets_store }
+    /// Create a new secret set tool. Secrets stored via `call()` are written
+    /// to `agent_id`'s scope.
+    pub fn new(secrets_store: Arc<SecretsStore>, agent_id: AgentId) -> Self {
+        Self {
+            secrets_store,
+            agent_id,
+        }
     }
 }
 
@@ -124,16 +134,19 @@ impl Tool for SecretSetTool {
             None => auto_categorize(&name),
         };
 
-        // Check if this is an update to an existing secret.
-        let updated = self.secrets_store.get_metadata(&name).is_ok();
+        let scope = SecretScope::agent(&self.agent_id);
+
+        // Check if this is an update to an existing secret in this scope.
+        let updated = self.secrets_store.get_metadata(&scope, &name).is_ok();
 
         self.secrets_store
-            .set(&name, &args.value, category)
+            .set(&scope, &name, &args.value, category)
             .map_err(|error| SecretSetError(format!("{error}")))?;
 
         tracing::info!(
             name = %name,
             category = %category,
+            scope = %scope,
             updated,
             "worker stored secret via secret_set tool"
         );

@@ -798,6 +798,9 @@ pub(crate) struct BrowserContext {
     /// `None` for channel-level tool invocations (no worker outcome to short-
     /// circuit).
     blocked_signal: Option<crate::agent::worker::BlockSignal>,
+    /// Owning agent for secret-scope resolution. `None` for channel-level
+    /// invocations — those resolve secrets from instance-shared only.
+    agent_id: Option<crate::AgentId>,
 }
 
 impl BrowserContext {
@@ -813,6 +816,7 @@ impl BrowserContext {
             screenshot_dir,
             secrets,
             blocked_signal: None,
+            agent_id: None,
         }
     }
 
@@ -823,6 +827,38 @@ impl BrowserContext {
     pub(crate) fn with_block_signal(mut self, signal: crate::agent::worker::BlockSignal) -> Self {
         self.blocked_signal = Some(signal);
         self
+    }
+
+    /// Attach the owning agent so `browser_type` secret resolution prefers
+    /// the agent's scope before falling back to instance-shared.
+    pub(crate) fn with_agent_id(mut self, agent_id: crate::AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Resolve a secret name to a value. Tries the calling agent's scope
+    /// first (when set), then falls back to instance-shared.
+    fn resolve_secret_value(
+        &self,
+        name: &str,
+    ) -> Result<crate::secrets::store::DecryptedSecret, BrowserError> {
+        let store = self.secrets.as_ref().ok_or_else(|| {
+            BrowserError::new(
+                "secret store is not available — secrets cannot be resolved. \
+                 Add the secret via the API or use the `text` parameter instead.",
+            )
+        })?;
+        if let Some(agent_id) = self.agent_id.as_ref() {
+            let agent_scope = crate::secrets::store::SecretScope::agent(agent_id);
+            if let Ok(secret) = store.get(&agent_scope, name) {
+                return Ok(secret);
+            }
+        }
+        store
+            .get(&crate::secrets::store::SecretScope::shared(), name)
+            .map_err(|error| {
+                BrowserError::new(format!("failed to resolve secret '{name}': {error}"))
+            })
     }
 
     /// Mark a positive block detection. No-op when no signal is wired.
@@ -1660,15 +1696,7 @@ impl Tool for BrowserTypeTool {
         // Resolve the text to type: either from `secret` (secure) or `text` (plain).
         let (text_value, is_secret) = match (&args.secret, &args.text) {
             (Some(secret_name), None) => {
-                let store = self.context.secrets.as_ref().ok_or_else(|| {
-                    BrowserError::new(
-                        "secret store is not available — secrets cannot be resolved. \
-                         Add the secret via the API or use the `text` parameter instead.",
-                    )
-                })?;
-                let decrypted = store.get(secret_name).map_err(|error| {
-                    BrowserError::new(format!("failed to resolve secret '{secret_name}': {error}"))
-                })?;
+                let decrypted = self.context.resolve_secret_value(secret_name)?;
                 (decrypted.expose().to_string(), true)
             }
             (None, Some(text)) => (text.clone(), false),
@@ -2213,6 +2241,7 @@ pub fn register_browser_tools(
     screenshot_dir: PathBuf,
     runtime_config: &crate::config::RuntimeConfig,
     blocked_signal: Option<crate::agent::worker::BlockSignal>,
+    agent_id: Option<crate::AgentId>,
 ) -> rig::tool::server::ToolServer {
     let state = if let Some(shared) = runtime_config
         .shared_browser
@@ -2229,6 +2258,9 @@ pub fn register_browser_tools(
     let mut context = BrowserContext::new(state, config, screenshot_dir, secrets);
     if let Some(signal) = blocked_signal {
         context = context.with_block_signal(signal);
+    }
+    if let Some(agent_id) = agent_id {
+        context = context.with_agent_id(agent_id);
     }
 
     server

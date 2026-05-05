@@ -247,7 +247,7 @@ impl Branch {
         // Layer 1: exact-match redaction of known secrets from the store.
         // Layer 2: regex-based redaction of unknown secret patterns.
         let conclusion = if let Some(store) = self.deps.runtime_config.secrets.load().as_ref() {
-            crate::secrets::scrub::scrub_with_store(&conclusion, store)
+            crate::secrets::scrub::scrub_with_store(&conclusion, store, &self.deps.agent_id)
         } else {
             conclusion
         };

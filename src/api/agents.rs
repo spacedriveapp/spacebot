@@ -878,6 +878,7 @@ pub async fn create_agent_internal(
             agent_config.workspace.clone(),
             &instance_dir,
             agent_config.data_dir.clone(),
+            std::sync::Arc::from(agent_config.id.as_str()),
         )
         .await,
     );

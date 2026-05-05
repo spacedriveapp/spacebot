@@ -949,7 +949,11 @@ impl Worker {
                             let scrubbed = if let Some(store) =
                                 self.deps.runtime_config.secrets.load().as_ref().as_ref()
                             {
-                                crate::secrets::scrub::scrub_with_store(&response, store)
+                                crate::secrets::scrub::scrub_with_store(
+                                    &response,
+                                    store,
+                                    &self.deps.agent_id,
+                                )
                             } else {
                                 response
                             };

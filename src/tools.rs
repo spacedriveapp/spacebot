@@ -970,7 +970,7 @@ pub fn create_worker_tool_server(
             let mut status_tool =
                 SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx.clone());
             if let Some(store) = runtime_config.secrets.load().as_ref() {
-                status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs());
+                status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs(&agent_id));
             }
             status_tool
         })
@@ -979,7 +979,7 @@ pub fn create_worker_tool_server(
     server = register_file_tools(server, workspace, sandbox);
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
-        server = server.tool(SecretSetTool::new(store.clone()));
+        server = server.tool(SecretSetTool::new(store.clone(), agent_id.clone()));
     }
 
     if browser_config.enabled {
@@ -989,6 +989,7 @@ pub fn create_worker_tool_server(
             screenshot_dir,
             &runtime_config,
             blocked_signal,
+            Some(agent_id.clone()),
         );
     }
 
@@ -1139,6 +1140,7 @@ pub fn create_cortex_chat_tool_server(
             screenshot_dir,
             &runtime_config,
             None,
+            Some(agent_id.clone()),
         );
     }
 

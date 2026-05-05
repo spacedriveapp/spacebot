@@ -3739,7 +3739,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     // Collect tool secret names so the worker template can list available credentials.
     let secrets_guard = deps.runtime_config.secrets.load();
     let tool_secret_names = match (*secrets_guard).as_ref() {
-        Some(store) => store.tool_secret_names(),
+        Some(store) => store.tool_secret_names(&deps.agent_id),
         None => Vec::new(),
     };
 
@@ -3892,6 +3892,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     );
 
     let task_store = deps.task_store.clone();
+    let agent_id_typed = deps.agent_id.clone();
     let agent_id = deps.agent_id.to_string();
     let event_tx = deps.event_tx.clone();
     let logger = logger.clone();
@@ -3907,7 +3908,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         // before persisting, logging, or emitting events.
         let scrub = |text: String| -> String {
             let scrubbed = if let Some(store) = secrets_snapshot.as_ref() {
-                crate::secrets::scrub::scrub_with_store(&text, store)
+                crate::secrets::scrub::scrub_with_store(&text, store, &agent_id_typed)
             } else {
                 text
             };
