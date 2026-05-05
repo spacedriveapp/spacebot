@@ -47,6 +47,78 @@ const TRANSIENT_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::fro
 /// without completing the task.
 const MAX_SEGMENTS: usize = 10;
 
+/// Default wall-clock budget for a worker run when no agent override is set.
+pub const DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS: u64 = 1800;
+
+/// Structured outcome of a worker's `run()` call.
+///
+/// Replaces the prior `Result<String>` return so callers can distinguish a
+/// clean success from a partial (max-segments) exit, a wall-clock timeout,
+/// a tool-driven block (captcha / login wall — phase 4), a cancellation, or
+/// a hard failure. All variants carry enough payload that the caller can
+/// emit a `ProcessEvent::WorkerComplete` without losing context.
+#[derive(Debug, Clone)]
+pub enum WorkerOutcome {
+    /// Worker completed and produced a final assistant response.
+    Success { result: String },
+    /// Worker hit the segment ceiling (`MAX_SEGMENTS`) before producing a
+    /// terminal response. `result` is the last assistant text or a synthetic
+    /// "max segments reached" marker.
+    Partial { result: String, segments_run: usize },
+    /// Worker was cancelled (LLM `PromptCancelled`, manual cancel, etc.).
+    Cancelled { reason: String },
+    /// Worker exceeded the wall-clock timeout. `segments_run` reflects how
+    /// many segments completed before the timeout fired.
+    Timeout {
+        elapsed_secs: u64,
+        segments_run: usize,
+    },
+    /// Worker failed for any other reason (LLM error, transient retries
+    /// exhausted, context overflow exhausted, empty result without outcome).
+    Failed { reason: String },
+}
+
+impl WorkerOutcome {
+    /// Render the outcome as text suitable for relay to a channel.
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Success { result } => result,
+            Self::Partial {
+                result,
+                segments_run,
+            } => format!(
+                "{result}\n\n(reached max segments after {segments_run} attempts — partial result)"
+            ),
+            Self::Cancelled { reason } => format!("Worker cancelled: {reason}"),
+            Self::Timeout {
+                elapsed_secs,
+                segments_run,
+            } => format!(
+                "Worker exceeded {elapsed_secs}s wall-clock timeout after {segments_run} segments."
+            ),
+            Self::Failed { reason } => format!("Worker failed: {reason}"),
+        }
+    }
+
+    /// Whether the outcome should be classified as a successful completion
+    /// for downstream notification / task-state purposes. `Partial` counts as
+    /// success — the worker did real work, just hit a ceiling.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. } | Self::Partial { .. })
+    }
+
+    /// Short stable kind tag for telemetry / event payloads.
+    pub fn kind_tag(&self) -> &'static str {
+        match self {
+            Self::Success { .. } => "success",
+            Self::Partial { .. } => "partial",
+            Self::Cancelled { .. } => "cancelled",
+            Self::Timeout { .. } => "timeout",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
 /// Worker state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -97,6 +169,16 @@ pub struct Worker {
     pub wiki_write: bool,
     /// Model override from conversation settings (per-process or blanket).
     pub model_override: Option<String>,
+    /// Wall-clock budget for the entire `run()` invocation. Distinct from
+    /// the supervisor's `CortexConfig.worker_timeout_secs` (which is an
+    /// idle-kill bound measured from `last_activity_at`). Resolution chain
+    /// at construction: agent `CortexConfig.worker_wall_clock_timeout_secs`
+    /// → `DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS`.
+    pub worker_wall_clock_timeout_secs: u64,
+    /// Shared segment counter so the outer timeout wrapper can report
+    /// progress in `WorkerOutcome::Timeout` after the inner future is
+    /// cancelled.
+    pub segments_run: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Worker {
@@ -128,6 +210,12 @@ impl Worker {
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (inject_tx, inject_rx) = mpsc::channel(8);
 
+        let worker_wall_clock_timeout_secs = deps
+            .runtime_config
+            .cortex
+            .load()
+            .worker_wall_clock_timeout_secs;
+
         (
             Self {
                 id,
@@ -153,6 +241,8 @@ impl Worker {
                 worker_memory_mode,
                 wiki_write,
                 model_override,
+                worker_wall_clock_timeout_secs,
+                segments_run: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             },
             inject_tx,
         )
@@ -316,13 +406,47 @@ impl Worker {
         Ok(())
     }
 
+    /// Run the worker with the configured wall-clock budget.
+    ///
+    /// Wraps `run_inner` in `tokio::time::timeout`. On expiry the inner
+    /// future is dropped (cancelled mid-step) and we return
+    /// `WorkerOutcome::Timeout`, reading the segment count from the shared
+    /// atomic so the caller knows how far the worker got.
+    pub async fn run(self) -> Result<WorkerOutcome> {
+        let timeout_secs = self.worker_wall_clock_timeout_secs;
+        let segments_tracker = self.segments_run.clone();
+        let worker_id = self.id;
+        let agent_id = self.deps.agent_id.clone();
+
+        let inner_fut = self.run_inner();
+        tokio::pin!(inner_fut);
+
+        tokio::select! {
+            outcome = &mut inner_fut => outcome,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                let segments = segments_tracker.load(std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    %worker_id,
+                    %agent_id,
+                    timeout_secs,
+                    segments_run = segments,
+                    "worker exceeded wall-clock timeout"
+                );
+                Ok(WorkerOutcome::Timeout {
+                    elapsed_secs: timeout_secs,
+                    segments_run: segments,
+                })
+            }
+        }
+    }
+
     /// Run the worker's LLM agent loop until completion.
     ///
     /// Runs in segments of 25 turns. After each segment, checks context usage
     /// and compacts if the worker is approaching the context window limit.
     /// This prevents long-running workers from dying mid-task due to context
     /// exhaustion.
-    pub async fn run(mut self) -> Result<String> {
+    async fn run_inner(mut self) -> Result<WorkerOutcome> {
         // Wire the injection receiver into the hook so `on_completion_call`
         // can drain pending injected context before each LLM turn.
         if let Some(inject_rx) = self.inject_rx.take() {
@@ -404,9 +528,10 @@ impl Worker {
         // Run the initial task in segments with compaction checkpoints
         // (skipped entirely for resumed workers).
         let mut prompt = self.task.clone();
-        let mut segments_run = 0;
+        let mut segments_run: usize = 0;
         let mut overflow_retries = 0;
         let mut transient_retries = 0;
+        let mut hit_max_segments = false;
 
         let mut result = if resuming {
             // For resumed workers, synthesize a "result" from the task
@@ -415,6 +540,8 @@ impl Worker {
         } else {
             loop {
                 segments_run += 1;
+                self.segments_run
+                    .store(segments_run, std::sync::atomic::Ordering::Relaxed);
 
                 // Pre-prompt maintenance: dedup stale tool results and check
                 // context usage *before* each LLM call, not just at segment
@@ -446,6 +573,7 @@ impl Worker {
                                 "worker hit max segments, returning partial result"
                             );
                             self.hook.send_status("done (max segments)");
+                            hit_max_segments = true;
                             break crate::agent::extract_last_assistant_text(&history)
                                 .unwrap_or_else(|| {
                                     "Worker reached maximum segments without a final response."
@@ -475,17 +603,20 @@ impl Worker {
                         self.write_failure_log(&history, &format!("cancelled: {reason}"));
                         self.persist_transcript(&compacted_history, &history).await;
                         tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
-                        return Err(crate::error::AgentError::Cancelled { reason }.into());
+                        return Ok(WorkerOutcome::Cancelled { reason });
                     }
                     Err(error) if is_context_overflow_error(&error.to_string()) => {
                         overflow_retries += 1;
                         if overflow_retries > MAX_OVERFLOW_RETRIES {
                             self.state = WorkerState::Failed;
                             self.hook.send_status("failed");
-                            self.write_failure_log(&history, &format!("context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
+                            let reason = format!(
+                                "context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"
+                            );
+                            self.write_failure_log(&history, &reason);
                             self.persist_transcript(&compacted_history, &history).await;
                             tracing::error!(worker_id = %self.id, %error, "worker context overflow unrecoverable");
-                            return Err(crate::error::AgentError::Other(error.into()).into());
+                            return Ok(WorkerOutcome::Failed { reason });
                         }
 
                         tracing::warn!(
@@ -508,9 +639,10 @@ impl Worker {
                         if transient_retries > MAX_TRANSIENT_RETRIES {
                             self.state = WorkerState::Failed;
                             self.hook.send_status("failed");
-                            self.write_failure_log(&history, &format!(
+                            let reason = format!(
                                 "transient provider error after {MAX_TRANSIENT_RETRIES} retries: {error}"
-                            ));
+                            );
+                            self.write_failure_log(&history, &reason);
                             self.persist_transcript(&compacted_history, &history).await;
                             tracing::error!(
                                 worker_id = %self.id,
@@ -518,7 +650,7 @@ impl Worker {
                                 %error,
                                 "worker transient error retries exhausted"
                             );
-                            return Err(crate::error::AgentError::Other(error.into()).into());
+                            return Ok(WorkerOutcome::Failed { reason });
                         }
 
                         let delay =
@@ -543,10 +675,11 @@ impl Worker {
                     Err(error) => {
                         self.state = WorkerState::Failed;
                         self.hook.send_status("failed");
-                        self.write_failure_log(&history, &error.to_string());
+                        let reason = error.to_string();
+                        self.write_failure_log(&history, &reason);
                         self.persist_transcript(&compacted_history, &history).await;
                         tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
-                        return Err(crate::error::AgentError::Other(error.into()).into());
+                        return Ok(WorkerOutcome::Failed { reason });
                     }
                 }
             }
@@ -570,13 +703,12 @@ impl Worker {
             } else {
                 self.state = WorkerState::Failed;
                 self.hook.send_status("failed (empty result)");
+                let reason = "worker produced empty result without signaling a meaningful outcome"
+                    .to_string();
                 self.write_failure_log(&history, "worker produced empty result — likely a reasoning-only exit that bypassed the outcome gate");
                 self.persist_transcript(&compacted_history, &history).await;
                 tracing::error!(worker_id = %self.id, "worker produced empty result, treating as failure");
-                return Err(crate::error::AgentError::Other(anyhow::anyhow!(
-                    "worker produced empty result without signaling a meaningful outcome"
-                ))
-                .into());
+                return Ok(WorkerOutcome::Failed { reason });
             }
         }
 
@@ -727,7 +859,9 @@ impl Worker {
         if let Some(failure_reason) = follow_up_failure {
             self.persist_transcript(&compacted_history, &history).await;
             tracing::error!(worker_id = %self.id, reason = %failure_reason, "worker failed");
-            return Err(crate::error::AgentError::Other(anyhow::anyhow!(failure_reason)).into());
+            return Ok(WorkerOutcome::Failed {
+                reason: failure_reason,
+            });
         }
 
         self.state = WorkerState::Done;
@@ -757,7 +891,14 @@ impl Worker {
         }
 
         tracing::info!(worker_id = %self.id, "worker completed");
-        Ok(result)
+        if hit_max_segments {
+            Ok(WorkerOutcome::Partial {
+                result,
+                segments_run,
+            })
+        } else {
+            Ok(WorkerOutcome::Success { result })
+        }
     }
 
     /// Check context usage and compact history if approaching the limit.

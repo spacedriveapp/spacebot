@@ -364,6 +364,7 @@ pub(super) struct TomlCompactionConfig {
 pub(super) struct TomlCortexConfig {
     pub(super) tick_interval_secs: Option<u64>,
     pub(super) worker_timeout_secs: Option<u64>,
+    pub(super) worker_wall_clock_timeout_secs: Option<u64>,
     pub(super) branch_timeout_secs: Option<u64>,
     pub(super) detached_worker_timeout_retry_limit: Option<u8>,
     pub(super) supervisor_kill_budget_per_tick: Option<usize>,

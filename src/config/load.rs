@@ -195,6 +195,9 @@ impl CortexConfig {
             worker_timeout_secs: overrides
                 .worker_timeout_secs
                 .unwrap_or(defaults.worker_timeout_secs),
+            worker_wall_clock_timeout_secs: overrides
+                .worker_wall_clock_timeout_secs
+                .unwrap_or(defaults.worker_wall_clock_timeout_secs),
             branch_timeout_secs: overrides
                 .branch_timeout_secs
                 .unwrap_or(defaults.branch_timeout_secs),

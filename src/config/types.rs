@@ -1040,7 +1040,13 @@ impl Default for OpenCodeConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct CortexConfig {
     pub tick_interval_secs: u64,
+    /// Supervisor idle-kill bound: max seconds since `last_activity_at`
+    /// before the cortex supervisor terminates a stuck worker.
     pub worker_timeout_secs: u64,
+    /// Wall-clock budget for an entire `Worker::run` invocation. Distinct
+    /// from `worker_timeout_secs` (which is idle-shaped). Catches the
+    /// slow-drift case where a worker stays "active" but never completes.
+    pub worker_wall_clock_timeout_secs: u64,
     pub branch_timeout_secs: u64,
     pub detached_worker_timeout_retry_limit: u8,
     pub supervisor_kill_budget_per_tick: usize,
@@ -1080,6 +1086,8 @@ impl Default for CortexConfig {
         Self {
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
+            worker_wall_clock_timeout_secs:
+                crate::agent::worker::DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS,
             branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,

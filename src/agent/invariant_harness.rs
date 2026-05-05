@@ -1,8 +1,9 @@
 //! Invariant-driven fault harness for agent loop regression tests.
 
 use super::channel_dispatch::{
-    WorkerCompletionError, map_worker_completion_result, reserve_worker_slot_local,
+    WorkerCompletionError, map_worker_completion, reserve_worker_slot_local,
 };
+use super::worker::WorkerOutcome;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -97,16 +98,15 @@ impl HarnessState {
                 }
             }
             HarnessFault::WorkerFailure => {
-                let (_text, _notify, success) = map_worker_completion_result(Err(
-                    WorkerCompletionError::failed("worker failed"),
-                ));
+                let (_text, _notify, success) =
+                    map_worker_completion(Err(WorkerCompletionError::failed("worker failed")));
                 if success {
                     self.worker_false_success = true;
                 }
             }
             HarnessFault::WorkerCancelled => {
                 let (text, _notify, success) =
-                    map_worker_completion_result(Err(WorkerCompletionError::Cancelled {
+                    map_worker_completion(Err(WorkerCompletionError::Cancelled {
                         reason: "user requested".to_string(),
                     }));
                 if success || !text.starts_with("Worker cancelled:") {
@@ -114,7 +114,9 @@ impl HarnessState {
                 }
             }
             HarnessFault::WorkerSuccess => {
-                let (_text, _notify, success) = map_worker_completion_result(Ok("ok".to_string()));
+                let (_text, _notify, success) = map_worker_completion(Ok(WorkerOutcome::Success {
+                    result: "ok".to_string(),
+                }));
                 if !success {
                     self.worker_false_success = true;
                 }
