@@ -1189,7 +1189,7 @@ where
             // carry bearer tokens / session ids. The blocked URL flows
             // into WorkerComplete.result and channel logs, so an
             // un-scrubbed URL is a credential-leak path.
-            let url = url.map(|u| scrub(u));
+            let url = url.map(scrub);
             if let Some(snippet) = evidence.html_snippet.take() {
                 evidence.html_snippet = Some(scrub(snippet));
             }

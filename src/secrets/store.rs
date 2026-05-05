@@ -144,16 +144,12 @@ fn encode_key(scope: &SecretScope, name: &str) -> String {
 /// Inverse of `encode_key`. Returns `None` for legacy unprefixed keys (so
 /// the migration path can detect them) and for malformed keys.
 fn decode_key(key: &str) -> Option<(SecretScope, String)> {
-    let mut parts = key.splitn(2, '\x00');
-    let tag = parts.next()?;
-    let rest = parts.next()?;
+    let (tag, rest) = key.split_once('\x00')?;
     match tag {
         "s" => Some((SecretScope::InstanceShared, rest.to_string())),
         "a" => {
-            let mut sub = rest.splitn(2, '\x00');
-            let id = sub.next()?.to_string();
-            let name = sub.next()?.to_string();
-            Some((SecretScope::Agent { id }, name))
+            let (id, name) = rest.split_once('\x00')?;
+            Some((SecretScope::Agent { id: id.to_string() }, name.to_string()))
         }
         _ => None,
     }
