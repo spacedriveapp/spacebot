@@ -15,7 +15,7 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
+    MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
     ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
     SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
     TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
@@ -189,6 +189,7 @@ impl CortexConfig {
         }
 
         let config = CortexConfig {
+            mode: overrides.mode.unwrap_or(defaults.mode),
             tick_interval_secs: overrides
                 .tick_interval_secs
                 .unwrap_or(defaults.tick_interval_secs),
@@ -983,6 +984,7 @@ impl Config {
                     .unwrap_or_else(|_| "spacebot".into()),
                 sample_rate: 1.0,
             },
+            memory_janitor: MemoryJanitorConfig::default(),
         })
     }
 
@@ -2634,6 +2636,17 @@ impl Config {
             }
         }
 
+        let memory_janitor = MemoryJanitorConfig {
+            enabled: toml
+                .memory_janitor
+                .enabled
+                .unwrap_or_else(|| MemoryJanitorConfig::default().enabled),
+            interval_secs: toml
+                .memory_janitor
+                .interval_secs
+                .unwrap_or_else(|| MemoryJanitorConfig::default().interval_secs),
+        };
+
         Ok(Config {
             instance_dir,
             llm,
@@ -2647,6 +2660,7 @@ impl Config {
             api,
             metrics,
             telemetry,
+            memory_janitor,
         })
     }
 }

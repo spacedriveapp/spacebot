@@ -870,13 +870,17 @@ impl Channel {
             let has_links =
                 !crate::links::links_for_agent(&deps.links.load(), &deps.agent_id).is_empty();
             if has_links {
-                Some(crate::tools::SendAgentMessageTool::new(
+                let mut tool = crate::tools::SendAgentMessageTool::new(
                     deps.agent_id.clone(),
                     deps.links.clone(),
                     deps.agent_names.clone(),
                     deps.task_store.clone(),
                     ConversationLogger::new(deps.sqlite_pool.clone()),
-                ))
+                );
+                if let Some(wake_tx) = deps.wake_tx.clone() {
+                    tool = tool.with_wake_tx(wake_tx);
+                }
+                Some(tool)
             } else {
                 None
             }

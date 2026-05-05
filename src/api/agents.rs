@@ -4,7 +4,7 @@ use crate::agent::cortex::CortexLogger;
 use crate::conversation::channels::ChannelStore;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
@@ -396,6 +396,46 @@ pub(super) async fn get_warmup_status(
     Ok(Json(WarmupStatusResponse { statuses }))
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(super) struct WakeAgentResponse {
+    pub agent_id: String,
+    pub fired: bool,
+    pub message: String,
+}
+
+/// Manually wake a (typically dormant) agent.
+///
+/// Fires the same wake path that `send_agent_message`, cron, and other
+/// trigger sources use. Useful for debugging dormant deployments and
+/// recovering an agent stuck on a missed trigger.
+#[utoipa::path(
+    post,
+    path = "/agents/{agent_id}/wake",
+    params(("agent_id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 202, body = WakeAgentResponse),
+        (status = 503, description = "Wake manager not running"),
+    ),
+    tag = "agents",
+)]
+pub(super) async fn wake_agent(
+    State(state): State<Arc<ApiState>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<WakeAgentResponse>, StatusCode> {
+    let wake_tx_guard = state.wake_tx.load();
+    let Some(tx) = wake_tx_guard.as_ref().as_ref() else {
+        tracing::warn!(%agent_id, "wake requested but wake manager is not running");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let target: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
+    crate::agent::wake::fire_wake(tx, &target);
+    Ok(Json(WakeAgentResponse {
+        agent_id,
+        fired: true,
+        message: "wake delivered".to_string(),
+    }))
+}
+
 /// Trigger warmup for one agent or all agents.
 #[utoipa::path(
     post,
@@ -514,6 +554,7 @@ pub(super) async fn trigger_warmup(
                 working_memory,
                 api_state: None,
                 wiki_store: None,
+                wake_tx: None,
             };
             let mut logger = CortexLogger::new(sqlite_pool);
             if let Some(store) = notif_store_warmup {
@@ -949,6 +990,7 @@ pub async fn create_agent_internal(
         },
         api_state: Some(state.clone()),
         wiki_store: state.wiki_store.load().as_ref().clone(),
+        wake_tx: state.wake_tx.load().as_ref().as_ref().cloned(),
     };
 
     let event_rx = event_tx.subscribe();

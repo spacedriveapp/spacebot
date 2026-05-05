@@ -1402,6 +1402,12 @@ async fn run_cron_job(
         .unwrap_or(DEFAULT_CRON_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
 
+    // Wake the owning agent so dormant-mode cortex picks up any side-effect
+    // tasks the cron channel may surface. No-op for active-mode agents.
+    if let Some(tx) = context.deps.wake_tx.as_ref() {
+        crate::agent::wake::fire_wake(tx, &context.deps.agent_id);
+    }
+
     // Keep channel_tx alive — on timeout we send a "synthesize now" message
     // so the LLM gets a direct turn to compose the final reply.
 

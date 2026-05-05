@@ -59,6 +59,31 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+    /// Instance-wide memory janitor — required for dormant-mode agents
+    /// (their cortex tick never runs maintenance), additive on active-mode
+    /// agents.
+    pub memory_janitor: MemoryJanitorConfig,
+}
+
+/// Instance-wide memory maintenance scheduler.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryJanitorConfig {
+    /// When `true`, a single background task walks every registered agent
+    /// on `interval_secs` and runs `memory::maintenance::run_maintenance`
+    /// against its memory store. Disabled by default; enable when running
+    /// dormant-mode agents at scale.
+    pub enabled: bool,
+    /// Seconds between full sweeps. Default `86_400` (daily).
+    pub interval_secs: u64,
+}
+
+impl Default for MemoryJanitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 86_400,
+        }
+    }
 }
 
 impl Config {
@@ -1036,9 +1061,37 @@ impl Default for OpenCodeConfig {
     }
 }
 
+/// Whether the cortex runs its periodic loops or stays dormant until woken.
+///
+/// `Active` (default) is the historical behavior — the cortex spawns
+/// warmup, tick, association, and ready-task loops at agent startup.
+///
+/// `Dormant` is the agentic-backend deployment mode — the cortex skips
+/// all four loops and instead relies on external wake triggers
+/// (`send_agent_message` post-insert hook, cron fire, admin wake API).
+/// Required for deployments running thousands of mostly-idle agents on
+/// shared infrastructure where periodic LLM-backed bulletin generation
+/// would dominate cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CortexMode {
+    #[default]
+    Active,
+    Dormant,
+}
+
+impl CortexMode {
+    pub fn is_dormant(&self) -> bool {
+        matches!(self, Self::Dormant)
+    }
+}
+
 /// Cortex configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct CortexConfig {
+    /// Whether the cortex's periodic loops run. See `CortexMode` for the
+    /// active vs dormant trade-off.
+    pub mode: CortexMode,
     pub tick_interval_secs: u64,
     /// Supervisor idle-kill bound: max seconds since `last_activity_at`
     /// before the cortex supervisor terminates a stuck worker.
@@ -1088,6 +1141,7 @@ pub struct CortexConfig {
 impl Default for CortexConfig {
     fn default() -> Self {
         Self {
+            mode: CortexMode::Active,
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
             worker_wall_clock_timeout_secs:

@@ -464,6 +464,11 @@ pub struct AgentDeps {
     pub api_state: Option<Arc<api::ApiState>>,
     /// Instance-wide wiki store.
     pub wiki_store: Option<Arc<wiki::WikiStore>>,
+    /// Wake channel for dormant-mode dispatch. When set, tools / cron
+    /// fire wakes by sending a target `AgentId`; the wake manager looks
+    /// up the receiver and runs `cortex::wake_one` for it. `None` in
+    /// test contexts and during config preview where no manager runs.
+    pub wake_tx: Option<agent::wake::WakeSender>,
 }
 
 impl AgentDeps {

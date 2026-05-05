@@ -65,6 +65,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(agents::reconnect_agent_mcp))
         .routes(routes!(agents::get_warmup_status))
         .routes(routes!(agents::trigger_warmup))
+        .routes(routes!(agents::wake_agent))
         .routes(routes!(agents::agent_overview))
         .routes(routes!(agents::get_agent_profile))
         .routes(routes!(

@@ -3691,6 +3691,20 @@ pub fn spawn_association_loop(
     })
 }
 
+/// One-shot wake for dormant agents.
+///
+/// Triggered by `agent::wake::WakeManager` when an external event delivers
+/// a wake (cross-agent message, cron fire, admin API). Picks up at most
+/// one ready task synchronously, then returns. Idempotent and safe to
+/// call on active-mode agents — the spawn_ready_task_loop will simply
+/// race with us, which is fine because `task_store.claim_next_ready` is
+/// transactional.
+pub async fn wake_one(deps: &AgentDeps) -> anyhow::Result<()> {
+    tracing::debug!(agent_id = %deps.agent_id, "cortex wake fired");
+    let logger = CortexLogger::new(deps.sqlite_pool.clone());
+    pickup_one_ready_task(deps, &logger).await
+}
+
 /// Spawn a background loop that picks up ready tasks when idle.
 pub fn spawn_ready_task_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

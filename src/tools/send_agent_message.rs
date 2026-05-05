@@ -41,6 +41,10 @@ pub struct SendAgentMessageTool {
     /// Set per-turn so task completion notifications route back to the right place.
     originating_channel: Option<String>,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
+    /// Wake dispatcher for the receiving agent. Fired after task insert so
+    /// dormant-mode receivers wake up immediately instead of waiting for a
+    /// (non-existent) tick. No-op when None or when the receiver is active.
+    wake_tx: Option<crate::agent::wake::WakeSender>,
 }
 
 impl std::fmt::Debug for SendAgentMessageTool {
@@ -68,7 +72,15 @@ impl SendAgentMessageTool {
             skip_flag: None,
             originating_channel: None,
             working_memory: None,
+            wake_tx: None,
         }
+    }
+
+    /// Attach the instance-wide wake dispatcher so dormant receivers get
+    /// woken immediately on delegation.
+    pub fn with_wake_tx(mut self, tx: crate::agent::wake::WakeSender) -> Self {
+        self.wake_tx = Some(tx);
+        self
     }
 
     /// Set the per-turn skip flag so the channel turn ends after delegation.
@@ -245,6 +257,14 @@ impl Tool for SendAgentMessageTool {
             })?;
 
         let task_number = task.task_number;
+
+        // Wake the receiving agent. No-op when the receiver is in active mode
+        // (its ready-task loop will pick the task up on its own); critical when
+        // the receiver is dormant (no loop runs).
+        if let Some(tx) = self.wake_tx.as_ref() {
+            let receiver: crate::AgentId = std::sync::Arc::from(receiving_agent_id.as_str());
+            crate::agent::wake::fire_wake(tx, &receiver);
+        }
 
         // Log delegation record in the link channel (system message).
         let sender_display = self

@@ -12,9 +12,11 @@ pub mod cortex_chat;
 pub mod ingestion;
 #[cfg(test)]
 mod invariant_harness;
+pub mod maintenance;
 pub mod process_control;
 pub mod prompt_snapshot;
 pub mod status;
+pub mod wake;
 pub mod worker;
 
 pub(crate) fn panic_payload_to_string(panic_payload: &(dyn std::any::Any + Send)) -> String {
