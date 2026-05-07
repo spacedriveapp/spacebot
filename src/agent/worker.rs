@@ -1134,9 +1134,29 @@ impl Worker {
         let estimated = estimate_history_tokens(history);
         let usage = estimated as f32 / context_window as f32;
 
-        let remove_count = ((total as f32 * fraction) as usize)
+        let mut remove_count = ((total as f32 * fraction) as usize)
             .max(1)
             .min(total.saturating_sub(2));
+
+        // Advance the boundary past User messages that contain ToolResult blocks.
+        // If we stop right after an Assistant message with ToolCalls, the next
+        // User message holds the corresponding ToolResults. Leaving those orphaned
+        // causes the Anthropic API to reject the request with:
+        //   "unexpected tool_use_id found in tool_result blocks"
+        while remove_count < total.saturating_sub(2) {
+            let has_tool_result = matches!(
+                history.get(remove_count),
+                Some(rig::message::Message::User { content })
+                    if content.iter().any(|item|
+                        matches!(item, rig::message::UserContent::ToolResult(_)))
+            );
+            if has_tool_result {
+                remove_count += 1;
+            } else {
+                break;
+            }
+        }
+
         let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
         compacted_history.extend(removed.iter().cloned());
 
