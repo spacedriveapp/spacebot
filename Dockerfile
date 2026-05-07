@@ -59,6 +59,7 @@ RUN cd interface && bun run build
 COPY build.rs ./
 COPY prompts/ prompts/
 COPY presets/ presets/
+COPY skills/ skills/
 COPY migrations/ migrations/
 COPY docs/ docs/
 COPY AGENTS.md README.md CHANGELOG.md ./
