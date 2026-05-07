@@ -9,23 +9,23 @@
 @import "tailwindcss";
 
 /* SpaceUI design tokens */
-@import "@spacedrive/tokens/src/css/theme.css";
-@import "@spacedrive/tokens/src/css/base.css";
+@import "@spacedrive/tokens/theme";
+@import "@spacedrive/tokens/css";
 
 /* Themes */
-@import "@spacedrive/tokens/src/css/themes/light.css";
-@import "@spacedrive/tokens/src/css/themes/dark.css";
-@import "@spacedrive/tokens/src/css/themes/midnight.css";
-@import "@spacedrive/tokens/src/css/themes/noir.css";
-@import "@spacedrive/tokens/src/css/themes/slate.css";
-@import "@spacedrive/tokens/src/css/themes/nord.css";
-@import "@spacedrive/tokens/src/css/themes/mocha.css";
+@import "@spacedrive/tokens/css/themes/light";
+@import "@spacedrive/tokens/css/themes/dark";
+@import "@spacedrive/tokens/css/themes/midnight";
+@import "@spacedrive/tokens/css/themes/noir";
+@import "@spacedrive/tokens/css/themes/slate";
+@import "@spacedrive/tokens/css/themes/nord";
+@import "@spacedrive/tokens/css/themes/mocha";
 
-/* Tell Tailwind to scan SpaceUI component source for classes */
-@source "../../../spaceui/packages/primitives/src";
-@source "../../../spaceui/packages/ai/src";
-@source "../../../spaceui/packages/forms/src";
-@source "../../../spaceui/packages/explorer/src";
+/* Tell Tailwind to scan SpaceUI component output for classes */
+@source "../node_modules/@spacedrive/primitives";
+@source "../node_modules/@spacedrive/ai";
+@source "../node_modules/@spacedrive/forms";
+@source "../node_modules/@spacedrive/explorer";
 
 /* Override default font to IBM Plex Sans */
 @theme {
