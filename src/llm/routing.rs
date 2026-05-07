@@ -36,7 +36,7 @@ pub struct RoutingConfig {
 
 impl Default for RoutingConfig {
     fn default() -> Self {
-        Self::for_model("anthropic/claude-sonnet-4".into())
+        Self::for_model("anthropic/claude-sonnet-4-20250514".into())
     }
 }
 
@@ -164,7 +164,7 @@ pub fn is_context_overflow_error(error_message: &str) -> bool {
 /// each provider sane defaults so things work out of the box.
 pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
     match provider {
-        "anthropic" => RoutingConfig::for_model("anthropic/claude-sonnet-4".into()),
+        "anthropic" => RoutingConfig::for_model("anthropic/claude-sonnet-4-20250514".into()),
         "openrouter" => {
             let channel: String = "openrouter/anthropic/claude-sonnet-4-20250514".into();
             let worker: String = "openrouter/anthropic/claude-haiku-4.5-20250514".into();
