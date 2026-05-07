@@ -97,8 +97,11 @@ pub fn build_anthropic_request(
         body["output_config"] = serde_json::json!({ "effort": effort });
     }
 
+    // Override the global 120s client timeout — large completions with
+    // extended thinking can easily take 5–10 minutes to generate.
     let builder = http_client
         .post(&url)
+        .timeout(std::time::Duration::from_secs(10 * 60))
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
 
