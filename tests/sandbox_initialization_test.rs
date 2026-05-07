@@ -16,6 +16,7 @@ async fn test_sandbox_creation_in_initialize() {
         workspace.path().to_path_buf(),
         instance_dir.path(),
         data_dir.path().to_path_buf(),
+        Arc::from("test-agent"),
     )
     .await;
 

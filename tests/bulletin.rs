@@ -105,6 +105,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
             agent_config.workspace.clone(),
             &config.instance_dir,
             agent_config.data_dir.clone(),
+            agent_id.clone(),
         )
         .await,
     );
@@ -137,6 +138,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         ),
         api_state: None,
         wiki_store: None,
+        wake_tx: None,
     })
 }
 
