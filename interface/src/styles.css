@@ -7,6 +7,7 @@
 @layer opencode-portals;
 
 @import "tailwindcss";
+@plugin "tailwindcss-radix";
 
 /* SpaceUI design tokens */
 @import "@spacedrive/tokens/theme";
