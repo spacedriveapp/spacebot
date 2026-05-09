@@ -1,4 +1,5 @@
 import {useState, useEffect, useRef} from "react";
+import {useTheme} from "../hooks/useTheme";
 
 /** RFC 4648 base64url encoding (no padding), matching OpenCode's directory encoding. */
 export function base64UrlEncode(value: string): string {
@@ -14,10 +15,15 @@ export function base64UrlEncode(value: string): string {
 let embedAssetsPromise: Promise<{
 	mountOpenCode: (
 		el: HTMLElement,
-		config: {serverUrl: string; initialRoute?: string},
+		config: {
+			serverUrl: string;
+			initialRoute?: string;
+			colorScheme?: "light" | "dark" | "system";
+		},
 	) => {
 		dispose: () => void;
 		navigate: (route: string) => void;
+		setColorScheme?: (scheme: "light" | "dark" | "system") => void;
 	};
 	cssText: string;
 }> | null = null;
@@ -84,7 +90,59 @@ function loadEmbedAssets() {
  * Multiple OpenCodeEmbed instances can coexist (e.g. orchestration view);
  * the portal CSS is only removed when the last instance unmounts.
  */
+/**
+ * SpaceUI theme tokens (CSS custom properties) that need to cross the Shadow
+ * DOM boundary so the embedded OpenCode SPA can theme its prompt-input,
+ * buttons, etc. against the active Spacebot theme. Sourced from
+ * spaceui/packages/tokens/src/css/themes/<theme>.css — keep in sync when
+ * spaceui adds/removes tokens.
+ */
+const FORWARDED_THEME_TOKENS = [
+	"--color-accent", "--color-accent-faint", "--color-accent-deep",
+	"--color-ink", "--color-ink-dull", "--color-ink-faint",
+	"--color-sidebar", "--color-sidebar-box", "--color-sidebar-line",
+	"--color-sidebar-ink", "--color-sidebar-ink-dull", "--color-sidebar-ink-faint",
+	"--color-sidebar-divider", "--color-sidebar-button", "--color-sidebar-selected",
+	"--color-sidebar-shade",
+	"--color-app", "--color-app-box", "--color-app-dark-box", "--color-app-darker-box",
+	"--color-app-light-box", "--color-app-overlay", "--color-app-input", "--color-app-focus",
+	"--color-app-line", "--color-app-divider", "--color-app-button", "--color-app-hover",
+	"--color-app-selected", "--color-app-selected-item", "--color-app-active",
+	"--color-app-shade", "--color-app-frame", "--color-app-slider",
+	"--color-app-explorer-scrollbar",
+	"--color-menu", "--color-menu-line", "--color-menu-ink", "--color-menu-faint",
+	"--color-menu-hover", "--color-menu-selected", "--color-menu-shade",
+];
+
+/**
+ * Read the current values of FORWARDED_THEME_TOKENS from the document root
+ * and inject them as `:host { --foo: bar; ... }` into the given style
+ * element. This makes the tokens available inside the Shadow DOM so the
+ * OpenCode embed's CSS can resolve var(--color-app-box) etc. against the
+ * active Spacebot theme.
+ */
+function forwardThemeTokens(styleEl: HTMLStyleElement) {
+	const styles = getComputedStyle(document.documentElement);
+	const declarations = FORWARDED_THEME_TOKENS
+		.map((name) => {
+			const value = styles.getPropertyValue(name).trim();
+			return value ? `${name}: ${value};` : "";
+		})
+		.filter(Boolean)
+		.join("\n\t");
+	styleEl.textContent = `:host {\n\t${declarations}\n}`;
+}
+
 let portalCssRefCount = 0;
+
+/**
+ * Map a Spacebot theme to OpenCode's color scheme. Vanilla is the only
+ * dedicated light theme in the Spacebot palette today; everything else is
+ * a dark variant. If a future theme adds light variants, extend this list.
+ */
+function colorSchemeForTheme(theme: string): "light" | "dark" {
+	return theme === "vanilla" ? "light" : "dark";
+}
 
 export function OpenCodeEmbed({
 	port,
@@ -101,7 +159,12 @@ export function OpenCodeEmbed({
 	const handleRef = useRef<{
 		dispose: () => void;
 		navigate: (route: string) => void;
+		setColorScheme?: (scheme: "light" | "dark" | "system") => void;
 	} | null>(null);
+	// Style element inside the shadow root that mirrors :root's SpaceUI
+	// theme tokens. Refresh on every theme change via the effect below.
+	const themeForwardRef = useRef<HTMLStyleElement | null>(null);
+	const {theme} = useTheme();
 
 	// Route through the Spacebot proxy so it works for hosted/Tailscale
 	// users, not just local dev. The proxy handles forwarding to the
@@ -256,6 +319,15 @@ export function OpenCodeEmbed({
 				// Clear any previous content
 				shadow.innerHTML = "";
 
+				// Forward SpaceUI theme tokens into the shadow as :host CSS
+				// custom properties so OpenCode's embedded styles + our overrides
+				// can resolve var(--color-app-box) etc. against the active theme.
+				const themeForward = document.createElement("style");
+				themeForward.id = "spacebot-theme-forward";
+				shadow.appendChild(themeForward);
+				forwardThemeTokens(themeForward);
+				themeForwardRef.current = themeForward;
+
 				// Inject the OpenCode CSS into the shadow root
 				const style = document.createElement("style");
 				style.textContent = cssText;
@@ -319,6 +391,7 @@ export function OpenCodeEmbed({
 				const handle = mountOpenCode(mountDiv, {
 					serverUrl,
 					initialRoute: initialRouteRef.current,
+					colorScheme: colorSchemeForTheme(theme),
 				});
 
 				handleRef.current = handle;
@@ -353,6 +426,17 @@ export function OpenCodeEmbed({
 			}
 		};
 	}, [serverUrl]);
+
+	// Re-forward SpaceUI theme tokens AND update OpenCode's color scheme
+	// whenever the active Spacebot theme changes — both without remounting,
+	// preserving session state.
+	useEffect(() => {
+		const styleEl = themeForwardRef.current;
+		if (styleEl) {
+			forwardThemeTokens(styleEl);
+		}
+		handleRef.current?.setColorScheme?.(colorSchemeForTheme(theme));
+	}, [theme]);
 
 	// Navigate the embedded app when the route changes (directory discovered
 	// via SSE probe, or props changed). This avoids remounting the entire
