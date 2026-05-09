@@ -257,14 +257,18 @@ No other agent harness is building this. It's a category.
 ### Build and Run
 
 ```bash
-git clone https://github.com/spacedriveapp/spacebot
+git clone https://github.com/spacedriveapp/spacebot.git
 cd spacebot
 
-# Optional: build the OpenCode embedded UI (requires Node 22+ and bun)
-# Without this, OpenCode workers still work — the Workers tab shows a transcript view instead.
-# ./scripts/build-opencode-embed.sh
+# Build the web UI (React + Vite, embedded into the binary)
+cd interface && bun install && npm i && bun build && cd ..
 
-cargo build --release
+# Optional: build the OpenCode embed (live coding UI in the Workers tab)
+# Requires Node 22+ (use fnm: fnm install v24.14.0 && fnm use v24.14.0)
+./scripts/build-opencode-embed.sh
+
+# Install the binary
+cargo install --path .
 ```
 
 ### Run
