@@ -21,6 +21,11 @@
 @import "@spacedrive/tokens/css/themes/nord";
 @import "@spacedrive/tokens/css/themes/mocha";
 
+/* Local theme additions (Spacebot-specific; not yet upstream in @spacedrive/tokens) */
+@import "./themes/solarized-light.css";
+@import "./themes/solarized-dark.css";
+@import "./themes/catppuccin-latte.css";
+
 /* Tell Tailwind to scan SpaceUI component output for classes */
 @source "../node_modules/@spacedrive/primitives/dist";
 @source "../node_modules/@spacedrive/ai/dist";

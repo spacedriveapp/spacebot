@@ -1,0 +1,46 @@
+/* Solarized Light — Ethan Schoonover's palette translated into SpaceUI tokens.
+   Background: base3 (#fdf6e3). Body text: base01 (#586e75). Accent: blue. */
+.solarized-light-theme {
+	--color-accent: hsl(205, 69%, 49%);          /* solarized blue */
+	--color-accent-faint: hsl(205, 69%, 60%);
+	--color-accent-deep: hsl(205, 69%, 40%);
+	--color-ink: hsl(194, 14%, 40%);             /* base01 */
+	--color-ink-dull: hsl(194, 14%, 50%);        /* base00 */
+	--color-ink-faint: hsl(180, 7%, 60%);        /* base1 */
+	--color-sidebar: hsl(46, 42%, 88%);          /* base2 */
+	--color-sidebar-box: hsl(44, 87%, 94%);      /* base3 */
+	--color-sidebar-line: hsl(46, 30%, 78%);
+	--color-sidebar-ink: hsl(194, 14%, 40%);
+	--color-sidebar-ink-dull: hsl(194, 14%, 50%);
+	--color-sidebar-ink-faint: hsl(180, 7%, 60%);
+	--color-sidebar-divider: hsl(46, 42%, 85%);
+	--color-sidebar-button: hsl(44, 87%, 94%);
+	--color-sidebar-selected: hsl(46, 42%, 80%);
+	--color-sidebar-shade: hsl(46, 42%, 92%);
+	--color-app: hsl(44, 87%, 94%);              /* base3 */
+	--color-app-box: hsl(44, 50%, 96%);
+	--color-app-dark-box: hsl(46, 42%, 88%);     /* base2 */
+	--color-app-darker-box: hsl(46, 42%, 84%);
+	--color-app-light-box: hsl(44, 87%, 97%);
+	--color-app-overlay: hsl(44, 50%, 96%);
+	--color-app-input: hsl(44, 87%, 97%);
+	--color-app-focus: hsl(44, 87%, 94%);
+	--color-app-line: hsl(46, 30%, 80%);
+	--color-app-divider: hsl(46, 42%, 70%);
+	--color-app-button: hsl(44, 87%, 97%);
+	--color-app-hover: hsl(46, 42%, 90%);
+	--color-app-selected: hsl(46, 42%, 82%);
+	--color-app-selected-item: hsl(46, 42%, 88%);
+	--color-app-active: hsl(46, 42%, 75%);
+	--color-app-shade: hsl(46, 42%, 50%);
+	--color-app-frame: hsl(44, 50%, 96%);
+	--color-app-slider: hsl(46, 42%, 88%);
+	--color-app-explorer-scrollbar: hsl(46, 30%, 65%);
+	--color-menu: hsl(44, 50%, 96%);
+	--color-menu-line: hsl(46, 42%, 88%);
+	--color-menu-ink: hsl(194, 14%, 30%);
+	--color-menu-faint: hsl(46, 42%, 70%);
+	--color-menu-hover: hsl(46, 42%, 88%);
+	--color-menu-selected: hsl(46, 42%, 80%);
+	--color-menu-shade: hsl(194, 14%, 0%);
+}
