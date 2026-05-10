@@ -16,6 +16,9 @@ const MODE_OPTIONS: {id: ThemeMode; label: string; description: string}[] = [
 	},
 ];
 
+/** Settings panel: pick mode (light/dark/auto) and the theme used in each
+ * surface. The dark/light pickers stay visible together in auto mode so users
+ * can preview both without flipping their OS preference. */
 export function AppearanceSection() {
 	const {
 		mode,
@@ -77,6 +80,8 @@ export function AppearanceSection() {
 	);
 }
 
+/** Mode picker (light / dark / auto) backed by native radio inputs so screen
+ * readers and arrow-key navigation work without custom ARIA. */
 function ModeSelector({
 	mode,
 	setMode,
@@ -126,6 +131,8 @@ function ModeSelector({
 	);
 }
 
+/** Theme grid for a single surface (light or dark). `groupName` must differ
+ * between the two pickers so each is its own native radio group. */
 function ThemePickerSection({
 	title,
 	subtitle,
@@ -217,6 +224,8 @@ const PREVIEW_COLORS: Record<
 	"solarized-dark": {bg: "#002b36", sidebar: "#073642", accent: "#268bd2"},
 };
 
+/** Tiny inline swatch (background + sidebar + accent stripes) drawn from a
+ * static palette so we don't have to compute resolved CSS vars per card. */
 function ThemePreview({themeId}: {themeId: ThemeId}) {
 	const c = PREVIEW_COLORS[themeId];
 

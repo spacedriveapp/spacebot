@@ -106,6 +106,7 @@ const LEGACY_KEY = "spacebot-theme";
 const DEFAULT_LIGHT: ThemeId = "vanilla";
 const DEFAULT_DARK: ThemeId = "default";
 
+/** Look up a theme option by its id, or undefined if unknown. */
 function getThemeById(id: string): ThemeOption | undefined {
 	return THEMES.find((t) => t.id === id);
 }
@@ -167,6 +168,8 @@ function readPersisted(): {
 	};
 }
 
+/** Read the OS-level color-scheme preference. Defaults to dark on SSR or in
+ * environments without `matchMedia` so we don't flash a light surface. */
 function getSystemPrefersDark(): boolean {
 	if (typeof window === "undefined" || !window.matchMedia) return true;
 	return window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -185,6 +188,9 @@ function effectiveTheme(
 	return systemPrefersDark ? darkTheme : lightTheme;
 }
 
+/** Toggle theme classes on `<html>` so SpaceUI tokens resolve to the selected
+ * theme. All known theme classes are removed before the new one is added so
+ * there's never more than one active. */
 function applyThemeClass(themeId: ThemeId) {
 	const theme = getThemeById(themeId);
 	const root = document.documentElement;
@@ -200,6 +206,9 @@ function applyThemeClass(themeId: ThemeId) {
 	}
 }
 
+/** Theme state hook with per-mode persistence, OS-preference subscription,
+ * and FOUC-safe pre-hydration init. Exposes `mode` (light/dark/system), a
+ * theme slot per surface, and a back-compat `setTheme` setter. */
 export function useTheme() {
 	const [{ mode, lightTheme, darkTheme }, setPersisted] = useState(readPersisted);
 	const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
