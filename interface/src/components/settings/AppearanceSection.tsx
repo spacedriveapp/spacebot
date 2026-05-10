@@ -54,6 +54,7 @@ export function AppearanceSection() {
 						selected={lightTheme}
 						onSelect={setLightTheme}
 						active={theme}
+						groupName="theme-light"
 					/>
 				)}
 				{(mode === "dark" || mode === "system") && (
@@ -68,6 +69,7 @@ export function AppearanceSection() {
 						selected={darkTheme}
 						onSelect={setDarkTheme}
 						active={theme}
+						groupName="theme-dark"
 					/>
 				)}
 			</div>
@@ -83,25 +85,30 @@ function ModeSelector({
 	setMode: (m: ThemeMode) => void;
 }) {
 	return (
-		<div role="radiogroup" aria-label="Color mode" className="space-y-2">
-			<h3 className="text-xs font-semibold uppercase tracking-wide text-ink-dull">
+		<fieldset className="space-y-2">
+			<legend className="text-xs font-semibold uppercase tracking-wide text-ink-dull">
 				Mode
-			</h3>
+			</legend>
 			<div className="grid grid-cols-3 gap-2">
 				{MODE_OPTIONS.map((opt) => {
 					const selected = mode === opt.id;
 					return (
-						<button
+						<label
 							key={opt.id}
-							role="radio"
-							aria-checked={selected}
-							onClick={() => setMode(opt.id)}
-							className={`flex flex-col items-start rounded-lg border p-3 text-left transition-colors ${
+							className={`flex cursor-pointer flex-col items-start rounded-lg border p-3 text-left transition-colors focus-within:ring-2 focus-within:ring-accent ${
 								selected
 									? "border-accent bg-accent/10"
 									: "border-app-line bg-app-box hover:border-app-line/80 hover:bg-app-hover"
 							}`}
 						>
+							<input
+								type="radio"
+								name="theme-mode"
+								value={opt.id}
+								checked={selected}
+								onChange={() => setMode(opt.id)}
+								className="sr-only"
+							/>
 							<div className="flex w-full items-center justify-between">
 								<span className="text-sm font-medium text-ink">
 									{opt.label}
@@ -111,11 +118,11 @@ function ModeSelector({
 								)}
 							</div>
 							<p className="mt-1 text-xs text-ink-dull">{opt.description}</p>
-						</button>
+						</label>
 					);
 				})}
 			</div>
-		</div>
+		</fieldset>
 	);
 }
 
@@ -126,6 +133,7 @@ function ThemePickerSection({
 	selected,
 	onSelect,
 	active,
+	groupName,
 }: {
 	title: string;
 	subtitle: string;
@@ -133,13 +141,14 @@ function ThemePickerSection({
 	selected: ThemeId;
 	onSelect: (id: ThemeId) => void;
 	active: ThemeId;
+	groupName: string;
 }) {
 	return (
-		<div>
+		<fieldset>
 			<div className="mb-3">
-				<h3 className="text-xs font-semibold uppercase tracking-wide text-ink-dull">
+				<legend className="text-xs font-semibold uppercase tracking-wide text-ink-dull">
 					{title}
-				</h3>
+				</legend>
 				<p className="mt-1 text-xs text-ink-faint">{subtitle}</p>
 			</div>
 			<div className="grid grid-cols-2 gap-3">
@@ -147,15 +156,22 @@ function ThemePickerSection({
 					const isSelected = selected === t.id;
 					const isActive = active === t.id;
 					return (
-						<button
+						<label
 							key={t.id}
-							onClick={() => onSelect(t.id)}
-							className={`group relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors ${
+							className={`group relative flex cursor-pointer flex-col items-start rounded-lg border p-4 text-left transition-colors focus-within:ring-2 focus-within:ring-accent ${
 								isSelected
 									? "border-accent bg-accent/10"
 									: "border-app-line bg-app-box hover:border-app-line/80 hover:bg-app-hover"
 							}`}
 						>
+							<input
+								type="radio"
+								name={groupName}
+								value={t.id}
+								checked={isSelected}
+								onChange={() => onSelect(t.id)}
+								className="sr-only"
+							/>
 							<div className="flex w-full items-center justify-between gap-2">
 								<span className="text-sm font-medium text-ink">{t.name}</span>
 								<div className="flex items-center gap-1">
@@ -174,11 +190,11 @@ function ThemePickerSection({
 							</div>
 							<p className="mt-1 text-sm text-ink-dull">{t.description}</p>
 							<ThemePreview themeId={t.id} />
-						</button>
+						</label>
 					);
 				})}
 			</div>
-		</div>
+		</fieldset>
 	);
 }
 

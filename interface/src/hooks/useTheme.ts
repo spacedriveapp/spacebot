@@ -125,18 +125,20 @@ function readPersisted(): {
 	let lightTheme = localStorage.getItem(LIGHT_KEY) as ThemeId | null;
 	let darkTheme = localStorage.getItem(DARK_KEY) as ThemeId | null;
 
-	// Migration: legacy `spacebot-theme` is a single ThemeId. Route it to the
-	// matching slot based on isLight, mode = system. Cleared after migration.
+	// Migration: legacy `spacebot-theme` is a single ThemeId. Pin mode to the
+	// surface the user explicitly chose (light/dark) so they don't flip when
+	// the OS preference disagrees. Cleared after migration.
 	if (!mode && !lightTheme && !darkTheme) {
 		const legacy = localStorage.getItem(LEGACY_KEY);
 		const legacyTheme = legacy ? getThemeById(legacy) : undefined;
 		if (legacyTheme) {
 			if (legacyTheme.isLight) {
 				lightTheme = legacyTheme.id;
+				mode = "light";
 			} else {
 				darkTheme = legacyTheme.id;
+				mode = "dark";
 			}
-			mode = "system";
 			localStorage.setItem(MODE_KEY, mode);
 			if (lightTheme) localStorage.setItem(LIGHT_KEY, lightTheme);
 			if (darkTheme) localStorage.setItem(DARK_KEY, darkTheme);
