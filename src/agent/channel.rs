@@ -40,7 +40,6 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{Duration, sleep};
 
 /// Shared cache of in-flight worker transcript steps, keyed by worker ID.
 pub type LiveWorkerTranscripts =
@@ -2960,6 +2959,10 @@ impl Channel {
         })
     }
 
+    /// Send outbound text and record send metrics. Returns `true` on success.
+    ///
+    /// Failure here means the outbound response channel's receiver has closed
+    /// (e.g. shutdown) — `mpsc::Sender::send` does not fail transiently.
     async fn send_outbound_text(&self, text: String, error_context: &str) -> bool {
         match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
@@ -2986,54 +2989,6 @@ impl Channel {
                 false
             }
         }
-    }
-
-    async fn send_outbound_text_with_retry(
-        &self,
-        text: String,
-        error_context: &str,
-        max_attempts: usize,
-    ) -> bool {
-        let attempts = max_attempts.max(1);
-        for attempt in 1..=attempts {
-            if self
-                .send_outbound_text(text.clone(), error_context)
-                .await
-            {
-                if attempt > 1 {
-                    tracing::info!(
-                        channel_id = %self.id,
-                        attempt,
-                        attempts,
-                        "outbound relay succeeded after retry"
-                    );
-                }
-                return true;
-            }
-
-            if attempt < attempts {
-                let delay_ms = match attempt {
-                    1 => 250,
-                    2 => 1_000,
-                    _ => 2_000,
-                };
-                tracing::warn!(
-                    channel_id = %self.id,
-                    attempt,
-                    attempts,
-                    delay_ms,
-                    "outbound relay failed; retrying"
-                );
-                sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-
-        tracing::warn!(
-            channel_id = %self.id,
-            attempts,
-            "outbound relay failed after retries"
-        );
-        false
     }
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
@@ -3111,23 +3066,14 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                let delivered = self
-                                    .send_outbound_text_with_retry(
+                                if self
+                                    .send_outbound_text(
                                         final_text,
                                         "failed to send retrigger fallback reply",
-                                        3,
                                     )
-                                    .await;
-                                if delivered {
+                                    .await
+                                {
                                     replied_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                } else {
-                                    let _ = self
-                                        .send_outbound_text_with_retry(
-                                            "Delivery issue: your background result is preserved. Send 'continue' to replay it.".to_string(),
-                                            "failed to send relay failure backup notice",
-                                            1,
-                                        )
-                                        .await;
                                 }
                             }
                         }
@@ -3189,23 +3135,14 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                let delivered = self
-                                    .send_outbound_text_with_retry(
+                                if self
+                                    .send_outbound_text(
                                         final_text,
                                         "failed to send retrigger fallback reply",
-                                        3,
                                     )
-                                    .await;
-                                if delivered {
+                                    .await
+                                {
                                     replied_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                } else {
-                                    let _ = self
-                                        .send_outbound_text_with_retry(
-                                            "Delivery issue: your background result is preserved. Send 'continue' to replay it.".to_string(),
-                                            "failed to send relay failure backup notice",
-                                            1,
-                                        )
-                                        .await;
                                 }
                             }
                         }
@@ -3262,10 +3199,9 @@ impl Channel {
                                     Some(self.agent_display_name()),
                                     tool_calls_json,
                                 );
-                            self.send_outbound_text_with_retry(
+                            self.send_outbound_text(
                                 final_text,
                                 "failed to send fallback reply",
-                                2,
                             )
                             .await;
                         }
