@@ -33,13 +33,29 @@ export function useStickToBottom(
 			scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <
 			NEAR_BOTTOM_PX;
 
-		const scrollToBottom = () => {
+		/** Snap to the bottom now, then again on each of the next two
+		 * animation frames. The follow-up snaps catch growth that happens
+		 * AFTER the current ResizeObserver callback returns: scrollbar
+		 * appearing and narrowing content (extra row of wrap), web-font
+		 * swap, late Markdown layout (images, code blocks), or a sibling
+		 * that mounts a frame later (e.g. a hover-action toolbar). Cheap to
+		 * over-call — `scrollTop = scrollHeight` is a no-op once we're at
+		 * the bottom. */
+		const settleToBottom = () => {
 			scroll.scrollTop = scroll.scrollHeight;
+			requestAnimationFrame(() => {
+				if (!isPinnedRef.current) return;
+				scroll.scrollTop = scroll.scrollHeight;
+				requestAnimationFrame(() => {
+					if (!isPinnedRef.current) return;
+					scroll.scrollTop = scroll.scrollHeight;
+				});
+			});
 		};
 
 		// Land at the bottom on first mount regardless of the initial
 		// scrollTop value the browser remembered.
-		scrollToBottom();
+		settleToBottom();
 
 		const onScroll = () => {
 			isPinnedRef.current = isNearBottom();
@@ -47,7 +63,7 @@ export function useStickToBottom(
 		scroll.addEventListener("scroll", onScroll, {passive: true});
 
 		const ro = new ResizeObserver(() => {
-			if (isPinnedRef.current) scrollToBottom();
+			if (isPinnedRef.current) settleToBottom();
 		});
 		ro.observe(content);
 
