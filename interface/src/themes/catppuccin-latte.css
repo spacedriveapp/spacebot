@@ -1,0 +1,46 @@
+/* Catppuccin Latte — official light variant pairing with the existing mocha
+   (Catppuccin Mocha) dark theme. Translated into SpaceUI tokens. */
+.catppuccin-latte-theme {
+	--color-accent: hsl(266, 85%, 58%);          /* mauve */
+	--color-accent-faint: hsl(266, 85%, 68%);
+	--color-accent-deep: hsl(266, 85%, 48%);
+	--color-ink: hsl(234, 16%, 35%);             /* text */
+	--color-ink-dull: hsl(233, 13%, 41%);        /* subtext1 */
+	--color-ink-faint: hsl(233, 10%, 47%);       /* subtext0 */
+	--color-sidebar: hsl(220, 21%, 89%);         /* mantle */
+	--color-sidebar-box: hsl(220, 23%, 95%);     /* base */
+	--color-sidebar-line: hsl(225, 14%, 76%);    /* surface1 */
+	--color-sidebar-ink: hsl(234, 16%, 35%);
+	--color-sidebar-ink-dull: hsl(233, 13%, 41%);
+	--color-sidebar-ink-faint: hsl(233, 10%, 47%);
+	--color-sidebar-divider: hsl(225, 14%, 84%);
+	--color-sidebar-button: hsl(220, 23%, 97%);
+	--color-sidebar-selected: hsl(225, 14%, 80%);
+	--color-sidebar-shade: hsl(220, 23%, 95%);
+	--color-app: hsl(220, 23%, 95%);             /* base */
+	--color-app-box: hsl(220, 22%, 92%);
+	--color-app-dark-box: hsl(220, 21%, 89%);    /* mantle */
+	--color-app-darker-box: hsl(220, 17%, 87%);  /* crust */
+	--color-app-light-box: hsl(220, 23%, 97%);
+	--color-app-overlay: hsl(220, 22%, 92%);
+	--color-app-input: hsl(220, 23%, 97%);
+	--color-app-focus: hsl(220, 23%, 95%);
+	--color-app-line: hsl(225, 14%, 80%);
+	--color-app-divider: hsl(225, 14%, 70%);
+	--color-app-button: hsl(220, 23%, 97%);
+	--color-app-hover: hsl(220, 22%, 90%);
+	--color-app-selected: hsl(225, 14%, 80%);
+	--color-app-selected-item: hsl(220, 22%, 92%);
+	--color-app-active: hsl(225, 14%, 75%);
+	--color-app-shade: hsl(225, 14%, 50%);
+	--color-app-frame: hsl(220, 23%, 95%);
+	--color-app-slider: hsl(220, 22%, 92%);
+	--color-app-explorer-scrollbar: hsl(225, 14%, 65%);
+	--color-menu: hsl(220, 23%, 95%);
+	--color-menu-line: hsl(220, 22%, 92%);
+	--color-menu-ink: hsl(234, 16%, 25%);
+	--color-menu-faint: hsl(225, 14%, 70%);
+	--color-menu-hover: hsl(220, 22%, 88%);
+	--color-menu-selected: hsl(225, 14%, 80%);
+	--color-menu-shade: hsl(234, 16%, 0%);
+}
