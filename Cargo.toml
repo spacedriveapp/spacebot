@@ -87,9 +87,7 @@ rmcp = { version = "1.1", features = ["client", "reqwest", "transport-child-proc
 clap = { version = "4.5", features = ["derive"] }
 dialoguer = { version = "0.11", features = ["password"] }
 
-# Daemonization
-daemonize = "0.5"
-libc = "0.2"
+# Daemonization (Unix only -- daemonize and libc at bottom in target cfg)
 ignore = "0.4"
 
 # Discord
@@ -179,6 +177,15 @@ parking_lot = "0.12"
 # OS keystore (macOS Keychain for master key storage)
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+# Unix-only daemonization
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
+libc = "0.2"
+
+# Windows-only system APIs
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [[bin]]
 name = "openapi-spec"
