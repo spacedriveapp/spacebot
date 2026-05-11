@@ -74,6 +74,7 @@ impl PromptEngine {
             "memory_persistence",
             crate::prompts::text::get("memory_persistence"),
         )?;
+        env.add_template("active_recall", crate::prompts::text::get("active_recall"))?;
         env.add_template("ingestion", crate::prompts::text::get("ingestion"))?;
         env.add_template("cortex_chat", crate::prompts::text::get("cortex_chat"))?;
         env.add_template(
@@ -569,6 +570,7 @@ impl PromptEngine {
             None,
             None,
             None,
+            None,
             false,
         )
     }
@@ -681,6 +683,7 @@ impl PromptEngine {
         working_memory: Option<String>,
         channel_activity_map: Option<String>,
         participant_context: Option<String>,
+        active_recall_context: Option<String>,
         direct_mode: bool,
     ) -> Result<String> {
         self.render(
@@ -702,6 +705,7 @@ impl PromptEngine {
                 working_memory => working_memory,
                 channel_activity_map => channel_activity_map,
                 participant_context => participant_context,
+                active_recall_context => active_recall_context,
                 knowledge_synthesis => knowledge_synthesis,
                 direct_mode => direct_mode,
             },
@@ -844,6 +848,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
             )
             .expect("channel prompt should render");
@@ -863,6 +868,38 @@ mod tests {
         assert!(prompt.contains("Stable participant or user role facts"));
         assert!(prompt.contains("the user is the CEO"));
         assert!(!prompt.contains("\"The user is the CEO\" or similar role statements"));
+    }
+
+    #[test]
+    fn renders_active_recall_as_read_only_background_context() {
+        let engine = PromptEngine::new("en").expect("prompt engine should build");
+        let prompt = engine
+            .render_channel_prompt_with_links(
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("- Prior decision: use SQLite for local state.".to_string()),
+                false,
+            )
+            .expect("channel prompt should render");
+
+        assert!(prompt.contains("## Background Recall (READ-ONLY CONTEXT)"));
+        assert!(prompt.contains("context, not user input"));
+        assert!(prompt.contains("Prior decision: use SQLite for local state."));
     }
 }
 // to support multiple languages at compile time.

@@ -801,6 +801,7 @@ pub(super) async fn inspect_prompt(
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
             empty_to_none(participant_context),
+            None,  // active_recall_context — only owned by the live channel loop
             false, // direct_mode — resolved at runtime by the channel, not available here
         )
         .unwrap_or_default();
