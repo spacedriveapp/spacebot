@@ -372,6 +372,31 @@ impl BulletinRefreshOutcome {
     }
 }
 
+const CORTEX_ONE_SHOT_MAX_TURNS: usize = 1;
+const CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE: &str =
+    "cortex_intraday_synthesis_system_fallback";
+const CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK_TEMPLATE: &str = "cortex_daily_summary_system_fallback";
+
+fn render_static_prompt_or_fallback(
+    prompt_engine: &crate::prompts::engine::PromptEngine,
+    template_name: &'static str,
+    fallback_template_name: &'static str,
+) -> String {
+    match prompt_engine.render_static(template_name) {
+        Ok(prompt) => prompt,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                template_name,
+                "failed to render static cortex prompt, using fallback"
+            );
+            prompt_engine
+                .render_static(fallback_template_name)
+                .expect("fallback cortex prompt template should render")
+        }
+    }
+}
+
 fn maybe_spawn_synthesis_task(
     task: &mut Option<tokio::task::JoinHandle<anyhow::Result<bool>>>,
     backoff: &SynthesisTaskBackoff,
@@ -2763,6 +2788,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     let agent = AgentBuilder::new(model)
         .preamble(&bulletin_prompt)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let synthesis_prompt = match prompt_engine
@@ -3007,6 +3033,7 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
     let agent = AgentBuilder::new(model)
         .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let max_words = cortex_config.knowledge_synthesis_max_words;
@@ -3252,6 +3279,11 @@ pub async fn maybe_synthesize_intraday_batch(
 
     // Render the synthesis prompt.
     let prompt_engine = deps.runtime_config.prompts.load();
+    let synthesis_preamble = render_static_prompt_or_fallback(
+        &prompt_engine,
+        "cortex_intraday_synthesis_system",
+        CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
+    );
     let prompt = prompt_engine.render_intraday_synthesis(
         unsynthesized.len(),
         &time_start_str,
@@ -3271,8 +3303,9 @@ pub async fn maybe_synthesize_intraday_batch(
         .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
-        .preamble("You are a concise narrative summarizer. Output only the summary paragraph, nothing else.")
+        .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let synthesis = agent.prompt(&prompt).await;
@@ -3408,6 +3441,11 @@ pub async fn maybe_synthesize_daily_summary(
 
     let wm_config = **deps.runtime_config.working_memory.load();
     let prompt_engine = deps.runtime_config.prompts.load();
+    let synthesis_preamble = render_static_prompt_or_fallback(
+        &prompt_engine,
+        "cortex_daily_summary_system",
+        CORTEX_DAILY_SUMMARY_SYSTEM_FALLBACK_TEMPLATE,
+    );
     let prompt = prompt_engine.render_daily_summary(
         &yesterday,
         wm_config.daily_summary_max_words,
@@ -3426,8 +3464,9 @@ pub async fn maybe_synthesize_daily_summary(
         .with_accumulator(usage_accumulator.clone());
 
     let agent = AgentBuilder::new(model)
-        .preamble("You are a daily activity summarizer. Output only the summary, nothing else.")
+        .preamble(&synthesis_preamble)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let summary = agent.prompt(&prompt).await;
@@ -3592,6 +3631,7 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     let agent = AgentBuilder::new(model)
         .preamble(&profile_prompt)
         .hook(CortexHook::new())
+        .default_max_turns(CORTEX_ONE_SHOT_MAX_TURNS)
         .build();
 
     let result = agent
@@ -4647,7 +4687,8 @@ async fn fetch_memories_for_association(
 mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
-        BulletinRefreshOutcome, CortexReceiverOutcome, GatheredSections, HealthRuntimeState,
+        BulletinRefreshOutcome, CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
+        CortexReceiverOutcome, GatheredSections, HealthRuntimeState,
         MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction, ReceiverClosedBehavior,
         Signal, SynthesisTaskBackoff, WorkerTracker, apply_cancelled_warmup_status,
         build_kill_targets, claim_detached_completion, collect_synthesis_task,
@@ -4657,12 +4698,14 @@ mod tests {
         mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
         maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
         parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
-        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
-        summarize_signal_text, take_lagged_control_flag,
+        render_static_prompt_or_fallback, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
+        take_lagged_control_flag,
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
     use crate::memory::MemoryType;
+    use crate::prompts::engine::PromptEngine;
     use crate::tasks::TaskStatus;
     use crate::tasks::TaskStore;
     use futures::FutureExt;
@@ -4691,6 +4734,24 @@ mod tests {
         };
 
         assert!(should_execute_warmup(warmup_config, true));
+    }
+
+    #[test]
+    fn static_cortex_prompt_fallback_keeps_synthesis_running_when_template_fails() {
+        let prompt_engine = PromptEngine::new("en").expect("prompt engine should build");
+
+        let prompt = render_static_prompt_or_fallback(
+            &prompt_engine,
+            "missing_cortex_synthesis_template",
+            CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE,
+        );
+
+        assert_eq!(
+            prompt,
+            prompt_engine
+                .render_static(CORTEX_INTRADAY_SYNTHESIS_SYSTEM_FALLBACK_TEMPLATE)
+                .expect("fallback prompt should render")
+        );
     }
 
     #[test]
