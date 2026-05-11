@@ -81,7 +81,7 @@ Core struct holding: agent deps, tool server, store.
 
 1. Load cortex chat history from DB
 2. If `channel_context_id` is provided, fetch the last 50 messages from that channel
-3. Render `cortex_chat.md.j2` with: identity context, memory bulletin, channel transcript (if any), worker capabilities
+3. Render `cortex_chat.md.j2` with: identity context, knowledge synthesis, channel transcript (if any), worker capabilities
 4. Current implementation: `agent.prompt(user_text).with_history(&mut history)` with SSE tool events + final response
 5. Target implementation: `agent.stream_prompt(user_text).with_history(...).multi_turn(50)` with text-delta forwarding
 6. Save both user message and assistant response to DB

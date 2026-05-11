@@ -14,7 +14,7 @@ This builds on the user identity system from the [user-scoped memories](user-sco
 
 **Memory about humans:** Memories can contain information about users (a Fact memory might say "Jamie prefers dark mode"), but there's no structured link between a memory and a user identity. Recalling "what do I know about Jamie" requires a full hybrid search with the person's name as the query — which only works if the branch thinks to do it.
 
-**The bulletin:** The cortex generates a global memory bulletin every hour and injects it into every channel's system prompt. This is the agent's ambient awareness layer. But it's about the agent itself — its identity, recent events, decisions, goals. It says nothing about who's in the current conversation.
+**Knowledge synthesis:** The cortex maintains global knowledge context and injects it into every channel's system prompt. This is the agent's ambient long-term awareness layer. But it is about the agent itself -- its identity, durable decisions, goals, and standing context. It says little about who's in the current conversation.
 
 ## The Humans Table
 
@@ -155,7 +155,7 @@ Generate a participant summary for: {{ display_name }}
 
 ### Cost Considerations
 
-The summary is cached — it only regenerates when the human has been active since the last summary. For a server with 100 users where 10 are active daily, the loop generates ~10 summaries per day. Each summary is a single short LLM call (small context, short output). This is negligible compared to the bulletin generation, which runs hourly with much more context.
+The summary is cached -- it only regenerates when the human has been active since the last summary. For a server with 100 users where 10 are active daily, the loop generates ~10 summaries per day. Each summary is a single short LLM call (small context, short output). This is negligible compared to knowledge synthesis, which uses much broader context.
 
 ## Prompt Integration
 

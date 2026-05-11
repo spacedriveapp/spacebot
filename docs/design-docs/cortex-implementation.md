@@ -1,15 +1,15 @@
 # Cortex Implementation Plan
 
-The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Phase 1 plumbing, Phase 2 health supervision, and Phase 3 maintenance are now live; consolidation remains.
+The cortex is designed to be the system's self-awareness -- supervising processes, maintaining memory coherence, maintaining knowledge synthesis, and running health loops. Phase 1 plumbing, Phase 2 health supervision, and Phase 3 maintenance are now live; consolidation remains.
 
-This doc covers the path from "bulletin generator" to "full system supervisor."
+This doc covers the path from "context synthesizer" to "full system supervisor."
 
 ## What Exists Today
 
 **Running:**
-- `spawn_cortex_loop()` — instantiates `Cortex`, subscribes to both control and memory event buses, runs a `tokio::select!` loop for event observation and periodic ticks, and refreshes bulletin/profile on interval.
+- `spawn_cortex_loop()` -- instantiates `Cortex`, subscribes to both control and memory event buses, runs a `tokio::select!` loop for event observation and periodic ticks, and refreshes knowledge/profile context.
 - `spawn_bulletin_loop()` — compatibility alias to `spawn_cortex_loop()`.
-- `spawn_warmup_loop()` — asynchronous warmup that keeps bulletin/embedding readiness fresh.
+- `spawn_warmup_loop()` -- asynchronous warmup that keeps knowledge synthesis and embedding readiness fresh.
 
 **Defined and instantiated:**
 - `Cortex` struct — observes all `ProcessEvent` variants, builds a rolling signal buffer, and runs on configurable tick cadence.
@@ -20,7 +20,7 @@ This doc covers the path from "bulletin generator" to "full system supervisor."
 - `memory/maintenance.rs` — `apply_decay()`, `prune_memories()`, and `merge_similar_memories()` are implemented and wired into the cortex loop.
 
 **Wired through config:**
-- `tick_interval_secs` and `bulletin_interval_secs` are read by the running cortex loop and hot-reload during runtime.
+- `tick_interval_secs` and the knowledge synthesis compatibility intervals are read by the running cortex loop and hot-reload during runtime.
 - Phase 2 knobs are active and hot-reloaded: `worker_timeout_secs`, `branch_timeout_secs`, `detached_worker_timeout_retry_limit`, `supervisor_kill_budget_per_tick`, and `circuit_breaker_threshold`.
 
 **Referenced in prompts but don't exist:**
@@ -50,7 +50,7 @@ Get the cortex running as a persistent process that observes the event bus and t
   - Receive control events → feed through `observe()`
   - Receive memory events (`MemorySaved`) → feed through `observe()`
   - Tick on `cortex_config.tick_interval_secs`
-- Move bulletin generation into the cortex's tick loop (currently a standalone free function)
+- Move context synthesis into the cortex's tick loop (currently a standalone free function)
 
 ### Fix `observe()` to extract real values (done)
 
@@ -190,7 +190,7 @@ The main value of an LLM-powered cortex — connecting dots that individual bran
 - The cortex is the only process that creates `Observation` type memories
 - Pattern detection from the signal buffer: recurring topics, frequent task types, behavioral patterns
 - Low importance by default — ambient awareness, not high-priority recall
-- Observations feed into the next bulletin generation, closing the loop
+- Observations feed into the next knowledge synthesis pass, closing the loop
 
 **End state:** The cortex maintains memory coherence across channels, creates cross-channel associations, detects patterns, and generates observations.
 

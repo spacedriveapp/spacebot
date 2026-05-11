@@ -22,7 +22,7 @@ Core tools include:
 | `cancel` | Stop a running worker or branch | Channel |
 | `skip` | Opt out of responding to the current message | Channel |
 | `react` | Add an emoji reaction to the user's message | Channel |
-| `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
+| `memory_save` | Write a memory to the store | Branch, Cortex |
 | `memory_recall` | Search memories via hybrid search | Branch |
 | `channel_recall` | Retrieve transcript from another channel | Branch |
 | `spacebot_docs` | Read embedded Spacebot docs/changelog/AGENTS | Branch, Cortex Chat |
@@ -164,7 +164,9 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, `email_search` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, and `email_search` on branch ToolServers. `shell`, `file`, and `exec` on worker ToolServers. The cortex ToolServer registers `memory_save`.
+
+The compactor has no tool server. Static tools are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
