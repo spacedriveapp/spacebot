@@ -65,21 +65,47 @@ fn truncate_for_log(message: &str, max_chars: usize) -> (&str, bool) {
 /// Check whether a daemon is already running by testing PID file liveness
 /// and socket connectivity.
 pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
-    let pid = read_pid_file(&paths.pid_file)?;
+    // Prefer querying the IPC socket first. This handles cases where the
+    // daemon was started in foreground (or inside a container as PID 1) and
+    // therefore did not create a PID file via the daemonize helper.
+    if paths.socket.exists() {
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&paths.socket) {
+            // Try to query the daemon for its status synchronously. If this
+            // succeeds we can return the authoritative PID returned by the
+            // daemon. If the query fails but the socket connected, treat the
+            // daemon as running (unknown PID).
+            if let Ok(command_bytes) = serde_json::to_vec(&IpcCommand::Status) {
+                let _ = stream.write_all(&command_bytes);
+                let _ = stream.write_all(b"\n");
+                let _ = stream.flush();
 
-    // Verify the process is actually alive
-    if !is_process_alive(pid) {
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    if let Ok(IpcResponse::Status { pid, .. }) = serde_json::from_str(line.trim()) {
+                        return Some(pid);
+                    }
+                    // Received some response but not a Status payload;
+                    // treat as running with unknown PID.
+                    return Some(0);
+                }
+            }
+
+            // Connected to socket but couldn't complete a query — assume
+            // the daemon is running (PID unknown).
+            return Some(0);
+        }
+
+        // Socket exists but can't connect — stale files
         cleanup_stale_files(paths);
         return None;
     }
 
-    // Double-check by trying to connect to the socket
-    if paths.socket.exists() {
-        if let Ok(stream) = std::os::unix::net::UnixStream::connect(&paths.socket) {
-            drop(stream);
-            return Some(pid);
-        }
-        // Socket exists but can't connect — stale
+    // Fallback: read PID file and verify liveness.
+    let pid = read_pid_file(&paths.pid_file)?;
+
+    // Verify the process is actually alive
+    if !is_process_alive(pid) {
         cleanup_stale_files(paths);
         return None;
     }
