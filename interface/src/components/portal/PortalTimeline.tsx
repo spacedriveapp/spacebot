@@ -1,4 +1,5 @@
 import {useEffect, useRef} from "react";
+import {useStickToBottom} from "@/hooks/useStickToBottom";
 import {useQuery} from "@tanstack/react-query";
 import {InlineBranchCard, MessageBubble} from "@spacedrive/ai";
 import {File as FileIcon} from "@phosphor-icons/react";
@@ -188,7 +189,7 @@ export function PortalTimeline({
 	sendCount,
 }: PortalTimelineProps) {
 	const scrollRef = useRef<HTMLDivElement>(null);
-	const previousLengthRef = useRef(0);
+	const contentRef = useRef<HTMLDivElement>(null);
 
 	// Fetch workers for this channel to resolve worker_run items.
 	const workersQuery = useQuery({
@@ -211,37 +212,20 @@ export function PortalTimeline({
 		return workerIds.has(item.id);
 	});
 
-	// Smart auto-scroll: only when near bottom
-	useEffect(() => {
-		const element = scrollRef.current;
-		if (!element) return;
+	// Stick to bottom: ResizeObserver catches tool-result expansion, async
+	// markdown reflow (highlighter, fonts, images), MessageBubble copy-action
+	// mount, and the streaming text growth uniformly. Preserves scroll-up
+	// intent.
+	useStickToBottom(scrollRef, contentRef);
 
-		const previousLength = previousLengthRef.current;
-		const currentLength = visibleItems.length;
-		const distanceFromBottom =
-			element.scrollHeight - element.scrollTop - element.clientHeight;
-		const isNearBottom = distanceFromBottom < 160;
-		const shouldAutoScroll =
-			(currentLength > previousLength || isTyping) &&
-			(previousLength === 0 || isNearBottom);
-
-		if (shouldAutoScroll) {
-			requestAnimationFrame(() => {
-				element.scrollTo({top: element.scrollHeight, behavior: "auto"});
-			});
-		}
-
-		previousLengthRef.current = currentLength;
-	}, [visibleItems.length, isTyping]);
-
-	// Always scroll to bottom when the user sends a message.
+	// Force-pin to bottom when the user sends a message — even if they had
+	// scrolled up to read history, they expect to see their own message
+	// land at the bottom.
 	useEffect(() => {
 		if (sendCount === 0) return;
-		const element = scrollRef.current;
-		if (!element) return;
-		requestAnimationFrame(() => {
-			element.scrollTo({top: element.scrollHeight, behavior: "smooth"});
-		});
+		const el = scrollRef.current;
+		if (!el) return;
+		el.scrollTop = el.scrollHeight;
 	}, [sendCount]);
 
 	const copyMessage = async (content: string) => {
@@ -250,7 +234,7 @@ export function PortalTimeline({
 
 	return (
 		<div ref={scrollRef} className="flex-1 overflow-x-hidden overflow-y-auto">
-			<div className="mx-auto flex max-w-3xl flex-col gap-2 px-4 py-6 pb-[180px]">
+			<div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-2 px-4 py-6 pb-[180px]">
 				{visibleItems.map((item) => {
 					if (item.type === "message") {
 						const attachments = item.attachments ?? [];
