@@ -208,6 +208,7 @@ function CortexChatInput({
 		return () => textarea.removeEventListener("input", adjustHeight);
 	}, [value]);
 
+	const canSend = !isStreaming && value.trim().length > 0;
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
 		const hasSubmitModifier =
@@ -215,8 +216,9 @@ function CortexChatInput({
 		if (prefs.enterToSubmit) {
 			if (event.shiftKey) return;
 			event.preventDefault();
-			onSubmit();
+			if (canSend) onSubmit();
 		} else if (hasSubmitModifier) {
+			if (!canSend) return;
 			event.preventDefault();
 			onSubmit();
 		}

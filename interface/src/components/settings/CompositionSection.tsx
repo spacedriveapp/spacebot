@@ -37,6 +37,8 @@ export function CompositionSection() {
 					return (
 						<button
 							key={String(opt.value)}
+							type="button"
+							aria-pressed={active}
 							onClick={() => setEnterToSubmit(opt.value)}
 							className={`flex flex-col items-start rounded-lg border p-4 text-left transition-colors ${
 								active
