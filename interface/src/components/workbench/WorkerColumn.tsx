@@ -14,7 +14,7 @@ export function WorkerColumn({worker}: {worker: OrchestrationWorker}) {
 	const taskText = worker.task.replace(/^\[opencode\]\s*/i, "");
 
 	return (
-		<div className="flex h-full w-[560px] flex-shrink-0 flex-col overflow-hidden rounded-2xl border border-app-line bg-app-box">
+		<div className="flex h-full w-full flex-shrink-0 snap-center flex-col overflow-hidden rounded-2xl border border-app-line bg-app-box md:w-[560px] md:snap-none">
 			{/* Column header */}
 			<div className="flex flex-col gap-1 h-[60px] border-b border-app-line px-3 py-2">
 				<div className="flex items-center gap-2">

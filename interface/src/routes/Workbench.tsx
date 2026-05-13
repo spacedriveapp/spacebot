@@ -1,7 +1,10 @@
-import {useMemo, useEffect, useRef} from "react";
+import {useMemo, useEffect, useRef, useState} from "react";
 import {useQuery, useQueryClient, useQueries} from "@tanstack/react-query";
+import {ListBullets} from "@phosphor-icons/react";
 import {api} from "@/api/client";
 import {useLiveContext} from "@/hooks/useLiveContext";
+import {useIsMobile} from "@/hooks/useMediaQuery";
+import {Drawer} from "@/ui/Drawer";
 import {
 	EmptyState,
 	WorkbenchSidebar,
@@ -158,13 +161,23 @@ export function Workbench() {
 		[filteredWorkers, directoryIndex],
 	);
 
+	const isMobile = useIsMobile();
+	const [sidebarOpen, setSidebarOpen] = useState(false);
+
+	const handleSelectWorker = (id: string) => {
+		scrollToWorker(id);
+		setSidebarOpen(false);
+	};
+
 	return (
-		<div className="flex h-full gap-[10px] bg-sidebar pr-[10px] pb-[10px]">
-			<WorkbenchSidebar
-				tree={tree}
-				totalCount={filteredWorkers.length}
-				onSelectWorker={scrollToWorker}
-			/>
+		<div className="relative flex h-full gap-[10px] bg-sidebar pb-[10px] md:pr-[10px]">
+			{!isMobile && (
+				<WorkbenchSidebar
+					tree={tree}
+					totalCount={filteredWorkers.length}
+					onSelectWorker={scrollToWorker}
+				/>
+			)}
 			<div className="flex min-w-0 flex-1">
 				{isLoading && filteredWorkers.length === 0 ? (
 					<div className="flex h-full flex-1 items-center justify-center">
@@ -176,14 +189,14 @@ export function Workbench() {
 				) : filteredWorkers.length === 0 ? (
 					<EmptyState />
 				) : (
-					<div className="flex flex-1 gap-[10px] overflow-x-auto">
+					<div className="flex flex-1 snap-x snap-mandatory gap-[10px] overflow-x-auto px-[10px] md:snap-none md:px-0">
 						{filteredWorkers.map((worker) => (
 							<div
 								key={worker.id}
 								ref={(el) => {
 									columnRefs.current[worker.id] = el;
 								}}
-								className="flex h-full flex-shrink-0"
+								className="flex h-full w-full flex-shrink-0 snap-center md:w-auto md:snap-none"
 							>
 								<WorkerColumn worker={worker} />
 							</div>
@@ -191,6 +204,33 @@ export function Workbench() {
 					</div>
 				)}
 			</div>
+
+			{isMobile && filteredWorkers.length > 0 && (
+				<button
+					type="button"
+					aria-label="Workers list"
+					onClick={() => setSidebarOpen(true)}
+					className="fixed bottom-4 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full border border-app-line bg-app-box text-ink shadow-lg active:bg-app-selected"
+				>
+					<ListBullets size={20} weight="bold" />
+				</button>
+			)}
+
+			{isMobile && (
+				<Drawer
+					open={sidebarOpen}
+					onOpenChange={setSidebarOpen}
+					side="right"
+					ariaLabel="Workers"
+				>
+					<WorkbenchSidebar
+						tree={tree}
+						totalCount={filteredWorkers.length}
+						onSelectWorker={handleSelectWorker}
+						fillWidth
+					/>
+				</Drawer>
+			)}
 		</div>
 	);
 }
