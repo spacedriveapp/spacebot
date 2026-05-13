@@ -3,6 +3,7 @@ import type {GlobalSettingsResponse} from "@/api/client";
 export type SectionId =
 	| "instance"
 	| "appearance"
+	| "composition"
 	| "providers"
 	| "channels"
 	| "api-keys"
