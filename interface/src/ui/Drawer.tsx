@@ -67,12 +67,7 @@ export function Drawer({
 								className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
 							/>
 						</RDialog.Overlay>
-						<RDialog.Content
-							asChild
-							forceMount
-							aria-label={ariaLabel}
-							onOpenAutoFocus={(e) => e.preventDefault()}
-						>
+						<RDialog.Content asChild forceMount aria-label={ariaLabel}>
 							<motion.div
 								initial={cfg.initial}
 								animate={cfg.animate}

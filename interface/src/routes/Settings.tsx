@@ -543,8 +543,8 @@ export function Settings() {
 			<div
 				className={
 					isMobile
-						? "flex min-h-0 w-full flex-shrink-0 flex-col overflow-y-auto"
-						: "flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-dark-box/20"
+						? "flex min-h-0 w-full shrink-0 flex-col overflow-y-auto"
+						: "flex min-h-0 w-52 shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-dark-box/20"
 				}
 			>
 				<div className="px-3 pb-1 pt-4">

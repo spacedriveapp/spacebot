@@ -18,7 +18,7 @@ export function WorkbenchSidebar({
 			className={
 				fillWidth
 					? "flex h-full w-full flex-col overflow-hidden bg-sidebar"
-					: "flex h-full w-[270px] flex-shrink-0 flex-col overflow-hidden rounded-2xl border border-app-line bg-app"
+					: "flex h-full w-[270px] shrink-0 flex-col overflow-hidden rounded-2xl border border-app-line bg-app"
 			}
 		>
 			<div className="flex h-[60px] flex-col justify-center gap-0.5 border-b border-app-line px-3 pt-1">
@@ -150,7 +150,7 @@ function WorkerRow({
 		>
 			<span
 				className={cx(
-					"h-2 w-2 flex-shrink-0 rounded-full",
+					"h-2 w-2 shrink-0 rounded-full",
 					isRunning && "animate-pulse bg-green-500",
 					isIdle && "bg-yellow-500",
 					!isRunning && !isIdle && "bg-ink-faint/40",

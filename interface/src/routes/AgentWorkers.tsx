@@ -221,8 +221,8 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 				<div
 					className={
 						isMobile
-							? "flex w-full flex-shrink-0 flex-col"
-							: "flex w-[360px] flex-shrink-0 flex-col border-r border-app-line/50"
+							? "flex w-full shrink-0 flex-col"
+							: "flex w-[360px] shrink-0 flex-col border-r border-app-line/50"
 					}
 				>
 					{/* Toolbar */}
