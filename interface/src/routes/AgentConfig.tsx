@@ -19,6 +19,8 @@ import {
 	type SaveHandlerRef,
 } from "@/components/agent-config";
 import {AgentIngest} from "@/routes/AgentIngest";
+import {useIsMobile} from "@/hooks/useMediaQuery";
+import {CaretLeft} from "@phosphor-icons/react";
 
 interface AgentConfigProps {
 	agentId: string;
@@ -32,6 +34,8 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 	const [dirty, setDirty] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const saveHandlerRef = useRef<SaveHandlerRef>({});
+	const isMobile = useIsMobile();
+	const [mobileShowDetail, setMobileShowDetail] = useState<boolean>(!!search.tab);
 
 	// Sync activeSection with URL search param
 	useEffect(() => {
@@ -39,18 +43,23 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 			const validSections = SECTIONS.map((section) => section.id);
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
+				setMobileShowDetail(true);
 			}
 		}
 	}, [search.tab]);
 
 	const handleSectionChange = (section: SectionId) => {
 		setActiveSection(section);
+		setMobileShowDetail(true);
 		navigate({
 			to: "/agents/$agentId/config",
 			params: {agentId},
 			search: {tab: section},
 		});
 	};
+
+	const showList = !isMobile || !mobileShowDetail;
+	const showDetail = !isMobile || mobileShowDetail;
 
 	const agentsQuery = useQuery({
 		queryKey: ["agents"],
@@ -187,13 +196,31 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 
 	return (
 		<div className="flex h-full relative">
-			<ConfigSidebar
-				activeSection={activeSection}
-				onSectionChange={handleSectionChange}
-				identityData={identityData}
-			/>
+			{showList && (
+				<ConfigSidebar
+					activeSection={activeSection}
+					onSectionChange={handleSectionChange}
+					identityData={identityData}
+				/>
+			)}
 
+			{showDetail && (
 			<div className="flex flex-1 flex-col overflow-hidden">
+				{isMobile && (
+					<div className="flex shrink-0 items-center gap-2 border-b border-app-line/50 px-2 py-1.5">
+						<button
+							type="button"
+							aria-label="Back to config sections"
+							onClick={() => setMobileShowDetail(false)}
+							className="flex h-11 w-11 items-center justify-center rounded-lg text-ink hover:bg-app-box/60 active:bg-app-box/80"
+						>
+							<CaretLeft size={20} weight="regular" />
+						</button>
+						<span className="truncate text-sm font-medium text-ink">
+							{active.label}
+						</span>
+					</div>
+				)}
 				{isIngestSection ? (
 					<AgentIngest agentId={agentId} />
 				) : isGeneralSection ? (
@@ -238,8 +265,9 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 					/>
 				)}
 			</div>
+			)}
 
-			{!isIngestSection && (
+			{showDetail && !isIngestSection && (
 				<SaveBar
 					dirty={dirty}
 					saving={saving}

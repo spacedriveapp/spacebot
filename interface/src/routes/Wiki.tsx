@@ -10,6 +10,7 @@ import { BookBookmark, Plus, MagnifyingGlass, ArrowLeft, ClockCounterClockwise, 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
+import { useIsMobile } from "@/hooks/useMediaQuery";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -322,6 +323,9 @@ export function Wiki() {
 	const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const [search, setSearch] = useState("");
+	const isMobile = useIsMobile();
+	const showList = !isMobile || !selectedSlug;
+	const showDetail = !isMobile || !!selectedSlug;
 
 	const { data: listData, isLoading } = useQuery({
 		queryKey: ["wiki", "list"],
@@ -357,7 +361,14 @@ export function Wiki() {
 	return (
 		<div className="flex h-full overflow-hidden">
 			{/* Sidebar */}
-			<div className="flex w-56 shrink-0 flex-col border-r border-app-line/30">
+			{showList && (
+			<div
+				className={
+					isMobile
+						? "flex w-full shrink-0 flex-col"
+						: "flex w-56 shrink-0 flex-col border-r border-app-line/30"
+				}
+			>
 				{/* Header */}
 				<div className="flex items-center gap-2 border-b border-app-line/30 px-3 py-3">
 					<BookBookmark className="size-4 text-ink-dull" weight="bold" />
@@ -419,8 +430,10 @@ export function Wiki() {
 					)}
 				</div>
 			</div>
+			)}
 
 			{/* Content */}
+			{showDetail && (
 			<div className="flex flex-1 overflow-hidden">
 				{selectedSlug ? (
 					<PageDetail
@@ -442,6 +455,7 @@ export function Wiki() {
 					</div>
 				)}
 			</div>
+			)}
 		</div>
 	);
 }

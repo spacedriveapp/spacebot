@@ -11,6 +11,9 @@ import {
 	type SelectedSkill,
 } from "@/components/skills";
 import type {SkillInfo, RegistrySkill} from "@/api/client";
+import {useIsMobile} from "@/hooks/useMediaQuery";
+import {Drawer} from "@/ui/Drawer";
+import {ListBullets} from "@phosphor-icons/react";
 
 interface AgentSkillsProps {
 	agentId: string;
@@ -78,8 +81,35 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 		setSelectedSkill({type: "registry", skill});
 	}, []);
 
+	const isMobile = useIsMobile();
+	const [sidebarOpen, setSidebarOpen] = useState(false);
+
+	const handleViewChange = (view: SkillView) => {
+		setActiveView(view);
+		setSidebarOpen(false);
+	};
+
+	const handleMobileSelectInstalled = useCallback(
+		(skill: SkillInfo) => {
+			handleSelectInstalledSkill(skill);
+			setSidebarOpen(false);
+		},
+		[handleSelectInstalledSkill],
+	);
+
+	const skillsSidebar = (onSelect: (s: SkillInfo) => void, onView: (v: SkillView) => void) => (
+		<SkillsSidebar
+			activeView={activeView}
+			onViewChange={onView}
+			installedSkills={installedSkills}
+			selectedSkill={selectedSkill}
+			onSelectInstalledSkill={onSelect}
+			isLoading={isSkillsLoading}
+		/>
+	);
+
 	return (
-		<div className="flex h-full">
+		<div className="relative flex h-full">
 			<input
 				ref={fileInputRef}
 				type="file"
@@ -92,14 +122,7 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 				}}
 			/>
 
-			<SkillsSidebar
-				activeView={activeView}
-				onViewChange={setActiveView}
-				installedSkills={installedSkills}
-				selectedSkill={selectedSkill}
-				onSelectInstalledSkill={handleSelectInstalledSkill}
-				isLoading={isSkillsLoading}
-			/>
+			{!isMobile && skillsSidebar(handleSelectInstalledSkill, setActiveView)}
 
 			<div className="flex flex-1 flex-col overflow-hidden">
 				{activeView === "directory" && (
@@ -130,7 +153,7 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 				{activeView === "create" && <CreateSkill />}
 			</div>
 
-			{selectedSkill && (
+			{selectedSkill && !isMobile && (
 				<SkillInspector
 					agentId={agentId}
 					selected={selectedSkill}
@@ -142,6 +165,49 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 					isRemoving={removeMutation.isPending}
 					removingName={removeMutation.variables ?? null}
 				/>
+			)}
+
+			{isMobile && (
+				<>
+					<button
+						type="button"
+						aria-label="Open skills sidebar"
+						onClick={() => setSidebarOpen(true)}
+						className="fixed bottom-4 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full border border-app-line bg-app-box text-ink shadow-lg active:bg-app-selected"
+					>
+						<ListBullets size={20} weight="bold" />
+					</button>
+					<Drawer
+						open={sidebarOpen}
+						onOpenChange={setSidebarOpen}
+						side="left"
+						ariaLabel="Skills"
+					>
+						{skillsSidebar(handleMobileSelectInstalled, handleViewChange)}
+					</Drawer>
+					<Drawer
+						open={!!selectedSkill}
+						onOpenChange={(open) => {
+							if (!open) setSelectedSkill(null);
+						}}
+						side="right"
+						ariaLabel="Skill details"
+					>
+						{selectedSkill && (
+							<SkillInspector
+								agentId={agentId}
+								selected={selectedSkill}
+								onClose={() => setSelectedSkill(null)}
+								onInstall={(spec) => installMutation.mutate(spec)}
+								onRemove={(name) => removeMutation.mutate(name)}
+								installedNames={installedNamesSet}
+								isInstalling={installMutation.isPending}
+								isRemoving={removeMutation.isPending}
+								removingName={removeMutation.variables ?? null}
+							/>
+						)}
+					</Drawer>
+				</>
 			)}
 		</div>
 	);
