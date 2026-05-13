@@ -62,6 +62,12 @@ export const SECTIONS = [
 		description: "Theme and display settings",
 	},
 	{
+		id: "composition" as const,
+		label: "Composition",
+		group: "general" as const,
+		description: "Chat composer and message input behavior",
+	},
+	{
 		id: "config-file" as const,
 		label: "Config File",
 		group: "system" as const,

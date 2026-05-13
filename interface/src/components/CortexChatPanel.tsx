@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {useCortexChat, type ToolActivity} from "@/hooks/useCortexChat";
+import {useChatInputPrefs} from "@/hooks/useChatInputPrefs";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair} from "@/components/ToolCall";
 import {
@@ -184,6 +185,7 @@ function CortexChatInput({
 	isStreaming: boolean;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const {prefs} = useChatInputPrefs();
 
 	useEffect(() => {
 		textareaRef.current?.focus();
@@ -207,7 +209,14 @@ function CortexChatInput({
 	}, [value]);
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-		if (event.key === "Enter" && !event.shiftKey) {
+		if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+		const hasSubmitModifier =
+			event.metaKey || event.ctrlKey || event.altKey;
+		if (prefs.enterToSubmit) {
+			if (event.shiftKey) return;
+			event.preventDefault();
+			onSubmit();
+		} else if (hasSubmitModifier) {
 			event.preventDefault();
 			onSubmit();
 		}
@@ -222,7 +231,11 @@ function CortexChatInput({
 					onChange={(event) => onChange(event.target.value)}
 					onKeyDown={handleKeyDown}
 					placeholder={
-						isStreaming ? "Waiting for response..." : "Message the cortex..."
+						isStreaming
+							? "Waiting for response..."
+							: prefs.enterToSubmit
+								? "Message the cortex..."
+								: "Message the cortex... (⌘/Ctrl+Enter to send)"
 					}
 					disabled={isStreaming}
 					rows={1}
