@@ -13,6 +13,8 @@ import {
 } from "@spacedrive/primitives";
 import {SettingSidebarButton} from "@/ui/SettingSidebarButton";
 import {useSearch, useNavigate} from "@tanstack/react-router";
+import {useIsMobile} from "@/hooks/useMediaQuery";
+import {CaretLeft} from "@phosphor-icons/react";
 import {ModelSelect} from "@/components/ModelSelect";
 import {
 	InstanceSection,
@@ -39,18 +41,28 @@ export function Settings() {
 	const navigate = useNavigate();
 	const search = useSearch({from: "/settings"}) as {tab?: string};
 	const [activeSection, setActiveSection] = useState<SectionId>("providers");
+	const isMobile = useIsMobile();
+	// On mobile we start on the list. ?tab=… deep-links straight to detail.
+	const [mobileShowDetail, setMobileShowDetail] = useState<boolean>(
+		!!search.tab,
+	);
 
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab && SECTIONS.some((s) => s.id === search.tab)) {
 			setActiveSection(search.tab as SectionId);
+			setMobileShowDetail(true);
 		}
 	}, [search.tab]);
 
 	const handleSectionChange = (section: SectionId) => {
 		setActiveSection(section);
+		setMobileShowDetail(true);
 		navigate({to: "/settings", search: {tab: section}});
 	};
+
+	const showList = !isMobile || !mobileShowDetail;
+	const showDetail = !isMobile || mobileShowDetail;
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
 	const [keyInput, setKeyInput] = useState("");
 	const [modelInput, setModelInput] = useState("");
@@ -527,7 +539,14 @@ export function Settings() {
 	return (
 		<div className="flex h-full min-h-0 overflow-hidden">
 			{/* Sidebar */}
-			<div className="flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-dark-box/20">
+			{showList && (
+			<div
+				className={
+					isMobile
+						? "flex min-h-0 w-full shrink-0 flex-col overflow-y-auto"
+						: "flex min-h-0 w-52 shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-dark-box/20"
+				}
+			>
 				<div className="px-3 pb-1 pt-4">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						Settings
@@ -545,9 +564,26 @@ export function Settings() {
 					))}
 				</div>
 			</div>
+			)}
 
 			{/* Content */}
+			{showDetail && (
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+				{isMobile && (
+					<div className="flex shrink-0 items-center gap-2 border-b border-app-line/50 px-2 py-1.5">
+						<button
+							type="button"
+							aria-label="Back to settings"
+							onClick={() => setMobileShowDetail(false)}
+							className="flex h-11 w-11 items-center justify-center rounded-lg text-ink hover:bg-app-box/60 active:bg-app-box/80"
+						>
+							<CaretLeft size={20} weight="regular" />
+						</button>
+						<span className="truncate text-sm font-medium text-ink">
+							{SECTIONS.find((s) => s.id === activeSection)?.label}
+						</span>
+					</div>
+				)}
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
 					{activeSection === "instance" ? (
 						<InstanceSection
@@ -722,6 +758,7 @@ export function Settings() {
 					) : null}
 				</div>
 			</div>
+			)}
 
 			<DialogRoot
 				open={!!editingProvider}

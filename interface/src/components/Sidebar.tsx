@@ -62,6 +62,8 @@ import {IS_DESKTOP, IS_MACOS} from "@/platform";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
+	/** When true, drop the fixed 220px width — sidebar fills its drawer container. */
+	fillWidth?: boolean;
 }
 
 const agentSubItems = [
@@ -185,7 +187,10 @@ function readProjectId(search: unknown): string | null {
 	return typeof id === "string" ? id : null;
 }
 
-export function Sidebar({liveStates: _liveStates}: SidebarProps) {
+export function Sidebar({
+	liveStates: _liveStates,
+	fillWidth = false,
+}: SidebarProps) {
 	const navigate = useNavigate();
 	const [createOpen, setCreateOpen] = useState(false);
 	const [userExpandedAgent, setUserExpandedAgent] = useState<string | null>(
@@ -273,7 +278,13 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 	};
 
 	return (
-		<aside className="flex w-[220px] shrink-0 flex-col bg-sidebar">
+		<aside
+			className={
+				fillWidth
+					? "flex h-full w-full shrink-0 flex-col bg-sidebar"
+					: "flex w-[220px] shrink-0 flex-col bg-sidebar"
+			}
+		>
 			{/* Company switcher */}
 			<div className={`px-3 ${IS_DESKTOP && IS_MACOS ? "pt-[50px]" : "pt-3"}`}>
 				<Popover.Root open={switcherOpen} onOpenChange={setSwitcherOpen}>

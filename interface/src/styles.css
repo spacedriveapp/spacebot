@@ -42,6 +42,18 @@
 	}
 }
 
+/* iOS Safari auto-zooms on focus when input font-size < 16px. Force the
+   computed font-size to 16px on small viewports without changing visual size
+   on desktop. Visual size on mobile is the trade-off: tiny inputs (text-xs /
+   text-tiny) read slightly larger on phones, which is desirable anyway. */
+@media (max-width: 767px) {
+	input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+	textarea,
+	select {
+		font-size: 16px;
+	}
+}
+
 /* Base styles */
 html,
 body {

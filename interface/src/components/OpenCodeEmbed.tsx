@@ -218,6 +218,9 @@ export function OpenCodeEmbed({
 
 				// Pre-seed OpenCode layout preferences so it starts with a clean
 				// chat-only view (sidebar, terminal, file tree, review all closed).
+				// `session.width` is intentionally omitted so OpenCode picks a width
+				// suitable for the current viewport — seeding a fixed 600px broke
+				// the native mobile layout at narrow widths.
 				const layoutKey = "opencode.global.dat:layout";
 				if (!localStorage.getItem(layoutKey)) {
 					localStorage.setItem(
@@ -232,7 +235,6 @@ export function OpenCodeEmbed({
 							terminal: {height: 280, opened: false},
 							review: {diffStyle: "split", panelOpened: false},
 							fileTree: {opened: false, width: 344, tab: "changes"},
-							session: {width: 600},
 							mobileSidebar: {opened: false},
 							sessionTabs: {},
 							sessionView: {},
@@ -261,12 +263,14 @@ export function OpenCodeEmbed({
 				style.textContent = cssText;
 				shadow.appendChild(style);
 
-				// Hide the sidebar, mobile sidebar, and top bar in embedded
-				// mode — we only want the session/chat view.
+				// Hide OpenCode's desktop nav + title chrome — spacebot provides
+				// its own. The mobile nav (`sidebar-nav-mobile`) is intentionally
+				// NOT hidden: when the viewport drops below md, OpenCode's
+				// internal responsive layout surfaces it, and we want users to
+				// have a way to switch sessions inside the embed on phones.
 				const overrides = document.createElement("style");
 				overrides.textContent = `
 					[data-component="sidebar-nav-desktop"],
-					[data-component="sidebar-nav-mobile"],
 					header:has(#opencode-titlebar-center),
 					[data-session-title] { display: none !important; }
 					main { border: none !important; border-radius: 0 !important; }

@@ -19,8 +19,10 @@ import {Badge, badgeVariants} from "@spacedrive/primitives";
 import {formatTimeAgo, formatDuration} from "@/lib/format";
 import {LiveDuration} from "@/components/LiveDuration";
 import {useLiveContext} from "@/hooks/useLiveContext";
+import {useIsMobile} from "@/hooks/useMediaQuery";
 import {cx} from "class-variance-authority";
 import {ProviderIcon} from "@/lib/providerIcons";
+import {CaretLeft} from "@phosphor-icons/react";
 
 import {OpenCodeEmbed, base64UrlEncode} from "@/components/OpenCodeEmbed";
 
@@ -206,77 +208,108 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 		[navigate, agentId],
 	);
 
+	const isMobile = useIsMobile();
+	// On mobile, master-detail collapses to a single pane: list when no
+	// worker is selected, detail (with back button) when one is.
+	const showList = !isMobile || !selectedWorkerId;
+	const showDetail = !isMobile || !!selectedWorkerId;
+
 	return (
 		<div className="flex h-full">
 			{/* Left column: worker list */}
-			<div className="flex w-[360px] flex-shrink-0 flex-col border-r border-app-line/50">
-				{/* Toolbar */}
-				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-dark-box/20 px-4 py-2.5">
-					<input
-						type="text"
-						placeholder="Search tasks..."
-						value={search}
-						onChange={(e) => setSearch(e.target.value)}
-						className="h-7 flex-1 rounded-md border border-app-line/50 bg-app-input px-2.5 text-xs text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none"
-					/>
-					<span className="text-tiny text-ink-faint">{total}</span>
-				</div>
+			{showList && (
+				<div
+					className={
+						isMobile
+							? "flex w-full shrink-0 flex-col"
+							: "flex w-[360px] shrink-0 flex-col border-r border-app-line/50"
+					}
+				>
+					{/* Toolbar */}
+					<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-dark-box/20 px-4 py-2.5">
+						<input
+							type="text"
+							placeholder="Search tasks..."
+							value={search}
+							onChange={(e) => setSearch(e.target.value)}
+							className="h-9 flex-1 rounded-md border border-app-line/50 bg-app-input px-2.5 text-xs text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none md:h-7"
+						/>
+						<span className="text-tiny text-ink-faint">{total}</span>
+					</div>
 
-				{/* Status filter pills */}
-				<div className="flex items-center gap-1.5 border-b border-app-line/50 px-4 py-2">
-					{STATUS_FILTERS.map((filter) => (
-						<button
-							key={filter}
-							onClick={() => setStatusFilter(filter)}
-							className={cx(
-								"rounded-full px-2.5 py-0.5 text-tiny font-medium transition-colors",
-								statusFilter === filter
-									? "bg-app-hover text-ink"
-									: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
-							)}
-						>
-							{filter.charAt(0).toUpperCase() + filter.slice(1)}
-						</button>
-					))}
-				</div>
+					{/* Status filter pills */}
+					<div className="flex items-center gap-1.5 overflow-x-auto border-b border-app-line/50 px-4 py-2">
+						{STATUS_FILTERS.map((filter) => (
+							<button
+								key={filter}
+								onClick={() => setStatusFilter(filter)}
+								className={cx(
+									"shrink-0 rounded-full px-2.5 py-0.5 text-tiny font-medium transition-colors",
+									statusFilter === filter
+										? "bg-app-hover text-ink"
+										: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
+								)}
+							>
+								{filter.charAt(0).toUpperCase() + filter.slice(1)}
+							</button>
+						))}
+					</div>
 
-				{/* Worker list */}
-				<div className="flex-1 overflow-y-auto">
-					{filteredWorkers.length === 0 ? (
-						<div className="flex h-32 items-center justify-center">
-							<p className="text-xs text-ink-faint">No workers found</p>
-						</div>
-					) : (
-						filteredWorkers.map((worker) => (
-							<WorkerCard
-								key={worker.id}
-								worker={worker}
-								liveWorker={scopedActiveWorkers[worker.id]}
-								selected={worker.id === selectedWorkerId}
-								onClick={() => selectWorker(worker.id)}
-							/>
-						))
-					)}
+					{/* Worker list */}
+					<div className="flex-1 overflow-y-auto">
+						{filteredWorkers.length === 0 ? (
+							<div className="flex h-32 items-center justify-center">
+								<p className="text-xs text-ink-faint">No workers found</p>
+							</div>
+						) : (
+							filteredWorkers.map((worker) => (
+								<WorkerCard
+									key={worker.id}
+									worker={worker}
+									liveWorker={scopedActiveWorkers[worker.id]}
+									selected={worker.id === selectedWorkerId}
+									onClick={() => selectWorker(worker.id)}
+								/>
+							))
+						)}
+					</div>
 				</div>
-			</div>
+			)}
 
 			{/* Right column: detail view */}
-			<div className="flex flex-1 flex-col overflow-hidden">
-				{selectedWorkerId && mergedDetail ? (
-					<WorkerDetail
-						detail={mergedDetail}
-						liveWorker={scopedActiveWorkers[selectedWorkerId]}
-						liveTranscript={liveTranscripts[selectedWorkerId]}
-						liveOpenCodeParts={liveOpenCodeParts[selectedWorkerId]}
-					/>
-				) : (
-					<div className="flex flex-1 items-center justify-center">
-						<p className="text-sm text-ink-faint">
-							Select a worker to view details
-						</p>
-					</div>
-				)}
-			</div>
+			{showDetail && (
+				<div className="flex flex-1 flex-col overflow-hidden">
+					{isMobile && selectedWorkerId && (
+						<div className="flex shrink-0 items-center gap-2 border-b border-app-line/50 px-2 py-1.5">
+							<button
+								type="button"
+								aria-label="Back to worker list"
+								onClick={() => selectWorker(null)}
+								className="flex h-11 w-11 items-center justify-center rounded-lg text-ink hover:bg-app-box/60 active:bg-app-box/80"
+							>
+								<CaretLeft size={20} weight="regular" />
+							</button>
+							<span className="truncate text-xs text-ink-faint">
+								Back to workers
+							</span>
+						</div>
+					)}
+					{selectedWorkerId && mergedDetail ? (
+						<WorkerDetail
+							detail={mergedDetail}
+							liveWorker={scopedActiveWorkers[selectedWorkerId]}
+							liveTranscript={liveTranscripts[selectedWorkerId]}
+							liveOpenCodeParts={liveOpenCodeParts[selectedWorkerId]}
+						/>
+					) : (
+						<div className="flex flex-1 items-center justify-center">
+							<p className="text-sm text-ink-faint">
+								Select a worker to view details
+							</p>
+						</div>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }

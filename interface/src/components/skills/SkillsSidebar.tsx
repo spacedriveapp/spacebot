@@ -42,7 +42,7 @@ export function SkillsSidebar({
 		selectedSkill?.type === "installed" ? selectedSkill.skill.name : null;
 
 	return (
-		<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-dark-box/20">
+		<div className="flex w-full shrink-0 flex-col md:w-52 md:border-r md:border-app-line/50 md:bg-app-dark-box/20">
 			{/* Top actions */}
 			<div className="flex flex-col gap-0.5 px-2 pt-3">
 				{TOP_VIEWS.map(({view, label, icon: Icon}) => (
