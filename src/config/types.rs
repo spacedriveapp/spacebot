@@ -2721,6 +2721,7 @@ pub struct EmailConfig {
     pub allowed_senders: Vec<String>,
     pub max_body_bytes: usize,
     pub max_attachment_bytes: usize,
+    pub sync_max_age_days: u64,
     pub instances: Vec<EmailInstanceConfig>,
 }
 
@@ -2746,6 +2747,7 @@ pub struct EmailInstanceConfig {
     pub allowed_senders: Vec<String>,
     pub max_body_bytes: usize,
     pub max_attachment_bytes: usize,
+    pub sync_max_age_days: u64,
 }
 
 impl std::fmt::Debug for EmailInstanceConfig {

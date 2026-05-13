@@ -1749,6 +1749,7 @@ id = "main"
                 allowed_senders: vec![],
                 max_body_bytes: 1_000_000,
                 max_attachment_bytes: 10_000_000,
+                sync_max_age_days: 0,
                 instances: vec![],
             }),
             webhook: None,

@@ -90,6 +90,7 @@ struct EmailPollConfig {
     poll_interval: Duration,
     allowed_senders: Vec<String>,
     max_body_bytes: usize,
+    sync_max_age_days: u64,
     runtime_key: String,
 }
 
@@ -142,6 +143,7 @@ pub struct EmailAdapter {
     allowed_senders: Vec<String>,
     max_body_bytes: usize,
     max_attachment_bytes: usize,
+    sync_max_age_days: u64,
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     poll_task: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -199,6 +201,7 @@ impl EmailAdapter {
             allowed_senders: config.allowed_senders.clone(),
             max_body_bytes: config.max_body_bytes,
             max_attachment_bytes: config.max_attachment_bytes,
+            sync_max_age_days: config.sync_max_age_days,
             instances: Vec::new(),
         };
         Self::build(runtime_key.into(), &email_config)
@@ -238,6 +241,7 @@ impl EmailAdapter {
             allowed_senders: config.allowed_senders.clone(),
             max_body_bytes: config.max_body_bytes.max(1024),
             max_attachment_bytes: config.max_attachment_bytes.max(1024),
+            sync_max_age_days: config.sync_max_age_days,
             smtp_transport,
             shutdown_tx: Arc::new(RwLock::new(None)),
             poll_task: Arc::new(RwLock::new(None)),
@@ -257,6 +261,7 @@ impl EmailAdapter {
             poll_interval: self.poll_interval,
             allowed_senders: self.allowed_senders.clone(),
             max_body_bytes: self.max_body_bytes,
+            sync_max_age_days: self.sync_max_age_days,
             runtime_key: self.runtime_key.clone(),
         }
     }
@@ -713,8 +718,19 @@ fn poll_inbox_once(config: &EmailPollConfig) -> anyhow::Result<Vec<InboundMessag
             continue;
         }
 
+        // Combine UNSEEN with a SINCE date filter when sync_max_age_days is set,
+        // so first-connect doesn't flood the agent with years of unread email.
+        let search_query = if config.sync_max_age_days > 0 {
+            let since_date = (Utc::now() - ChronoDuration::days(config.sync_max_age_days as i64))
+                .format("%d-%b-%Y")
+                .to_string();
+            format!("UNSEEN SINCE {since_date}")
+        } else {
+            "UNSEEN".to_string()
+        };
+
         let message_uids = session
-            .uid_search("UNSEEN")
+            .uid_search(&search_query)
             .with_context(|| format!("failed to search unseen messages in folder '{folder}'"))?;
 
         for uid in message_uids {
@@ -1210,6 +1226,7 @@ pub fn search_mailbox(
         poll_interval: Duration::from_secs(config.poll_interval_secs.max(5)),
         allowed_senders: config.allowed_senders.clone(),
         max_body_bytes: config.max_body_bytes.max(1024),
+        sync_max_age_days: config.sync_max_age_days,
         runtime_key: "email".to_string(),
     })?;
 
