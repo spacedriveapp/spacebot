@@ -157,6 +157,77 @@ Each agent has its own memory, identity, and conversation history.
 </Tab>
 </Tabs>
 
+## Multiple Telegram Instances
+
+You can run more than one Telegram bot under a single Spacebot instance — each with its own token, bindings, and DM permissions. This is useful when you want a separate bot identity per community or use case (e.g. a public support bot and a private team bot).
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+1. Go to **Settings** → **Messaging Platforms**
+2. Click **Telegram** in the left catalog
+3. If you already have a default Telegram bot, Spacebot prompts for an **Instance Name** (e.g. `support`, `team`)
+4. Enter the bot token for the new bot
+5. Click **Save**
+
+The new instance appears as a separate card. Each card has its own bindings and enable/disable toggle.
+
+</Tab>
+<Tab value="TOML Config">
+
+Add named instances under `[[messaging.telegram.instances]]`:
+
+```toml
+[messaging.telegram]
+enabled = true
+token = "env:TELEGRAM_BOT_TOKEN"
+
+[[messaging.telegram.instances]]
+name = "support"
+enabled = true
+token = "env:TELEGRAM_SUPPORT_BOT_TOKEN"
+
+[[bindings]]
+agent_id = "main"
+channel = "telegram"
+
+[[bindings]]
+agent_id = "support-agent"
+channel = "telegram"
+adapter = "support"
+chat_id = "-100111111111"
+```
+
+The `adapter` field in a binding selects which bot instance handles that chat. Bindings without `adapter` use the default instance.
+
+You can reference environment variables for tokens:
+
+```toml
+[[messaging.telegram.instances]]
+name = "team"
+enabled = true
+token = "env:TELEGRAM_TEAM_BOT_TOKEN"
+```
+
+</Tab>
+</Tabs>
+
+## Threads (Group Topics)
+
+Telegram supergroups can enable **Topics** (forum mode), which creates named threads inside a group. Spacebot tracks each topic as a separate conversation — messages in different topics don't share history.
+
+To use topics:
+
+1. In your Telegram group, go to **Group Settings** → enable **Topics**
+2. Create topics as needed (e.g. "General", "Support", "Dev")
+3. Add your bot to the group with privacy mode disabled (see Step 2 above)
+
+Spacebot reads messages from all topics the bot can see. Each topic maintains its own conversation context, so the bot won't mix up discussions between topics. In logs and tooling, topic messages appear with conversation IDs in the format `telegram:<chat_id>:<thread_id>` (e.g. `telegram:-100123456789:4`).
+
+<Callout type="info">
+Spacebot does not create or manage forum topics. It replies within the same topic where the message was sent, keeping replies in context.
+</Callout>
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -165,3 +236,5 @@ Each agent has its own memory, identity, and conversation history.
 | Bot doesn't respond in group | Privacy mode | Send `/setprivacy` → Disable to BotFather, then remove and re-add the bot |
 | Bot doesn't respond to DMs | DM filtering | Add user ID to `dm_allowed_users`, or clear the list to allow all |
 | Reaction fails silently | Unsupported emoji | Telegram limits reactions to each chat's configured emoji set |
+| Named instance not routing | Missing `adapter` in binding | Add `adapter = "instance-name"` to the binding for that chat |
+| Bot doesn't see topic messages | Topics not enabled or privacy mode | Enable Topics in group settings and disable privacy mode in BotFather |
