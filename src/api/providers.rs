@@ -374,6 +374,7 @@ pub(super) async fn get_providers(
     let instance_dir = (**state.instance_dir.load()).clone();
     let secrets_store = state.secrets_store.load();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
+    let anthropic_oauth_configured = crate::auth::credentials_path(&instance_dir).exists();
     let env_set = |name: &str| {
         std::env::var(name)
             .ok()
@@ -450,7 +451,7 @@ pub(super) async fn get_providers(
         };
 
         (
-            has_value("anthropic_key", "ANTHROPIC_API_KEY"),
+            has_value("anthropic_key", "ANTHROPIC_API_KEY") || anthropic_oauth_configured,
             has_value("openai_key", "OPENAI_API_KEY"),
             openai_oauth_configured,
             has_value("openrouter_key", "OPENROUTER_API_KEY"),
@@ -482,7 +483,7 @@ pub(super) async fn get_providers(
         )
     } else {
         (
-            env_set("ANTHROPIC_API_KEY"),
+            env_set("ANTHROPIC_API_KEY") || anthropic_oauth_configured,
             env_set("OPENAI_API_KEY"),
             openai_oauth_configured,
             env_set("OPENROUTER_API_KEY"),
@@ -1510,6 +1511,20 @@ pub(super) async fn delete_provider(
             success: true,
             message: "ChatGPT Plus OAuth credentials removed".into(),
         }));
+    }
+
+    // Anthropic OAuth credentials are stored as a separate JSON file.
+    // Remove it so that get_providers no longer reports Anthropic as configured.
+    if provider == "anthropic" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::auth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path).await.map_err(|error| {
+                tracing::error!(%error, path = %cred_path.display(), "failed to remove Anthropic OAuth credentials");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+        // Fall through to also remove the TOML key if present.
     }
 
     // GitHub Copilot has a cached token file alongside the TOML key.
