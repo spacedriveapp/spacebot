@@ -1513,6 +1513,20 @@ pub(super) async fn delete_provider(
         }));
     }
 
+    // Anthropic OAuth credentials are stored as a separate JSON file.
+    // Remove it so that get_providers no longer reports Anthropic as configured.
+    if provider == "anthropic" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::auth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path).await.map_err(|error| {
+                tracing::error!(%error, path = %cred_path.display(), "failed to remove Anthropic OAuth credentials");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+        // Fall through to also remove the TOML key if present.
+    }
+
     // GitHub Copilot has a cached token file alongside the TOML key.
     // Remove both the TOML key and the cached token.
     if provider == "github-copilot" {
