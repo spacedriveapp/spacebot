@@ -59,6 +59,31 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+    /// Instance-wide memory janitor — required for dormant-mode agents
+    /// (their cortex tick never runs maintenance), additive on active-mode
+    /// agents.
+    pub memory_janitor: MemoryJanitorConfig,
+}
+
+/// Instance-wide memory maintenance scheduler.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryJanitorConfig {
+    /// When `true`, a single background task walks every registered agent
+    /// on `interval_secs` and runs `memory::maintenance::run_maintenance`
+    /// against its memory store. Disabled by default; enable when running
+    /// dormant-mode agents at scale.
+    pub enabled: bool,
+    /// Seconds between full sweeps. Default `86_400` (daily).
+    pub interval_secs: u64,
+}
+
+impl Default for MemoryJanitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 86_400,
+        }
+    }
 }
 
 impl Config {
@@ -617,6 +642,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub participant_context: ParticipantContextConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
@@ -653,6 +679,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
+            .field("participant_context", &self.participant_context)
             .field("browser", &self.browser)
             .field("channel", &self.channel)
             .field("mcp", &self.mcp)
@@ -730,11 +757,20 @@ pub struct CompactionConfig {
 /// Spawns a silent branch every N messages to recall existing memories and save
 /// new ones from the recent conversation. Runs without blocking the channel and
 /// the result is never injected into channel history.
+///
+/// Legacy note: active working-memory persistence triggers are now configured in
+/// `WorkingMemoryConfig` (`persistence_message_threshold`,
+/// `persistence_time_threshold_secs`, `persistence_event_density_threshold`).
+/// Keep these values in sync only if you intentionally preserve this legacy
+/// branch cadence.
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryPersistenceConfig {
     /// Whether auto memory persistence branches are enabled.
     pub enabled: bool,
-    /// Number of user messages between automatic memory persistence branches.
+    /// Legacy branch cadence in user messages.
+    ///
+    /// Runtime checks now use the working-memory thresholds in
+    /// `WorkingMemoryConfig`.
     pub message_interval: usize,
 }
 
@@ -800,6 +836,38 @@ impl Default for WorkingMemoryConfig {
             persistence_message_threshold: 20,
             persistence_time_threshold_secs: 900,
             persistence_event_density_threshold: 5,
+        }
+    }
+}
+
+/// Participant context configuration.
+///
+/// Keeps the prompt-facing participant-awareness surface separate from working
+/// memory so the future humans/user-identity pipeline can evolve behind a
+/// stable boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct ParticipantContextConfig {
+    /// Whether participant context injection is enabled.
+    pub enabled: bool,
+    /// Minimum active participants required before the section appears.
+    ///
+    /// Defaults to 1 for the current config-backed implementation so DMs still
+    /// benefit from participant metadata. The fuller participant-awareness
+    /// pipeline can raise this later if needed.
+    pub min_participants: usize,
+    /// Token budget for the participant context section.
+    pub token_budget: usize,
+    /// Maximum participants to render in the prompt.
+    pub max_participants: usize,
+}
+
+impl Default for ParticipantContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_participants: 1,
+            token_budget: 400,
+            max_participants: 5,
         }
     }
 }
@@ -940,7 +1008,7 @@ impl Default for BrowserConfig {
 }
 
 /// Channel behavior configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
     /// Deprecated: use `response_mode` instead. Kept for backwards compatibility.
     pub listen_only_mode: bool,
@@ -950,6 +1018,16 @@ pub struct ChannelConfig {
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
     pub save_attachments: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            listen_only_mode: false,
+            response_mode: None,
+            save_attachments: true,
+        }
+    }
 }
 
 /// OpenCode subprocess worker configuration.
@@ -983,11 +1061,49 @@ impl Default for OpenCodeConfig {
     }
 }
 
+/// Whether the cortex runs its periodic loops or stays dormant until woken.
+///
+/// `Active` (default) is the historical behavior — the cortex spawns
+/// warmup, tick, association, and ready-task loops at agent startup.
+///
+/// `Dormant` is the agentic-backend deployment mode — the cortex skips
+/// all four loops and instead relies on external wake triggers
+/// (`send_agent_message` post-insert hook, cron fire, admin wake API).
+/// Required for deployments running thousands of mostly-idle agents on
+/// shared infrastructure where periodic LLM-backed bulletin generation
+/// would dominate cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CortexMode {
+    #[default]
+    Active,
+    Dormant,
+}
+
+impl CortexMode {
+    pub fn is_dormant(&self) -> bool {
+        matches!(self, Self::Dormant)
+    }
+}
+
 /// Cortex configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct CortexConfig {
+    /// Whether the cortex's periodic loops run. See `CortexMode` for the
+    /// active vs dormant trade-off.
+    pub mode: CortexMode,
     pub tick_interval_secs: u64,
+    /// Supervisor idle-kill bound: max seconds since `last_activity_at`
+    /// before the cortex supervisor terminates a stuck worker.
     pub worker_timeout_secs: u64,
+    /// Wall-clock budget for an entire `Worker::run` invocation. Distinct
+    /// from `worker_timeout_secs` (which is idle-shaped). Catches the
+    /// slow-drift case where a worker stays "active" but never completes.
+    pub worker_wall_clock_timeout_secs: u64,
+    /// Per-agent default for cron job timeouts. `None` falls back to the
+    /// system default (`crate::cron::scheduler::DEFAULT_CRON_TIMEOUT_SECS`).
+    /// A per-job `timeout_secs` always wins over this default.
+    pub cron_default_timeout_secs: Option<u64>,
     pub branch_timeout_secs: u64,
     pub detached_worker_timeout_retry_limit: u8,
     pub supervisor_kill_budget_per_tick: usize,
@@ -1025,9 +1141,13 @@ pub struct CortexConfig {
 impl Default for CortexConfig {
     fn default() -> Self {
         Self {
+            mode: CortexMode::Active,
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
-            branch_timeout_secs: 60,
+            worker_wall_clock_timeout_secs:
+                crate::agent::worker::DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS,
+            cron_default_timeout_secs: None,
+            branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,
@@ -1374,6 +1494,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
+            participant_context: ParticipantContextConfig::default(),
             browser: BrowserConfig::default(),
             channel: ChannelConfig::default(),
             mcp: Vec::new(),

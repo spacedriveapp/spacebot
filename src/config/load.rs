@@ -15,11 +15,11 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
-    ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
+    ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
+    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -38,7 +38,7 @@ pub(crate) fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
         let guard = RESOLVE_SECRETS_STORE.load();
         match (*guard).as_ref() {
-            Some(store) => match store.get(alias) {
+            Some(store) => match store.get(&crate::secrets::store::SecretScope::shared(), alias) {
                 Ok(secret) => Some(secret.expose().to_string()),
                 Err(error) => {
                     tracing::warn!(%error, alias, "failed to resolve secret: reference");
@@ -80,6 +80,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "api",
     "metrics",
     "telemetry",
+    "memory_janitor",
 ];
 
 /// Pre-parse check that warns about unrecognised top-level keys in a config
@@ -137,7 +138,9 @@ fn parse_response_mode(
     // Backwards compat: listen_only_mode maps to response_mode
     match listen_only_mode {
         Some(true) => {
-            tracing::warn!("listen_only_mode is deprecated, use response_mode = \"observe\" instead");
+            tracing::warn!(
+                "listen_only_mode is deprecated, use response_mode = \"observe\" instead"
+            );
             Some(ResponseMode::Observe)
         }
         Some(false) => Some(ResponseMode::Active),
@@ -186,13 +189,28 @@ impl CortexConfig {
             );
         }
 
+        let worker_wall_clock_timeout_secs = overrides
+            .worker_wall_clock_timeout_secs
+            .unwrap_or(defaults.worker_wall_clock_timeout_secs);
+        if worker_wall_clock_timeout_secs < 1 {
+            return Err(ConfigError::Invalid(
+                "worker_wall_clock_timeout_secs must be >= 1".to_string(),
+            )
+            .into());
+        }
+
         let config = CortexConfig {
+            mode: overrides.mode.unwrap_or(defaults.mode),
             tick_interval_secs: overrides
                 .tick_interval_secs
                 .unwrap_or(defaults.tick_interval_secs),
             worker_timeout_secs: overrides
                 .worker_timeout_secs
                 .unwrap_or(defaults.worker_timeout_secs),
+            worker_wall_clock_timeout_secs,
+            cron_default_timeout_secs: overrides
+                .cron_default_timeout_secs
+                .or(defaults.cron_default_timeout_secs),
             branch_timeout_secs: overrides
                 .branch_timeout_secs
                 .unwrap_or(defaults.branch_timeout_secs),
@@ -975,6 +993,7 @@ impl Config {
                     .unwrap_or_else(|_| "spacebot".into()),
                 sample_rate: 1.0,
             },
+            memory_janitor: MemoryJanitorConfig::default(),
         })
     }
 
@@ -1611,6 +1630,36 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
+            participant_context: toml
+                .defaults
+                .participant_context
+                .map(|participant_context| -> Result<ParticipantContextConfig> {
+                    let resolved = ParticipantContextConfig {
+                        enabled: participant_context
+                            .enabled
+                            .unwrap_or(base_defaults.participant_context.enabled),
+                        min_participants: participant_context
+                            .min_participants
+                            .unwrap_or(base_defaults.participant_context.min_participants),
+                        token_budget: participant_context
+                            .token_budget
+                            .unwrap_or(base_defaults.participant_context.token_budget),
+                        max_participants: participant_context
+                            .max_participants
+                            .unwrap_or(base_defaults.participant_context.max_participants),
+                    };
+                    if resolved.max_participants < resolved.min_participants {
+                        return Err(ConfigError::Invalid(format!(
+                            "defaults.participant_context.max_participants ({}) must be >= defaults.participant_context.min_participants ({})",
+                            resolved.max_participants, resolved.min_participants
+                        ))
+                        .into());
+                    }
+
+                    Ok(resolved)
+                })
+                .transpose()?
+                .unwrap_or(base_defaults.participant_context),
             browser: {
                 let chrome_cache_dir = instance_dir.join("chrome_cache");
                 toml.defaults
@@ -2598,6 +2647,17 @@ impl Config {
             }
         }
 
+        let memory_janitor = MemoryJanitorConfig {
+            enabled: toml
+                .memory_janitor
+                .enabled
+                .unwrap_or_else(|| MemoryJanitorConfig::default().enabled),
+            interval_secs: toml
+                .memory_janitor
+                .interval_secs
+                .unwrap_or_else(|| MemoryJanitorConfig::default().interval_secs),
+        };
+
         Ok(Config {
             instance_dir,
             llm,
@@ -2611,6 +2671,7 @@ impl Config {
             api,
             metrics,
             telemetry,
+            memory_janitor,
         })
     }
 }

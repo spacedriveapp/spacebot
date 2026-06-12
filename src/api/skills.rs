@@ -207,6 +207,7 @@ pub(super) async fn list_skills(
             file_path: s.file_path.display().to_string(),
             base_dir: s.base_dir.display().to_string(),
             source: match s.source {
+                crate::skills::SkillSource::Builtin => "builtin".to_string(),
                 crate::skills::SkillSource::Instance => "instance".to_string(),
                 crate::skills::SkillSource::Workspace => "workspace".to_string(),
             },
@@ -291,8 +292,8 @@ pub(super) async fn remove_skill(
 
     let removed_path = skills.remove(&req.name).await.map_err(|error| {
         let msg = error.to_string();
-        if msg.contains("instance-level skill") {
-            tracing::warn!(skill = %req.name, "rejected removal of instance-level skill");
+        if msg.contains("built-in skill") || msg.contains("instance-level skill") {
+            tracing::warn!(skill = %req.name, "rejected removal of protected skill");
             StatusCode::FORBIDDEN
         } else {
             tracing::warn!(%error, skill = %req.name, "failed to remove skill");
@@ -353,6 +354,7 @@ pub(super) async fn get_skill_content(
         file_path: skill.file_path.display().to_string(),
         base_dir: skill.base_dir.display().to_string(),
         source: match skill.source {
+            crate::skills::SkillSource::Builtin => "builtin".to_string(),
             crate::skills::SkillSource::Instance => "instance".to_string(),
             crate::skills::SkillSource::Workspace => "workspace".to_string(),
         },

@@ -1,12 +1,25 @@
-import {useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo} from "react";
+import {
+	useState,
+	useEffect,
+	useCallback,
+	useRef,
+	lazy,
+	Suspense,
+	useMemo,
+} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {api} from "@/api/client";
 import {useAudioRecorder} from "@/hooks/useAudioRecorder";
 import {useTtsPlayback} from "@/hooks/useTtsPlayback";
 import {getPortalSessionId} from "@/hooks/usePortal";
 import {useEventSource} from "@/hooks/useEventSource";
-import {cx} from "@/ui/utils";
-import {IS_TAURI, resizeWindow, listen as platformListen} from "@/platform";
+import {cx} from "class-variance-authority";
+import {
+	dragRegionAttributes,
+	IS_DESKTOP,
+	resizeWindow,
+	listen as platformListen,
+} from "@/platform";
 
 const Orb = lazy(() => import("@/components/Orb"));
 
@@ -30,10 +43,16 @@ export function Overlay() {
 	const [expanded, setExpanded] = useState(false);
 	const [voiceState, setVoiceState] = useState<VoiceState>("idle");
 	const [agentId] = useState("main"); // default agent
-	const [profileId, setProfileId] = useState<string>(() => localStorage.getItem("spacebot.voice.profileId") ?? "");
-	const [statusText, setStatusText] = useState("Press Option+Shift+Space to talk");
+	const [profileId, setProfileId] = useState<string>(
+		() => localStorage.getItem("spacebot.voice.profileId") ?? "",
+	);
+	const [statusText, setStatusText] = useState(
+		"Press Option+Shift+Space to talk",
+	);
 	const [, setSpokenText] = useState<string | null>(null);
-	const [transcript, setTranscript] = useState<Array<{role: string; text: string}>>([]);
+	const [transcript, setTranscript] = useState<
+		Array<{role: string; text: string}>
+	>([]);
 	const containerRef = useRef<HTMLDivElement>(null);
 
 	const sessionId = getPortalSessionId(agentId);
@@ -69,16 +88,21 @@ export function Overlay() {
 	// Measure actual content height and ask the host to resize the window.
 	// The frontend is the single source of truth for layout dimensions.
 	useEffect(() => {
-		if (!IS_TAURI) return;
+		if (!IS_DESKTOP) return;
 		const element = containerRef.current;
 		if (!element) return;
 
 		const observer = new ResizeObserver((entries) => {
-			const height = entries[0]?.borderBoxSize?.[0]?.blockSize
-				?? entries[0]?.contentRect.height
-				?? 0;
+			const height =
+				entries[0]?.borderBoxSize?.[0]?.blockSize ??
+				entries[0]?.contentRect.height ??
+				0;
 			if (height > 0) {
-				void resizeWindow(OVERLAY_WINDOW_LABEL, OVERLAY_WIDTH, Math.ceil(height));
+				void resizeWindow(
+					OVERLAY_WINDOW_LABEL,
+					OVERLAY_WIDTH,
+					Math.ceil(height),
+				);
 			}
 		});
 		observer.observe(element);
@@ -93,7 +117,11 @@ export function Overlay() {
 
 	useEffect(() => {
 		if (!profilesQuery.data?.length) return;
-		if (profileId && profilesQuery.data.some((profile) => profile.id === profileId)) return;
+		if (
+			profileId &&
+			profilesQuery.data.some((profile) => profile.id === profileId)
+		)
+			return;
 		const firstProfileId = profilesQuery.data[0]?.id ?? "";
 		if (firstProfileId) {
 			setProfileId(firstProfileId);
@@ -102,54 +130,78 @@ export function Overlay() {
 	}, [profilesQuery.data, profileId]);
 
 	// -- SSE: listen for spoken_response + outbound_message events --
-	const handleSpokenResponse = useCallback((data: unknown) => {
-		const event = data as SpokenResponseEvent;
-		if (event.channel_id !== sessionId) return;
+	const handleSpokenResponse = useCallback(
+		(data: unknown) => {
+			const event = data as SpokenResponseEvent;
+			if (event.channel_id !== sessionId) return;
 
-		spokenReceivedRef.current = true;
-		if (ttsStartedRef.current) {
-			// We've already started playback for this turn via fallback.
-			// Keep the transcript update, but don't trigger overlapping audio.
-			setTranscript((prev) => [...prev, {role: "assistant", text: event.full_text}]);
-			return;
-		}
+			spokenReceivedRef.current = true;
+			if (ttsStartedRef.current) {
+				// We've already started playback for this turn via fallback.
+				// Keep the transcript update, but don't trigger overlapping audio.
+				setTranscript((prev) => [
+					...prev,
+					{role: "assistant", text: event.full_text},
+				]);
+				return;
+			}
 
-		setSpokenText(event.spoken_text);
-		setVoiceState("speaking");
-		setStatusText(event.spoken_text);
+			setSpokenText(event.spoken_text);
+			setVoiceState("speaking");
+			setStatusText(event.spoken_text);
 
-		// Add full text to transcript
-		setTranscript((prev) => [...prev, {role: "assistant", text: event.full_text}]);
+			// Add full text to transcript
+			setTranscript((prev) => [
+				...prev,
+				{role: "assistant", text: event.full_text},
+			]);
 
-		// Play TTS
-		ttsStartedRef.current = true;
+			// Play TTS
+			ttsStartedRef.current = true;
 			speak(event.spoken_text, agentId, profileId).then(() => {
 				ttsStartedRef.current = false;
 				setVoiceState("idle");
 				setStatusText("Press Option+Shift+Space to talk");
 			});
-	}, [sessionId, agentId, speak, profileId]);
+		},
+		[sessionId, agentId, speak, profileId],
+	);
 
-	const handleOutboundMessage = useCallback((data: unknown) => {
-		const event = data as {agent_id: string; channel_id: string; text: string};
-		if (event.channel_id !== sessionId) return;
+	const handleOutboundMessage = useCallback(
+		(data: unknown) => {
+			const event = data as {
+				agent_id: string;
+				channel_id: string;
+				text: string;
+			};
+			if (event.channel_id !== sessionId) return;
 
-		// Show the full reply in the transcript immediately, but only speak when
-		// a dedicated spoken_response event arrives from the backend.
-		if (voiceState === "processing") {
-			setStatusText(event.text.slice(0, 120) + (event.text.length > 120 ? "..." : ""));
-			setTranscript((prev) => [...prev, {role: "assistant", text: event.text}]);
-		}
-	}, [sessionId, voiceState]);
+			// Show the full reply in the transcript immediately, but only speak when
+			// a dedicated spoken_response event arrives from the backend.
+			if (voiceState === "processing") {
+				setStatusText(
+					event.text.slice(0, 120) + (event.text.length > 120 ? "..." : ""),
+				);
+				setTranscript((prev) => [
+					...prev,
+					{role: "assistant", text: event.text},
+				]);
+			}
+		},
+		[sessionId, voiceState],
+	);
 
-	const handleTypingState = useCallback((data: unknown) => {
-		const event = data as {channel_id: string; is_typing: boolean};
-		if (event.channel_id !== sessionId) return;
+	const handleTypingState = useCallback(
+		(data: unknown) => {
+			const event = data as {channel_id: string; is_typing: boolean};
+			if (event.channel_id !== sessionId) return;
 
-		if (event.is_typing && voiceState === "processing") {
-			setStatusText("Thinking...");
-		}
-	}, [sessionId, voiceState]);
+			if (event.is_typing && voiceState === "processing") {
+				setStatusText("Thinking...");
+			}
+		},
+		[sessionId, voiceState],
+	);
 
 	useEventSource(api.getEventsUrl(), {
 		handlers: {
@@ -200,19 +252,25 @@ export function Overlay() {
 	}, [recorderState, stopRecording, agentId, sessionId]);
 
 	useEffect(() => {
-		if (!IS_TAURI) return;
+		if (!IS_DESKTOP) return;
 
 		let disposed = false;
 		let unlistenStart: null | (() => void) = null;
 		let unlistenStop: null | (() => void) = null;
 
 		void (async () => {
-			unlistenStart = await platformListen("voice-overlay:start-recording", () => {
-				void handleStartRecording();
-			});
-			unlistenStop = await platformListen("voice-overlay:stop-recording", () => {
-				void handleStopRecording();
-			});
+			unlistenStart = await platformListen(
+				"voice-overlay:start-recording",
+				() => {
+					void handleStartRecording();
+				},
+			);
+			unlistenStop = await platformListen(
+				"voice-overlay:stop-recording",
+				() => {
+					void handleStopRecording();
+				},
+			);
 			// If the component unmounted before the async listeners resolved,
 			// clean up immediately.
 			if (disposed) {
@@ -231,13 +289,23 @@ export function Overlay() {
 	// -- Keyboard shortcut (web mode mirrors the dedicated voice hotkey) --
 	useEffect(() => {
 		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.code === "Space" && event.altKey && event.shiftKey && voiceState === "idle") {
+			if (
+				event.code === "Space" &&
+				event.altKey &&
+				event.shiftKey &&
+				voiceState === "idle"
+			) {
 				event.preventDefault();
 				handleStartRecording();
 			}
 		};
 		const handleKeyUp = (event: KeyboardEvent) => {
-			if (event.code === "Space" && event.altKey && event.shiftKey && voiceState === "recording") {
+			if (
+				event.code === "Space" &&
+				event.altKey &&
+				event.shiftKey &&
+				voiceState === "recording"
+			) {
 				event.preventDefault();
 				handleStopRecording();
 			}
@@ -251,23 +319,26 @@ export function Overlay() {
 		};
 	}, [voiceState, handleStartRecording, handleStopRecording]);
 
-	const activeEnergy = voiceState === "recording"
-		? audioLevel
-		: voiceState === "speaking"
-			? playbackLevel
-			: 0;
+	const activeEnergy =
+		voiceState === "recording"
+			? audioLevel
+			: voiceState === "speaking"
+				? playbackLevel
+				: 0;
 
-	const activeSpectrumLevels = voiceState === "recording"
-		? recorderSpectrumLevels
-		: voiceState === "speaking"
-			? playbackSpectrumLevels
-			: Array.from({length: 45}, () => 0);
+	const activeSpectrumLevels =
+		voiceState === "recording"
+			? recorderSpectrumLevels
+			: voiceState === "speaking"
+				? playbackSpectrumLevels
+				: Array.from({length: 45}, () => 0);
 
-	const waveColor = voiceState === "recording"
-		? "#70b8ff"
-		: voiceState === "speaking"
-			? "#ba5cf6"
-			: "#6b7280";
+	const waveColor =
+		voiceState === "recording"
+			? "#70b8ff"
+			: voiceState === "speaking"
+				? "#ba5cf6"
+				: "#6b7280";
 
 	const haloStyle = (() => {
 		if (voiceState === "recording") {
@@ -285,7 +356,8 @@ export function Overlay() {
 		}
 
 		return {
-			background: "radial-gradient(circle, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 34%, transparent 72%)",
+			background:
+				"radial-gradient(circle, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 34%, transparent 72%)",
 			transform: "scale(1)",
 		};
 	})();
@@ -298,7 +370,7 @@ export function Overlay() {
 		>
 			{/* Expanded transcript area */}
 			{expanded && (
-				<div className="mb-2 w-full max-w-[500px] overflow-hidden rounded-2xl border border-white/10 bg-app-darkBox/95 shadow-2xl backdrop-blur-xl">
+				<div className="mb-2 w-full max-w-[500px] overflow-hidden rounded-2xl border border-white/10 bg-app-dark-box/95 shadow-2xl backdrop-blur-xl">
 					{/* Header */}
 					<div className="flex items-start justify-between gap-3 border-b border-white/5 px-4 py-2.5">
 						<div className="flex items-center gap-2">
@@ -310,9 +382,14 @@ export function Overlay() {
 								value={profileId}
 								onChange={(event) => {
 									setProfileId(event.target.value);
-									localStorage.setItem("spacebot.voice.profileId", event.target.value);
+									localStorage.setItem(
+										"spacebot.voice.profileId",
+										event.target.value,
+									);
 								}}
-								disabled={profilesQuery.isLoading || !profilesQuery.data?.length}
+								disabled={
+									profilesQuery.isLoading || !profilesQuery.data?.length
+								}
 								className="min-w-[180px] max-w-[220px] rounded-md border border-white/10 bg-white/5 px-2 py-1 text-tiny text-ink outline-none disabled:opacity-60"
 							>
 								{profilesQuery.isLoading && <option>Loading voices...</option>}
@@ -325,17 +402,18 @@ export function Overlay() {
 									</option>
 								))}
 							</select>
-						<button
-							onClick={() => setExpanded(false)}
-							className="text-tiny text-ink-faint hover:text-ink"
-						>
-							Collapse
-						</button>
+							<button
+								onClick={() => setExpanded(false)}
+								className="text-tiny text-ink-faint hover:text-ink"
+							>
+								Collapse
+							</button>
 						</div>
 					</div>
 					{profilesQuery.isError && (
 						<div className="border-b border-white/5 px-4 py-2 text-tiny text-amber-300/80">
-							Couldn&apos;t load Voicebox profiles. Restart Spacebot after backend changes, or set `SPACEBOT_VOICEBOX_PROFILE_ID`.
+							Couldn&apos;t load Voicebox profiles. Restart Spacebot after
+							backend changes, or set `SPACEBOT_VOICEBOX_PROFILE_ID`.
 						</div>
 					)}
 
@@ -365,27 +443,27 @@ export function Overlay() {
 
 			{/* Pill */}
 			<div
+				{...dragRegionAttributes()}
 				className={cx(
 					"voice-overlay-pill mb-2 flex w-full max-w-[460px] cursor-pointer items-center gap-2.5 overflow-hidden rounded-[20px] border px-3 py-2 shadow-2xl backdrop-blur-xl transition-all",
 					voiceState === "recording"
 						? "border-sky-300/35 bg-sky-400/10"
 						: voiceState === "speaking"
 							? "border-violet-300/35 bg-violet-400/10"
-							: "border-white/10 bg-app-darkBox/95",
+							: "border-white/10 bg-app-dark-box/95",
 				)}
-			data-tauri-drag-region
-			onClick={() => {
-				if (voiceState === "idle") setExpanded(!expanded);
-			}}
+				onClick={() => {
+					if (voiceState === "idle") setExpanded(!expanded);
+				}}
 			>
-			<div
-				className={cx(
-					"pointer-events-none absolute inset-x-5 -bottom-5 -top-5 rounded-full blur-2xl transition-all duration-200",
-					voiceState === "recording" && "voice-overlay-halo-recording",
-					voiceState === "speaking" && "voice-overlay-halo-speaking",
-				)}
-				style={haloStyle}
-			/>
+				<div
+					className={cx(
+						"pointer-events-none absolute inset-x-5 -bottom-5 -top-5 rounded-full blur-2xl transition-all duration-200",
+						voiceState === "recording" && "voice-overlay-halo-recording",
+						voiceState === "speaking" && "voice-overlay-halo-speaking",
+					)}
+					style={haloStyle}
+				/>
 
 				<div className="relative flex h-9 w-9 flex-shrink-0 items-center justify-center">
 					<div
@@ -428,10 +506,12 @@ export function Overlay() {
 										: "Voice ready"}
 						</span>
 					</div>
-					<p className={cx(
-						"min-w-0 truncate text-[12px] leading-tight",
-						voiceState === "idle" ? "text-ink-faint" : "text-ink",
-					)}>
+					<p
+						className={cx(
+							"min-w-0 truncate text-[12px] leading-tight",
+							voiceState === "idle" ? "text-ink-faint" : "text-ink",
+						)}
+					>
 						{statusText}
 					</p>
 					<div className="relative z-10 h-9 overflow-hidden px-1">
@@ -452,17 +532,17 @@ export function Overlay() {
 					}}
 					className={cx(
 						"relative z-10 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border transition-colors",
-						voiceState === "idle" && "border-white/10 bg-white/5 text-ink-faint hover:bg-white/10 hover:text-ink",
-						voiceState === "processing" && "animate-pulse border-violet-300/30 bg-violet-400/15 text-violet-100",
-						voiceState === "speaking" && "border-violet-300/30 bg-violet-400/15 text-violet-100",
-						voiceState === "recording" && "border-sky-300/30 bg-sky-400/15 text-sky-100",
+						voiceState === "idle" &&
+							"border-white/10 bg-white/5 text-ink-faint hover:bg-white/10 hover:text-ink",
+						voiceState === "processing" &&
+							"animate-pulse border-violet-300/30 bg-violet-400/15 text-violet-100",
+						voiceState === "speaking" &&
+							"border-violet-300/30 bg-violet-400/15 text-violet-100",
+						voiceState === "recording" &&
+							"border-sky-300/30 bg-sky-400/15 text-sky-100",
 					)}
 				>
-					{voiceState === "speaking" ? (
-						<SpeakerIcon />
-					) : (
-						<MicIcon />
-					)}
+					{voiceState === "speaking" ? <SpeakerIcon /> : <MicIcon />}
 				</button>
 
 				{/* Stop button (while recording) */}
@@ -505,15 +585,24 @@ function SiriWaveform({
 		const bucketCount = 24;
 		return Array.from({length: bucketCount}, (_, bucketIndex) => {
 			const start = Math.floor((bucketIndex / bucketCount) * levels.length);
-			const end = Math.max(start + 1, Math.floor(((bucketIndex + 1) / bucketCount) * levels.length));
+			const end = Math.max(
+				start + 1,
+				Math.floor(((bucketIndex + 1) / bucketCount) * levels.length),
+			);
 			const slice = levels.slice(start, end);
-			const average = slice.reduce((sum, value) => sum + value, 0) / slice.length;
+			const average =
+				slice.reduce((sum, value) => sum + value, 0) / slice.length;
 			return Math.min(1, average);
 		});
 	}, [levels]);
 
 	const wavePaths = useMemo(() => {
-		const makePath = (phase: number, amplitudeBoost: number, frequency: number, drift: number) => {
+		const makePath = (
+			phase: number,
+			amplitudeBoost: number,
+			frequency: number,
+			drift: number,
+		) => {
 			const sampleCount = 88;
 			const points = Array.from({length: sampleCount + 1}, (_, index) => {
 				const progress = index / sampleCount;
@@ -524,15 +613,21 @@ function SiriWaveform({
 				);
 				const fft = smoothedLevels[levelIndex] ?? 0;
 				const envelope = Math.pow(Math.sin(progress * Math.PI), 1.35);
-				const neighboringLevel = smoothedLevels[Math.min(smoothedLevels.length - 1, levelIndex + 1)] ?? fft;
+				const neighboringLevel =
+					smoothedLevels[Math.min(smoothedLevels.length - 1, levelIndex + 1)] ??
+					fft;
 				const blendedFft = fft * 0.65 + neighboringLevel * 0.35;
 				const baseAmplitude = active
 					? 3.2 + energy * 9.5 + blendedFft * 12.5 * amplitudeBoost
 					: 1.35;
 				const primary = Math.sin(progress * Math.PI * frequency + phase);
-				const secondary = Math.sin(progress * Math.PI * (frequency * 0.52) - drift) * 0.4;
-				const tertiary = Math.cos(progress * Math.PI * (frequency * 0.24) + phase * 0.35) * 0.18;
-				const y = centerY - (primary + secondary + tertiary) * baseAmplitude * envelope;
+				const secondary =
+					Math.sin(progress * Math.PI * (frequency * 0.52) - drift) * 0.4;
+				const tertiary =
+					Math.cos(progress * Math.PI * (frequency * 0.24) + phase * 0.35) *
+					0.18;
+				const y =
+					centerY - (primary + secondary + tertiary) * baseAmplitude * envelope;
 				return {x, y};
 			});
 
@@ -550,17 +645,52 @@ function SiriWaveform({
 		const layerColors = buildWaveLayerColors(color);
 
 		return [
-			{path: makePath(0.1, 1.28, 3.15, 0.55), opacity: active ? 0.96 : 0.28, strokeWidth: 2.9, color: layerColors[0]},
-			{path: makePath(0.9, 1.08, 2.7, 1.1), opacity: active ? 0.82 : 0.22, strokeWidth: 2.55, color: layerColors[1]},
-			{path: makePath(1.7, 0.9, 2.2, 1.7), opacity: active ? 0.64 : 0.18, strokeWidth: 2.15, color: layerColors[2]},
-			{path: makePath(2.45, 0.74, 1.75, 2.15), opacity: active ? 0.46 : 0.14, strokeWidth: 1.85, color: layerColors[3]},
-			{path: makePath(3.2, 0.58, 1.3, 2.7), opacity: active ? 0.3 : 0.1, strokeWidth: 1.5, color: layerColors[4]},
+			{
+				path: makePath(0.1, 1.28, 3.15, 0.55),
+				opacity: active ? 0.96 : 0.28,
+				strokeWidth: 2.9,
+				color: layerColors[0],
+			},
+			{
+				path: makePath(0.9, 1.08, 2.7, 1.1),
+				opacity: active ? 0.82 : 0.22,
+				strokeWidth: 2.55,
+				color: layerColors[1],
+			},
+			{
+				path: makePath(1.7, 0.9, 2.2, 1.7),
+				opacity: active ? 0.64 : 0.18,
+				strokeWidth: 2.15,
+				color: layerColors[2],
+			},
+			{
+				path: makePath(2.45, 0.74, 1.75, 2.15),
+				opacity: active ? 0.46 : 0.14,
+				strokeWidth: 1.85,
+				color: layerColors[3],
+			},
+			{
+				path: makePath(3.2, 0.58, 1.3, 2.7),
+				opacity: active ? 0.3 : 0.1,
+				strokeWidth: 1.5,
+				color: layerColors[4],
+			},
 		];
 	}, [active, centerY, color, energy, smoothedLevels, width]);
 
 	return (
-		<svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" preserveAspectRatio="none" aria-hidden="true">
-			<path d={`M 0 ${centerY} L ${width} ${centerY}`} stroke={color} strokeOpacity={active ? 0.14 : 0.08} strokeWidth="1" />
+		<svg
+			viewBox={`0 0 ${width} ${height}`}
+			className="h-full w-full"
+			preserveAspectRatio="none"
+			aria-hidden="true"
+		>
+			<path
+				d={`M 0 ${centerY} L ${width} ${centerY}`}
+				stroke={color}
+				strokeOpacity={active ? 0.14 : 0.08}
+				strokeWidth="1"
+			/>
 			{wavePaths.map((wave, index) => (
 				<path
 					key={index}
@@ -612,15 +742,20 @@ function buildWaveLayerColors(baseColor: string) {
 function mixHex(colorA: string, colorB: string, amount: number) {
 	const from = hexToRgb(colorA);
 	const to = hexToRgb(colorB);
-	const mix = (fromValue: number, toValue: number) => Math.round(fromValue + (toValue - fromValue) * amount);
+	const mix = (fromValue: number, toValue: number) =>
+		Math.round(fromValue + (toValue - fromValue) * amount);
 	return `rgb(${mix(from.red, to.red)}, ${mix(from.green, to.green)}, ${mix(from.blue, to.blue)})`;
 }
 
 function hexToRgb(hex: string) {
 	const normalized = hex.replace("#", "");
-	const value = normalized.length === 3
-		? normalized.split("").map((char) => char + char).join("")
-		: normalized;
+	const value =
+		normalized.length === 3
+			? normalized
+					.split("")
+					.map((char) => char + char)
+					.join("")
+			: normalized;
 	const parsed = Number.parseInt(value, 16);
 	return {
 		red: (parsed >> 16) & 255,
@@ -633,7 +768,16 @@ function hexToRgb(hex: string) {
 
 function MicIcon() {
 	return (
-		<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+		<svg
+			width="16"
+			height="16"
+			viewBox="0 0 16 16"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+		>
 			<rect x="5" y="1" width="6" height="9" rx="3" />
 			<path d="M3 7a5 5 0 0 0 10 0" />
 			<line x1="8" y1="12" x2="8" y2="15" />
@@ -644,8 +788,21 @@ function MicIcon() {
 
 function SpeakerIcon() {
 	return (
-		<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-			<polygon points="2,5 6,5 10,1.5 10,14.5 6,11 2,11" fill="currentColor" stroke="none" />
+		<svg
+			width="16"
+			height="16"
+			viewBox="0 0 16 16"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+		>
+			<polygon
+				points="2,5 6,5 10,1.5 10,14.5 6,11 2,11"
+				fill="currentColor"
+				stroke="none"
+			/>
 			<path d="M12.5 5.5a3.5 3.5 0 0 1 0 5" />
 		</svg>
 	);
@@ -653,8 +810,25 @@ function SpeakerIcon() {
 
 function StopIcon() {
 	return (
-		<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-			<rect x="3.5" y="3.5" width="7" height="7" rx="1.5" fill="currentColor" stroke="none" />
+		<svg
+			width="14"
+			height="14"
+			viewBox="0 0 14 14"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+		>
+			<rect
+				x="3.5"
+				y="3.5"
+				width="7"
+				height="7"
+				rx="1.5"
+				fill="currentColor"
+				stroke="none"
+			/>
 		</svg>
 	);
 }

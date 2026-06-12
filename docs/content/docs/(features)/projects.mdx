@@ -1,0 +1,141 @@
+---
+title: Projects
+description: Instance-level project management with repo tracking, worktrees, and auto logo detection.
+---
+
+# Projects
+
+Projects represent the codebases and working directories that agents operate on. Each project maps to a root directory containing one or more git repositories and their worktrees.
+
+Projects are instance-level — shared across all agents. A single project can be referenced by any agent's workers, and the same codebase doesn't need to be registered multiple times for different agents.
+
+## What a Project Contains
+
+A project is a directory tree with:
+
+- **Root path** — the top-level directory (e.g. `/home/user/projects/myapp`)
+- **Repos** — git repositories discovered within the project, with remote URL, default branch, current branch, and disk usage
+- **Worktrees** — git worktrees linked to repos, for parallel branch work
+- **Logo** — auto-detected project icon from common locations
+- **Metadata** — name, description, icon emoji, tags, status, settings
+
+## Storage
+
+Three SQLite tables in the global (instance-level) database:
+
+### projects
+
+```sql
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    icon TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    root_path TEXT NOT NULL,
+    logo_path TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+A unique index on `root_path` prevents duplicate registrations of the same directory.
+
+### project_repos
+
+```sql
+CREATE TABLE project_repos (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    remote_url TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    current_branch TEXT,
+    description TEXT NOT NULL DEFAULT '',
+    disk_usage_bytes INTEGER,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+### project_worktrees
+
+```sql
+CREATE TABLE project_worktrees (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'user',
+    disk_usage_bytes INTEGER,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+```
+
+## Auto Logo Detection
+
+When a project is created or scanned, Spacebot looks for a logo in common locations within the project directory:
+
+- `.github/` — organization avatars and branding
+- `public/` — web app static assets
+- `src-tauri/` — Tauri app icons
+
+It scans up to 3 levels deep looking for files named `logo.{png,svg,webp}`, `icon.{png,svg,ico}`, or `favicon.{png,ico,svg}`, skipping `node_modules`, `target`, `.git`, `dist`, and `build` directories. The first match is stored as a relative `logo_path` on the project and served via a dedicated endpoint for the dashboard sidebar and project views.
+
+## Project Scanning
+
+The `POST /api/projects/:id/scan` endpoint triggers a full scan of the project directory:
+
+1. **Repo discovery** — walks the directory tree looking for `.git` directories
+2. **Branch detection** — reads the current branch and default branch for each repo
+3. **Worktree discovery** — finds linked git worktrees
+4. **Disk usage** — computes directory sizes asynchronously
+5. **Logo detection** — scans for project icons
+
+Scanning runs in the background. The project's repos, worktrees, and metadata are updated in the database as results come in.
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/projects` | List all projects |
+| `POST` | `/api/projects` | Create a project (registers a root path) |
+| `GET` | `/api/projects/:id` | Get project with repos and worktrees |
+| `PUT` | `/api/projects/:id` | Update project metadata |
+| `DELETE` | `/api/projects/:id` | Delete project and associated repos/worktrees |
+| `POST` | `/api/projects/:id/scan` | Trigger a full directory scan |
+| `POST` | `/api/projects/:id/repos` | Register a repo within the project |
+| `DELETE` | `/api/projects/:id/repos/:repo_id` | Remove a repo |
+| `POST` | `/api/projects/:id/worktrees` | Create a git worktree |
+| `DELETE` | `/api/projects/:id/worktrees/:wt_id` | Delete a worktree |
+| `GET` | `/api/projects/:id/disk-usage` | Get disk usage breakdown |
+| `GET` | `/api/projects/:id/logo` | Serve the project logo image |
+| `PUT` | `/api/projects/reorder` | Update project sort order |
+
+## Dashboard
+
+Projects appear in the sidebar with their logo (or icon emoji fallback) and name. The active project is highlighted. Clicking a project navigates to its detail view showing repos, branches, worktrees, and disk usage.
+
+Workers spawned from the dashboard can target a specific project directory. The worker's `directory` parameter is set to the project's root path, and the sandbox writable paths are updated accordingly.
+
+## Worker Integration
+
+The `spawn_worker` tool accepts `project_id` and `worktree_id` parameters. When set, the worker operates in that project's context — the directory defaults to the project root or worktree path. The `worker_project_link` table (per-agent database) tracks which workers operated on which projects, providing a history of agent activity per codebase.
+
+A `project_manage` tool gives agents CRUD access to the project registry directly.
+
+## Migration History
+
+Projects were originally per-agent (stored in each agent's SQLite database with an `agent_id` column). They were elevated to instance-level in the SpaceUI migration:
+
+1. `20260306000003_projects.sql` — original per-agent tables
+2. `20260404120000_projects.sql` — global schema (instance-level)
+3. `20260404120000_drop_per_agent_projects.sql` — migration with dedup logic
+
+The dedup migration merges projects from all agents by `root_path`, preserving the most complete metadata.

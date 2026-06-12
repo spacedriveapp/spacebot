@@ -1,6 +1,8 @@
 //! Task update tool for branch and worker processes.
 
-use crate::tasks::{TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput};
+use crate::tasks::{
+    TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput, WorkerTaskUpdateResult,
+};
 use crate::{AgentId, WorkerId};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -155,40 +157,17 @@ impl Tool for TaskUpdateTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
-
-        if let TaskUpdateScope::Worker(ref worker_id) = self.scope {
-            let current = self
-                .task_store
-                .get_by_worker_id(&worker_id.to_string())
-                .await
-                .map_err(|error| TaskUpdateError(format!("{error}")))?;
-
-            let Some(task) = current else {
-                return Err(TaskUpdateError(
-                    "worker is not assigned to a task".to_string(),
-                ));
-            };
-
-            if task.task_number != task_number {
-                return Err(TaskUpdateError(format!(
-                    "worker {} can only update task #{}",
-                    worker_id, task.task_number
-                )));
-            }
-
-            // Workers can only update subtasks and metadata — not status, priority,
-            // title, description, worker binding, or approval.
-            if args.title.is_some()
+        if matches!(self.scope, TaskUpdateScope::Worker(_))
+            && (args.title.is_some()
                 || args.description.is_some()
                 || args.status.is_some()
                 || args.priority.is_some()
                 || args.worker_id.is_some()
-                || args.approved_by.is_some()
-            {
-                return Err(TaskUpdateError(
-                    "workers can only update subtasks and metadata".to_string(),
-                ));
-            }
+                || args.approved_by.is_some())
+        {
+            return Err(TaskUpdateError(
+                "workers can only update subtasks and metadata".to_string(),
+            ));
         }
 
         let status = match args.status.as_deref() {
@@ -213,38 +192,74 @@ impl Tool for TaskUpdateTool {
             ),
         };
 
-        let updated = self
-            .task_store
-            .update(
-                task_number,
-                UpdateTaskInput {
-                    title: args.title,
-                    description: args.description,
-                    status,
-                    priority,
-                    subtasks: args.subtasks,
-                    metadata: args.metadata,
-                    worker_id: args.worker_id,
-                    clear_worker_id: false,
-                    approved_by: args.approved_by,
-                    complete_subtask,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| TaskUpdateError(format!("{error}")))?
-            .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?;
+        let input = UpdateTaskInput {
+            title: args.title,
+            description: args.description,
+            status,
+            priority,
+            subtasks: args.subtasks,
+            metadata: args.metadata,
+            worker_id: args.worker_id,
+            clear_worker_id: false,
+            approved_by: args.approved_by,
+            complete_subtask,
+            ..Default::default()
+        };
+
+        let update_result = match &self.scope {
+            TaskUpdateScope::Branch => self
+                .task_store
+                .update_with_status_transition(task_number, input)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?
+                .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?,
+            TaskUpdateScope::Worker(worker_id) => match self
+                .task_store
+                .update_worker_task(&worker_id.to_string(), task_number, input)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?
+            {
+                WorkerTaskUpdateResult::Updated(result) => *result,
+                WorkerTaskUpdateResult::NotAssigned => {
+                    return Err(TaskUpdateError(
+                        "worker is not assigned to a task".to_string(),
+                    ));
+                }
+                WorkerTaskUpdateResult::WrongTask {
+                    assigned_task_number,
+                } => {
+                    return Err(TaskUpdateError(format!(
+                        "worker {} can only update task #{}",
+                        worker_id, assigned_task_number
+                    )));
+                }
+            },
+        };
+        let previous_status = update_result.previous_status;
+        let updated = update_result.task;
 
         if let Some(working_memory) = &self.working_memory {
-            working_memory
-                .emit(
+            let transitioned_to_done =
+                previous_status != TaskStatus::Done && updated.status == TaskStatus::Done;
+            let (event_type, summary, importance) = if transitioned_to_done {
+                (
+                    crate::memory::WorkingMemoryEventType::Outcome,
+                    format!("Task #{} completed", updated.task_number),
+                    0.7,
+                )
+            } else {
+                (
                     crate::memory::WorkingMemoryEventType::TaskUpdate,
                     format!(
                         "Task #{} updated to {}",
                         updated.task_number, updated.status
                     ),
+                    0.4,
                 )
-                .importance(0.4)
+            };
+            working_memory
+                .emit(event_type, summary)
+                .importance(importance)
                 .record();
         }
 
@@ -254,5 +269,235 @@ impl Tool for TaskUpdateTool {
             status: updated.status.to_string(),
             message: format!("Updated task #{}", updated.task_number),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::memory::working::WorkingMemoryEvent;
+    use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
+    use chrono_tz::Tz;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
+
+    async fn setup_working_memory() -> Arc<WorkingMemoryStore> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        WorkingMemoryStore::new(pool, Tz::UTC)
+    }
+
+    async fn wait_for_single_event(store: &WorkingMemoryStore) -> WorkingMemoryEvent {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .get_recent_events(10, 0.0)
+                    .await
+                    .expect("working memory query");
+                if let Some(event) = events.into_iter().next() {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for working memory event")
+    }
+
+    #[tokio::test]
+    async fn task_update_emits_outcome_for_done_status() {
+        let task_store = Arc::new(setup_test_store().await);
+        let working_memory = setup_working_memory().await;
+
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Review PR 2".to_string(),
+                description: None,
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let tool = TaskUpdateTool::for_branch(task_store, AgentId::from("agent-test"))
+            .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: None,
+                description: None,
+                status: Some("done".to_string()),
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect("task update should succeed");
+
+        assert_eq!(output.status, "done");
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(
+            event.summary,
+            format!("Task #{} completed", created.task_number)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_update_keeps_task_update_event_when_task_was_already_done() {
+        let task_store = Arc::new(setup_test_store().await);
+        let working_memory = setup_working_memory().await;
+
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Review merged changes".to_string(),
+                description: None,
+                status: TaskStatus::Done,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let tool = TaskUpdateTool::for_branch(task_store, AgentId::from("agent-test"))
+            .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: Some("Review merged changes carefully".to_string()),
+                description: None,
+                status: None,
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect("task update should succeed");
+
+        assert_eq!(output.status, "done");
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::TaskUpdate);
+        assert_eq!(
+            event.summary,
+            format!("Task #{} updated to done", created.task_number)
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_scope_checks_assignment_before_global_task_lookup() {
+        let task_store = Arc::new(setup_test_store().await);
+        let assigned = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Assigned task".to_string(),
+                description: None,
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("assigned task should be created");
+        let other = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Other task".to_string(),
+                description: None,
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("other task should be created");
+        let worker_id = WorkerId::new_v4();
+        task_store
+            .update(
+                assigned.task_number,
+                crate::tasks::UpdateTaskInput {
+                    worker_id: Some(worker_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("worker assignment should update");
+
+        let tool = TaskUpdateTool::for_worker(task_store, AgentId::from("agent-test"), worker_id);
+
+        let existing_foreign = tool
+            .call(TaskUpdateArgs {
+                task_number: other.task_number as i32,
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                subtasks: None,
+                metadata: Some(serde_json::json!({"progress": "checked"})),
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect_err("foreign task should be rejected");
+        let missing = tool
+            .call(TaskUpdateArgs {
+                task_number: 999,
+                title: None,
+                description: None,
+                status: None,
+                priority: None,
+                subtasks: None,
+                metadata: Some(serde_json::json!({"progress": "checked"})),
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect_err("missing task should be rejected the same way");
+
+        assert_eq!(existing_foreign.to_string(), missing.to_string());
+        assert_eq!(
+            existing_foreign.to_string(),
+            format!(
+                "task_update failed: worker {} can only update task #{}",
+                worker_id, assigned.task_number
+            )
+        );
     }
 }

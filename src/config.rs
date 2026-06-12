@@ -1138,6 +1138,49 @@ maintenance_merge_similarity_threshold = 1.1
     }
 
     #[test]
+    fn test_participant_context_defaults_and_overrides_resolution() {
+        let toml = r#"
+[defaults.participant_context]
+enabled = false
+min_participants = 2
+token_budget = 280
+max_participants = 3
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert!(!config.defaults.participant_context.enabled);
+        assert_eq!(config.defaults.participant_context.min_participants, 2);
+        assert_eq!(config.defaults.participant_context.token_budget, 280);
+        assert_eq!(config.defaults.participant_context.max_participants, 3);
+    }
+
+    #[test]
+    fn test_participant_context_rejects_impossible_bounds() {
+        let toml = r#"
+[defaults.participant_context]
+min_participants = 4
+max_participants = 3
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let error = Config::from_toml(parsed, PathBuf::from("."))
+            .expect_err("expected invalid participant context bounds to fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("defaults.participant_context.max_participants (3) must be >= defaults.participant_context.min_participants (4)"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_work_readiness_requires_warm_state() {
         let readiness = evaluate_work_readiness(
             WarmupConfig::default(),

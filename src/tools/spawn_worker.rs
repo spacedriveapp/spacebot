@@ -29,6 +29,21 @@ impl SpawnWorkerTool {
     }
 }
 
+fn summarize_duplicate_task(task: &str) -> String {
+    let trimmed = task.trim();
+    if trimmed.is_empty() {
+        return "unspecified task".to_string();
+    }
+
+    const MAX_CHARS: usize = 80;
+    if trimmed.len() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        let boundary = trimmed.floor_char_boundary(MAX_CHARS);
+        format!("{}...", &trimmed[..boundary])
+    }
+}
+
 /// Error type for spawn worker tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Worker spawn failed: {0}")]
@@ -188,6 +203,20 @@ impl Tool for SpawnWorkerTool {
         {
             let status = self.state.status_block.read().await;
             if let Some(existing_id) = status.find_duplicate_worker_task(&args.task) {
+                self.state
+                    .deps
+                    .working_memory
+                    .emit(
+                        crate::memory::WorkingMemoryEventType::BlockedOn,
+                        format!(
+                            "Worker spawn blocked on active worker {existing_id} for duplicate task: {}",
+                            summarize_duplicate_task(&args.task)
+                        ),
+                    )
+                    .channel(self.state.channel_id.to_string())
+                    .importance(0.6)
+                    .record();
+
                 return Ok(SpawnWorkerOutput {
                     worker_id: existing_id,
                     spawned: false,
@@ -415,7 +444,7 @@ impl Tool for DetachedSpawnWorkerTool {
 
         let secrets_guard = rc.secrets.load();
         let tool_secret_names = match (*secrets_guard).as_ref() {
-            Some(store) => store.tool_secret_names(),
+            Some(store) => store.tool_secret_names(&self.deps.agent_id),
             None => Vec::new(),
         };
 
@@ -425,6 +454,8 @@ impl Tool for DetachedSpawnWorkerTool {
             .resolve(crate::ProcessType::Worker, None)
             .to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
+        let project_context =
+            crate::agent::channel_dispatch::build_project_context(&self.deps, &prompt_engine).await;
         let worker_system_prompt = prompt_engine
             .render_worker_prompt(
                 &rc.instance_dir.display().to_string(),
@@ -436,6 +467,8 @@ impl Tool for DetachedSpawnWorkerTool {
                 &tool_secret_names,
                 browser_config.persist_session,
                 worker_status_text,
+                self.deps.wiki_store.is_some(),
+                project_context,
             )
             .and_then(|prompt| {
                 prompt_engine.maybe_append_tool_use_enforcement(
@@ -461,6 +494,7 @@ impl Tool for DetachedSpawnWorkerTool {
             self.logs_dir.clone(),
             Vec::new(), // no initial history for detached workers
             crate::conversation::settings::WorkerMemoryMode::None,
+            self.deps.wiki_store.is_some(),
             None, // No model override for detached workers
         );
 
@@ -564,7 +598,6 @@ async fn resolve_directory_from_project(
     }
 
     let store = &deps.project_store;
-    let agent_id = &deps.agent_id;
 
     // Worktree resolution: look up the worktree, derive absolute path from project root.
     if let Some(worktree_id) = worktree_id
@@ -582,7 +615,7 @@ async fn resolve_directory_from_project(
                 "project_id/worktree_id mismatch — using worktree's project"
             );
         }
-        if let Ok(Some(project)) = store.get_project(agent_id, &worktree.project_id).await {
+        if let Ok(Some(project)) = store.get_project(&worktree.project_id).await {
             let abs_path = std::path::Path::new(&project.root_path).join(&worktree.path);
             return Some(abs_path.to_string_lossy().to_string());
         }
@@ -590,7 +623,7 @@ async fn resolve_directory_from_project(
 
     // Project root resolution.
     if let Some(project_id) = project_id
-        && let Ok(Some(project)) = store.get_project(agent_id, project_id).await
+        && let Ok(Some(project)) = store.get_project(project_id).await
     {
         return Some(project.root_path.clone());
     }

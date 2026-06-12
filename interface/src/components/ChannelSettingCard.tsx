@@ -10,25 +10,37 @@ import {
 import {
 	Button,
 	Input,
-	Select,
+	SelectRoot,
 	SelectTrigger,
 	SelectValue,
 	SelectContent,
 	SelectItem,
-	Dialog,
+	DialogRoot,
 	DialogContent,
 	DialogHeader,
 	DialogTitle,
 	DialogFooter,
-	Toggle,
-} from "@/ui";
+} from "@spacedrive/primitives";
+import {Switch} from "@spacedrive/primitives";
 import {PlatformIcon} from "@/lib/platformIcons";
-import {isValidE164, E164_ERROR_TEXT, validateSignalDmAllowedUsers} from "@/lib/format";
+import {
+	isValidE164,
+	E164_ERROR_TEXT,
+	validateSignalDmAllowedUsers,
+} from "@/lib/format";
 import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faChevronDown, faPlus} from "@fortawesome/free-solid-svg-icons";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal";
+type Platform =
+	| "discord"
+	| "slack"
+	| "telegram"
+	| "twitch"
+	| "email"
+	| "webhook"
+	| "mattermost"
+	| "signal";
 
 const PLATFORM_LABELS: Record<Platform, string> = {
 	discord: "Discord",
@@ -89,8 +101,14 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 					onClick={() => onAddInstance(platform)}
 					className="flex items-center gap-2.5 rounded-md px-3 py-2 text-left hover:bg-app-hover transition-colors group"
 				>
-					<PlatformIcon platform={platform} size="sm" className="text-ink-faint" />
-					<span className="flex-1 text-sm text-ink">{PLATFORM_LABELS[platform]}</span>
+					<PlatformIcon
+						platform={platform}
+						size="sm"
+						className="text-ink-faint"
+					/>
+					<span className="flex-1 text-sm text-ink">
+						{PLATFORM_LABELS[platform]}
+					</span>
 					<FontAwesomeIcon
 						icon={faPlus}
 						className="text-ink-faint opacity-0 group-hover:opacity-100 transition-opacity text-xs"
@@ -106,7 +124,11 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 					key={platform}
 					className="flex items-center gap-2.5 rounded-md px-3 py-2 opacity-40"
 				>
-					<PlatformIcon platform={platform} size="sm" className="text-ink-faint/50" />
+					<PlatformIcon
+						platform={platform}
+						size="sm"
+						className="text-ink-faint/50"
+					/>
 					<span className="flex-1 text-sm text-ink-dull">{name}</span>
 				</div>
 			))}
@@ -122,11 +144,20 @@ interface InstanceCardProps {
 	onToggleExpand: () => void;
 }
 
-export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardProps) {
+export function InstanceCard({
+	instance,
+	expanded,
+	onToggleExpand,
+}: InstanceCardProps) {
 	const queryClient = useQueryClient();
-	const [message, setMessage] = useState<{text: string; type: "success" | "error"} | null>(null);
+	const [message, setMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
 	const [confirmRemove, setConfirmRemove] = useState(false);
-	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(null);
+	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(
+		null,
+	);
 	const [addingBinding, setAddingBinding] = useState(false);
 	const [bindingForm, setBindingForm] = useState({
 		agent_id: "main",
@@ -170,7 +201,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 		onSuccess: () => {
 			queryClient.invalidateQueries({queryKey: ["messaging-status"]});
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const deleteInstance = useMutation({
@@ -185,7 +217,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const addBindingMutation = useMutation({
@@ -201,7 +234,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const updateBindingMutation = useMutation({
@@ -217,7 +251,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const deleteBindingMutation = useMutation({
@@ -231,7 +266,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	function resetBindingForm() {
@@ -292,7 +328,8 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 		if (platform === "telegram" && bindingForm.chat_id.trim())
 			request.chat_id = bindingForm.chat_id.trim();
 		request.channel_ids = bindingForm.channel_ids;
-		request.require_mention = platform === "discord" ? bindingForm.require_mention : false;
+		request.require_mention =
+			platform === "discord" ? bindingForm.require_mention : false;
 		request.dm_allowed_users = bindingForm.dm_allowed_users;
 		updateBindingMutation.mutate(request as any);
 	}
@@ -334,7 +371,11 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 				aria-expanded={expanded}
 				className="flex w-full items-center gap-3 p-3 text-left cursor-pointer"
 			>
-				<PlatformIcon platform={platform} size="sm" className="text-ink-faint" />
+				<PlatformIcon
+					platform={platform}
+					size="sm"
+					className="text-ink-faint"
+				/>
 				<div className="flex-1 min-w-0">
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">
@@ -343,12 +384,15 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 						<span className="rounded bg-app-selected/60 px-1.5 py-0.5 text-[10px] font-medium uppercase leading-none text-ink-faint">
 							{instance.name || "default"}
 						</span>
-						<span className={`text-tiny ${instance.enabled ? "text-green-400" : "text-ink-faint"}`}>
+						<span
+							className={`text-tiny ${instance.enabled ? "text-green-400" : "text-ink-faint"}`}
+						>
 							{instance.enabled ? "● Active" : "○ Disabled"}
 						</span>
 					</div>
 					<p className="text-tiny text-ink-faint mt-0.5">
-						{instance.binding_count} binding{instance.binding_count !== 1 ? "s" : ""}
+						{instance.binding_count} binding
+						{instance.binding_count !== 1 ? "s" : ""}
 					</p>
 				</div>
 				<motion.div
@@ -370,7 +414,7 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 						transition={{duration: 0.25, ease: [0.4, 0, 0.2, 1]}}
 						className="overflow-hidden"
 					>
-						<div className="border-t border-app-line/50 bg-app-darkBox px-4 pb-4 pt-3 flex flex-col gap-4">
+						<div className="border-t border-app-line/50 bg-app-dark-box px-4 pb-4 pt-3 flex flex-col gap-4">
 							{/* Enable/Disable toggle */}
 							<div className="flex items-center justify-between">
 								<div>
@@ -379,7 +423,7 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 										{instance.enabled ? "Receiving messages" : "Adapter paused"}
 									</p>
 								</div>
-								<Toggle
+								<Switch
 									checked={instance.enabled}
 									onCheckedChange={(checked) => toggleEnabled.mutate(checked)}
 									disabled={toggleEnabled.isPending}
@@ -412,22 +456,34 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 												className="flex items-center gap-2 border-b border-app-line/50 px-3 py-2 last:border-b-0"
 											>
 												<div className="flex-1 min-w-0">
-													<span className="text-sm text-ink">{binding.agent_id}</span>
+													<span className="text-sm text-ink">
+														{binding.agent_id}
+													</span>
 													<div className="flex flex-wrap gap-1.5 mt-0.5 text-tiny text-ink-faint">
-														{binding.guild_id && <span>Guild: {binding.guild_id}</span>}
-														{binding.workspace_id && <span>Workspace: {binding.workspace_id}</span>}
-														{binding.chat_id && <span>Chat: {binding.chat_id}</span>}
+														{binding.guild_id && (
+															<span>Guild: {binding.guild_id}</span>
+														)}
+														{binding.workspace_id && (
+															<span>Workspace: {binding.workspace_id}</span>
+														)}
+														{binding.chat_id && (
+															<span>Chat: {binding.chat_id}</span>
+														)}
 														{binding.channel_ids.length > 0 && (
 															<span>
-																{binding.channel_ids.length} channel{binding.channel_ids.length > 1 ? "s" : ""}
+																{binding.channel_ids.length} channel
+																{binding.channel_ids.length > 1 ? "s" : ""}
 															</span>
 														)}
 														{binding.dm_allowed_users.length > 0 && (
 															<span>
-																{binding.dm_allowed_users.length} DM user{binding.dm_allowed_users.length > 1 ? "s" : ""}
+																{binding.dm_allowed_users.length} DM user
+																{binding.dm_allowed_users.length > 1 ? "s" : ""}
 															</span>
 														)}
-														{binding.require_mention && <span>Mention only</span>}
+														{binding.require_mention && (
+															<span>Mention only</span>
+														)}
 														{!binding.guild_id &&
 															!binding.workspace_id &&
 															!binding.chat_id &&
@@ -436,7 +492,11 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 															)}
 													</div>
 												</div>
-												<Button size="sm" variant="outline" onClick={() => startEditBinding(binding)}>
+												<Button
+													size="sm"
+													variant="outline"
+													onClick={() => startEditBinding(binding)}
+												>
 													Edit
 												</Button>
 												<Button
@@ -457,7 +517,7 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 								)}
 
 								{/* Add/Edit binding modal */}
-								<Dialog
+								<DialogRoot
 									open={isEditingOrAdding}
 									onOpenChange={(open) => {
 										if (!open) {
@@ -479,16 +539,22 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 											bindingForm={bindingForm}
 											setBindingForm={setBindingForm}
 											editing={!!editingBinding}
-											onSave={editingBinding ? handleUpdateBinding : handleAddBinding}
+											onSave={
+												editingBinding ? handleUpdateBinding : handleAddBinding
+											}
 											onCancel={() => {
 												setEditingBinding(null);
 												setAddingBinding(false);
 												setMessage(null);
 											}}
-											saving={editingBinding ? updateBindingMutation.isPending : addBindingMutation.isPending}
+											saving={
+												editingBinding
+													? updateBindingMutation.isPending
+													: addBindingMutation.isPending
+											}
 										/>
 									</DialogContent>
-								</Dialog>
+								</DialogRoot>
 							</div>
 
 							{/* Status message */}
@@ -506,36 +572,40 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 
 							{/* Remove instance */}
 							<div className="border-t border-app-line/50 pt-3">
-									{!confirmRemove ? (
-										<Button
-											variant="outline"
-											size="sm"
-											onClick={() => setConfirmRemove(true)}
-										>
-											Remove {instanceLabel}
-										</Button>
-									) : (
-										<div className="flex flex-col gap-2">
-											<p className="text-sm text-red-400">
-												This will remove credentials and bindings for {instanceLabel}.
-												The adapter will stop immediately.
-											</p>
-											<div className="flex gap-2">
-												<Button variant="ghost" size="sm" onClick={() => setConfirmRemove(false)}>
-													Cancel
-												</Button>
-												<Button
-													size="sm"
-													onClick={() => deleteInstance.mutate()}
-													loading={deleteInstance.isPending}
-													className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
-												>
-													Confirm Remove
-												</Button>
-											</div>
+								{!confirmRemove ? (
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => setConfirmRemove(true)}
+									>
+										Remove {instanceLabel}
+									</Button>
+								) : (
+									<div className="flex flex-col gap-2">
+										<p className="text-sm text-red-400">
+											This will remove credentials and bindings for{" "}
+											{instanceLabel}. The adapter will stop immediately.
+										</p>
+										<div className="flex gap-2">
+											<Button
+												variant="bare"
+												size="sm"
+												onClick={() => setConfirmRemove(false)}
+											>
+												Cancel
+											</Button>
+											<Button
+												size="sm"
+												onClick={() => deleteInstance.mutate()}
+												loading={deleteInstance.isPending}
+												className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
+											>
+												Confirm Remove
+											</Button>
 										</div>
-									)}
-								</div>
+									</div>
+								)}
+							</div>
 						</div>
 					</motion.div>
 				)}
@@ -553,11 +623,21 @@ interface AddInstanceCardProps {
 	onCreated: () => void;
 }
 
-export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddInstanceCardProps) {
+export function AddInstanceCard({
+	platform,
+	isDefault,
+	onCancel,
+	onCreated,
+}: AddInstanceCardProps) {
 	const queryClient = useQueryClient();
 	const [instanceName, setInstanceName] = useState("");
-	const [credentialInputs, setCredentialInputs] = useState<Record<string, string>>({});
-	const [message, setMessage] = useState<{text: string; type: "success" | "error"} | null>(null);
+	const [credentialInputs, setCredentialInputs] = useState<
+		Record<string, string>
+	>({});
+	const [message, setMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
 
 	const createInstance = useMutation({
 		mutationFn: api.createMessagingInstance,
@@ -570,7 +650,8 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	function handleSave() {
@@ -583,8 +664,14 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 			}
 			credentials.discord_token = credentialInputs.discord_token.trim();
 		} else if (platform === "slack") {
-			if (!credentialInputs.slack_bot_token?.trim() || !credentialInputs.slack_app_token?.trim()) {
-				setMessage({text: "Both bot token and app token are required", type: "error"});
+			if (
+				!credentialInputs.slack_bot_token?.trim() ||
+				!credentialInputs.slack_app_token?.trim()
+			) {
+				setMessage({
+					text: "Both bot token and app token are required",
+					type: "error",
+				});
 				return;
 			}
 			credentials.slack_bot_token = credentialInputs.slack_bot_token.trim();
@@ -596,29 +683,56 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 			}
 			credentials.telegram_token = credentialInputs.telegram_token.trim();
 		} else if (platform === "twitch") {
-			if (!credentialInputs.twitch_username?.trim() || !credentialInputs.twitch_oauth_token?.trim()) {
-				setMessage({text: "Username and OAuth token are required", type: "error"});
+			if (
+				!credentialInputs.twitch_username?.trim() ||
+				!credentialInputs.twitch_oauth_token?.trim()
+			) {
+				setMessage({
+					text: "Username and OAuth token are required",
+					type: "error",
+				});
 				return;
 			}
 			credentials.twitch_username = credentialInputs.twitch_username.trim();
-			credentials.twitch_oauth_token = credentialInputs.twitch_oauth_token.trim();
+			credentials.twitch_oauth_token =
+				credentialInputs.twitch_oauth_token.trim();
 			if (credentialInputs.twitch_client_id?.trim())
 				credentials.twitch_client_id = credentialInputs.twitch_client_id.trim();
 			if (credentialInputs.twitch_client_secret?.trim())
-				credentials.twitch_client_secret = credentialInputs.twitch_client_secret.trim();
+				credentials.twitch_client_secret =
+					credentialInputs.twitch_client_secret.trim();
 			if (credentialInputs.twitch_refresh_token?.trim())
-				credentials.twitch_refresh_token = credentialInputs.twitch_refresh_token.trim();
+				credentials.twitch_refresh_token =
+					credentialInputs.twitch_refresh_token.trim();
 		} else if (platform === "email") {
-			if (!credentialInputs.email_imap_host?.trim() || !credentialInputs.email_smtp_host?.trim()) {
-				setMessage({text: "IMAP host and SMTP host are required", type: "error"});
+			if (
+				!credentialInputs.email_imap_host?.trim() ||
+				!credentialInputs.email_smtp_host?.trim()
+			) {
+				setMessage({
+					text: "IMAP host and SMTP host are required",
+					type: "error",
+				});
 				return;
 			}
-			if (!credentialInputs.email_imap_username?.trim() || !credentialInputs.email_imap_password?.trim()) {
-				setMessage({text: "IMAP username and password are required", type: "error"});
+			if (
+				!credentialInputs.email_imap_username?.trim() ||
+				!credentialInputs.email_imap_password?.trim()
+			) {
+				setMessage({
+					text: "IMAP username and password are required",
+					type: "error",
+				});
 				return;
 			}
-			if (!credentialInputs.email_smtp_username?.trim() || !credentialInputs.email_smtp_password?.trim()) {
-				setMessage({text: "SMTP username and password are required", type: "error"});
+			if (
+				!credentialInputs.email_smtp_username?.trim() ||
+				!credentialInputs.email_smtp_password?.trim()
+			) {
+				setMessage({
+					text: "SMTP username and password are required",
+					type: "error",
+				});
 				return;
 			}
 			if (!credentialInputs.email_from_address?.trim()) {
@@ -626,23 +740,32 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				return;
 			}
 			credentials.email_imap_host = credentialInputs.email_imap_host.trim();
-			credentials.email_imap_username = credentialInputs.email_imap_username.trim();
-			credentials.email_imap_password = credentialInputs.email_imap_password.trim();
+			credentials.email_imap_username =
+				credentialInputs.email_imap_username.trim();
+			credentials.email_imap_password =
+				credentialInputs.email_imap_password.trim();
 			credentials.email_smtp_host = credentialInputs.email_smtp_host.trim();
-			credentials.email_smtp_username = credentialInputs.email_smtp_username.trim();
-			credentials.email_smtp_password = credentialInputs.email_smtp_password.trim();
-			credentials.email_from_address = credentialInputs.email_from_address.trim();
+			credentials.email_smtp_username =
+				credentialInputs.email_smtp_username.trim();
+			credentials.email_smtp_password =
+				credentialInputs.email_smtp_password.trim();
+			credentials.email_from_address =
+				credentialInputs.email_from_address.trim();
 			if (credentialInputs.email_imap_port?.trim())
-				credentials.email_imap_port = parseInt(credentialInputs.email_imap_port.trim(), 10) || undefined;
+				credentials.email_imap_port =
+					parseInt(credentialInputs.email_imap_port.trim(), 10) || undefined;
 			if (credentialInputs.email_smtp_port?.trim())
-				credentials.email_smtp_port = parseInt(credentialInputs.email_smtp_port.trim(), 10) || undefined;
+				credentials.email_smtp_port =
+					parseInt(credentialInputs.email_smtp_port.trim(), 10) || undefined;
 		} else if (platform === "webhook") {
 			if (credentialInputs.webhook_port?.trim())
-				credentials.webhook_port = parseInt(credentialInputs.webhook_port.trim(), 10) || undefined;
+				credentials.webhook_port =
+					parseInt(credentialInputs.webhook_port.trim(), 10) || undefined;
 			if (credentialInputs.webhook_bind?.trim())
 				credentials.webhook_bind = credentialInputs.webhook_bind.trim();
 			if (credentialInputs.webhook_auth_token?.trim())
-				credentials.webhook_auth_token = credentialInputs.webhook_auth_token.trim();
+				credentials.webhook_auth_token =
+					credentialInputs.webhook_auth_token.trim();
 		} else if (platform === "mattermost") {
 			if (!credentialInputs.mattermost_base_url?.trim()) {
 				setMessage({text: "Server URL is required", type: "error"});
@@ -652,7 +775,8 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				setMessage({text: "Access token is required", type: "error"});
 				return;
 			}
-			credentials.mattermost_base_url = credentialInputs.mattermost_base_url.trim();
+			credentials.mattermost_base_url =
+				credentialInputs.mattermost_base_url.trim();
 			credentials.mattermost_token = credentialInputs.mattermost_token.trim();
 		} else if (platform === "signal") {
 			if (!credentialInputs.signal_http_url?.trim()) {
@@ -668,7 +792,7 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 			if (!isValidE164(account)) {
 				setMessage({
 					text: E164_ERROR_TEXT,
-					type: "error"
+					type: "error",
 				});
 				return;
 			}
@@ -676,13 +800,15 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 			credentials.signal_account = account;
 			// Normalize: always omit when blank (empty or undefined) for consistent empty-state behavior
 			if (credentialInputs.signal_dm_allowed_users?.trim()) {
-				const result = validateSignalDmAllowedUsers(credentialInputs.signal_dm_allowed_users);
+				const result = validateSignalDmAllowedUsers(
+					credentialInputs.signal_dm_allowed_users,
+				);
 				if (!result.valid) {
 					setMessage({text: result.error, type: "error"});
 					return;
 				}
 				if (result.entries.length > 0) {
-					credentials.signal_dm_allowed_users = result.entries.join(',');
+					credentials.signal_dm_allowed_users = result.entries.join(",");
 				}
 			}
 		}
@@ -705,7 +831,11 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 		<div className="rounded-lg border border-accent/30 bg-app-box">
 			<div className="p-4 flex flex-col gap-3">
 				<div className="flex items-center gap-2">
-					<PlatformIcon platform={platform} size="sm" className="text-ink-faint" />
+					<PlatformIcon
+						platform={platform}
+						size="sm"
+						className="text-ink-faint"
+					/>
 					<span className="text-sm font-medium text-ink">
 						{isDefault
 							? `Add ${PLATFORM_LABELS[platform]}`
@@ -731,14 +861,23 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{/* Platform-specific credential fields */}
 				{platform === "discord" && (
 					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+							Bot Token
+						</label>
 						<Input
 							type="password"
 							size="lg"
 							value={credentialInputs.discord_token ?? ""}
-							onChange={(e) => setCredentialInputs({...credentialInputs, discord_token: e.target.value})}
+							onChange={(e) =>
+								setCredentialInputs({
+									...credentialInputs,
+									discord_token: e.target.value,
+								})
+							}
 							placeholder="MTk4NjIyNDgzNDcxOTI1MjQ4.D..."
-							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") handleSave();
+							}}
 						/>
 					</div>
 				)}
@@ -746,24 +885,40 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{platform === "slack" && (
 					<>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Bot Token
+							</label>
 							<Input
 								type="password"
 								size="lg"
 								value={credentialInputs.slack_bot_token ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, slack_bot_token: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										slack_bot_token: e.target.value,
+									})
+								}
 								placeholder="xoxb-..."
 							/>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">App Token</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								App Token
+							</label>
 							<Input
 								type="password"
 								size="lg"
 								value={credentialInputs.slack_app_token ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, slack_app_token: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										slack_app_token: e.target.value,
+									})
+								}
 								placeholder="xapp-..."
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 						</div>
 					</>
@@ -771,14 +926,23 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 
 				{platform === "telegram" && (
 					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+							Bot Token
+						</label>
 						<Input
 							type="password"
 							size="lg"
 							value={credentialInputs.telegram_token ?? ""}
-							onChange={(e) => setCredentialInputs({...credentialInputs, telegram_token: e.target.value})}
+							onChange={(e) =>
+								setCredentialInputs({
+									...credentialInputs,
+									telegram_token: e.target.value,
+								})
+							}
 							placeholder="123456789:ABCdefGHI..."
-							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") handleSave();
+							}}
 						/>
 					</div>
 				)}
@@ -786,54 +950,91 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{platform === "twitch" && (
 					<>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Username</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Bot Username
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.twitch_username ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, twitch_username: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										twitch_username: e.target.value,
+									})
+								}
 								placeholder="my_bot"
 							/>
 						</div>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">Client ID</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									Client ID
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.twitch_client_id ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, twitch_client_id: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											twitch_client_id: e.target.value,
+										})
+									}
 									placeholder="your-client-id"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">Client Secret</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									Client Secret
+								</label>
 								<Input
 									type="password"
 									size="lg"
 									value={credentialInputs.twitch_client_secret ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, twitch_client_secret: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											twitch_client_secret: e.target.value,
+										})
+									}
 									placeholder="your-client-secret"
 								/>
 							</div>
 						</div>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">OAuth Token</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									OAuth Token
+								</label>
 								<Input
 									type="password"
 									size="lg"
 									value={credentialInputs.twitch_oauth_token ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, twitch_oauth_token: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											twitch_oauth_token: e.target.value,
+										})
+									}
 									placeholder="abcd1234..."
-									onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleSave();
+									}}
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">Refresh Token</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									Refresh Token
+								</label>
 								<Input
 									type="password"
 									size="lg"
 									value={credentialInputs.twitch_refresh_token ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, twitch_refresh_token: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											twitch_refresh_token: e.target.value,
+										})
+									}
 									placeholder="refresh-token"
 								/>
 							</div>
@@ -845,94 +1046,159 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 					<>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">IMAP Host</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									IMAP Host
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_imap_host ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_imap_host: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_imap_host: e.target.value,
+										})
+									}
 									placeholder="imap.gmail.com"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">IMAP Port</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									IMAP Port
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_imap_port ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_imap_port: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_imap_port: e.target.value,
+										})
+									}
 									placeholder="993"
 								/>
 							</div>
 						</div>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">IMAP Username</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									IMAP Username
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_imap_username ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_imap_username: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_imap_username: e.target.value,
+										})
+									}
 									placeholder="user@example.com"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">IMAP Password</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									IMAP Password
+								</label>
 								<Input
 									type="password"
 									size="lg"
 									value={credentialInputs.email_imap_password ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_imap_password: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_imap_password: e.target.value,
+										})
+									}
 									placeholder="App password"
 								/>
 							</div>
 						</div>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">SMTP Host</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									SMTP Host
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_smtp_host ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_smtp_host: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_smtp_host: e.target.value,
+										})
+									}
 									placeholder="smtp.gmail.com"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">SMTP Port</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									SMTP Port
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_smtp_port ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_smtp_port: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_smtp_port: e.target.value,
+										})
+									}
 									placeholder="587"
 								/>
 							</div>
 						</div>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">SMTP Username</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									SMTP Username
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.email_smtp_username ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_smtp_username: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_smtp_username: e.target.value,
+										})
+									}
 									placeholder="user@example.com"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">SMTP Password</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									SMTP Password
+								</label>
 								<Input
 									type="password"
 									size="lg"
 									value={credentialInputs.email_smtp_password ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, email_smtp_password: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											email_smtp_password: e.target.value,
+										})
+									}
 									placeholder="App password"
 								/>
 							</div>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">From Address</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								From Address
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.email_from_address ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, email_from_address: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_from_address: e.target.value,
+									})
+								}
 								placeholder="bot@example.com"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 						</div>
 					</>
@@ -942,33 +1208,56 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 					<>
 						<div className="grid grid-cols-2 gap-3">
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">Port</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									Port
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.webhook_port ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, webhook_port: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											webhook_port: e.target.value,
+										})
+									}
 									placeholder="18789"
 								/>
 							</div>
 							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bind Address</label>
+								<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+									Bind Address
+								</label>
 								<Input
 									size="lg"
 									value={credentialInputs.webhook_bind ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, webhook_bind: e.target.value})}
+									onChange={(e) =>
+										setCredentialInputs({
+											...credentialInputs,
+											webhook_bind: e.target.value,
+										})
+									}
 									placeholder="127.0.0.1"
 								/>
 							</div>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Auth Token</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Auth Token
+							</label>
 							<Input
 								type="password"
 								size="lg"
 								value={credentialInputs.webhook_auth_token ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, webhook_auth_token: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										webhook_auth_token: e.target.value,
+									})
+								}
 								placeholder="Optional — leave empty for no auth"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 						</div>
 					</>
@@ -977,23 +1266,39 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{platform === "mattermost" && (
 					<>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Server URL</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Server URL
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.mattermost_base_url ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_base_url: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										mattermost_base_url: e.target.value,
+									})
+								}
 								placeholder="https://mattermost.example.com"
 							/>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Access Token</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Access Token
+							</label>
 							<Input
 								type="password"
 								size="lg"
 								value={credentialInputs.mattermost_token ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_token: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										mattermost_token: e.target.value,
+									})
+								}
 								placeholder="Personal access token from Mattermost account settings"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 						</div>
 					</>
@@ -1002,42 +1307,72 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{platform === "signal" && (
 					<>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">HTTP URL</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								HTTP URL
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.signal_http_url ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, signal_http_url: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										signal_http_url: e.target.value,
+									})
+								}
 								placeholder="http://127.0.0.1:8686"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 							<p className="mt-1 text-xs text-ink-faint">
 								URL of your signal-cli daemon (e.g., http://127.0.0.1:8686)
 							</p>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Account Phone Number</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Account Phone Number
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.signal_account ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, signal_account: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										signal_account: e.target.value,
+									})
+								}
 								placeholder="+1234567890"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 							<p className="mt-1 text-xs text-ink-faint">
-								Your Signal phone number in E.164 format (+ followed by 6-15 digits, first digit 1-9)
+								Your Signal phone number in E.164 format (+ followed by 6-15
+								digits, first digit 1-9)
 							</p>
 						</div>
 						<div>
-							<label className="mb-1.5 block text-sm font-medium text-ink-dull">DM Allowed Users (Optional)</label>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								DM Allowed Users (Optional)
+							</label>
 							<Input
 								size="lg"
 								value={credentialInputs.signal_dm_allowed_users ?? ""}
-								onChange={(e) => setCredentialInputs({...credentialInputs, signal_dm_allowed_users: e.target.value})}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										signal_dm_allowed_users: e.target.value,
+									})
+								}
 								placeholder="+1234567890, +1987654321"
-								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
 							/>
 							<p className="mt-1 text-xs text-ink-faint">
-								Allowed DM senders: E.164 phone numbers (+1234567890) or uuid:xxx identifiers. Comma-separated. If empty, DMs are blocked.
+								Allowed DM senders: E.164 phone numbers (+1234567890) or
+								uuid:xxx identifiers. Comma-separated. If empty, DMs are
+								blocked.
 							</p>
 						</div>
 					</>
@@ -1046,7 +1381,12 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				{docLink && (
 					<p className="text-xs text-ink-faint">
 						Need help?{" "}
-						<a href={docLink} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+						<a
+							href={docLink}
+							target="_blank"
+							rel="noopener noreferrer"
+							className="text-accent hover:underline"
+						>
 							Read the {PLATFORM_LABELS[platform]} setup docs &rarr;
 						</a>
 					</p>
@@ -1065,10 +1405,14 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				)}
 
 				<div className="flex gap-2 justify-end">
-					<Button size="sm" variant="ghost" onClick={onCancel}>
+					<Button size="sm" variant="bare" onClick={onCancel}>
 						Cancel
 					</Button>
-					<Button size="sm" onClick={handleSave} loading={createInstance.isPending}>
+					<Button
+						size="sm"
+						onClick={handleSave}
+						loading={createInstance.isPending}
+					>
 						{isDefault ? "Connect" : "Create Instance"}
 					</Button>
 				</div>
@@ -1109,27 +1453,37 @@ function BindingForm({
 	return (
 		<div className="flex flex-col gap-3">
 			<div>
-				<label className="mb-1 block text-sm font-medium text-ink-dull">Agent</label>
-				<Select
+				<label className="mb-1 block text-sm font-medium text-ink-dull">
+					Agent
+				</label>
+				<SelectRoot
 					value={bindingForm.agent_id}
 					onValueChange={(v) => setBindingForm({...bindingForm, agent_id: v})}
 				>
-					<SelectTrigger><SelectValue /></SelectTrigger>
+					<SelectTrigger>
+						<SelectValue />
+					</SelectTrigger>
 					<SelectContent>
 						{agents.map((a) => (
-							<SelectItem key={a.id} value={a.id}>{a.id}</SelectItem>
+							<SelectItem key={a.id} value={a.id}>
+								{a.id}
+							</SelectItem>
 						)) ?? <SelectItem value="main">main</SelectItem>}
 					</SelectContent>
-				</Select>
+				</SelectRoot>
 			</div>
 
 			{platform === "discord" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Guild ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Guild ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.guild_id}
-						onChange={(e) => setBindingForm({...bindingForm, guild_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, guild_id: e.target.value})
+						}
 						placeholder="Optional -- leave empty for all servers"
 					/>
 				</div>
@@ -1137,11 +1491,15 @@ function BindingForm({
 
 			{platform === "slack" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Workspace ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Workspace ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.workspace_id}
-						onChange={(e) => setBindingForm({...bindingForm, workspace_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, workspace_id: e.target.value})
+						}
 						placeholder="Optional -- leave empty for all workspaces"
 					/>
 				</div>
@@ -1149,11 +1507,15 @@ function BindingForm({
 
 			{platform === "telegram" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Chat ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Chat ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.chat_id}
-						onChange={(e) => setBindingForm({...bindingForm, chat_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, chat_id: e.target.value})
+						}
 						placeholder="Optional -- leave empty for all chats"
 					/>
 				</div>
@@ -1161,10 +1523,14 @@ function BindingForm({
 
 			{(platform === "discord" || platform === "slack") && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Channel IDs</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Channel IDs
+					</label>
 					<TagInput
 						value={bindingForm.channel_ids}
-						onChange={(ids) => setBindingForm({...bindingForm, channel_ids: ids})}
+						onChange={(ids) =>
+							setBindingForm({...bindingForm, channel_ids: ids})
+						}
 						placeholder="Add channel ID..."
 					/>
 				</div>
@@ -1176,37 +1542,56 @@ function BindingForm({
 						<input
 							type="checkbox"
 							checked={bindingForm.require_mention}
-							onChange={(e) => setBindingForm({...bindingForm, require_mention: e.target.checked})}
+							onChange={(e) =>
+								setBindingForm({
+									...bindingForm,
+									require_mention: e.target.checked,
+								})
+							}
 							className="h-4 w-4 rounded border-app-line bg-app-box"
 						/>
 						Require @mention or reply to bot
 					</label>
-					<p className="mt-1.5 text-xs text-ink-faint">Blocks messages entirely — the agent won't see them at all. To let the agent read all messages but only respond to commands, mentions, or replies, use Mention Only mode in Channels settings (cog icon).</p>
+					<p className="mt-1.5 text-xs text-ink-faint">
+						Blocks messages entirely — the agent won't see them at all. To let
+						the agent read all messages but only respond to commands, mentions,
+						or replies, use Mention Only mode in Channels settings (cog icon).
+					</p>
 				</div>
 			)}
 
 			{platform === "twitch" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Channels</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Channels
+					</label>
 					<TagInput
 						value={bindingForm.channel_ids}
-						onChange={(ids) => setBindingForm({...bindingForm, channel_ids: ids})}
+						onChange={(ids) =>
+							setBindingForm({...bindingForm, channel_ids: ids})
+						}
 						placeholder="Add channel name..."
 					/>
 				</div>
 			)}
 
 			<div>
-				<label className="mb-1 block text-sm font-medium text-ink-dull">DM Allowed Users</label>
+				<label className="mb-1 block text-sm font-medium text-ink-dull">
+					DM Allowed Users
+				</label>
 				<TagInput
 					value={bindingForm.dm_allowed_users}
-					onChange={(users) => setBindingForm({...bindingForm, dm_allowed_users: users})}
+					onChange={(users) =>
+						setBindingForm({...bindingForm, dm_allowed_users: users})
+					}
 					placeholder="Add user ID..."
 				/>
 			</div>
 
 			<DialogFooter>
-				<Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+				<Button size="sm" variant="bare" onClick={onCancel}>
+					Cancel
+				</Button>
 				<Button size="sm" onClick={onSave} loading={saving}>
 					{editing ? "Update" : "Add Binding"}
 				</Button>
@@ -1229,7 +1614,11 @@ export function DisabledChannelCard({
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4 opacity-40">
 			<div className="flex items-center gap-3">
-				<PlatformIcon platform={platform} size="lg" className="text-ink-faint/50" />
+				<PlatformIcon
+					platform={platform}
+					size="lg"
+					className="text-ink-faint/50"
+				/>
 				<div className="flex-1">
 					<span className="text-sm font-medium text-ink">{name}</span>
 					<p className="mt-0.5 text-sm text-ink-dull">{description}</p>

@@ -259,6 +259,7 @@ impl Tool for SkillsSearchTool {
                         name: skill.name,
                         description: skill.description,
                         source: match skill.source {
+                            crate::skills::SkillSource::Builtin => "builtin".to_string(),
                             crate::skills::SkillSource::Instance => "instance".to_string(),
                             crate::skills::SkillSource::Workspace => "workspace".to_string(),
                         },

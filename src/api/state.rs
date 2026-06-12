@@ -6,13 +6,14 @@ use crate::agent::status::StatusBlock;
 use crate::config::{
     Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SignalPermissions, SlackPermissions,
 };
-use crate::conversation::worker_transcript::{ActionContent, TranscriptStep};
+use crate::conversation::worker_transcript::{ActionContent, ToolResultStatus, TranscriptStep};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
 use crate::mcp::McpManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::portal::PortalAdapter;
+use crate::notifications::{NewNotification, Notification, NotificationStore};
 use crate::projects::ProjectStore;
 use crate::prompts::PromptEngine;
 use crate::tasks::TaskStore;
@@ -22,11 +23,183 @@ use crate::{ProcessEvent, ProcessId};
 use arc_swap::ArcSwap;
 use serde::Serialize;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
+
+const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 50_000;
+const LIVE_TOOL_OUTPUT_REDACTION: &str = "[REDACTED:potential-secret]";
+const MAX_COMPLETED_WORKER_TOMBSTONES: usize = 4_096;
+
+fn worker_tool_result_status(result: &str) -> ToolResultStatus {
+    if result.contains("\"waiting_for_input\":true")
+        || result.contains("\"waiting_for_input\": true")
+        || result.contains("Command appears to be waiting for interactive input.")
+    {
+        ToolResultStatus::WaitingForInput
+    } else {
+        ToolResultStatus::Final
+    }
+}
+
+fn append_live_output(output: &mut Option<String>, line: &str) {
+    let mut combined = output.take().unwrap_or_default();
+    combined.push_str(line);
+    combined.push('\n');
+
+    if combined.len() > MAX_LIVE_TOOL_OUTPUT_BYTES {
+        let mut start = combined.len().saturating_sub(MAX_LIVE_TOOL_OUTPUT_BYTES);
+        while start < combined.len() && !combined.is_char_boundary(start) {
+            start += 1;
+        }
+        combined.drain(..start);
+    }
+    *output = Some(combined);
+}
+
+fn upsert_pending_tool_output(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    line: &str,
+) {
+    if let Some(step) = steps.iter_mut().find(|step| {
+        matches!(
+            step,
+            TranscriptStep::ToolResult {
+                call_id: existing_call_id,
+                ..
+            } if existing_call_id == &call_id
+        )
+    }) && let TranscriptStep::ToolResult {
+        live_output,
+        status,
+        ..
+    } = step
+    {
+        if !matches!(*status, ToolResultStatus::Pending) {
+            return;
+        }
+        append_live_output(live_output, line);
+        *status = ToolResultStatus::Pending;
+        return;
+    }
+
+    steps.push(TranscriptStep::ToolResult {
+        call_id,
+        name: tool_name,
+        text: String::new(),
+        live_output: Some(format!("{line}\n")),
+        status: ToolResultStatus::Pending,
+    });
+}
+
+fn push_live_tool_call(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    args: String,
+) {
+    let pending_output_index = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                TranscriptStep::ToolResult {
+                    call_id: existing_call_id,
+                    ..
+                } if existing_call_id == &call_id
+            )
+        })
+        .or_else(|| {
+            steps.iter().position(|step| {
+                matches!(
+                    step,
+                    TranscriptStep::ToolResult {
+                        name,
+                        text,
+                        status: ToolResultStatus::Pending,
+                        ..
+                    } if name == &tool_name && text.is_empty()
+                )
+            })
+        });
+
+    let pending_output = pending_output_index.map(|index| steps.remove(index));
+
+    steps.push(TranscriptStep::Action {
+        content: vec![ActionContent::ToolCall {
+            id: call_id.clone(),
+            name: tool_name.clone(),
+            args,
+        }],
+    });
+
+    if let Some(TranscriptStep::ToolResult {
+        text,
+        live_output,
+        status,
+        ..
+    }) = pending_output
+    {
+        steps.push(TranscriptStep::ToolResult {
+            call_id,
+            name: tool_name,
+            text,
+            live_output,
+            status,
+        });
+    }
+}
+
+fn upsert_final_tool_result(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    result: String,
+) {
+    let status = worker_tool_result_status(&result);
+    if let Some(step) = steps.iter_mut().find(|step| {
+        matches!(
+            step,
+            TranscriptStep::ToolResult {
+                call_id: existing_call_id,
+                ..
+            } if existing_call_id == &call_id
+        )
+    }) && let TranscriptStep::ToolResult {
+        name,
+        text,
+        live_output,
+        status: existing_status,
+        ..
+    } = step
+    {
+        *name = tool_name;
+        *text = result;
+        *live_output = None;
+        *existing_status = status;
+        return;
+    }
+
+    steps.push(TranscriptStep::ToolResult {
+        call_id,
+        name: tool_name,
+        text: result,
+        live_output: None,
+        status,
+    });
+}
+
+fn sanitize_live_tool_output_line(line: &str) -> String {
+    let scrubbed = crate::secrets::scrub::scrub_leaks(line);
+    if crate::secrets::scrub::scan_for_leaks(&scrubbed).is_some() {
+        return LIVE_TOOL_OUTPUT_REDACTION.to_string();
+    }
+    scrubbed
+}
 
 /// Summary of an agent's configuration, exposed via the API.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -84,8 +257,22 @@ pub struct ApiState {
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
     /// Instance-level global task store shared across all agents.
     pub task_store: ArcSwap<Option<Arc<TaskStore>>>,
-    /// Per-agent project stores for project/repo/worktree CRUD operations.
-    pub project_stores: arc_swap::ArcSwap<HashMap<String, Arc<ProjectStore>>>,
+    /// Instance-wide wiki knowledge base.
+    pub wiki_store: ArcSwap<Option<Arc<crate::wiki::WikiStore>>>,
+    /// Wake-dispatch sender for dormant-mode agent triggers. Set at startup
+    /// when the wake manager spawns; consumed by tools / endpoints that
+    /// deliver wakes to other agents.
+    pub wake_tx: ArcSwap<Option<crate::agent::wake::WakeSender>>,
+    /// Live registry of agent ID → deps for the wake manager. Mutated by
+    /// startup, runtime agent-create, and runtime agent-delete paths so
+    /// dynamically-added agents are wakeable and removed agents stop
+    /// receiving wakes.
+    pub wake_registry:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<crate::AgentId, crate::AgentDeps>>>,
+    /// Instance-level shared project store.
+    pub project_store: ArcSwap<Option<Arc<ProjectStore>>>,
+    /// Instance-level notification store for the dashboard inbox.
+    pub notification_store: ArcSwap<Option<Arc<NotificationStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Per-agent MCP managers for status and reconnect APIs.
@@ -137,9 +324,29 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by worker_id, cleared on worker completion.
     pub live_worker_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
+    /// Bounded tombstone set of recently completed worker IDs.
+    ///
+    /// Prevents late/lagged `ToolOutput` events from recreating transcript
+    /// entries after `WorkerComplete` has already cleared them.
+    pub completed_worker_tombstones: Arc<RwLock<HashSet<String>>>,
+    /// In-memory cache of tool calls for running channel turns (direct mode).
+    /// Keyed by channel_id, drained when the bot message is persisted.
+    pub live_channel_tool_calls: Arc<RwLock<HashMap<String, Vec<ChannelToolCallEntry>>>>,
     /// Serializes SSH daemon enable/disable transitions to prevent races
     /// between overlapping toggle requests.
     pub ssh_mutex: tokio::sync::Mutex<()>,
+}
+
+/// A single channel-level tool call accumulated in memory during a direct-mode turn.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ChannelToolCallEntry {
+    pub id: String,
+    pub tool_name: String,
+    pub args: String,
+    pub result: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -153,6 +360,8 @@ pub enum ApiEvent {
         sender_name: Option<String>,
         sender_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::agent::channel_attachments::SavedAttachmentMeta>,
     },
     /// An outbound message sent by the bot.
     OutboundMessage {
@@ -223,6 +432,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         process_type: String,
         process_id: String,
+        call_id: String,
         tool_name: String,
         args: String,
     },
@@ -232,6 +442,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         process_type: String,
         process_id: String,
+        call_id: String,
         tool_name: String,
         result: String,
     },
@@ -279,6 +490,27 @@ pub enum ApiEvent {
         content: String,
         tool_calls: Option<Vec<crate::agent::cortex_chat::CortexChatToolCall>>,
     },
+    /// A new notification was created and persisted.
+    NotificationCreated { notification: Notification },
+    /// A notification was updated (read or dismissed) — for cross-tab sync.
+    NotificationUpdated {
+        id: String,
+        read: bool,
+        dismissed: bool,
+    },
+    /// A line of live output from a running tool (e.g. shell stdout/stderr).
+    /// Ephemeral — for frontend live display only. The full output is in ToolCompleted.
+    ToolOutput {
+        agent_id: String,
+        channel_id: Option<String>,
+        process_type: String,
+        process_id: String,
+        /// Stable identifier matching the tool_call that initiated this stream.
+        call_id: String,
+        tool_name: String,
+        line: String,
+        stream: String,
+    },
 }
 
 impl ApiState {
@@ -307,7 +539,11 @@ impl ApiState {
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_store: ArcSwap::from_pointee(None),
-            project_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            wiki_store: ArcSwap::from_pointee(None),
+            wake_tx: ArcSwap::from_pointee(None),
+            wake_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            project_store: ArcSwap::from_pointee(None),
+            notification_store: ArcSwap::from_pointee(None),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             sandboxes: ArcSwap::from_pointee(HashMap::new()),
@@ -332,6 +568,8 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            completed_worker_tombstones: Arc::new(RwLock::new(HashSet::new())),
+            live_channel_tool_calls: Arc::new(RwLock::new(HashMap::new())),
             ssh_mutex: tokio::sync::Mutex::new(()),
         }
     }
@@ -382,6 +620,11 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
+        let completed_worker_tombstones = self.completed_worker_tombstones.clone();
+        let live_channel_tools = self.live_channel_tool_calls.clone();
+        // Snapshot the notification store at registration time. It is set once
+        // at startup before any agents register, so the snapshot is always valid.
+        let _notif_store_snap = self.notification_store.load_full();
         tokio::spawn(async move {
             loop {
                 match agent_event_rx.recv().await {
@@ -396,10 +639,14 @@ impl ApiState {
                                 interactive,
                                 ..
                             } => {
+                                let worker_key = worker_id.to_string();
+                                let mut completed_guard = completed_worker_tombstones.write().await;
+                                completed_guard.remove(&worker_key);
                                 live_transcripts
                                     .write()
                                     .await
-                                    .insert(worker_id.to_string(), Vec::new());
+                                    .entry(worker_key)
+                                    .or_default();
                                 api_tx
                                     .send(ApiEvent::WorkerStarted {
                                         agent_id: agent_id.clone(),
@@ -461,10 +708,13 @@ impl ApiState {
                                 success,
                                 ..
                             } => {
-                                live_transcripts
-                                    .write()
-                                    .await
-                                    .remove(&worker_id.to_string());
+                                let worker_key = worker_id.to_string();
+                                let mut completed_guard = completed_worker_tombstones.write().await;
+                                if completed_guard.len() >= MAX_COMPLETED_WORKER_TOMBSTONES {
+                                    completed_guard.clear();
+                                }
+                                completed_guard.insert(worker_key.clone());
+                                live_transcripts.write().await.remove(&worker_key);
                                 api_tx
                                     .send(ApiEvent::WorkerCompleted {
                                         agent_id: agent_id.clone(),
@@ -474,6 +724,49 @@ impl ApiState {
                                         success: *success,
                                     })
                                     .ok();
+                                // TODO: re-enable WorkerFailed notifications once action_url points somewhere useful
+                                // if !success {
+                                //     if let Some(ref store) = *notif_store_snap {
+                                //         let store = store.clone();
+                                //         let event_tx = api_tx.clone();
+                                //         let agent_id_n = agent_id.clone();
+                                //         let worker_id_n = worker_id.to_string();
+                                //         let body = if result.is_empty() {
+                                //             None
+                                //         } else {
+                                //             Some(result.chars().take(300).collect::<String>())
+                                //         };
+                                //         tokio::spawn(async move {
+                                //             let n = NewNotification {
+                                //                 kind: NotificationKind::WorkerFailed,
+                                //                 severity: NotificationSeverity::Error,
+                                //                 title: format!("Worker failed: {worker_id_n}"),
+                                //                 body,
+                                //                 agent_id: Some(agent_id_n),
+                                //                 related_entity_type: Some("worker".to_string()),
+                                //                 related_entity_id: Some(worker_id_n),
+                                //                 action_url: None,
+                                //                 metadata: None,
+                                //             };
+                                //             match store.insert(n).await {
+                                //                 Ok(Some(notification)) => {
+                                //                     event_tx
+                                //                         .send(ApiEvent::NotificationCreated {
+                                //                             notification,
+                                //                         })
+                                //                         .ok();
+                                //                 }
+                                //                 Ok(None) => {}
+                                //                 Err(error) => {
+                                //                     tracing::warn!(
+                                //                         %error,
+                                //                         "failed to insert worker failure notification"
+                                //                     );
+                                //                 }
+                                //             }
+                                //         });
+                                //     }
+                                // }
                             }
                             ProcessEvent::BranchResult {
                                 branch_id,
@@ -493,6 +786,7 @@ impl ApiState {
                             ProcessEvent::ToolStarted {
                                 process_id,
                                 channel_id,
+                                call_id,
                                 tool_name,
                                 args,
                                 ..
@@ -500,17 +794,34 @@ impl ApiState {
                                 let (process_type, id_str) = process_id_info(process_id);
                                 // Accumulate tool call into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
-                                    let call_id = format!("live_{}", uuid::Uuid::new_v4());
-                                    let step = TranscriptStep::Action {
-                                        content: vec![ActionContent::ToolCall {
-                                            id: call_id,
-                                            name: tool_name.clone(),
-                                            args: args.clone(),
-                                        }],
-                                    };
+                                    let worker_key = worker_id.to_string();
                                     let mut guard = live_transcripts.write().await;
-                                    if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
-                                        steps.push(step);
+                                    if let Some(steps) = guard.get_mut(&worker_key) {
+                                        push_live_tool_call(
+                                            steps,
+                                            call_id.clone(),
+                                            tool_name.clone(),
+                                            args.clone(),
+                                        );
+                                    }
+                                }
+                                // Accumulate channel-level tool calls in memory,
+                                // skipping conversation/routing tools.
+                                if let ProcessId::Channel(ch_id) = process_id {
+                                    if is_hidden_channel_tool(tool_name) {
+                                        // skip
+                                    } else {
+                                        let entry = ChannelToolCallEntry {
+                                            id: call_id.clone(),
+                                            tool_name: tool_name.clone(),
+                                            args: args.clone(),
+                                            result: None,
+                                            status: "running".into(),
+                                            started_at: chrono::Utc::now().to_rfc3339(),
+                                            completed_at: None,
+                                        };
+                                        let mut guard = live_channel_tools.write().await;
+                                        guard.entry(ch_id.to_string()).or_default().push(entry);
                                     }
                                 }
                                 api_tx
@@ -519,6 +830,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         process_type,
                                         process_id: id_str,
+                                        call_id: call_id.clone(),
                                         tool_name: tool_name.clone(),
                                         args: args.clone(),
                                     })
@@ -527,6 +839,7 @@ impl ApiState {
                             ProcessEvent::ToolCompleted {
                                 process_id,
                                 channel_id,
+                                call_id,
                                 tool_name,
                                 result,
                                 ..
@@ -534,14 +847,28 @@ impl ApiState {
                                 let (process_type, id_str) = process_id_info(process_id);
                                 // Accumulate tool result into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
-                                    let step = TranscriptStep::ToolResult {
-                                        call_id: String::new(),
-                                        name: tool_name.clone(),
-                                        text: result.clone(),
-                                    };
+                                    let worker_key = worker_id.to_string();
                                     let mut guard = live_transcripts.write().await;
-                                    if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
-                                        steps.push(step);
+                                    if let Some(steps) = guard.get_mut(&worker_key) {
+                                        upsert_final_tool_result(
+                                            steps,
+                                            call_id.clone(),
+                                            tool_name.clone(),
+                                            result.clone(),
+                                        );
+                                    }
+                                }
+                                // Complete channel-level tool call in memory (FIFO).
+                                if let ProcessId::Channel(ch_id) = process_id {
+                                    let mut guard = live_channel_tools.write().await;
+                                    if let Some(calls) = guard.get_mut(&ch_id.to_string())
+                                        && let Some(entry) = calls.iter_mut().find(|c| {
+                                            c.id == call_id.as_str() && c.status == "running"
+                                        })
+                                    {
+                                        entry.result = Some(result.clone());
+                                        entry.status = "completed".into();
+                                        entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
                                     }
                                 }
                                 api_tx
@@ -550,6 +877,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         process_type,
                                         process_id: id_str,
+                                        call_id: call_id.clone(),
                                         tool_name: tool_name.clone(),
                                         result: result.clone(),
                                     })
@@ -694,6 +1022,83 @@ impl ApiState {
         });
     }
 
+    /// Register an agent's tool output stream. Spawns a task that forwards
+    /// ToolOutput ProcessEvents into the aggregated API event stream and
+    /// accumulates streaming output into the live transcript cache so it's
+    /// available on refresh.
+    pub fn register_tool_output_stream(
+        &self,
+        agent_id: String,
+        mut tool_output_rx: broadcast::Receiver<ProcessEvent>,
+    ) {
+        let api_tx = self.event_tx.clone();
+        let live_transcripts = self.live_worker_transcripts.clone();
+        let completed_worker_tombstones = self.completed_worker_tombstones.clone();
+        tokio::spawn(async move {
+            loop {
+                match tool_output_rx.recv().await {
+                    Ok(event) => {
+                        if let ProcessEvent::ToolOutput {
+                            process_id,
+                            channel_id,
+                            call_id,
+                            tool_name,
+                            line,
+                            stream,
+                            ..
+                        } = &event
+                        {
+                            let sanitized_line = sanitize_live_tool_output_line(line);
+                            let (process_type, id_str) = process_id_info(process_id);
+                            // Accumulate streaming output into live transcript for workers.
+                            if let ProcessId::Worker(worker_id) = process_id {
+                                let worker_key = worker_id.to_string();
+                                let completed_guard = completed_worker_tombstones.write().await;
+                                if !completed_guard.contains(&worker_key) {
+                                    let mut guard = live_transcripts.write().await;
+                                    let steps = guard.entry(worker_key).or_default();
+                                    upsert_pending_tool_output(
+                                        steps,
+                                        call_id.clone(),
+                                        tool_name.clone(),
+                                        &sanitized_line,
+                                    );
+                                }
+                            }
+                            api_tx
+                                .send(ApiEvent::ToolOutput {
+                                    agent_id: agent_id.clone(),
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                    process_type,
+                                    process_id: id_str,
+                                    call_id: call_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    line: sanitized_line,
+                                    stream: stream.clone(),
+                                })
+                                .ok();
+                        }
+                    }
+                    Err(error) => {
+                        match crate::classify_broadcast_recv_result::<crate::ProcessEvent>(Err(
+                            error,
+                        )) {
+                            crate::BroadcastRecvResult::Lagged(count) => {
+                                tracing::trace!(
+                                    agent_id = %agent_id,
+                                    count,
+                                    "tool output stream lagged, dropped lines"
+                                );
+                            }
+                            crate::BroadcastRecvResult::Closed => break,
+                            crate::BroadcastRecvResult::Event(_) => unreachable!(),
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// Set the SQLite pools for all agents.
     pub fn set_agent_pools(&self, pools: HashMap<String, sqlx::SqlitePool>) {
         self.agent_pools.store(Arc::new(pools));
@@ -749,9 +1154,38 @@ impl ApiState {
         self.task_store.store(Arc::new(Some(store)));
     }
 
-    /// Set the project stores for all agents.
-    pub fn set_project_stores(&self, stores: HashMap<String, Arc<ProjectStore>>) {
-        self.project_stores.store(Arc::new(stores));
+    /// Set the instance-wide wiki store.
+    pub fn set_wiki_store(&self, store: Arc<crate::wiki::WikiStore>) {
+        self.wiki_store.store(Arc::new(Some(store)));
+    }
+
+    /// Set the shared project store.
+    pub fn set_project_store(&self, store: Arc<ProjectStore>) {
+        self.project_store.store(Arc::new(Some(store)));
+    }
+
+    /// Set the instance-level notification store.
+    pub fn set_notification_store(&self, store: Arc<NotificationStore>) {
+        self.notification_store.store(Arc::new(Some(store)));
+    }
+
+    /// Insert a notification and broadcast `NotificationCreated` via SSE.
+    /// Fire-and-forget: spawns a task and returns immediately.
+    pub fn emit_notification(&self, n: NewNotification) {
+        let store = self.notification_store.load().as_ref().clone();
+        let event_tx = self.event_tx.clone();
+        let Some(store) = store else { return };
+        tokio::spawn(async move {
+            match store.insert(n).await {
+                Ok(Some(notification)) => {
+                    event_tx
+                        .send(ApiEvent::NotificationCreated { notification })
+                        .ok();
+                }
+                Ok(None) => {} // duplicate suppressed by unique index
+                Err(error) => tracing::warn!(%error, "failed to insert notification"),
+            }
+        });
     }
 
     /// Set the runtime configs for all agents.
@@ -844,10 +1278,27 @@ impl ApiState {
         self.agent_humans.store(Arc::new(humans));
     }
 
+    /// Drain accumulated channel tool calls for a channel.
+    ///
+    /// Called when the bot message is about to be persisted so the tool calls
+    /// can be stored in the message metadata.
+    pub async fn take_channel_tool_calls(&self, channel_id: &str) -> Vec<ChannelToolCallEntry> {
+        let mut guard = self.live_channel_tool_calls.write().await;
+        guard.remove(channel_id).unwrap_or_default()
+    }
+
     /// Send an event to all SSE subscribers.
     pub fn send_event(&self, event: ApiEvent) {
         let _ = self.event_tx.send(event);
     }
+}
+
+/// Conversation/routing tools that should not be stored or surfaced as channel tool calls.
+fn is_hidden_channel_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "reply" | "react" | "skip" | "set_outcome" | "spawn_worker" | "branch" | "route" | "cancel"
+    )
 }
 
 /// Extract (process_type, id_string) from a ProcessId.
@@ -856,5 +1307,164 @@ fn process_id_info(id: &ProcessId) -> (String, String) {
         ProcessId::Channel(channel_id) => ("channel".into(), channel_id.to_string()),
         ProcessId::Branch(branch_id) => ("branch".into(), branch_id.to_string()),
         ProcessId::Worker(worker_id) => ("worker".into(), worker_id.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_LIVE_TOOL_OUTPUT_BYTES, append_live_output, sanitize_live_tool_output_line,
+        upsert_pending_tool_output,
+    };
+    use crate::conversation::worker_transcript::{ToolResultStatus, TranscriptStep};
+    use crate::{ProcessEvent, ProcessId};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn append_live_output_caps_buffer_bytes() {
+        let mut output = Some("a".repeat(MAX_LIVE_TOOL_OUTPUT_BYTES - 1));
+        append_live_output(&mut output, "bc");
+        let capped = output.expect("output should be present");
+        assert!(capped.len() <= MAX_LIVE_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn append_live_output_preserves_utf8_boundaries_when_capping() {
+        let mut output = Some("🙂".repeat((MAX_LIVE_TOOL_OUTPUT_BYTES / 4) + 4));
+        append_live_output(&mut output, "🙂");
+        let capped = output.expect("output should be present");
+        assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+        assert!(capped.len() <= MAX_LIVE_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn upsert_pending_tool_output_ignores_finalized_call() {
+        let mut steps = vec![TranscriptStep::ToolResult {
+            call_id: "call-1".to_string(),
+            name: "shell".to_string(),
+            text: "done".to_string(),
+            live_output: None,
+            status: ToolResultStatus::Final,
+        }];
+
+        upsert_pending_tool_output(
+            &mut steps,
+            "call-1".to_string(),
+            "shell".to_string(),
+            "late output",
+        );
+
+        let TranscriptStep::ToolResult {
+            text, live_output, ..
+        } = &steps[0]
+        else {
+            panic!("expected tool result");
+        };
+        assert_eq!(text, "done");
+        assert!(live_output.is_none());
+    }
+
+    #[test]
+    fn sanitize_live_tool_output_line_redacts_detected_leaks() {
+        let line = "key=sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+        let sanitized = sanitize_live_tool_output_line(line);
+        assert_ne!(sanitized, line);
+        assert!(crate::secrets::scrub::scan_for_leaks(&sanitized).is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_output_before_worker_started_is_cached_and_stale_output_ignored_after_complete() {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let api_state = super::ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        );
+
+        let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
+        let (tool_output_tx, tool_output_rx) = tokio::sync::broadcast::channel(16);
+        api_state.register_agent_events("agent".to_string(), control_rx);
+        api_state.register_tool_output_stream("agent".to_string(), tool_output_rx);
+
+        let agent_id: crate::AgentId = Arc::from("agent");
+        let worker_id = uuid::Uuid::new_v4();
+        let process_id = ProcessId::Worker(worker_id);
+        let worker_key = worker_id.to_string();
+
+        let _ = tool_output_tx.send(ProcessEvent::ToolOutput {
+            agent_id: agent_id.clone(),
+            process_id: process_id.clone(),
+            channel_id: None,
+            call_id: "shell_call_early".to_string(),
+            tool_name: "shell".to_string(),
+            line: "early line".to_string(),
+            stream: "stdout".to_string(),
+        });
+
+        let early_cached = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(steps) = api_state.get_live_transcript(&worker_key).await
+                    && steps.iter().any(|step| {
+                        matches!(
+                            step,
+                            TranscriptStep::ToolResult { live_output: Some(output), .. }
+                                if output.contains("early line")
+                        )
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            early_cached.is_ok(),
+            "early streamed output should be cached"
+        );
+
+        let _ = control_tx.send(ProcessEvent::WorkerComplete {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: None,
+            result: "done".to_string(),
+            notify: false,
+            success: true,
+        });
+
+        let removed_after_complete = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if api_state.get_live_transcript(&worker_key).await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            removed_after_complete.is_ok(),
+            "worker completion should clear live transcript cache"
+        );
+
+        let _ = tool_output_tx.send(ProcessEvent::ToolOutput {
+            agent_id,
+            process_id,
+            channel_id: None,
+            call_id: "shell_call_late".to_string(),
+            tool_name: "shell".to_string(),
+            line: "late line".to_string(),
+            stream: "stdout".to_string(),
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            api_state.get_live_transcript(&worker_key).await.is_none(),
+            "late output should not recreate cache after worker completion"
+        );
     }
 }

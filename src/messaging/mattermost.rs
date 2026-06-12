@@ -597,9 +597,12 @@ impl Messaging for MattermostAdapter {
                                             } // close match MattermostWsEvent
                                         }
                                         Some(Ok(WsMessage::Ping(data))) => {
-                                            if write.send(WsMessage::Pong(data)).await.is_err() {
-                                                tracing::warn!(adapter = %runtime_key, "failed to send pong");
-                                                break;
+                                            match write.send(WsMessage::Pong(data.clone())).await {
+                                                Ok(()) => {}
+                                                Err(_) => {
+                                                    tracing::warn!(adapter = %runtime_key, "failed to send pong");
+                                                    break;
+                                                }
                                             }
                                         }
                                         Some(Ok(WsMessage::Pong(_))) => {}

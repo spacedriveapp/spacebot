@@ -42,7 +42,7 @@ function NvidiaIcon({ size = 24, className }: IconProps) {
 	);
 }
 
-function OpenCodeZenIcon({ size = 24, className }: IconProps) {
+export function OpenCodeZenIcon({ size = 24, className }: IconProps) {
 	const clipId = useId();
 	const clipPathId = `opencode-zen-clip-${clipId}`;
 	const width = (size * 32) / 40;

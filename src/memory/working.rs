@@ -10,7 +10,7 @@
 //! conversations: worker lifecycle, branch conclusions, cron executions,
 //! decisions, errors.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -39,6 +39,18 @@ pub enum WorkingMemoryEventType {
     MemorySaved,
     /// A decision was made (extracted from conversation).
     Decision,
+    /// The user corrected prior instructions or assumptions.
+    UserCorrection,
+    /// A prior decision was revised.
+    DecisionRevised,
+    /// A concrete deadline or due date was set.
+    DeadlineSet,
+    /// Progress is currently blocked on an external dependency or prerequisite.
+    BlockedOn,
+    /// An explicit constraint was stated.
+    Constraint,
+    /// A task or branch reached a terminal result.
+    Outcome,
     /// An error or failure occurred.
     Error,
     /// A task was created or updated.
@@ -62,6 +74,12 @@ impl WorkingMemoryEventType {
             Self::CronExecuted => "cron_executed",
             Self::MemorySaved => "memory_saved",
             Self::Decision => "decision",
+            Self::UserCorrection => "user_correction",
+            Self::DecisionRevised => "decision_revised",
+            Self::DeadlineSet => "deadline_set",
+            Self::BlockedOn => "blocked_on",
+            Self::Constraint => "constraint",
+            Self::Outcome => "outcome",
             Self::Error => "error",
             Self::TaskUpdate => "task_update",
             Self::AgentMessage => "agent_message",
@@ -79,6 +97,12 @@ impl WorkingMemoryEventType {
             "cron_executed" => Some(Self::CronExecuted),
             "memory_saved" => Some(Self::MemorySaved),
             "decision" => Some(Self::Decision),
+            "user_correction" => Some(Self::UserCorrection),
+            "decision_revised" => Some(Self::DecisionRevised),
+            "deadline_set" => Some(Self::DeadlineSet),
+            "blocked_on" => Some(Self::BlockedOn),
+            "constraint" => Some(Self::Constraint),
+            "outcome" => Some(Self::Outcome),
             "error" => Some(Self::Error),
             "task_update" => Some(Self::TaskUpdate),
             "agent_message" => Some(Self::AgentMessage),
@@ -206,13 +230,13 @@ impl WorkingMemoryStore {
     pub async fn get_events_for_day(&self, day: &str) -> Result<Vec<WorkingMemoryEvent>> {
         let rows = sqlx::query(
             "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-             FROM working_memory_events WHERE day = ? ORDER BY timestamp ASC",
+             FROM working_memory_events WHERE day = ? ORDER BY timestamp ASC, id ASC",
         )
         .bind(day)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().map(row_to_event).collect())
+        rows.iter().map(row_to_event).collect()
     }
 
     /// Get recent events for a channel, used for context injection.
@@ -223,7 +247,7 @@ impl WorkingMemoryStore {
     ) -> Result<Vec<WorkingMemoryEvent>> {
         let rows = sqlx::query(
             "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-             FROM working_memory_events WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
+             FROM working_memory_events WHERE channel_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
         )
         .bind(channel_id)
         .bind(limit as i64)
@@ -231,7 +255,8 @@ impl WorkingMemoryStore {
         .await?;
 
         // Reverse so oldest-first for rendering.
-        let mut events: Vec<WorkingMemoryEvent> = rows.iter().map(row_to_event).collect();
+        let mut events: Vec<WorkingMemoryEvent> =
+            rows.iter().map(row_to_event).collect::<Result<Vec<_>>>()?;
         events.reverse();
         Ok(events)
     }
@@ -244,14 +269,15 @@ impl WorkingMemoryStore {
     ) -> Result<Vec<WorkingMemoryEvent>> {
         let rows = sqlx::query(
             "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-             FROM working_memory_events WHERE importance >= ? ORDER BY timestamp DESC LIMIT ?",
+             FROM working_memory_events WHERE importance >= ? ORDER BY timestamp DESC, id DESC LIMIT ?",
         )
         .bind(min_importance)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut events: Vec<WorkingMemoryEvent> = rows.iter().map(row_to_event).collect();
+        let mut events: Vec<WorkingMemoryEvent> =
+            rows.iter().map(row_to_event).collect::<Result<Vec<_>>>()?;
         events.reverse();
         Ok(events)
     }
@@ -264,14 +290,15 @@ impl WorkingMemoryStore {
     ) -> Result<Vec<WorkingMemoryEvent>> {
         let rows = sqlx::query(
             "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-             FROM working_memory_events WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+             FROM working_memory_events WHERE user_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
         )
         .bind(user_id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut events: Vec<WorkingMemoryEvent> = rows.iter().map(row_to_event).collect();
+        let mut events: Vec<WorkingMemoryEvent> =
+            rows.iter().map(row_to_event).collect::<Result<Vec<_>>>()?;
         events.reverse();
         Ok(events)
     }
@@ -286,7 +313,7 @@ impl WorkingMemoryStore {
             Some(after_ts) => {
                 sqlx::query(
                     "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-                     FROM working_memory_events WHERE day = ? AND timestamp > ? ORDER BY timestamp ASC",
+                     FROM working_memory_events WHERE day = ? AND timestamp > ? ORDER BY timestamp ASC, id ASC",
                 )
                 .bind(day)
                 .bind(after_ts)
@@ -296,7 +323,7 @@ impl WorkingMemoryStore {
             None => {
                 sqlx::query(
                     "SELECT id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day \
-                     FROM working_memory_events WHERE day = ? ORDER BY timestamp ASC",
+                     FROM working_memory_events WHERE day = ? ORDER BY timestamp ASC, id ASC",
                 )
                 .bind(day)
                 .fetch_all(&self.pool)
@@ -304,7 +331,7 @@ impl WorkingMemoryStore {
             }
         };
 
-        Ok(rows.iter().map(row_to_event).collect())
+        rows.iter().map(row_to_event).collect()
     }
 
     /// Count events for a channel since a timestamp (for density trigger).
@@ -331,7 +358,7 @@ impl WorkingMemoryStore {
     ) -> Result<Option<DateTime<Utc>>> {
         let row = sqlx::query(
             "SELECT time_range_end FROM working_memory_intraday_syntheses \
-             WHERE day = ? ORDER BY time_range_start DESC LIMIT 1",
+             WHERE day = ? ORDER BY time_range_start DESC, id DESC LIMIT 1",
         )
         .bind(day)
         .fetch_optional(&self.pool)
@@ -371,7 +398,7 @@ impl WorkingMemoryStore {
     pub async fn get_intraday_syntheses(&self, day: &str) -> Result<Vec<IntradaySynthesis>> {
         let rows = sqlx::query(
             "SELECT id, day, time_range_start, time_range_end, summary, event_count, created_at \
-             FROM working_memory_intraday_syntheses WHERE day = ? ORDER BY time_range_start ASC",
+             FROM working_memory_intraday_syntheses WHERE day = ? ORDER BY time_range_start ASC, id ASC",
         )
         .bind(day)
         .fetch_all(&self.pool)
@@ -680,13 +707,13 @@ pub async fn render_channel_activity_map(
          LEFT JOIN conversation_messages m ON m.id = ( \
             SELECT id FROM conversation_messages \
             WHERE channel_id = c.id \
-            ORDER BY created_at DESC \
+            ORDER BY created_at DESC, id DESC \
             LIMIT 1 \
          ) \
          WHERE c.id != ? \
            AND c.is_active = 1 \
            AND (m.created_at IS NULL OR m.created_at > datetime('now', ?)) \
-         ORDER BY m.created_at DESC NULLS LAST \
+         ORDER BY m.created_at DESC NULLS LAST, c.id ASC \
          LIMIT ?",
     )
     .bind(exclude_channel_id)
@@ -746,6 +773,69 @@ pub async fn render_channel_activity_map(
     Ok(output)
 }
 
+/// Render Layer 4: participant context for the most recently active users in
+/// the current channel.
+pub async fn render_participant_context(
+    working_memory: &WorkingMemoryStore,
+    participants: &[crate::conversation::ActiveParticipant],
+    channel_id: &str,
+    config: &crate::config::ParticipantContextConfig,
+) -> Result<String> {
+    use std::fmt::Write;
+
+    if !config.enabled || participants.len() < config.min_participants {
+        return Ok(String::new());
+    }
+
+    let now = Utc::now();
+    let mut output = String::new();
+    writeln!(output, "## Participants\n").ok();
+
+    for participant in participants {
+        write!(output, "**{}**", participant.display_name).ok();
+        if let Some(role) = participant.role.as_deref() {
+            write!(output, " -- {role}").ok();
+        }
+        writeln!(output).ok();
+
+        if let Some(profile) = participant.profile_summary.as_deref() {
+            writeln!(output, "  {profile}").ok();
+        }
+
+        let recent_line = participant_recent_activity(
+            working_memory,
+            &participant.participant_key,
+            participant.last_message_at,
+            now,
+            channel_id,
+        )
+        .await?;
+        writeln!(output, "  Recent: {recent_line}.").ok();
+        writeln!(output).ok();
+
+        if estimate_tokens(&output) >= config.token_budget {
+            break;
+        }
+    }
+
+    if estimate_tokens(&output) > config.token_budget {
+        let mut trimmed = String::new();
+        let mut tokens_used = 0usize;
+        for line in output.lines() {
+            let candidate = format!("{line}\n");
+            let candidate_tokens = estimate_tokens(&candidate);
+            if tokens_used + candidate_tokens > config.token_budget {
+                break;
+            }
+            trimmed.push_str(&candidate);
+            tokens_used += candidate_tokens;
+        }
+        return Ok(trimmed.trim_end().to_string());
+    }
+
+    Ok(output.trim_end().to_string())
+}
+
 /// Format a single event as a one-line summary for the raw tail.
 fn format_event_line(event: &WorkingMemoryEvent, current_channel_id: &str) -> String {
     let type_label = match event.event_type {
@@ -755,6 +845,12 @@ fn format_event_line(event: &WorkingMemoryEvent, current_channel_id: &str) -> St
         WorkingMemoryEventType::CronExecuted => "Cron executed",
         WorkingMemoryEventType::MemorySaved => "Memory saved",
         WorkingMemoryEventType::Decision => "Decision",
+        WorkingMemoryEventType::UserCorrection => "User correction",
+        WorkingMemoryEventType::DecisionRevised => "Decision revised",
+        WorkingMemoryEventType::DeadlineSet => "Deadline set",
+        WorkingMemoryEventType::BlockedOn => "Blocked on",
+        WorkingMemoryEventType::Constraint => "Constraint",
+        WorkingMemoryEventType::Outcome => "Outcome",
         WorkingMemoryEventType::Error => "Error",
         WorkingMemoryEventType::TaskUpdate => "Task update",
         WorkingMemoryEventType::AgentMessage => "Agent message",
@@ -788,14 +884,16 @@ async fn get_topic_hints(
     let placeholders: Vec<&str> = (0..channel_ids.len()).map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
 
-    // We need the most recent BranchCompleted per channel. Use a window
-    // function approach that works in a single pass.
+    // Semantic branch conclusions are stored by event type, so keep topic hints
+    // scoped to summaries emitted from branches.
     let query = format!(
         "SELECT channel_id, summary FROM ( \
             SELECT channel_id, summary, \
-                   ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY timestamp DESC) AS rn \
+                   ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY timestamp DESC, id DESC) AS rn \
             FROM working_memory_events \
-            WHERE event_type = 'branch_completed' \
+            WHERE (event_type = 'branch_completed' \
+                   OR (event_type IN ('outcome', 'blocked_on', 'constraint', 'deadline_set') \
+                       AND summary LIKE 'Branch %')) \
               AND channel_id IN ({in_clause}) \
         ) WHERE rn = 1"
     );
@@ -832,6 +930,42 @@ fn format_time_ago(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
         let days = minutes / 1440;
         format!("{days}d ago")
     }
+}
+
+async fn participant_recent_activity(
+    working_memory: &WorkingMemoryStore,
+    user_id: &str,
+    last_message_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    channel_id: &str,
+) -> Result<String> {
+    let recent_events = working_memory.get_user_recent_events(user_id, 3).await?;
+    if recent_events.is_empty() {
+        return Ok(format!(
+            "active in this channel {}",
+            format_time_ago(now, last_message_at)
+        ));
+    }
+
+    let parts: Vec<String> = recent_events
+        .iter()
+        .rev()
+        .map(|event| {
+            let channel_prefix = match &event.channel_id {
+                Some(event_channel_id) if event_channel_id != channel_id => {
+                    format!("in {event_channel_id} ")
+                }
+                _ => String::new(),
+            };
+            format!(
+                "{channel_prefix}{} {}",
+                event.summary,
+                format_time_ago(now, event.timestamp)
+            )
+        })
+        .collect();
+
+    Ok(parts.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -911,12 +1045,18 @@ impl WorkingMemoryEventBuilder {
 // Row mapping helpers
 // ---------------------------------------------------------------------------
 
-fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> WorkingMemoryEvent {
+fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<WorkingMemoryEvent> {
+    let id: String = row.get("id");
     let event_type_str: String = row.get("event_type");
-    WorkingMemoryEvent {
-        id: row.get("id"),
-        event_type: WorkingMemoryEventType::parse(&event_type_str)
-            .unwrap_or(WorkingMemoryEventType::System),
+    let Some(event_type) = WorkingMemoryEventType::parse(&event_type_str) else {
+        return Err(Error::Other(anyhow::anyhow!(
+            "unknown working memory event_type '{event_type_str}' for event {id}"
+        )));
+    };
+
+    Ok(WorkingMemoryEvent {
+        id,
+        event_type,
         timestamp: row.get("timestamp"),
         channel_id: row.get("channel_id"),
         user_id: row.get("user_id"),
@@ -924,7 +1064,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> WorkingMemoryEvent {
         detail: row.get("detail"),
         importance: row.get("importance"),
         day: row.get("day"),
-    }
+    })
 }
 
 fn row_to_intraday_synthesis(row: &sqlx::sqlite::SqliteRow) -> IntradaySynthesis {
@@ -1050,20 +1190,28 @@ mod tests {
         let store = setup_test_store().await;
         let today = store.today();
 
-        for event_type in [
+        let inserted = [
             WorkingMemoryEventType::BranchCompleted,
             WorkingMemoryEventType::WorkerSpawned,
             WorkingMemoryEventType::WorkerCompleted,
             WorkingMemoryEventType::CronExecuted,
             WorkingMemoryEventType::MemorySaved,
             WorkingMemoryEventType::Decision,
+            WorkingMemoryEventType::UserCorrection,
+            WorkingMemoryEventType::DecisionRevised,
+            WorkingMemoryEventType::DeadlineSet,
+            WorkingMemoryEventType::BlockedOn,
+            WorkingMemoryEventType::Constraint,
+            WorkingMemoryEventType::Outcome,
             WorkingMemoryEventType::Error,
             WorkingMemoryEventType::TaskUpdate,
             WorkingMemoryEventType::AgentMessage,
             WorkingMemoryEventType::System,
             WorkingMemoryEventType::MemoryPromoted,
             WorkingMemoryEventType::MemoryDemoted,
-        ] {
+        ];
+
+        for event_type in inserted {
             let event = WorkingMemoryEvent {
                 id: Uuid::new_v4().to_string(),
                 event_type,
@@ -1079,12 +1227,91 @@ mod tests {
         }
 
         let events = store.get_events_for_day(&today).await.unwrap();
-        assert_eq!(events.len(), 12);
+        assert_eq!(events.len(), inserted.len());
 
         // Verify all types survived the roundtrip.
         let types: Vec<WorkingMemoryEventType> = events.iter().map(|e| e.event_type).collect();
         assert!(types.contains(&WorkingMemoryEventType::BranchCompleted));
         assert!(types.contains(&WorkingMemoryEventType::MemoryDemoted));
+    }
+
+    #[tokio::test]
+    async fn unknown_event_type_returns_decode_error() {
+        let store = setup_test_store().await;
+        let today = store.today();
+
+        sqlx::query(
+            "INSERT INTO working_memory_events \
+             (id, event_type, timestamp, channel_id, user_id, summary, detail, importance, day) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("wm_unknown")
+        .bind("unknown_type")
+        .bind(Utc::now())
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind("unknown event")
+        .bind(Option::<String>::None)
+        .bind(0.5_f32)
+        .bind(&today)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let error = store.get_events_for_day(&today).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown working memory event_type 'unknown_type' for event wm_unknown")
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_hints_include_branch_semantic_terminal_events() {
+        let store = setup_test_store().await;
+        let today = store.today();
+        let base = Utc::now();
+
+        insert_event(
+            &store.pool,
+            &WorkingMemoryEvent {
+                id: Uuid::new_v4().to_string(),
+                event_type: WorkingMemoryEventType::Outcome,
+                timestamp: base,
+                channel_id: Some("chan-1".to_string()),
+                user_id: None,
+                summary: "Branch outcome: selected the task-store transaction fix".to_string(),
+                detail: None,
+                importance: 0.7,
+                day: today.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_event(
+            &store.pool,
+            &WorkingMemoryEvent {
+                id: Uuid::new_v4().to_string(),
+                event_type: WorkingMemoryEventType::Outcome,
+                timestamp: base + chrono::Duration::minutes(1),
+                channel_id: Some("chan-1".to_string()),
+                user_id: None,
+                summary: "Task #12 completed".to_string(),
+                detail: None,
+                importance: 0.7,
+                day: today,
+            },
+        )
+        .await
+        .unwrap();
+
+        let channel_ids = vec!["chan-1".to_string()];
+        let hints = get_topic_hints(&store.pool, &channel_ids).await.unwrap();
+
+        assert_eq!(
+            hints.get("chan-1").map(String::as_str),
+            Some("Branch outcome: selected the task-store transaction fix")
+        );
     }
 
     #[tokio::test]
@@ -1468,6 +1695,61 @@ mod tests {
 
         // No channels in DB, so should be empty.
         assert!(rendered.is_empty(), "should be empty with no channels");
+    }
+
+    #[tokio::test]
+    async fn test_render_participant_context_uses_humans_and_recent_activity() {
+        let store = setup_test_store().await;
+        let config = crate::config::ParticipantContextConfig {
+            max_participants: 3,
+            ..crate::config::ParticipantContextConfig::default()
+        };
+
+        sqlx::query(
+            "INSERT INTO conversation_messages \
+             (id, channel_id, role, sender_name, sender_id, content) \
+             VALUES (?, ?, 'user', ?, ?, ?)",
+        )
+        .bind("message-1")
+        .bind("discord:chan-1")
+        .bind("Victor")
+        .bind("12345")
+        .bind("Can you review this?")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let event = WorkingMemoryEvent {
+            id: Uuid::new_v4().to_string(),
+            event_type: WorkingMemoryEventType::Decision,
+            timestamp: Utc::now() - chrono::Duration::minutes(10),
+            channel_id: Some("discord:chan-2".to_string()),
+            user_id: Some("victor".to_string()),
+            summary: "approved the migration approach".to_string(),
+            detail: None,
+            importance: 0.8,
+            day: store.today(),
+        };
+        insert_event(&store.pool, &event).await.unwrap();
+
+        let participants = vec![crate::conversation::ActiveParticipant {
+            participant_key: "victor".to_string(),
+            platform: "discord".to_string(),
+            sender_id: "12345".to_string(),
+            display_name: "Victor".to_string(),
+            role: Some("Maintainer".to_string()),
+            profile_summary: Some("Prefers direct, technical responses.".to_string()),
+            last_message_at: Utc::now(),
+        }];
+
+        let rendered = render_participant_context(&store, &participants, "discord:chan-1", &config)
+            .await
+            .unwrap();
+
+        assert!(rendered.contains("## Participants"));
+        assert!(rendered.contains("**Victor** -- Maintainer"));
+        assert!(rendered.contains("Prefers direct, technical responses."));
+        assert!(rendered.contains("approved the migration approach"));
     }
 
     #[test]

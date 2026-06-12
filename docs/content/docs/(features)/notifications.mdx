@@ -1,0 +1,109 @@
+---
+title: Notifications
+description: Real-time notification system for task approvals, worker failures, and system events.
+---
+
+# Notifications
+
+Actionable events surfaced to the dashboard. When a task needs approval, a worker fails, or the cortex observes something notable, a notification is created and pushed to connected clients in real-time via SSE.
+
+## Notification Kinds
+
+| Kind | Trigger | Severity |
+|------|---------|----------|
+| `task_approval` | A task enters `pending_approval` status (cortex-promoted from a todo memory) | `info` |
+| `worker_failed` | A worker process fails during execution | `warn` |
+| `cortex_observation` | The cortex detects something that needs human attention | `info` |
+
+Each notification has a `related_entity_type` and `related_entity_id` that link back to the source — a task number, worker ID, or cortex event. The `action_url` field provides a deep link for the dashboard UI.
+
+## Storage
+
+One SQLite table in the global (instance-level) database:
+
+```sql
+CREATE TABLE notifications (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,              -- task_approval, worker_failed, cortex_observation
+    severity TEXT NOT NULL DEFAULT 'info',  -- info, warn, error
+    title TEXT NOT NULL,
+    body TEXT,
+    agent_id TEXT,                   -- source agent (NULL = instance-level)
+    related_entity_type TEXT,        -- task, worker, cortex_event
+    related_entity_id TEXT,
+    action_url TEXT,
+    metadata TEXT,                   -- JSON
+    created_at TEXT NOT NULL,
+    read_at TEXT,
+    dismissed_at TEXT
+);
+```
+
+A unique index on `(kind, related_entity_type, related_entity_id) WHERE dismissed_at IS NULL` prevents duplicate active notifications for the same event.
+
+## Lifecycle
+
+```
+Created → Read → Dismissed
+```
+
+- **Created** — a notification is emitted by the system (task approval, worker failure)
+- **Read** — the user has seen it (`read_at` set, but still visible in the inbox)
+- **Dismissed** — the user has acted on or cleared it (`dismissed_at` set, filtered from inbox queries)
+
+Notifications are never deleted. Dismissed notifications remain in the database for audit purposes.
+
+## Real-Time Delivery
+
+Notifications are broadcast to connected dashboard clients via Server-Sent Events. When a notification is created, updated, or dismissed, an SSE event is emitted so the UI updates instantly without polling.
+
+The frontend `useNotifications` hook manages the notification state:
+
+- Fetches the initial list on mount
+- Subscribes to SSE events for real-time updates
+- Supports **optimistic dismiss** — the UI removes the notification immediately on click, before the server confirms
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/notifications` | List notifications (filterable by kind, agent_id, read/unread) |
+| `GET` | `/api/notifications/unread-count` | Count of unread notifications |
+| `POST` | `/api/notifications/:id/read` | Mark a notification as read |
+| `POST` | `/api/notifications/:id/dismiss` | Dismiss a notification |
+| `POST` | `/api/notifications/read-all` | Mark all as read |
+| `POST` | `/api/notifications/dismiss-read` | Dismiss all read notifications |
+
+## Dashboard Integration
+
+Notifications power the **Action Items** card on the dashboard. Each notification renders with:
+
+- Title and body text
+- Severity indicator (info, warn, error)
+- Source agent badge
+- Action button linked to the related entity (e.g. "Review" for task approvals opens the task detail)
+- Dismiss button
+
+Task approval notifications open a dedicated `ApprovalModal` with the full task detail view, approve/dismiss actions, and query invalidation on action.
+
+## Emission
+
+Notifications are emitted automatically by the system:
+
+- **Task approval** — when the cortex promotes a todo memory to a `pending_approval` task, a notification is created via `ApiState` (threaded through `AgentDeps`)
+- **Worker failure** — when a worker process returns an error, the cortex observation loop emits a notification
+- **Cortex observation** — the cortex can emit notifications for events that warrant human attention
+
+## Module Layout
+
+```
+src/
+├── notifications.rs          → notifications/
+│   └── store.rs              — NotificationStore: CRUD, filtering, count
+│
+├── api/
+│   └── notifications.rs      — REST endpoints + SSE broadcast
+│
+└── migrations/global/
+    └── 20260405120000_notifications.sql
+```

@@ -11,32 +11,32 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 
 ### Major
 
-- [ ] **R2 — Bulletin fallback gate too aggressive** (`prompts/en/channel.md.j2:172`)
-  Condition `not working_memory and not knowledge_synthesis` hides bulletin when working memory exists but knowledge synthesis hasn't run yet. Should gate only on `not knowledge_synthesis`.
+- [x] **R2 — Bulletin fallback gate too aggressive** (`prompts/en/channel.md.j2:172`)
+  Condition `not working_memory and not knowledge_synthesis` hides bulletin when working memory exists but knowledge synthesis hasn't run yet. **Fixed in PR #570:** fallback now depends on missing `knowledge_synthesis`, and prompt data preserves that original absence.
 
-- [ ] **R3 — Don't exclude participant-role facts yet** (`prompts/en/cortex_knowledge_synthesis.md.j2:21`)
-  Exclusion of "The user is the CEO" drops participant context with nowhere else to live until Phase 6 ships.
+- [x] **R3 — Don't exclude participant-role facts yet** (`prompts/en/cortex_knowledge_synthesis.md.j2:21`)
+  Exclusion of "The user is the CEO" drops participant context with nowhere else to live until Phase 6 ships. **Fixed in this slice:** knowledge synthesis now preserves concise participant/user role facts when they affect future routing, authority, relationships, or interpretation.
 
 - [ ] **R4 — Raw worker task in working memory** (`src/agent/channel_dispatch.rs:596`)
   `task` from user input persisted verbatim; could capture secrets/PII. Truncate and scrub.
 
 - [ ] **R5 — Dirty flag only bumps on merges** (`src/agent/cortex.rs:1958`)
-  Prunes and decays also change the memory set but don't trigger knowledge synthesis re-gen. Add `report.pruned > 0 || report.decayed > 0`.
+  Prunes and decays also change the memory set but don't trigger knowledge synthesis re-gen. Add `report.pruned > 0 || report.decayed > 0`. **Partial in PR #570:** prunes and merges now dirty synthesis; decay remains intentionally importance-only and needs a follow-up decision.
 
-- [ ] **R6 — Dirty-flag synthesis not mutex-guarded** (`src/agent/cortex.rs:2106`)
-  Can race with warmup synthesis path. Should acquire the same synthesis mutex.
+- [x] **R6 — Dirty-flag synthesis not mutex-guarded** (`src/agent/cortex.rs:2106`)
+  Can race with warmup synthesis path. **Fixed in this slice:** dirty-triggered synthesis now acquires the warmup/synthesis mutex and re-checks the dirty version after the lock is held.
 
-- [ ] **R7 — Intraday/daily synthesis blocks main cortex loop** (`src/agent/cortex.rs:2166`)
-  LLM calls awaited inline inside `tokio::select!`; events stop draining during synthesis. Spawn as background tasks.
+- [x] **R7 — Intraday/daily synthesis blocks main cortex loop** (`src/agent/cortex.rs:2166`)
+  LLM calls awaited inline inside `tokio::select!`; events stop draining during synthesis. **Fixed in PR #570:** intraday and daily synthesis now run as background tasks with single-flight scheduling and failure backoff.
 
-- [ ] **R8 — Empty sections treated as successful no-op** (`src/agent/cortex.rs:2558`)
-  Returns before tasks can contribute to synthesis; dirty flag never clears, causing infinite rescheduling.
+- [x] **R8 — Empty sections treated as successful no-op** (`src/agent/cortex.rs:2558`)
+  Returns before tasks can contribute to synthesis; dirty flag never clears, causing infinite rescheduling. **Fixed in PR #570:** true empty input clears the target version, while gather failures fail the synthesis path and keep it retryable.
 
 - [ ] **R9 — Missing `default_max_turns(1)` + inline preambles** (`src/agent/cortex.rs:2579`)
-  Three cortex agent builders lack explicit max_turns; two have inline preamble strings instead of prompt files.
+  Three cortex agent builders lack explicit max_turns; two have inline preamble strings instead of prompt files. **Stacked in PR #571:** one-shot synthesis prompt hardening is kept out of PR #570 to keep the reliability diff focused.
 
-- [ ] **R10 — Version snapshot after async work** (`src/agent/cortex.rs:2614`)
-  `knowledge_synthesis_last_version` read after LLM call; concurrent writes can advance the version past what was actually synthesized. Snapshot before.
+- [x] **R10 — Version snapshot after async work** (`src/agent/cortex.rs:2614`)
+  `knowledge_synthesis_last_version` read after LLM call; concurrent writes can advance the version past what was actually synthesized. **Fixed in PR #570:** synthesis snapshots the target version before async work and only marks that version complete.
 
 - [x] **R11 — Unsynthesized yesterday events dropped** (`src/agent/cortex.rs:2916`)
   Raw events that didn't hit count/time trigger before midnight are lost from daily summary. Roll them into the summary. **Fixed:** daily summary now fetches all raw events, filters to the unsynthesized tail after the last intra-day synthesis, and includes them in the LLM input.

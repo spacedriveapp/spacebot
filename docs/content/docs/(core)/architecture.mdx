@@ -105,6 +105,8 @@ This split keeps high-volume memory writes off the control bus so channel contro
 | `CompactionTriggered` | Compactor | Channel | Context compacted |
 | `StatusUpdate` | Various | UI (SSE) | Typing indicators, lifecycle |
 | `TaskUpdated` | Branch, Worker | UI | Task board change |
+| `WorkerText` | Hook | Channel, UI | Streaming token-by-token text deltas |
+| `SettingsUpdated` | API | Channel | Hot-reload channel settings |
 | `AgentMessageSent` | Channel | Link routing | Inter-agent message |
 | `AgentMessageReceived` | Link routing | Channel | Inbound inter-agent message |
 
@@ -163,8 +165,23 @@ The primary database. Stores everything that benefits from relational queries:
 | `tasks` | Structured task board (backlog → in_progress → done) |
 | `ingestion_progress` | Chunk-level progress for file ingestion |
 | `agent_profile` | Cortex-generated personality data |
+| `portal_conversations` | Portal chat conversation persistence with settings |
+| `channel_settings` | Per-channel settings (response mode, model overrides, memory mode) |
+| `token_usage` | Per-process token counts, model, provider, estimated cost |
 
-Migrations are in `migrations/` and are **immutable once committed**. Schema changes always go in new migration files. See [Memory](/docs/memory) for the memory graph schema.
+A separate **global database** (`~/.spacebot/data/global.db`) holds instance-wide data shared across all agents:
+
+| Table | Purpose |
+|-------|---------|
+| `projects` | Registered project directories with metadata |
+| `project_repos` | Git repositories within projects |
+| `project_worktrees` | Git worktrees linked to repos |
+| `notifications` | Actionable events (task approvals, worker failures) |
+| `wiki_pages` | Knowledge base pages with versioning |
+| `wiki_page_versions` | Full edit history for wiki pages |
+| `wiki_pages_fts` | FTS5 virtual table for wiki search |
+
+Migrations are in `migrations/` (per-agent) and `migrations/global/` (instance-wide). Both are **immutable once committed**. Schema changes always go in new migration files. See [Memory](/docs/memory) for the memory graph schema.
 
 ### LanceDB
 
@@ -196,7 +213,7 @@ Slack ───┤
 Telegram ┼──→ MessagingManager ──→ InboundMessage stream ──→ main.rs event loop
 Twitch ──┤                                                        │
 Webhook ─┤                                                        ▼
-WebChat ─┘                                              Channel.handle_message()
+Portal ──┘                                              Channel.handle_message()
                                                                   │
                                                                   ▼
                                                           OutboundResponse
@@ -310,7 +327,7 @@ An embedded Axum HTTP server provides the control API for the dashboard and exte
 | Group | Prefix | Purpose |
 |-------|--------|---------|
 | Agents | `/api/agents` | CRUD for agent definitions |
-| Channels | `/api/channels` | Channel listing, history, deletion |
+| Channels | `/api/channels` | Channel listing, history, settings, deletion |
 | Workers | `/api/workers` | Worker status, history, timeline |
 | Cortex | `/api/cortex` | Bulletin, profile, cortex chat |
 | Memory | `/api/memories` | Memory CRUD, graph queries |
@@ -320,9 +337,14 @@ An embedded Axum HTTP server provides the control API for the dashboard and exte
 | Tasks | `/api/tasks` | Task board CRUD |
 | Cron | `/api/cron` | Scheduled task management |
 | System | `/api/system` | Health, version, metrics |
-| WebChat | `/api/webchat` | Embedded chat interface |
+| Portal | `/api/portal` | Chat interface, conversations, attachments |
 | Models | `/api/models` | Available model listing |
 | Topology | `/api/topology` | Full communication graph |
+| Wiki | `/api/wiki` | Knowledge base pages and search |
+| Notifications | `/api/notifications` | Actionable events and inbox |
+| Projects | `/api/projects` | Project directories, repos, worktrees |
+| Usage | `/api/usage` | Token usage and cost tracking |
+| Secrets | `/api/secrets` | Credential store CRUD and encryption |
 
 The dashboard UI is a React SPA embedded in the binary via `rust-embed` and served at the root path. It communicates with these API endpoints for all operations.
 
@@ -381,7 +403,7 @@ src/
 │   ├── cortex.rs        — system observer
 │   └── status.rs        — live status snapshot
 │
-├── tools/               — 27 tool implementations (one per file)
+├── tools/               — 30+ tool implementations (one per file)
 ├── memory/              — memory graph, search, embeddings
 ├── llm/                 — model routing, provider clients
 ├── messaging/           — platform adapters
@@ -389,13 +411,15 @@ src/
 ├── prompts/             — template engine
 ├── hooks/               — PromptHook implementations
 ├── cron/                — scheduled tasks
-├── api/                 — 21 Axum endpoint modules
+├── api/                 — 30+ Axum endpoint modules
 ├── identity/            — identity file loading
 ├── secrets/             — secret store, OS keystore, output scrubbing
 ├── settings/            — key-value settings
 ├── tasks/               — task board
 ├── links/               — communication graph types
-├── skills/              — skill management
+├── skills/              — skill management (installed + built-in)
+├── wiki/                — wiki store, versioning, edit matching
+├── notifications/       — notification store, emission
 ├── opencode/            — OpenCode worker integration
 ├── sandbox/             — command sandboxing
 ├── telemetry/           — metrics (feature-gated)

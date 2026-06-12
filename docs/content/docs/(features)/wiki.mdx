@@ -1,0 +1,185 @@
+---
+title: Wiki
+description: Instance-wide knowledge base with versioned pages, wiki-link navigation, and agent-accessible tools.
+---
+
+# Wiki
+
+A shared knowledge base that lives alongside the memory graph. While memories are structured objects optimized for recall and association, wiki pages are long-form documents — written and edited by agents and humans alike. Entity profiles, decision records, project docs, concept explainers, reference material.
+
+The wiki is instance-wide. All agents and users share it. Every edit is versioned permanently.
+
+## Why Both Wiki and Memory
+
+Memories are atomic facts: "James prefers Rust over TypeScript." They're created automatically during conversation, scored by importance, and decay over time. They're optimized for search and injection into prompts.
+
+Wiki pages are authored documents: "Authentication Architecture" with sections, links to related pages, and a full edit history. They don't decay. They're not injected into prompts automatically — agents read them on demand via tools.
+
+| | Memory | Wiki |
+|---|---|---|
+| **Unit** | A single fact, preference, or observation | A full document with sections |
+| **Creation** | Automatic (branches, compaction, cortex) | Intentional (tools, API, UI) |
+| **Lifecycle** | Importance decay, pruning, merging | Permanent, versioned, archivable |
+| **Prompt injection** | Via bulletin and recall | On-demand via `wiki_read` tool |
+| **Scope** | Per-agent | Instance-wide |
+
+## Page Types
+
+Every page has a type that signals its purpose:
+
+| Type | Description |
+|------|-------------|
+| `entity` | A person, team, service, or system |
+| `concept` | An idea, pattern, or methodology |
+| `decision` | A decision record with context and rationale |
+| `project` | A project overview with goals and status |
+| `reference` | Technical reference, API docs, runbooks |
+
+Page types are enforced at creation and can't be changed after. They help agents decide what kind of page to create and help the UI organize content.
+
+## Wiki Links
+
+Pages link to each other using wiki-link syntax:
+
+```markdown
+See [Authentication Architecture](wiki:authentication-architecture) for details.
+```
+
+The `wiki:slug` format is recognized in page content. The frontend renders these as navigable links between pages. The `related` field on each page stores an explicit list of related page slugs for bidirectional discovery.
+
+## Storage
+
+Two SQLite tables in the global (instance-level) database:
+
+### wiki_pages
+
+```sql
+CREATE TABLE wiki_pages (
+    id          TEXT PRIMARY KEY,
+    slug        TEXT NOT NULL UNIQUE,
+    title       TEXT NOT NULL,
+    page_type   TEXT NOT NULL,   -- entity, concept, decision, project, reference
+    content     TEXT NOT NULL DEFAULT '',
+    related     TEXT NOT NULL DEFAULT '[]',   -- JSON array of related slugs
+    created_by  TEXT NOT NULL,
+    updated_by  TEXT NOT NULL,
+    version     INTEGER NOT NULL DEFAULT 1,
+    archived    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+```
+
+### wiki_page_versions
+
+Every edit creates a version row. Nothing is ever deleted.
+
+```sql
+CREATE TABLE wiki_page_versions (
+    id           TEXT PRIMARY KEY,
+    page_id      TEXT NOT NULL REFERENCES wiki_pages(id),
+    version      INTEGER NOT NULL,
+    content      TEXT NOT NULL,
+    edit_summary TEXT,
+    author_type  TEXT NOT NULL,   -- agent or user
+    author_id    TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE (page_id, version)
+);
+```
+
+### Full-Text Search
+
+An FTS5 virtual table (`wiki_pages_fts`) indexes title and content with automatic trigger-based sync. The `wiki_search` tool and API search endpoint query this directly.
+
+## Tolerant Edit Matching
+
+When an agent edits a wiki page, it provides an `old_text` and `new_text` pair. The wiki store uses a multi-pass matching strategy to find the edit target:
+
+1. **Exact match** — the `old_text` appears verbatim in the page content
+2. **Normalized match** — whitespace and line endings are normalized before matching
+3. **Fuzzy match** — leading/trailing whitespace is trimmed, internal whitespace collapsed
+
+The full pass sequence:
+
+1. **Exact match** — direct substring lookup
+2. **Line-trimmed** — per-line trim, then line-block matching
+3. **Whitespace-normalized** — collapse all whitespace before matching
+4. **Indentation-flexible** — strip leading whitespace per line
+5. **Block anchor** — Levenshtein-scored first/last lines with interior similarity (60% threshold)
+
+This tolerance handles the common case where an LLM reproduces text with slightly different formatting. If all passes fail, the edit is rejected with an error describing what was attempted. The `replace_all` flag controls whether multiple occurrences are replaced or only the first match.
+
+## Tools
+
+Six LLM tools provide full wiki access to branches and workers (when `wiki_enabled` is true):
+
+| Tool | Purpose |
+|------|---------|
+| `wiki_create` | Create a new page with title, slug, type, content, and related links |
+| `wiki_edit` | Edit a page using old_text/new_text replacement with edit summary |
+| `wiki_read` | Read a page by slug, returns full content and metadata |
+| `wiki_list` | List pages with optional type filter and pagination |
+| `wiki_search` | Full-text search across titles and content |
+| `wiki_history` | View version history for a page |
+
+### Tool Availability
+
+Wiki tools are wired into branches and workers based on configuration:
+
+- **Branches** get wiki tools when the agent's config has `wiki_enabled = true`
+- **Workers** get wiki tools when `WorkerContextMode` includes `wiki_write: true`
+- **Direct mode channels** get wiki tools alongside other worker-level tools
+
+The built-in `wiki-writing` skill provides agents with style guidelines for encyclopedic writing — page type selection, tone, structure, and editing discipline.
+
+## API
+
+REST endpoints under `/api/wiki/`:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/wiki/pages` | List pages (filterable by type, archived status) |
+| `GET` | `/wiki/search?q=` | Full-text search |
+| `POST` | `/wiki/pages` | Create a page |
+| `GET` | `/wiki/pages/:slug` | Get a page by slug |
+| `POST` | `/wiki/pages/:slug/edit` | Edit a page (old_text/new_text with edit summary) |
+| `GET` | `/wiki/pages/:slug/history` | Version history |
+| `POST` | `/wiki/pages/:slug/restore` | Restore a previous version |
+| `DELETE` | `/wiki/pages/:slug` | Archive a page (soft delete) |
+
+## Frontend
+
+The Wiki route provides a full page browser:
+
+- **Page list** — filterable by type, searchable, sorted by last updated
+- **Page viewer** — rendered markdown with wiki-link navigation
+- **Create form** — title, slug (auto-generated from title), type selector, content editor
+- **Version history** — view previous versions with author and edit summary
+
+Wiki links in page content render as clickable navigation links. Clicking a `wiki:slug` link navigates to that page within the wiki route.
+
+## Module Layout
+
+```
+src/
+├── wiki.rs                    → wiki/
+│   └── store.rs               — WikiStore: CRUD, search, versioning, edit matching
+│
+├── tools/
+│   ├── wiki_create.rs         — wiki_create LLM tool
+│   ├── wiki_edit.rs           — wiki_edit LLM tool (tolerant matching)
+│   ├── wiki_read.rs           — wiki_read LLM tool
+│   ├── wiki_list.rs           — wiki_list LLM tool
+│   ├── wiki_search.rs         — wiki_search LLM tool (FTS5)
+│   └── wiki_history.rs        — wiki_history LLM tool
+│
+├── api/
+│   └── wiki.rs                — REST endpoints
+│
+├── skills/builtin/
+│   └── wiki-writing/SKILL.md  — Built-in wiki writing guidelines
+│
+└── migrations/global/
+    └── 20260407120000_wiki.sql — Schema + FTS + triggers
+```

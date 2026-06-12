@@ -28,9 +28,21 @@ This is an automatic process triggered periodically during conversation. You are
    - Use `part_of` when a detail belongs to a larger concept already in memory
 
 4. **Extract events.** While reviewing the conversation, identify key decisions, important events, and errors. Include them in the `events` field of `memory_persistence_complete`:
-   - `event_type`: "decision" for commitments or choices made, "error" for failures or problems, "system" for other notable events
+   - `event_type`:
+     - `"decision"` for commitments or choices made
+     - `"user_correction"` when the user corrects a prior assumption, instruction, or framing
+     - `"decision_revised"` when a prior choice changes after feedback or new information
+     - `"deadline_set"` when the conversation establishes a concrete due date, deadline, or scheduled milestone
+     - `"blocked_on"` when progress is waiting on an approval, dependency, missing input, or external action
+     - `"constraint"` when the user or system states a hard requirement, limitation, or non-negotiable boundary
+     - `"outcome"` when a task, branch, or delegated step reaches a clear terminal result worth retaining in temporal memory
+     - `"error"` for failures or problems
+     - `"system"` for other notable events
    - `summary`: one-line description of what happened
-   - `importance`: 0.0-1.0 score (decisions and errors typically 0.6-0.8)
+   - Normalize relative time references to absolute dates/times with timezone
+     (for example `2026-03-31T14:20:00-04:00`) so downstream memory checks are
+     stable across sessions.
+   - `importance`: 0.0-1.0 score (`decision`, `user_correction`, `decision_revised`, `blocked_on`, and `outcome` are typically 0.6-0.8)
    - Events feed the agent's temporal working memory — they help the agent remember *what happened today*, not just facts.
 
 5. **Finish with the terminal tool.** You must call `memory_persistence_complete` before finishing:
@@ -46,3 +58,14 @@ This is an automatic process triggered periodically during conversation. You are
 4. Focus on the most recent portion of the conversation — older content has likely already been captured by previous persistence runs.
 5. Do not invent memory IDs. Every ID in `saved_memory_ids` must come from a real successful `memory_save` call in this run.
 6. Do not return plain text as the terminal result. End the run by calling `memory_persistence_complete`.
+
+7. Exclude non-durable information:
+   - Raw repo-state or derivable state such as `ls`, `pwd`, environment output,
+     git status/history, or full file diffs unless it materially changes the
+     plan or decision.
+   - Ephemeral task chatter: retries, progress updates, temporary tool output,
+     or worker process chatter.
+
+8. Verify stale memory before relying on it. If a recalled memory conflicts with
+the newer conversation context, treat the older item as stale, avoid propagating
+it as truth, and capture the latest truth via `updates` or `contradicts`.

@@ -41,6 +41,10 @@ pub struct SendAgentMessageTool {
     /// Set per-turn so task completion notifications route back to the right place.
     originating_channel: Option<String>,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
+    /// Wake dispatcher for the receiving agent. Fired after task insert so
+    /// dormant-mode receivers wake up immediately instead of waiting for a
+    /// (non-existent) tick. No-op when None or when the receiver is active.
+    wake_tx: Option<crate::agent::wake::WakeSender>,
 }
 
 impl std::fmt::Debug for SendAgentMessageTool {
@@ -68,7 +72,15 @@ impl SendAgentMessageTool {
             skip_flag: None,
             originating_channel: None,
             working_memory: None,
+            wake_tx: None,
         }
+    }
+
+    /// Attach the instance-wide wake dispatcher so dormant receivers get
+    /// woken immediately on delegation.
+    pub fn with_wake_tx(mut self, tx: crate::agent::wake::WakeSender) -> Self {
+        self.wake_tx = Some(tx);
+        self
     }
 
     /// Set the per-turn skip flag so the channel turn ends after delegation.
@@ -246,6 +258,14 @@ impl Tool for SendAgentMessageTool {
 
         let task_number = task.task_number;
 
+        // Wake the receiving agent. No-op when the receiver is in active mode
+        // (its ready-task loop will pick the task up on its own); critical when
+        // the receiver is dormant (no loop runs).
+        if let Some(tx) = self.wake_tx.as_ref() {
+            let receiver: crate::AgentId = std::sync::Arc::from(receiving_agent_id.as_str());
+            crate::agent::wake::fire_wake(tx, &receiver);
+        }
+
         // Log delegation record in the link channel (system message).
         let sender_display = self
             .agent_names
@@ -285,7 +305,7 @@ impl Tool for SendAgentMessageTool {
         if let Some(working_memory) = &self.working_memory {
             working_memory
                 .emit(
-                    crate::memory::WorkingMemoryEventType::AgentMessage,
+                    crate::memory::WorkingMemoryEventType::Outcome,
                     format!("Delegated task #{task_number} to {target_display}"),
                 )
                 .importance(0.7)
@@ -323,5 +343,104 @@ fn extract_task_title(message: &str) -> String {
     } else {
         let boundary = first_line.floor_char_boundary(120);
         format!("{}...", first_line[..boundary].trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::links::{AgentLink, LinkDirection, LinkKind};
+    use crate::memory::working::WorkingMemoryEvent;
+    use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
+    use arc_swap::ArcSwap;
+    use chrono_tz::Tz;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    async fn wait_for_single_event(store: &WorkingMemoryStore) -> WorkingMemoryEvent {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .get_recent_events(10, 0.0)
+                    .await
+                    .expect("working memory query");
+                if let Some(event) = events.into_iter().next() {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for working memory event")
+    }
+
+    #[tokio::test]
+    async fn send_agent_message_emits_outcome_event() {
+        let task_store = setup_test_store().await;
+        let pool = task_store.pool().clone();
+        sqlx::query(
+            "CREATE TABLE conversation_messages (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                sender_name TEXT,
+                sender_id TEXT,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("conversation messages schema should be created");
+        let task_store = Arc::new(task_store);
+        let conversation_logger = ConversationLogger::new(pool.clone());
+        let working_memory_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&working_memory_pool)
+            .await
+            .expect("working memory migrations");
+        let working_memory = WorkingMemoryStore::new(working_memory_pool, Tz::UTC);
+
+        let links = Arc::new(ArcSwap::from_pointee(vec![AgentLink {
+            from_agent_id: "planner".to_string(),
+            to_agent_id: "executor".to_string(),
+            direction: LinkDirection::TwoWay,
+            kind: LinkKind::Peer,
+        }]));
+        let agent_names = Arc::new(HashMap::from([
+            ("planner".to_string(), "Planner".to_string()),
+            ("executor".to_string(), "Executor".to_string()),
+        ]));
+
+        let tool = SendAgentMessageTool::new(
+            crate::AgentId::from("planner"),
+            links,
+            agent_names,
+            task_store,
+            conversation_logger,
+        )
+        .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(SendAgentMessageArgs {
+                target: "executor".to_string(),
+                message: "Implement the working-memory renderer. Include tests.".to_string(),
+            })
+            .await
+            .expect("send agent message should succeed");
+
+        assert!(output.success);
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(event.summary, "Delegated task #1 to Executor");
     }
 }

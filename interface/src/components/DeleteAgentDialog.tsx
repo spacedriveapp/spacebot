@@ -2,7 +2,7 @@ import {useState} from "react";
 import {useMutation, useQueryClient} from "@tanstack/react-query";
 import {useNavigate} from "@tanstack/react-router";
 import {api} from "@/api/client";
-import {Button, Input, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter} from "@/ui";
+import {Button, Input, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogFooter} from "@spacedrive/primitives";
 
 interface DeleteAgentDialogProps {
 	open: boolean;
@@ -42,7 +42,7 @@ export function DeleteAgentDialog({open, onOpenChange, agentId}: DeleteAgentDial
 	}
 
 	return (
-		<Dialog open={open} onOpenChange={(v) => { if (!v) { setError(null); setConfirmation(""); } onOpenChange(v); }}>
+		<DialogRoot open={open} onOpenChange={(v) => { if (!v) { setError(null); setConfirmation(""); } onOpenChange(v); }}>
 			<DialogContent className="max-w-sm">
 				<DialogHeader>
 					<DialogTitle>Delete Agent</DialogTitle>
@@ -72,12 +72,12 @@ export function DeleteAgentDialog({open, onOpenChange, agentId}: DeleteAgentDial
 					)}
 				</div>
 				<DialogFooter>
-					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+					<Button variant="bare" size="sm" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
 					<Button
 						size="sm"
-						variant="destructive"
+						variant="accent"
 						onClick={handleSubmit}
 						loading={deleteMutation.isPending}
 						disabled={!confirmed}
@@ -86,6 +86,6 @@ export function DeleteAgentDialog({open, onOpenChange, agentId}: DeleteAgentDial
 					</Button>
 				</DialogFooter>
 			</DialogContent>
-		</Dialog>
+		</DialogRoot>
 	);
 }

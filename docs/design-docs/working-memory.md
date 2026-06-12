@@ -75,6 +75,18 @@ pub enum WorkingMemoryEventType {
     MemorySaved,
     /// A decision was made (extracted from conversation)
     Decision,
+    /// The user corrected a prior assumption, instruction, or framing
+    UserCorrection,
+    /// A prior decision changed after feedback or new information
+    DecisionRevised,
+    /// A concrete due date, deadline, or scheduled milestone was set
+    DeadlineSet,
+    /// Progress is waiting on approval, missing input, or an external dependency
+    BlockedOn,
+    /// A hard requirement, limitation, or non-negotiable boundary was stated
+    Constraint,
+    /// A task, branch, or delegated step reached a clear terminal result
+    Outcome,
     /// An error or failure occurred
     Error,
     /// A task was created or updated
@@ -350,9 +362,9 @@ Per-user context injected when specific users are active in the current channel.
 
 ### Relationship to existing designs
 
-This layer is the `participant-awareness.md` design, integrated into the layered context assembly. The design is unchanged -- `humans` table, cortex-generated summaries, cached and injected when `participants.len() >= min_participants`. The only change is its position in the prompt (it moves from "after Memory Context" to its own layer in the new assembly order).
+The long-term target for this layer is still the `participant-awareness.md` design, but the current implementation is a lighter config-backed variant. The channel now maintains a per-session active participant map keyed by canonical human ID when available and by `platform:sender_id` otherwise. Prompt rendering reads from that tracked participant set, matches known humans against configured `HumanDef` entries, and renders the available profile fields (`display_name`, `role`, `description` / `bio`) inline. There is still no dedicated `humans` table or cortex-generated participant summary cache on the current code path yet.
 
-If user-scoped memories lands first, the `humans` table merges with `user_identifiers` as described in that design doc. The working memory system does not depend on which identity table is canonical.
+If user-scoped memories or the full participant-awareness pipeline lands later, this layer can switch to that richer source without changing the prompt shape. The working memory system does not depend on which identity store is canonical.
 
 ### Enhancement: Recent Activity Per User
 
@@ -370,9 +382,9 @@ The participant summary (2-3 sentences about who this person is) is augmented wi
   Recent: asked about Docker runtime deps in #talk-to-spacebot 10m ago.
 ```
 
-The "Recent:" line is programmatic -- a query against `working_memory_events WHERE user_id = X ORDER BY timestamp DESC LIMIT 3`. The summary paragraph is the cached cortex-generated profile from the participant-awareness design. No additional LLM call.
+The "Recent:" line is programmatic -- a query against `working_memory_events WHERE user_id = X ORDER BY timestamp DESC LIMIT 3`. The profile paragraph currently comes from configured human metadata when available. No additional LLM call.
 
-**Token budget:** Configurable, default 400 tokens. Max 5 participants rendered. In a 50-person channel, only the 5 most recently active participants get profiles.
+**Token budget:** Configurable via the dedicated participant-context config, default 400 tokens. Max 5 participants rendered. In a 50-person channel, only the 5 most recently active participants get profiles.
 
 ---
 
@@ -455,7 +467,7 @@ The periodic memory persistence branch currently runs every 50 user messages. Re
 
 ### Persistence Branch Dual Output
 
-The memory persistence branch gains a second responsibility: in addition to saving graph memories, it emits `Decision` and `MemorySaved` events into the working memory log. This connects the two systems:
+The memory persistence branch gains a second responsibility: in addition to saving graph memories, it emits typed conversational events into the working memory log. This connects the two systems:
 
 ```
 Persistence branch runs:
@@ -463,11 +475,11 @@ Persistence branch runs:
   2. Reads conversation history since last run
   3. Saves new graph memories via memory_save (as today)
   4. Identifies key decisions and events
-  5. Emits working memory events for each decision identified
+  5. Emits working memory events for each important event identified
   6. Calls memory_persistence_complete
 ```
 
-Step 5 is new. The persistence branch prompt is updated to instruct it to identify decisions explicitly. The `memory_persistence_complete` tool gains an optional `events` field:
+Step 5 is new. The persistence branch prompt is updated to identify durable temporal events explicitly: decisions, user corrections, revised decisions, concrete deadlines, blockers, constraints, terminal outcomes, errors, and system events. The `memory_persistence_complete` tool gains an optional `events` field:
 
 ```rust
 pub struct MemoryPersistenceCompleteArgs {
@@ -477,7 +489,7 @@ pub struct MemoryPersistenceCompleteArgs {
 }
 
 pub struct WorkingMemoryEventInput {
-    pub event_type: String,       // "decision", "error", etc.
+    pub event_type: String,       // "decision", "blocked_on", "outcome", etc.
     pub summary: String,
     pub importance: Option<f32>,
 }
@@ -490,13 +502,17 @@ The majority of working memory events are captured programmatically, with zero L
 | Event            | Emitter                                      | How                                                                  |
 | ---------------- | -------------------------------------------- | -------------------------------------------------------------------- |
 | Worker spawned   | `spawn_worker` tool handler                  | After successful spawn, write event with task description as summary |
-| Worker completed | Worker state machine terminal transition     | Write event with worker result summary (truncated to 200 chars)      |
-| Branch completed | Branch return path in channel                | Write event with branch conclusion (truncated to 200 chars)          |
+| Worker completed | Worker state machine terminal transition     | Write typed result, blocker, constraint, or deadline event when the summary uses a recognized prefix; otherwise write `WorkerCompleted` |
+| Branch completed | Branch return path in channel                | Write typed result, blocker, constraint, or deadline event when the summary uses a recognized prefix; otherwise write `BranchCompleted` |
 | Cron executed    | Cron scheduler after job completes           | Write event with cron name + outcome                                 |
 | Memory saved     | `memory_save` tool handler                   | Write event with memory type + content preview                       |
-| Task updated     | Task tool handlers                           | Write event with task title + new status                             |
+| Task updated     | Task tool handlers                           | Write `Outcome` when a task transitions to `done`; otherwise write `TaskUpdate` with task status |
+| Duplicate worker | `spawn_worker` duplicate guard               | Write `BlockedOn` with the active worker ID and duplicate task preview |
+| Agent delegation | `send_agent_message` tool handler            | Write `Outcome` when delegation creates the cross-agent task          |
 | Error            | SpacebotHook on tool failure, worker failure | Write event with error description                                   |
 | System           | Startup, config change, maintenance          | Write event with description                                         |
+
+Branch and worker summaries may opt into richer event types with these prefixes: `outcome:`, `blocked_on:` or `blocked on:`, `constraint:`, and `deadline_set:` or `deadline:`. The prefix is stripped before rendering the event summary.
 
 Each emitter calls `working_memory_store.record_event()` as a fire-and-forget `tokio::spawn`. The message processing pipeline never waits on event recording.
 

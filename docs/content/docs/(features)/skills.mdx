@@ -270,17 +270,35 @@ assets/boilerplate/
 
 Workers copy or modify these files to produce results.
 
+## Built-in Skills
+
+Some skills are compiled directly into the Spacebot binary via `include_str!()`. These are always available without installation and serve as baseline capabilities.
+
+Currently shipped:
+
+| Skill | Description |
+|-------|-------------|
+| `wiki-writing` | Encyclopedic writing standards for the wiki system — page types, tone, structure, wiki-link syntax, editing discipline |
+
+Built-in skills follow the same `SKILL.md` format as installed skills. They're defined in `src/skills/builtin.rs` and sourced from `skills/builtin/` in the repo.
+
+### Precedence
+
+Built-in skills have the lowest priority. If you install a skill with the same name from the registry or create one locally, it overrides the built-in version.
+
 ## Skill Precedence
 
-Skills are loaded from two locations with workspace-level skills overriding instance-level:
+Skills are loaded from three tiers, with later tiers overriding earlier ones on name conflicts:
 
-1. **Instance-level:** `\{instance_dir\}/skills/` — shared across all agents
-2. **Workspace-level:** `\{agent_workspace\}/skills/` — agent-specific
+1. **Built-in:** Compiled into the binary. Lowest priority. Marked `SkillSource::Builtin`.
+2. **Instance-level:** `\{instance_dir\}/skills/` — shared across all agents. Marked `SkillSource::Instance`.
+3. **Workspace-level:** `\{agent_workspace\}/skills/` — agent-specific. Highest priority. Marked `SkillSource::Workspace`.
 
-If both locations have a skill named `pdf`, the workspace version wins.
+If all three tiers have a skill named `wiki-writing`, the workspace version wins.
 
 **Use case:**
 
+- Built-in skills provide baseline capabilities out of the box
 - Install common skills (pdf, browser-use) at instance level
 - Override with agent-specific versions in workspace
 - Test new skill versions without affecting other agents
@@ -506,8 +524,10 @@ rm -rf ~/.spacebot/agents/my-agent/workspace/skills/conflicting-skill
 **File structure:**
 
 ```rust
-src/skills.rs           // Skill loading and prompt injection
-src/skills/installer.rs // GitHub download and .skill file extraction
+src/skills.rs             // Skill loading, precedence resolution, prompt injection
+src/skills/installer.rs   // GitHub download and .skill file extraction
+src/skills/builtin.rs     // Built-in skill registration (include_str! macros)
+skills/builtin/           // Built-in skill SKILL.md files (compiled into binary)
 ```
 
 **Loading:**

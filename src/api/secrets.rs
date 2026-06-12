@@ -10,7 +10,8 @@ use crate::config::{
     TwitchConfig,
 };
 use crate::secrets::store::{
-    ExportData, SecretCategory, SecretsStore, StoreState, SystemSecrets, auto_categorize,
+    ExportData, SecretCategory, SecretScope, SecretsStore, StoreState, SystemSecrets,
+    auto_categorize,
 };
 
 use axum::Json;
@@ -69,6 +70,9 @@ pub async fn secrets_status(State(state): State<Arc<ApiState>>) -> impl IntoResp
 #[derive(Serialize, utoipa::ToSchema)]
 struct SecretListItem {
     name: String,
+    /// Visibility scope. `InstanceShared` is the default for system /
+    /// admin-managed secrets; `Agent` rows are per-agent tool credentials.
+    scope: SecretScope,
     category: SecretCategory,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -95,12 +99,18 @@ pub async fn list_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRespon
         Err(e) => return e.into_response(),
     };
 
-    match store.list_metadata() {
+    // Restrict to InstanceShared until per-agent CRUD endpoints land — the
+    // existing PUT/DELETE/INFO endpoints only operate on shared scope, so
+    // surfacing agent-scoped rows here would let the dashboard show entries
+    // it can't read or mutate. Agent-scoped secrets get their own listing
+    // through the per-agent endpoints (forthcoming).
+    match store.list_metadata(Some(&SecretScope::shared())) {
         Ok(metadata) => {
             let mut secrets: Vec<SecretListItem> = metadata
                 .into_iter()
-                .map(|(name, meta)| SecretListItem {
+                .map(|((scope, name), meta)| SecretListItem {
                     name,
+                    scope,
                     category: meta.category,
                     created_at: meta.created_at,
                     updated_at: meta.updated_at,
@@ -167,7 +177,7 @@ pub async fn put_secret(
 
     let category = body.category.unwrap_or_else(|| auto_categorize(&name));
 
-    match store.set(&name, &body.value, category) {
+    match store.set(&SecretScope::shared(), &name, &body.value, category) {
         Ok(()) => {
             let reload_required = category == SecretCategory::System;
             let message = if reload_required {
@@ -230,7 +240,7 @@ pub async fn delete_secret(
             .into_response();
     }
 
-    match store.delete(&name) {
+    match store.delete(&SecretScope::shared(), &name) {
         Ok(()) => Json(DeleteSecretResponse {
             deleted: name,
             warning: None,
@@ -275,7 +285,7 @@ pub async fn secret_info(
         Err(e) => return e.into_response(),
     };
 
-    match store.get_metadata(&name) {
+    match store.get_metadata(&SecretScope::shared(), &name) {
         Ok(meta) => Json(SecretInfoResponse {
             name,
             category: meta.category,
@@ -736,7 +746,7 @@ fn try_migrate_field(
     }
 
     let category = auto_categorize(secret_name);
-    if let Err(error) = store.set(secret_name, &value_str, category) {
+    if let Err(error) = store.set(&SecretScope::shared(), secret_name, &value_str, category) {
         tracing::warn!(%error, secret_name, "failed to migrate secret");
         return;
     }
@@ -819,7 +829,9 @@ fn migrate_section_secrets<T: SystemSecrets>(
             };
 
             let category = auto_categorize(&secret_name);
-            if let Err(error) = store.set(&secret_name, &value_str, category) {
+            if let Err(error) =
+                store.set(&SecretScope::shared(), &secret_name, &value_str, category)
+            {
                 tracing::warn!(%error, %secret_name, "failed to migrate instance secret");
                 continue;
             }

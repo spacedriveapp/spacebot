@@ -1,7 +1,16 @@
-import { createContext, useContext, useRef, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
-import { Link } from "@tanstack/react-router";
-import { BASE_PATH } from "@/api/client";
-import { IS_TAURI, startDragging } from "@/platform";
+import {
+	createContext,
+	useContext,
+	useRef,
+	useCallback,
+	useSyncExternalStore,
+	type ReactNode,
+	type MouseEvent,
+} from "react";
+import {useQuery} from "@tanstack/react-query";
+import {SelectPill} from "@spacedrive/primitives";
+import {api} from "@/api/client";
+import {IS_DESKTOP, IS_MACOS, startDragging} from "@/platform";
 
 // ── Context ──────────────────────────────────────────────────────────────
 
@@ -36,7 +45,7 @@ function createTopBarStore(): TopBarStore {
 
 const TopBarContext = createContext<TopBarStore | null>(null);
 
-export function TopBarProvider({ children }: { children: ReactNode }) {
+export function TopBarProvider({children}: {children: ReactNode}) {
 	const storeRef = useRef<TopBarStore>(null);
 	if (!storeRef.current) {
 		storeRef.current = createTopBarStore();
@@ -57,7 +66,8 @@ export function TopBarProvider({ children }: { children: ReactNode }) {
  */
 export function useSetTopBar(node: ReactNode) {
 	const store = useContext(TopBarContext);
-	if (!store) throw new Error("useSetTopBar must be used within TopBarProvider");
+	if (!store)
+		throw new Error("useSetTopBar must be used within TopBarProvider");
 
 	// Update content synchronously during render (like useSyncExternalStore pattern).
 	// This avoids the useEffect loop entirely.
@@ -70,6 +80,14 @@ export function TopBar() {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("TopBar must be used within TopBarProvider");
 
+	const { data: globalSettings } = useQuery({
+		queryKey: ["global-settings"],
+		queryFn: api.globalSettings,
+		staleTime: 10_000,
+	});
+
+	const companyName = globalSettings?.company_name ?? "My Company";
+
 	const content = useSyncExternalStore(
 		store.subscribe,
 		store.getSnapshot,
@@ -77,43 +95,36 @@ export function TopBar() {
 	);
 
 	const handleMouseDown = useCallback((e: MouseEvent) => {
-		if (!IS_TAURI) return;
+		if (!IS_DESKTOP) return;
 		// Only drag on primary button, and not when clicking interactive elements
 		if (e.buttons !== 1) return;
 		const target = e.target as HTMLElement;
-		if (target.closest("a, button, input, select, textarea, [role=button]")) return;
+		if (target.closest("a, button, input, select, textarea, [role=button]"))
+			return;
 		e.preventDefault();
 		startDragging();
 	}, []);
 
 	return (
 		<div
-			className={`flex h-12 w-full shrink-0 border-b border-app-line bg-app-darkBox/50${IS_TAURI ? " select-none" : ""}`}
+			className={`flex h-12 w-full shrink-0 bg-app-dark-box/50${IS_DESKTOP ? " select-none" : ""}`}
 			onMouseDown={handleMouseDown}
 		>
 			{/* Left corner block */}
-			{IS_TAURI ? (
-				/* Tauri: padding for macOS traffic lights */
+			{IS_DESKTOP && IS_MACOS ? (
+				/* Padding for native traffic lights */
 				<div className="w-[72px] shrink-0" />
 			) : (
-				/* Web: ball icon block matching sidebar width + border */
-				<Link
-					to="/"
-					className="flex w-14 shrink-0 items-center justify-center border-r border-sidebar-line bg-sidebar"
-				>
-					<img
-						src={`${BASE_PATH}/ball.png`}
-						alt=""
-						className="h-6 w-6 transition-transform duration-150 ease-out hover:scale-110 active:scale-95"
-						draggable={false}
-					/>
-				</Link>
+				/* Browser/non-mac desktop: ball icon block matching sidebar width + border */
+				<div className="flex w-[220px] shrink-0 items-center border-r border-app-line bg-sidebar px-3">
+					<SelectPill variant="sidebar" size="md" className="w-full">
+						<span className="font-semibold">{companyName}</span>
+					</SelectPill>
+				</div>
 			)}
 
 			{/* Route-controlled content area */}
-			<div className="flex min-w-0 flex-1 items-center">
-				{content}
-			</div>
+			<div className="flex min-w-0 flex-1 items-center">{content}</div>
 		</div>
 	);
 }

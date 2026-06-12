@@ -189,12 +189,12 @@ async fn stream_events_from_live_server() {
                         saw_text = true;
                     }
                 }
-                SseEvent::SessionIdle { session_id: sid } => {
-                    if sid == &session_id && saw_assistant {
-                        saw_idle = true;
-                        events.push(event);
-                        break;
-                    }
+                SseEvent::SessionIdle { session_id: sid }
+                    if sid == &session_id && saw_assistant =>
+                {
+                    saw_idle = true;
+                    events.push(event);
+                    break;
                 }
                 _ => {}
             }

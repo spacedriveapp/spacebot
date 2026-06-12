@@ -1,12 +1,24 @@
-import { useState } from "react";
-import { cx } from "@/ui/utils";
-import type { TranscriptStep, OpenCodePart } from "@/api/client";
+import {useState} from "react";
+import {cx} from "class-variance-authority";
+import type {OpenCodePart} from "@/api/client";
+import type { TranscriptStep as SchemaTranscriptStep } from "@/api/types";
+
+// Extended TranscriptStep with live_output for streaming shell output
+type ToolResultStatus = "pending" | "final" | "waiting_for_input";
+
+type ExtendedTranscriptStep = SchemaTranscriptStep & {
+	live_output?: string;
+	status?: ToolResultStatus;
+};
+
+// Use the extended type for pairing
+type TranscriptStep = ExtendedTranscriptStep;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type ToolCallStatus = "running" | "completed" | "error";
+export type ToolCallStatus = "running" | "completed" | "error" | "waiting_for_input";
 
 export interface ToolCallPair {
 	/** The call_id linking tool_call to tool_result */
@@ -25,6 +37,8 @@ export interface ToolCallPair {
 	status: ToolCallStatus;
 	/** Human-readable summary provided by live opencode parts */
 	title?: string | null;
+	/** Live streaming output from tool_output SSE events (running tools only) */
+	liveOutput?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -37,17 +51,26 @@ export interface ToolCallPair {
  * list of renderable items: text blocks and paired tool calls.
  */
 export type TranscriptItem =
-	| { kind: "text"; text: string }
-	| { kind: "tool"; pair: ToolCallPair };
+	| {kind: "text"; text: string}
+	| {kind: "tool"; pair: ToolCallPair};
 
 export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 	const items: TranscriptItem[] = [];
-	const resultsById = new Map<string, { name: string; text: string }>();
+	const resultsById = new Map<
+		string,
+		{name: string; text: string; status: ToolResultStatus; liveOutput?: string}
+	>();
 
 	// First pass: index all tool_result steps by call_id
 	for (const step of steps) {
 		if (step.type === "tool_result") {
-			resultsById.set(step.call_id, { name: step.name, text: step.text });
+			const liveOutput = step.live_output;
+			resultsById.set(step.call_id, {
+				name: step.name,
+				text: step.text,
+				status: step.status ?? "final",
+				liveOutput,
+			});
 		}
 	}
 
@@ -56,16 +79,25 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 		if (step.type === "action") {
 			for (const content of step.content) {
 				if (content.type === "text") {
-					items.push({ kind: "text", text: content.text });
+					items.push({kind: "text", text: content.text});
 				} else if (content.type === "tool_call") {
 					const result = resultsById.get(content.id);
 					const parsedArgs = tryParseJson(content.args);
-					const parsedResult = result ? tryParseJson(result.text) : null;
+					const resultStatus = result?.status ?? "final";
+					const hasFinalResult = !!result && resultStatus !== "pending";
+					const parsedResult = hasFinalResult ? tryParseJson(result.text) : null;
 
 					// Detect error: result text starts with "Error" or contains error indicators
-					const isError = result
+					const isError = hasFinalResult
 						? isErrorResult(result.text, parsedResult)
 						: false;
+					const status: ToolCallStatus = resultStatus === "pending"
+							? "running"
+							: resultStatus === "waiting_for_input"
+								? "waiting_for_input"
+								: isError
+									? "error"
+									: "completed";
 
 					items.push({
 						kind: "tool",
@@ -74,13 +106,10 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 							name: content.name,
 							argsRaw: content.args,
 							args: parsedArgs,
-							resultRaw: result?.text ?? null,
+							resultRaw: hasFinalResult ? result.text : null,
 							result: parsedResult,
-							status: result
-								? isError
-									? "error"
-									: "completed"
-								: "running",
+							status,
+							liveOutput: result?.liveOutput,
 						},
 					});
 				}
@@ -97,16 +126,14 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
  * rendered by the unified ToolCall component.
  */
 export function openCodePartToPair(
-	part: Extract<OpenCodePart, { type: "tool" }>,
+	part: Extract<OpenCodePart, {type: "tool"}>,
 ): ToolCallPair {
 	const input =
 		part.status === "running" || part.status === "completed"
 			? (part as any).input
 			: undefined;
-	const output =
-		part.status === "completed" ? (part as any).output : undefined;
-	const error =
-		part.status === "error" ? (part as any).error : undefined;
+	const output = part.status === "completed" ? (part as any).output : undefined;
+	const error = part.status === "error" ? (part as any).error : undefined;
 	const title =
 		part.status === "running" || part.status === "completed"
 			? (part as any).title
@@ -133,11 +160,15 @@ export function openCodePartToPair(
 	};
 }
 
-function tryParseJson(text: string): Record<string, unknown> | null {
+export function tryParseJson(text: string): Record<string, unknown> | null {
 	if (!text || text.trim().length === 0) return null;
 	try {
 		const parsed = JSON.parse(text);
-		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed)
+		) {
 			return parsed as Record<string, unknown>;
 		}
 		return null;
@@ -146,7 +177,7 @@ function tryParseJson(text: string): Record<string, unknown> | null {
 	}
 }
 
-function isErrorResult(
+export function isErrorResult(
 	text: string,
 	parsed: Record<string, unknown> | null,
 ): boolean {
@@ -154,7 +185,8 @@ function isErrorResult(
 	if (parsed?.status === "error") return true;
 	// Shell structured results: { success: false } or non-zero exit code
 	if (parsed?.success === false) return true;
-	if (typeof parsed?.exit_code === "number" && parsed.exit_code !== 0) return true;
+	if (typeof parsed?.exit_code === "number" && parsed.exit_code !== 0)
+		return true;
 	const lower = text.toLowerCase();
 	return (
 		lower.startsWith("error:") ||
@@ -288,8 +320,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 			if (!pair.resultRaw) return null;
 			// Screenshot results may contain base64 image data or a path
 			if (pair.result?.base64) {
-				const mimeType =
-					(pair.result.mime_type as string) ?? "image/png";
+				const mimeType = (pair.result.mime_type as string) ?? "image/png";
 				return (
 					<div className="px-3 py-2">
 						<img
@@ -307,9 +338,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 	browser_evaluate: {
 		summary(pair) {
 			const expression = pair.args?.expression;
-			return expression
-				? truncate(String(expression), 50)
-				: "Evaluate JS";
+			return expression ? truncate(String(expression), 50) : "Evaluate JS";
 		},
 		argsView(pair) {
 			const expression = pair.args?.expression;
@@ -343,9 +372,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 	browser_tab_close: {
 		summary(pair) {
 			const tabId = pair.args?.tab_id;
-			return tabId !== undefined
-				? `Close tab ${tabId}`
-				: "Close tab";
+			return tabId !== undefined ? `Close tab ${tabId}` : "Close tab";
 		},
 	},
 
@@ -465,9 +492,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">
-								Old
-							</p>
+							<p className="text-tiny font-medium text-red-400/70">Old</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
@@ -475,9 +500,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">
-								New
-							</p>
+							<p className="text-tiny font-medium text-emerald-400/70">New</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
 								{truncate(String(newStr), 500)}
 							</pre>
@@ -645,9 +668,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">
-								Old
-							</p>
+							<p className="text-tiny font-medium text-red-400/70">Old</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
@@ -655,9 +676,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">
-								New
-							</p>
+							<p className="text-tiny font-medium text-emerald-400/70">New</p>
 							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
 								{truncate(String(newStr), 500)}
 							</pre>
@@ -758,7 +777,11 @@ const toolRenderers: Record<string, ToolRenderer> = {
 		summary(pair) {
 			if (pair.title) return pair.title;
 			const query = pair.args?.query;
-			const resultCount = pair.result?.result_count ?? (Array.isArray(pair.result?.results) ? (pair.result!.results as unknown[]).length : null);
+			const resultCount =
+				pair.result?.result_count ??
+				(Array.isArray(pair.result?.results)
+					? (pair.result!.results as unknown[]).length
+					: null);
 			const queryStr = query ? truncate(String(query), 50) : null;
 			if (queryStr && resultCount != null) {
 				return `${queryStr} (${resultCount} result${resultCount !== 1 ? "s" : ""})`;
@@ -810,9 +833,7 @@ const toolRenderers: Record<string, ToolRenderer> = {
 			return (
 				<div className="border-b border-app-line/20 px-3 py-2">
 					{!!docId && (
-						<p className="font-mono text-tiny text-ink-dull">
-							{String(docId)}
-						</p>
+						<p className="font-mono text-tiny text-ink-dull">{String(docId)}</p>
 					)}
 					{!!query && (
 						<p className="mt-0.5 text-tiny text-ink-faint">
@@ -867,13 +888,11 @@ function getRenderer(name: string): ToolRenderer {
 // Shared sub-components
 // ---------------------------------------------------------------------------
 
-function ResultLine({ text }: { text: string }) {
-	return (
-		<p className="px-3 py-2 text-tiny text-ink-dull">{text}</p>
-	);
+function ResultLine({text}: {text: string}) {
+	return <p className="px-3 py-2 text-tiny text-ink-dull">{text}</p>;
 }
 
-function ResultText({ text }: { text: string | null }) {
+function ResultText({text}: {text: string | null}) {
 	if (!text) return null;
 	return (
 		<pre className="max-h-60 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny text-ink-dull">
@@ -907,9 +926,7 @@ function CollapsiblePre({
 					onClick={() => setExpanded(!expanded)}
 					className="w-full border-t border-app-line/20 px-3 py-1 text-center text-tiny text-ink-faint hover:text-ink-dull"
 				>
-					{expanded
-						? "Show less"
-						: `Show all ${lines.length} lines`}
+					{expanded ? "Show less" : `Show all ${lines.length} lines`}
 				</button>
 			)}
 		</div>
@@ -920,7 +937,7 @@ function CollapsiblePre({
 // Shell result rendering
 // ---------------------------------------------------------------------------
 
-function ShellResultView({ pair }: { pair: ToolCallPair }) {
+function ShellResultView({pair}: {pair: ToolCallPair}) {
 	const r = pair.result;
 
 	// If we can't parse structured output, fall back to raw text
@@ -962,17 +979,21 @@ function ShellResultView({ pair }: { pair: ToolCallPair }) {
 			{hasStderr && (
 				<div>
 					<div className="flex items-center gap-1.5 border-b border-app-line/10 px-3 pt-1.5 pb-1">
-						<span className={cx(
-							"text-tiny font-medium",
-							isError ? "text-red-400/70" : "text-yellow-500/70",
-						)}>
+						<span
+							className={cx(
+								"text-tiny font-medium",
+								isError ? "text-red-400/70" : "text-yellow-500/70",
+							)}
+						>
 							stderr
 						</span>
 					</div>
-					<pre className={cx(
-						"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
-						isError ? "text-red-300/60" : "text-yellow-300/50",
-					)}>
+					<pre
+						className={cx(
+							"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
+							isError ? "text-red-300/60" : "text-yellow-300/50",
+						)}
+					>
 						{stderr.replace(/\n$/, "")}
 					</pre>
 				</div>
@@ -986,15 +1007,17 @@ function ShellResultView({ pair }: { pair: ToolCallPair }) {
 // ---------------------------------------------------------------------------
 
 const STATUS_ICONS: Record<ToolCallStatus, string> = {
-	running: "\u25B6",   // ▶
+	running: "\u25B6", // ▶
 	completed: "\u2713", // ✓
-	error: "\u2717",     // ✗
+	error: "\u2717", // ✗
+	waiting_for_input: "!",
 };
 
 const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
-	completed: "text-emerald-500",
-	error: "text-red-400",
+	completed: "text-status-success",
+	error: "text-status-error",
+	waiting_for_input: "text-blue-500",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1032,7 +1055,7 @@ function toolCategory(name: string): string | null {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function ToolCall({ pair }: { pair: ToolCallPair }) {
+export function ToolCall({pair}: {pair: ToolCallPair}) {
 	const [expanded, setExpanded] = useState(false);
 	const renderer = getRenderer(pair.name);
 	const summary = renderer.summary(pair);
@@ -1042,10 +1065,12 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 	return (
 		<div
 			className={cx(
-				"rounded-md border bg-app-darkBox/30",
+				"rounded-md border bg-app-dark-box/30",
 				pair.status === "error"
-					? "border-red-500/30"
-					: "border-app-line/50",
+					? "border-status-error/30"
+					: pair.status === "waiting_for_input"
+						? "border-blue-500/30"
+						: "border-app-line/50",
 			)}
 		>
 			{/* Header — always visible */}
@@ -1062,20 +1087,17 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 					{STATUS_ICONS[pair.status]}
 				</span>
 				{category && (
-					<span className="text-tiny text-ink-faint">
-						{category}
-					</span>
+					<span className="text-tiny text-ink-faint">{category}</span>
 				)}
-				<span className="font-medium text-ink-dull">
-					{displayName}
-				</span>
+				<span className="font-medium text-ink-dull">{displayName}</span>
 				{summary && !expanded && (
-					<span className="flex-1 truncate text-ink-faint">
-						{summary}
-					</span>
+					<span className="flex-1 truncate text-ink-faint">{summary}</span>
 				)}
 				{pair.status === "running" && (
 					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+				)}
+				{pair.status === "waiting_for_input" && !expanded && (
+					<span className="text-tiny text-blue-500">Waiting for input</span>
 				)}
 			</button>
 
@@ -1092,7 +1114,10 @@ export function ToolCall({ pair }: { pair: ToolCallPair }) {
 	);
 }
 
-function renderArgs(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode {
+function renderArgs(
+	pair: ToolCallPair,
+	renderer: ToolRenderer,
+): React.ReactNode {
 	// Try custom args view first
 	if (renderer.argsView) {
 		const custom = renderer.argsView(pair);
@@ -1130,12 +1155,33 @@ function renderArgs(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode
 	return null;
 }
 
-function renderResult(pair: ToolCallPair, renderer: ToolRenderer): React.ReactNode {
+function renderResult(
+	pair: ToolCallPair,
+	renderer: ToolRenderer,
+): React.ReactNode {
 	if (pair.status === "running") {
+		if (pair.liveOutput) {
+			return (
+				<div className="px-3 py-2">
+					<pre className="max-h-60 overflow-auto whitespace-pre-wrap font-mono text-tiny text-ink-dull">
+						{pair.liveOutput}
+					</pre>
+				</div>
+			);
+		}
 		return (
 			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-ink-faint">
 				<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
 				Running...
+			</div>
+		);
+	}
+
+	if (pair.status === "waiting_for_input" && !pair.resultRaw) {
+		return (
+			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-blue-500">
+				<span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+				Waiting for input
 			</div>
 		);
 	}

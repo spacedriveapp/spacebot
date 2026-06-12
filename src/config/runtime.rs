@@ -89,6 +89,8 @@ pub struct RuntimeConfig {
     pub projects: ArcSwap<crate::config::ProjectsConfig>,
     /// Working memory configuration for temporal context injection.
     pub working_memory: ArcSwap<crate::config::types::WorkingMemoryConfig>,
+    /// Participant context configuration for prompt-time participant awareness.
+    pub participant_context: ArcSwap<crate::config::types::ParticipantContextConfig>,
     /// Shared browser state for persistent sessions.
     ///
     /// When `browser.persist_session = true`, all workers share this handle so
@@ -160,6 +162,7 @@ impl RuntimeConfig {
             working_memory: ArcSwap::from_pointee(
                 crate::config::types::WorkingMemoryConfig::default(),
             ),
+            participant_context: ArcSwap::from_pointee(defaults.participant_context),
             shared_browser: if agent_config.browser.persist_session {
                 Some(crate::tools::browser::new_shared_browser_handle())
             } else {
@@ -192,12 +195,12 @@ impl RuntimeConfig {
     /// This bumps the dirty counter so the cortex regenerates knowledge synthesis.
     /// Do NOT call for importance-only changes (decay, access count).
     pub fn bump_knowledge_synthesis_version(&self) {
-        self.knowledge_synthesis_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.knowledge_synthesis_last_change.store(
             chrono::Utc::now().timestamp(),
-            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Release,
         );
+        self.knowledge_synthesis_version
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// Compute the current dispatch-readiness signal.
@@ -277,6 +280,8 @@ impl RuntimeConfig {
         self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
+        self.participant_context
+            .store(Arc::new(config.defaults.participant_context));
         // Preserve project_paths from the current sandbox config when
         // reloading — the resolved config only has user-configured paths.
         let existing_project_paths = self.sandbox.load().project_paths.clone();

@@ -61,10 +61,16 @@ pub async fn migrate_legacy_tasks(
             .unwrap_or("unknown")
             .to_string();
 
-        let db_path = agent_dir.join("data").join("spacebot.db");
-        if !db_path.exists() {
+        // Try new per-agent name first, fall back to legacy.
+        let new_db = agent_dir.join("data").join("agent.db");
+        let legacy_db = agent_dir.join("data").join("spacebot.db");
+        let db_path = if new_db.exists() {
+            new_db
+        } else if legacy_db.exists() {
+            legacy_db
+        } else {
             continue;
-        }
+        };
 
         match migrate_agent_tasks(&agent_id, &db_path, global_pool).await {
             Ok(count) => {

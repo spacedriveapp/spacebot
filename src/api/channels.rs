@@ -523,6 +523,7 @@ pub(super) async fn inspect_prompt(
     // ── Gather all dynamic sections ──
     let identity_context = rc.identity.load().render();
     let memory_bulletin = rc.memory_bulletin.load();
+    let knowledge_synthesis = rc.knowledge_synthesis.load();
     let skills = rc.skills.load();
     let skills_prompt = skills
         .render_channel_prompt(&prompt_engine)
@@ -575,6 +576,7 @@ pub(super) async fn inspect_prompt(
     };
 
     let sandbox_enabled = channel_state.deps.sandbox.containment_active();
+    let adapter = query.channel_id.split(':').next().filter(|a| !a.is_empty());
 
     // ── Render working memory layers (Layers 2 + 3) ──
     let wm_config = **rc.working_memory.load();
@@ -597,6 +599,27 @@ pub(super) async fn inspect_prompt(
     )
     .await
     .unwrap_or_default();
+
+    let participant_config = **rc.participant_context.load();
+    let tracked_participants = {
+        let participants = channel_state.active_participants.read().await;
+        crate::conversation::renderable_participants(&participants, &participant_config)
+    };
+    let participant_context = crate::memory::working::render_participant_context(
+        &channel_state.deps.working_memory,
+        &tracked_participants,
+        &query.channel_id,
+        &participant_config,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            %error,
+            channel_id = %query.channel_id,
+            "failed to render participant context for prompt inspection"
+        );
+        String::new()
+    });
 
     // ── Available channels ──
     let available_channels = {
@@ -699,7 +722,6 @@ pub(super) async fn inspect_prompt(
     };
 
     // ── Adapter prompt ──
-    let adapter = query.channel_id.split(':').next().filter(|a| !a.is_empty());
     let adapter_prompt =
         adapter.and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
@@ -708,10 +730,7 @@ pub(super) async fn inspect_prompt(
         use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
         let store = &channel_state.deps.project_store;
         let projects = store
-            .list_projects(
-                &channel_state.deps.agent_id,
-                Some(crate::projects::ProjectStatus::Active),
-            )
+            .list_projects(Some(crate::projects::ProjectStatus::Active))
             .await
             .unwrap_or_default();
         if projects.is_empty() {
@@ -767,6 +786,7 @@ pub(super) async fn inspect_prompt(
         .render_channel_prompt_with_links(
             empty_to_none(identity_context),
             empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(knowledge_synthesis.to_string()),
             empty_to_none(skills_prompt),
             worker_capabilities,
             conversation_context,
@@ -780,6 +800,8 @@ pub(super) async fn inspect_prompt(
             None, // backfill_transcript — only set during channel initialization
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            empty_to_none(participant_context),
+            false, // direct_mode — resolved at runtime by the channel, not available here
         )
         .unwrap_or_default();
 
@@ -1032,7 +1054,10 @@ pub(super) async fn get_channel_settings(
     channel_store
         .get(&channel_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| {
+            tracing::error!(%error, %channel_id, "failed to load channel for settings fetch");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
@@ -1077,7 +1102,10 @@ pub(super) async fn update_channel_settings(
     channel_store
         .get(&channel_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| {
+            tracing::error!(%error, %channel_id, "failed to load channel for settings update");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());

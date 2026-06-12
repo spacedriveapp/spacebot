@@ -3,8 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:dev": "../scripts/bundle-sidecar.sh && tauri dev",
+    "tauri:build": "../scripts/bundle-sidecar.sh --release && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

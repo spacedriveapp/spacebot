@@ -137,6 +137,14 @@ export interface CortexChatMessageEvent {
   tool_calls?: CortexChatToolCall[];
 }
 
+export interface SpokenResponseEvent {
+  type: "spoken_response";
+  agent_id: string;
+  channel_id: string;
+  spoken_text: string;
+  full_text: string;
+}
+
 export type ApiEvent =
   | InboundMessageEvent
   | OutboundMessageEvent
@@ -152,4 +160,5 @@ export type ApiEvent =
   | ToolCompletedEvent
   | OpenCodePartUpdatedEvent
   | WorkerTextEvent
-  | CortexChatMessageEvent;
+  | CortexChatMessageEvent
+  | SpokenResponseEvent;

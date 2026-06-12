@@ -1,5 +1,6 @@
 //! Task creation tool for branch processes.
 
+use crate::notifications::{NewNotification, NotificationKind, NotificationSeverity};
 use crate::tasks::{CreateTaskInput, TaskPriority, TaskStatus, TaskStore, TaskSubtask};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -7,12 +8,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TaskCreateTool {
     task_store: Arc<TaskStore>,
     agent_id: String,
     created_by: String,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
+    api_state: Option<Arc<crate::api::ApiState>>,
+}
+
+impl std::fmt::Debug for TaskCreateTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskCreateTool")
+            .field("agent_id", &self.agent_id)
+            .field("created_by", &self.created_by)
+            .finish()
+    }
 }
 
 impl TaskCreateTool {
@@ -26,11 +37,17 @@ impl TaskCreateTool {
             agent_id: agent_id.into(),
             created_by: created_by.into(),
             working_memory: None,
+            api_state: None,
         }
     }
 
     pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
         self.working_memory = Some(store);
+        self
+    }
+
+    pub fn with_api_state(mut self, state: Arc<crate::api::ApiState>) -> Self {
+        self.api_state = Some(state);
         self
     }
 }
@@ -49,8 +66,6 @@ pub struct TaskCreateArgs {
     pub subtasks: Vec<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    pub status: Option<String>,
 }
 
 fn default_priority() -> String {
@@ -94,11 +109,6 @@ impl Tool for TaskCreateTool {
                     "metadata": {
                         "type": "object",
                         "description": "Optional metadata object"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": crate::tasks::TaskStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                        "description": "Optional initial status"
                     }
                 },
                 "required": ["title"]
@@ -109,11 +119,7 @@ impl Tool for TaskCreateTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let priority = TaskPriority::parse(&args.priority)
             .ok_or_else(|| TaskCreateError(format!("invalid priority: {}", args.priority)))?;
-        let status = match args.status.as_deref() {
-            None => TaskStatus::Backlog,
-            Some(value) => TaskStatus::parse(value)
-                .ok_or_else(|| TaskCreateError(format!("invalid status: {value}")))?,
-        };
+        let status = TaskStatus::PendingApproval;
 
         let subtasks = args
             .subtasks
@@ -141,13 +147,52 @@ impl Tool for TaskCreateTool {
             .await
             .map_err(|error| TaskCreateError(format!("{error}")))?;
 
+        // Emit SSE event + notification so the dashboard updates in real time.
+        if let Some(api_state) = &self.api_state {
+            api_state
+                .event_tx
+                .send(crate::api::ApiEvent::TaskUpdated {
+                    agent_id: task.assigned_agent_id.clone(),
+                    task_number: task.task_number,
+                    status: task.status.to_string(),
+                    action: "created".to_string(),
+                })
+                .ok();
+            if task.status == TaskStatus::PendingApproval {
+                api_state.emit_notification(NewNotification {
+                    kind: NotificationKind::TaskApproval,
+                    severity: NotificationSeverity::Info,
+                    title: task.title.clone(),
+                    body: task.description.clone(),
+                    agent_id: Some(task.assigned_agent_id.clone()),
+                    related_entity_type: Some("task".to_string()),
+                    related_entity_id: Some(task.task_number.to_string()),
+                    action_url: Some(format!("/tasks/{}", task.task_number)),
+                    metadata: None,
+                });
+            }
+        }
+
         if let Some(working_memory) = &self.working_memory {
-            working_memory
-                .emit(
-                    crate::memory::WorkingMemoryEventType::TaskUpdate,
-                    format!("Task created #{}: {}", task.task_number, task.title),
+            let (event_type, summary, importance) = if task.status == TaskStatus::Done {
+                (
+                    crate::memory::WorkingMemoryEventType::Outcome,
+                    format!("Task #{} completed: {}", task.task_number, task.title),
+                    0.7,
                 )
-                .importance(0.5)
+            } else {
+                (
+                    crate::memory::WorkingMemoryEventType::TaskUpdate,
+                    format!(
+                        "Task created #{}: {} (status: {})",
+                        task.task_number, task.title, task.status
+                    ),
+                    0.5,
+                )
+            };
+            working_memory
+                .emit(event_type, summary)
+                .importance(importance)
                 .record();
         }
 
@@ -157,5 +202,72 @@ impl Tool for TaskCreateTool {
             status: task.status.to_string(),
             message: format!("Created task #{}: {}", task.task_number, task.title),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::memory::working::WorkingMemoryEvent;
+    use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
+    use chrono_tz::Tz;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
+
+    async fn wait_for_single_event(store: &WorkingMemoryStore) -> WorkingMemoryEvent {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .get_recent_events(10, 0.0)
+                    .await
+                    .expect("working memory query");
+                if let Some(event) = events.into_iter().next() {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for working memory event")
+    }
+
+    #[tokio::test]
+    async fn task_create_emits_task_update_for_new_tasks() {
+        let task_store = Arc::new(setup_test_store().await);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        let working_memory = WorkingMemoryStore::new(pool, Tz::UTC);
+
+        let tool = TaskCreateTool::new(task_store, "agent-test", "branch")
+            .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(TaskCreateArgs {
+                title: "Ship observation MVP".to_string(),
+                description: Some("land the first packet".to_string()),
+                priority: "medium".to_string(),
+                subtasks: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("task create should succeed");
+
+        assert_eq!(output.status, "pending_approval");
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::TaskUpdate);
+        assert_eq!(
+            event.summary,
+            "Task created #1: Ship observation MVP (status: pending_approval)"
+        );
     }
 }

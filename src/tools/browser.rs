@@ -794,10 +794,17 @@ pub(crate) struct BrowserContext {
     /// the `secret` parameter can look up credential values without exposing
     /// them in tool arguments or output.
     secrets: Option<Arc<SecretsStore>>,
+    /// Worker-shared slot for surfacing a captcha / login wall / WAF block.
+    /// `None` for channel-level tool invocations (no worker outcome to short-
+    /// circuit).
+    blocked_signal: Option<crate::agent::worker::BlockSignal>,
+    /// Owning agent for secret-scope resolution. `None` for channel-level
+    /// invocations — those resolve secrets from instance-shared only.
+    agent_id: Option<crate::AgentId>,
 }
 
 impl BrowserContext {
-    fn new(
+    pub(crate) fn new(
         state: Arc<Mutex<BrowserState>>,
         config: BrowserConfig,
         screenshot_dir: PathBuf,
@@ -808,7 +815,84 @@ impl BrowserContext {
             config,
             screenshot_dir,
             secrets,
+            blocked_signal: None,
+            agent_id: None,
         }
+    }
+
+    /// Attach a worker-shared block signal slot. When the browser detects an
+    /// external defense, it writes the structured reason + evidence into the
+    /// slot and the worker short-circuits to `WorkerOutcome::Blocked` at the
+    /// next loop iteration.
+    pub(crate) fn with_block_signal(mut self, signal: crate::agent::worker::BlockSignal) -> Self {
+        self.blocked_signal = Some(signal);
+        self
+    }
+
+    /// Attach the owning agent so `browser_type` secret resolution prefers
+    /// the agent's scope before falling back to instance-shared.
+    pub(crate) fn with_agent_id(mut self, agent_id: crate::AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Resolve a secret name to a value. Tries the calling agent's scope
+    /// first (when set), then falls back to instance-shared.
+    fn resolve_secret_value(
+        &self,
+        name: &str,
+    ) -> Result<crate::secrets::store::DecryptedSecret, BrowserError> {
+        let store = self.secrets.as_ref().ok_or_else(|| {
+            BrowserError::new(
+                "secret store is not available — secrets cannot be resolved. \
+                 Add the secret via the API or use the `text` parameter instead.",
+            )
+        })?;
+        if let Some(agent_id) = self.agent_id.as_ref() {
+            let agent_scope = crate::secrets::store::SecretScope::agent(agent_id);
+            // Fall back to shared only when the agent-scoped key truly
+            // doesn't exist. Decryption / read errors must surface — silently
+            // typing the shared value would inject the wrong tenant's
+            // credential into a `browser_type` call.
+            match store.get(&agent_scope, name) {
+                Ok(secret) => return Ok(secret),
+                Err(crate::error::SecretsError::NotFound { .. }) => {}
+                Err(error) => {
+                    return Err(BrowserError::new(format!(
+                        "failed to resolve agent-scoped secret '{name}': {error}"
+                    )));
+                }
+            }
+        }
+        store
+            .get(&crate::secrets::store::SecretScope::shared(), name)
+            .map_err(|error| {
+                BrowserError::new(format!("failed to resolve secret '{name}': {error}"))
+            })
+    }
+
+    /// Mark a positive block detection. No-op when no signal is wired.
+    /// First-write-wins — if the slot already holds a detection, the new
+    /// data is dropped (the worker has not yet read the prior detection,
+    /// short-circuit will pick it up first).
+    pub(crate) fn signal_block(
+        &self,
+        reason: crate::agent::worker::BlockReason,
+        url: Option<String>,
+        evidence: crate::agent::worker::BlockEvidence,
+    ) {
+        let Some(signal) = self.blocked_signal.as_ref() else {
+            return;
+        };
+        let Ok(mut slot) = signal.lock() else { return };
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(crate::agent::worker::BlockSignalData {
+            reason,
+            url,
+            evidence,
+        });
     }
 
     /// Get the active page or return an error. Does NOT hold the lock — caller
@@ -1276,7 +1360,7 @@ impl BrowserContext {
 
 #[derive(Debug, Clone)]
 pub struct BrowserLaunchTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1307,7 +1391,7 @@ impl Tool for BrowserLaunchTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserNavigateTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1357,7 +1441,21 @@ impl Tool for BrowserNavigateTool {
 
         let title = page.get_title().await.ok().flatten();
         let current_url = page.url().await.ok().flatten();
+        let detection = run_block_detection(page, current_url.as_deref(), Some(&args.url)).await;
+
         state.invalidate_snapshot();
+
+        if let Some(detection) = detection {
+            self.context.signal_block(
+                detection.reason.clone(),
+                current_url.clone(),
+                detection.evidence,
+            );
+            return Err(BrowserError::new(format!(
+                "navigation blocked: {} — surfaced to caller; agent will short-circuit",
+                detection.reason.describe()
+            )));
+        }
 
         Ok(BrowserOutput::success(format!("Navigated to {}", args.url))
             .with_page_info(title, current_url))
@@ -1368,7 +1466,7 @@ impl Tool for BrowserNavigateTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserSnapshotTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1470,7 +1568,7 @@ impl ElementTarget {
 
 #[derive(Debug, Clone)]
 pub struct BrowserClickTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1517,7 +1615,22 @@ impl Tool for BrowserClickTool {
         let page = self.context.require_active_page(&state)?;
         wait_for_page_ready(page).await;
 
+        let current_url = page.url().await.ok().flatten();
+        let detection = run_block_detection(page, current_url.as_deref(), None).await;
+
         state.invalidate_snapshot();
+
+        if let Some(detection) = detection {
+            self.context.signal_block(
+                detection.reason.clone(),
+                current_url.clone(),
+                detection.evidence,
+            );
+            return Err(BrowserError::new(format!(
+                "click triggered blocked page: {} — surfaced to caller; agent will short-circuit",
+                detection.reason.describe()
+            )));
+        }
 
         Ok(BrowserOutput::success(format!(
             "Clicked element at {label}"
@@ -1529,7 +1642,7 @@ impl Tool for BrowserClickTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTypeTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1593,15 +1706,7 @@ impl Tool for BrowserTypeTool {
         // Resolve the text to type: either from `secret` (secure) or `text` (plain).
         let (text_value, is_secret) = match (&args.secret, &args.text) {
             (Some(secret_name), None) => {
-                let store = self.context.secrets.as_ref().ok_or_else(|| {
-                    BrowserError::new(
-                        "secret store is not available — secrets cannot be resolved. \
-                         Add the secret via the API or use the `text` parameter instead.",
-                    )
-                })?;
-                let decrypted = store.get(secret_name).map_err(|error| {
-                    BrowserError::new(format!("failed to resolve secret '{secret_name}': {error}"))
-                })?;
+                let decrypted = self.context.resolve_secret_value(secret_name)?;
                 (decrypted.expose().to_string(), true)
             }
             (None, Some(text)) => (text.clone(), false),
@@ -1646,7 +1751,7 @@ impl Tool for BrowserTypeTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserPressKeyTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1690,7 +1795,7 @@ impl Tool for BrowserPressKeyTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserScreenshotTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1773,7 +1878,7 @@ impl Tool for BrowserScreenshotTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserEvaluateTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1838,7 +1943,7 @@ impl Tool for BrowserEvaluateTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabOpenTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1910,7 +2015,7 @@ impl Tool for BrowserTabOpenTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabListTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1965,7 +2070,7 @@ impl Tool for BrowserTabListTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserTabCloseTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2024,7 +2129,7 @@ impl Tool for BrowserTabCloseTool {
 
 #[derive(Debug, Clone)]
 pub struct BrowserCloseTool {
-    context: BrowserContext,
+    pub(crate) context: BrowserContext,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2145,6 +2250,8 @@ pub fn register_browser_tools(
     config: BrowserConfig,
     screenshot_dir: PathBuf,
     runtime_config: &crate::config::RuntimeConfig,
+    blocked_signal: Option<crate::agent::worker::BlockSignal>,
+    agent_id: Option<crate::AgentId>,
 ) -> rig::tool::server::ToolServer {
     let state = if let Some(shared) = runtime_config
         .shared_browser
@@ -2158,7 +2265,13 @@ pub fn register_browser_tools(
 
     let secrets = runtime_config.secrets.load().as_ref().as_ref().cloned();
 
-    let context = BrowserContext::new(state, config, screenshot_dir, secrets);
+    let mut context = BrowserContext::new(state, config, screenshot_dir, secrets);
+    if let Some(signal) = blocked_signal {
+        context = context.with_block_signal(signal);
+    }
+    if let Some(agent_id) = agent_id {
+        context = context.with_agent_id(agent_id);
+    }
 
     server
         .tool(BrowserLaunchTool {
@@ -2198,6 +2311,20 @@ pub fn register_browser_tools(
 }
 
 // Shared helpers
+
+/// Run captcha / login wall / WAF detection against the current page state.
+/// Returns `Some(Detection)` on positive match. Reads page HTML via CDP and
+/// passes it to the pure detection module. Detection failures (e.g. CDP
+/// errors) are silently treated as "no detection" — never block a navigation
+/// because we couldn't read its HTML.
+async fn run_block_detection(
+    page: &chromiumoxide::Page,
+    final_url: Option<&str>,
+    requested_url: Option<&str>,
+) -> Option<crate::tools::browser_detection::Detection> {
+    let html = page.content().await.ok()?;
+    crate::tools::browser_detection::classify(&html, final_url, requested_url)
+}
 
 /// Get the active page, or create a first one if the browser has no pages yet.
 async fn get_or_create_page<'a>(

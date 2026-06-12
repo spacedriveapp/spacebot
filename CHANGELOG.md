@@ -2,6 +2,48 @@
 
 Seeded from GitHub releases; maintained by the release bump workflow.
 
+## v0.5.0
+
+### Release Story
+
+v0.5.0 is the SpaceUI release. The entire frontend has been migrated to Spacedrive's component library — the local UI primitives are gone, replaced by `@spacedrive/primitives`, `@spacedrive/ai`, `@spacedrive/forms`, and `@spacedrive/explorer`, with Tailwind v4 and a unified design token system. This isn't a component swap; the interface has been rebuilt from the ground up.
+
+The old flat nav becomes a persistent 220px sidebar with an accordion agent sub-nav and a global workers popover in the footer. A new Dashboard lands as the home page, wired to live action items, token usage, and recent activity. The 2900-line Settings monolith was split into 12 section components; AgentConfig and TopologyGraph got the same treatment. Workbench was rewritten. The kanban TaskBoard is gone, replaced by a Linear-style task list with detail views, GitHub metadata badges, and SSE-driven updates. WebChat is now Portal — modular PortalPanel/Timeline/Composer/Header with file attachments, drag-and-drop, and tool calls rendered inline in the timeline.
+
+Three new systems ship alongside the UI rewrite. **Wiki** is a full SQLite-backed knowledge base with 6 tools (create/edit/read/list/search/history), tolerant multi-pass edit matching, and a REST API. **Notifications** are SQLite-stored with SSE real-time broadcasting, optimistic dismiss, and automatic emission for task approvals and worker failures. **Streaming** arrives via `prompt_once_streaming` with token-by-token `WorkerText` deltas and ~636 lines of OpenAI Responses API SSE handling for function call deltas, text deltas, and reasoning summaries.
+
+Backend keeps pace. `ConversationSettings` (memory mode, delegation, worker context, model selection) persist per-channel via `ChannelSettingsStore` with a clean resolution chain: per-channel DB > binding defaults > agent defaults. The legacy `listen_only_mode` system is gone, replaced by a `ResponseMode` enum (Active / Observe / MentionOnly). Direct mode gives channels full worker-level tools — shell, file, browser, wiki, web search, memory. Working memory has been hardened: participant context, expanded conversational event semantics, non-blocking cortex synthesis, dirty-state guards, and participant role preservation in knowledge synthesis. Agentic backend readiness adds per-agent secret isolation, structured `WorkerOutcome` with wall-clock timeouts, per-agent cron defaults, dormant cortex mode, and browser captcha / login-wall / WAF detection.
+
+Highlights:
+- Full SpaceUI migration (Tailwind v4, design tokens, primitives library)
+- New Dashboard with live action items, token usage, and activity cards
+- Linear-style task management replacing the kanban board
+- Wiki system with 6 tools and tolerant edit matching
+- Notification system with SSE real-time and optimistic dismiss
+- Portal (formerly WebChat) with file attachments and drag-and-drop
+- Token-by-token streaming via OpenAI Responses API SSE
+- Per-channel `ConversationSettings` with `ResponseMode` enum
+- Direct mode: channels with full worker-level tools
+- Built-in skills compiled into the binary
+- Projects elevated from per-agent to instance level
+- Working memory: participant context, non-blocking synthesis, role preservation
+- Per-agent secret isolation, dormant cortex, structured worker outcomes
+- Interactive shell streaming with live output
+
+## What's Changed
+* fix: MentionOnly mode retains channel context and memory capture by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/533
+* SpaceUI migration by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/555
+* feat(memory): add participant context foundation by @vsumner in https://github.com/spacedriveapp/spacebot/pull/521
+* fix(memory): tighten persistence rules and add conversational events by @vsumner in https://github.com/spacedriveapp/spacebot/pull/522
+* fix(memory): make cortex synthesis non-blocking by @vsumner in https://github.com/spacedriveapp/spacebot/pull/570
+* feat(memory): expand working-memory event semantics by @vsumner in https://github.com/spacedriveapp/spacebot/pull/567
+* feat: Interactive shell streaming with live output by @vsumner in https://github.com/spacedriveapp/spacebot/pull/562
+* [codex] Preserve participant roles in knowledge synthesis by @vsumner in https://github.com/spacedriveapp/spacebot/pull/574
+* [codex] Guard dirty knowledge synthesis by @vsumner in https://github.com/spacedriveapp/spacebot/pull/573
+* agentic-backend-readiness: per-agent secret isolation, dormant cortex, structured worker outcomes by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/583
+
+
+**Full Changelog**: https://github.com/spacedriveapp/spacebot/compare/v0.4.1...v0.5.0
 ## v0.4.1
 
 ### Release Story

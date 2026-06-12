@@ -106,21 +106,6 @@ export type WarmupTriggerRequest =
 export type WarmupTriggerResponse =
   components["schemas"]["WarmupTriggerResponse"];
 
-// Webchat conversations
-export type WebChatConversation = components["schemas"]["WebChatConversation"];
-export type WebChatConversationSummary =
-	components["schemas"]["WebChatConversationSummary"];
-export type WebChatConversationsResponse =
-	components["schemas"]["WebChatConversationsResponse"];
-export type WebChatConversationResponse =
-	components["schemas"]["WebChatConversationResponse"];
-export type CreateWebChatConversationRequest =
-	components["schemas"]["CreateWebChatConversationRequest"];
-export type UpdateWebChatConversationRequest =
-	components["schemas"]["UpdateWebChatConversationRequest"];
-export type WebChatHistoryMessage =
-	components["schemas"]["WebChatHistoryMessage"];
-
 // Conversation Settings
 export type ModelOverrides = {
 	channel?: string | null;
@@ -164,25 +149,21 @@ export type ConversationDefaultsResponse = {
 	worker_memory_modes: string[];
 };
 
-// Portal conversations (renamed from webchat)
-export type PortalConversation = components["schemas"]["WebChatConversation"];
-export type PortalConversationSummary = components["schemas"]["WebChatConversationSummary"];
-export type PortalConversationsResponse = components["schemas"]["WebChatConversationsResponse"];
-export type PortalConversationResponse = components["schemas"]["WebChatConversationResponse"];
-export type CreatePortalConversationRequest = {
-	agent_id: string;
-	title?: string | null;
-	settings?: ConversationSettings | null;
-};
-export type UpdatePortalConversationRequest = {
-	agent_id: string;
-	title?: string | null;
-	archived?: boolean | null;
-	settings?: ConversationSettings | null;
-};
-export type PortalHistoryMessage = components["schemas"]["WebChatHistoryMessage"];
-export type PortalSendRequest = components["schemas"]["WebChatSendRequest"];
-export type PortalSendResponse = components["schemas"]["WebChatSendResponse"];
+// Portal conversations
+export type PortalConversation = components["schemas"]["PortalConversation"];
+export type PortalConversationSummary =
+	components["schemas"]["PortalConversationSummary"];
+export type PortalConversationsResponse =
+	components["schemas"]["PortalConversationsResponse"];
+export type PortalConversationResponse =
+	components["schemas"]["PortalConversationResponse"];
+export type CreatePortalConversationRequest =
+	components["schemas"]["CreatePortalConversationRequest"];
+export type UpdatePortalConversationRequest =
+	components["schemas"]["UpdatePortalConversationRequest"];
+export type PortalHistoryMessage = components["schemas"]["PortalHistoryMessage"];
+export type PortalSendRequest = components["schemas"]["PortalSendRequest"];
+export type PortalSendResponse = components["schemas"]["PortalSendResponse"];
 
 // Activity
 export type ActivityDayCount = components["schemas"]["ActivityDayCount"];
@@ -438,10 +419,6 @@ export type TogglePlatformRequest =
   components["schemas"]["TogglePlatformRequest"];
 export type DisconnectPlatformRequest =
   components["schemas"]["DisconnectPlatformRequest"];
-
-// Web chat
-export type WebChatSendRequest = components["schemas"]["WebChatSendRequest"];
-export type WebChatSendResponse = components["schemas"]["WebChatSendResponse"];
 
 // =============================================================================
 // Links Types

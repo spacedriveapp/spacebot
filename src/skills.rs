@@ -4,14 +4,16 @@
 //! (name, description, metadata) and a markdown body with instructions.
 //! Compatible with OpenClaw's skill format and skills.sh registry.
 //!
-//! Skills are loaded from two sources (later wins on name conflicts):
-//! 1. Instance-level: `{instance_dir}/skills/`
-//! 2. Agent workspace: `{workspace}/skills/`
+//! Skills are loaded from three sources (later wins on name conflicts):
+//! 1. Built-in: embedded in the binary at compile time
+//! 2. Instance-level: `{instance_dir}/skills/`
+//! 3. Agent workspace: `{workspace}/skills/`
 //!
 //! The channel sees a summary of available skills and is instructed to
 //! delegate skill work to workers. Workers receive the full skill content
 //! in their system prompt.
 
+pub mod builtin;
 mod installer;
 
 pub use installer::{install_from_file, install_from_github};
@@ -42,6 +44,8 @@ pub struct Skill {
 /// Where a skill was loaded from, used for precedence tracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
+    /// Compiled into the binary.
+    Builtin,
     /// Instance-level `{instance_dir}/skills/`.
     Instance,
     /// Agent workspace `{workspace}/skills/`.
@@ -56,13 +60,18 @@ pub struct SkillSet {
 }
 
 impl SkillSet {
-    /// Load skills from instance and workspace directories.
+    /// Load skills from builtin, instance, and workspace sources.
     ///
-    /// Workspace skills override instance skills with the same name.
+    /// Precedence: Builtin < Instance < Workspace (later wins on name conflicts).
     pub async fn load(instance_skills_dir: &Path, workspace_skills_dir: &Path) -> Self {
         let mut set = Self::default();
 
-        // Instance skills (lowest precedence)
+        // Builtin skills (lowest precedence)
+        for skill in builtin::load() {
+            set.skills.insert(skill.name.to_lowercase(), skill);
+        }
+
+        // Instance skills
         if instance_skills_dir.is_dir()
             && let Ok(skills) =
                 load_skills_from_dir(instance_skills_dir, SkillSource::Instance).await
@@ -174,9 +183,8 @@ impl SkillSet {
 
     /// Remove a skill by name.
     ///
-    /// Only workspace-level skills can be removed via this method. Instance-level
-    /// skills are shared across all agents and must not be deleted through the
-    /// per-agent API.
+    /// Only workspace-level skills can be removed via this method. Built-in
+    /// and instance-level skills cannot be deleted through the per-agent API.
     ///
     /// Returns the base directory path if the skill was found and removed.
     pub async fn remove(&mut self, name: &str) -> anyhow::Result<Option<PathBuf>> {
@@ -185,6 +193,14 @@ impl SkillSet {
             Some(s) => s,
             None => return Ok(None),
         };
+
+        if skill.source == SkillSource::Builtin {
+            anyhow::bail!(
+                "cannot remove built-in skill '{}'; \
+                 built-in skills are compiled into the binary",
+                name
+            );
+        }
 
         if skill.source == SkillSource::Instance {
             anyhow::bail!(
@@ -334,7 +350,9 @@ async fn load_skill(
 ///
 /// Expects `---` delimiters. Returns the frontmatter key-value pairs and
 /// the remaining body. Compatible with OpenClaw's frontmatter format.
-fn parse_frontmatter(content: &str) -> anyhow::Result<(HashMap<String, String>, String)> {
+pub(crate) fn parse_frontmatter(
+    content: &str,
+) -> anyhow::Result<(HashMap<String, String>, String)> {
     let trimmed = content.trim_start();
 
     if !trimmed.starts_with("---") {
@@ -543,6 +561,21 @@ mod tests {
             source,
             source_repo: None,
         }
+    }
+
+    #[tokio::test]
+    async fn remove_builtin_skill_is_rejected() {
+        let mut set = SkillSet::default();
+        set.skills.insert(
+            "my-skill".into(),
+            make_skill("my-skill", SkillSource::Builtin),
+        );
+
+        let result = set.remove("my-skill").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("built-in skill"), "unexpected error: {msg}");
+        assert!(set.skills.contains_key("my-skill"));
     }
 
     #[tokio::test]

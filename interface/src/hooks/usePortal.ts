@@ -15,14 +15,14 @@ export function usePortal(agentId: string, sessionId?: string) {
 	const [error, setError] = useState<string | null>(null);
 
 	const sendMessage = useCallback(
-		async (text: string) => {
+		async (text: string, attachmentIds?: string[]) => {
 			if (isSending) return;
 
 			setError(null);
 			setIsSending(true);
 
 			try {
-				const response = await api.portalSend(agentId, resolvedSessionId, text);
+				const response = await api.portalSend(agentId, resolvedSessionId, text, undefined, attachmentIds);
 				if (!response.ok) {
 					throw new Error(`HTTP ${response.status}`);
 				}

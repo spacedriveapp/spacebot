@@ -244,7 +244,7 @@ impl OpenCodeWorker {
     /// Returns the scrubbed text. If no secrets store is set, returns the input unchanged.
     fn scrub_text(&self, text: &str) -> String {
         match &self.secrets_store {
-            Some(store) => crate::secrets::scrub::scrub_with_store(text, store),
+            Some(store) => crate::secrets::scrub::scrub_with_store(text, store, &self.agent_id),
             None => text.to_string(),
         }
     }

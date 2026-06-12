@@ -3,13 +3,13 @@ import {
 	createRootRoute,
 	createRoute,
 	Outlet,
+	useLocation,
 } from "@tanstack/react-router";
-import {useQuery} from "@tanstack/react-query";
-import {api, BASE_PATH} from "@/api/client";
+import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
-import {TopBar, TopBarProvider, useSetTopBar} from "@/components/TopBar";
 import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
+import {Dashboard} from "@/routes/Dashboard";
 import {AgentDetail} from "@/routes/AgentDetail";
 import {AgentChannels} from "@/routes/AgentChannels";
 import {AgentCortex} from "@/routes/AgentCortex";
@@ -17,68 +17,42 @@ import {ChannelDetail} from "@/routes/ChannelDetail";
 import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
-import {AgentIngest} from "@/routes/AgentIngest";
+
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {GlobalTasks} from "@/routes/GlobalTasks";
+import {Wiki} from "@/routes/Wiki";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
-import {Orchestrate} from "@/routes/Orchestrate";
+import {Workbench} from "@/routes/Workbench";
 import {useLiveContext} from "@/hooks/useLiveContext";
-import {AgentTabs} from "@/components/AgentTabs";
 
 // ── Root layout ──────────────────────────────────────────────────────────
 
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
+	const location = useLocation();
+	const bare = location.pathname.startsWith("/workbench") || location.pathname.startsWith("/dashboard");
 
 	return (
-		<TopBarProvider>
-			<div className="flex h-screen flex-col overflow-hidden bg-app">
-				<TopBar />
-				<ConnectionBanner state={connectionState} hasData={hasData} />
-				<div className="flex min-h-0 flex-1">
-					<Sidebar liveStates={liveStates} />
-					<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">
+			<ConnectionBanner state={connectionState} hasData={hasData} />
+			<div className="flex min-h-0 flex-1">
+				<Sidebar liveStates={liveStates} />
+				<div className="flex min-w-0 flex-1 flex-col overflow-hidden py-[10px] pr-[10px]">
+					{bare ? (
 						<Outlet />
-					</div>
+					) : (
+						<div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-app-line bg-app">
+							<Outlet />
+						</div>
+					)}
 				</div>
 			</div>
-		</TopBarProvider>
+		</div>
 	);
-}
-
-// ── Topbar content for agent routes ──────────────────────────────────────
-
-function AgentTopBar({agentId}: {agentId: string}) {
-	const agentsQuery = useQuery({
-		queryKey: ["agents"],
-		queryFn: () => api.agents(),
-		staleTime: 10_000,
-	});
-	const agent = agentsQuery.data?.agents.find((a) => a.id === agentId);
-	const displayName = agent?.display_name;
-
-	useSetTopBar(
-		<div className="flex h-full flex-col">
-			<div className="flex flex-1 items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">
-					{displayName ? (
-						<>
-							{displayName}
-							<span className="ml-2 text-ink-faint">{agentId}</span>
-						</>
-					) : (
-						agentId
-					)}
-				</h1>
-			</div>
-		</div>,
-	);
-
-	return <AgentTabs agentId={agentId} />;
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────
@@ -94,6 +68,12 @@ const indexRoute = createRoute({
 		const {liveStates, activeLinks} = useLiveContext();
 		return <Overview liveStates={liveStates} activeLinks={activeLinks} />;
 	},
+});
+
+const dashboardRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/dashboard",
+	component: Dashboard,
 });
 
 const settingsRoute = createRoute({
@@ -113,11 +93,6 @@ const logsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/logs",
 	component: function LogsPage() {
-		useSetTopBar(
-			<div className="flex h-full items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">Logs</h1>
-			</div>,
-		);
 		return (
 			<div className="flex flex-1 items-center justify-center">
 				<p className="text-sm text-ink-faint">Logs coming soon</p>
@@ -126,19 +101,11 @@ const logsRoute = createRoute({
 	},
 });
 
-const orchestrateRoute = createRoute({
+const workbenchRoute = createRoute({
 	getParentRoute: () => rootRoute,
-	path: "/orchestrate",
-	component: function OrchestratePage() {
-		useSetTopBar(
-			<div className="flex h-full items-center gap-4 px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">
-					Orchestrate
-				</h1>
-				<span className="text-xs text-ink-faint">Active workers across all agents</span>
-			</div>,
-		);
-		return <Orchestrate />;
+	path: "/workbench",
+	component: function WorkbenchPage() {
+		return <Workbench />;
 	},
 });
 
@@ -146,13 +113,15 @@ const tasksRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/tasks",
 	component: function TasksPage() {
-		useSetTopBar(
-			<div className="flex h-full items-center gap-4 px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">Tasks</h1>
-				<span className="text-xs text-ink-faint">All tasks across agents</span>
-			</div>,
-		);
 		return <GlobalTasks />;
+	},
+});
+
+const wikiRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/wiki",
+	component: function WikiPage() {
+		return <Wiki />;
 	},
 });
 
@@ -162,14 +131,7 @@ const agentRoute = createRoute({
 	component: function AgentPage() {
 		const {agentId} = agentRoute.useParams();
 		const {liveStates} = useLiveContext();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentDetail agentId={agentId} liveStates={liveStates} />
-				</div>
-			</div>
-		);
+		return <AgentDetail agentId={agentId} liveStates={liveStates} />;
 	},
 });
 
@@ -178,14 +140,7 @@ const agentChatRoute = createRoute({
 	path: "/agents/$agentId/chat",
 	component: function AgentChatPage() {
 		const {agentId} = agentChatRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentChat agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentChat agentId={agentId} />;
 	},
 });
 
@@ -195,14 +150,7 @@ const agentChannelsRoute = createRoute({
 	component: function AgentChannelsPage() {
 		const {agentId} = agentChannelsRoute.useParams();
 		const {liveStates} = useLiveContext();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentChannels agentId={agentId} liveStates={liveStates} />
-				</div>
-			</div>
-		);
+		return <AgentChannels agentId={agentId} liveStates={liveStates} />;
 	},
 });
 
@@ -211,32 +159,10 @@ const agentMemoriesRoute = createRoute({
 	path: "/agents/$agentId/memories",
 	component: function AgentMemoriesPage() {
 		const {agentId} = agentMemoriesRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentMemories agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentMemories agentId={agentId} />;
 	},
 });
 
-const agentIngestRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/ingest",
-	component: function AgentIngestPage() {
-		const {agentId} = agentIngestRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentIngest agentId={agentId} />
-				</div>
-			</div>
-		);
-	},
-});
 
 const agentWorkersRoute = createRoute({
 	getParentRoute: () => rootRoute,
@@ -246,30 +172,19 @@ const agentWorkersRoute = createRoute({
 	}),
 	component: function AgentWorkersPage() {
 		const {agentId} = agentWorkersRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentWorkers agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentWorkers agentId={agentId} />;
 	},
 });
 
-const agentProjectsRoute = createRoute({
+const projectsRoute = createRoute({
 	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/projects",
-	component: function AgentProjectsPage() {
-		const {agentId} = agentProjectsRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentProjects agentId={agentId} />
-				</div>
-			</div>
-		);
+	path: "/projects",
+	validateSearch: (search: Record<string, unknown>): {id?: string} => ({
+		id: typeof search.id === "string" ? search.id : undefined,
+	}),
+	component: function ProjectsPage() {
+		const {id} = projectsRoute.useSearch();
+		return <AgentProjects projectId={id} />;
 	},
 });
 
@@ -278,14 +193,7 @@ const agentTasksRoute = createRoute({
 	path: "/agents/$agentId/tasks",
 	component: function AgentTasksPage() {
 		const {agentId} = agentTasksRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentTasks agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentTasks agentId={agentId} />;
 	},
 });
 
@@ -294,14 +202,7 @@ const agentCronRoute = createRoute({
 	path: "/agents/$agentId/cron",
 	component: function AgentCronPage() {
 		const {agentId} = agentCronRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentCron agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentCron agentId={agentId} />;
 	},
 });
 
@@ -315,14 +216,7 @@ const agentConfigRoute = createRoute({
 	},
 	component: function AgentConfigPage() {
 		const {agentId} = agentConfigRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentConfig agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentConfig agentId={agentId} />;
 	},
 });
 
@@ -331,14 +225,7 @@ const agentCortexRoute = createRoute({
 	path: "/agents/$agentId/cortex",
 	component: function AgentCortexPage() {
 		const {agentId} = agentCortexRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentCortex agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentCortex agentId={agentId} />;
 	},
 });
 
@@ -347,14 +234,7 @@ const agentSkillsRoute = createRoute({
 	path: "/agents/$agentId/skills",
 	component: function AgentSkillsPage() {
 		const {agentId} = agentSkillsRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentSkills agentId={agentId} />
-				</div>
-			</div>
-		);
+		return <AgentSkills agentId={agentId} />;
 	},
 });
 
@@ -366,35 +246,32 @@ const channelRoute = createRoute({
 		const {liveStates, channels, loadOlderMessages} = useLiveContext();
 		const channel = channels.find((c) => c.id === channelId);
 		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<ChannelDetail
-						agentId={agentId}
-						channelId={channelId}
-						channel={channel}
-						liveState={liveStates[channelId]}
-						onLoadMore={() => loadOlderMessages(channelId)}
-					/>
-				</div>
-			</div>
+			<ChannelDetail
+				agentId={agentId}
+				channelId={channelId}
+				channel={channel}
+				liveState={liveStates[channelId]}
+				onLoadMore={() => loadOlderMessages(channelId)}
+			/>
 		);
 	},
 });
 
 const routeTree = rootRoute.addChildren([
 	indexRoute,
+	dashboardRoute,
 	settingsRoute,
 	logsRoute,
-	orchestrateRoute,
+	workbenchRoute,
 	tasksRoute,
+	wikiRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,
 	agentMemoriesRoute,
-	agentIngestRoute,
+
 	agentWorkersRoute,
-	agentProjectsRoute,
+	projectsRoute,
 	agentTasksRoute,
 	agentCortexRoute,
 	agentSkillsRoute,

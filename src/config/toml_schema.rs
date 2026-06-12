@@ -29,6 +29,14 @@ pub(super) struct TomlConfig {
     pub(super) metrics: TomlMetricsConfig,
     #[serde(default)]
     pub(super) telemetry: TomlTelemetryConfig,
+    #[serde(default)]
+    pub(super) memory_janitor: TomlMemoryJanitorConfig,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct TomlMemoryJanitorConfig {
+    pub(super) enabled: Option<bool>,
+    pub(super) interval_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -291,6 +299,7 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) ingestion: Option<TomlIngestionConfig>,
     pub(super) cortex: Option<TomlCortexConfig>,
     pub(super) warmup: Option<TomlWarmupConfig>,
+    pub(super) participant_context: Option<TomlParticipantContextConfig>,
     pub(super) browser: Option<TomlBrowserConfig>,
     pub(super) channel: Option<TomlChannelConfig>,
     #[serde(default)]
@@ -301,6 +310,14 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) opencode: Option<TomlOpenCodeConfig>,
     pub(super) worker_log_mode: Option<String>,
     pub(super) projects: Option<TomlProjectsConfig>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlParticipantContextConfig {
+    pub(super) enabled: Option<bool>,
+    pub(super) min_participants: Option<usize>,
+    pub(super) token_budget: Option<usize>,
+    pub(super) max_participants: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -353,8 +370,11 @@ pub(super) struct TomlCompactionConfig {
 
 #[derive(Deserialize)]
 pub(super) struct TomlCortexConfig {
+    pub(super) mode: Option<crate::config::CortexMode>,
     pub(super) tick_interval_secs: Option<u64>,
     pub(super) worker_timeout_secs: Option<u64>,
+    pub(super) worker_wall_clock_timeout_secs: Option<u64>,
+    pub(super) cron_default_timeout_secs: Option<u64>,
     pub(super) branch_timeout_secs: Option<u64>,
     pub(super) detached_worker_timeout_retry_limit: Option<u8>,
     pub(super) supervisor_kill_budget_per_tick: Option<usize>,

@@ -1,0 +1,11 @@
+Create a new wiki page. Wiki pages are instance-wide persistent knowledge — not conversation notes. Only create a page when there is enough to say something true, stable, and useful that will hold up over time.
+
+**page_type**: entity (person, project, tool, org), concept (pattern, approach, idea), decision (why a significant choice was made), project (running synthesis of a workstream), reference (stable factual content used repeatedly).
+
+**slug**: derived automatically from the title. You don't need to set it.
+
+**content**: full markdown body. Lead with one sentence stating what the page is about. Use ## headings. Link related pages inline with [display text](wiki:slug). Only link on first mention of a notable entity.
+
+**related**: slugs of pages with a coarse relationship to this one.
+
+Read existing pages with wiki_read before creating — update rather than duplicate.

@@ -158,6 +158,12 @@ pub enum WorkingMemoryEventType {
     CronExecuted,
     MemorySaved,
     Decision,
+    UserCorrection,
+    DecisionRevised,
+    DeadlineSet,
+    BlockedOn,
+    Constraint,
+    Outcome,
     Error,
     TaskUpdate,
     AgentMessage,
@@ -661,13 +667,15 @@ Create `prompts/en/cortex_knowledge_synthesis.md.j2`:
 Synthesize the agent's long-term knowledge into a concise briefing.
 Focus on:
 - Active goals and strategic direction
+- Stable participant or user role facts that affect future work
 - Cross-cutting themes and patterns
 - Known gaps in knowledge ("I don't have current information on X")
 - Accumulated observations
 
-Do NOT include: identity/role information, recent events or activity,
-channel-specific context, or user profiles. Those are provided by other
-context layers.
+Do NOT include: the agent's own identity or role, recent events or activity,
+channel-specific context, or full user profiles. Those are provided by other
+context layers. Keep concise participant-role facts here until participant
+context owns them.
 
 Maximum {{ max_words }} words.
 ```
@@ -861,7 +869,8 @@ Update `prompts/en/memory_persistence.md.j2` to add:
 In addition to saving graph memories, identify key decisions and important events
 from the conversation. For each, include it in the `events` field of
 memory_persistence_complete. Events should be one-line summaries with a type
-("decision", "error", "system") and importance score (0.0-1.0).
+("decision", "user_correction", "decision_revised", "deadline_set", "blocked_on",
+"constraint", "outcome", "error", "system") and importance score (0.0-1.0).
 ```
 
 Update `src/tools/memory_persistence_complete.rs`:

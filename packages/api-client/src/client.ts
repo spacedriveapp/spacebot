@@ -237,4 +237,55 @@ export const apiClient = {
       }),
     });
   },
+
+  // ── Voice / TTS ──────────────────────────────────────────────────────
+
+  webChatSendAudio(
+    agentId: string,
+    sessionId: string,
+    audioBlob: Blob,
+    senderName?: string,
+  ): Promise<Response> {
+    const formData = new FormData();
+    formData.append("agent_id", agentId);
+    formData.append("session_id", sessionId);
+    formData.append("sender_name", senderName ?? "user");
+    formData.append("audio", audioBlob, "voice.webm");
+    return fetch(`${getApiBase()}/webchat/send-audio`, {
+      method: "POST",
+      body: formData,
+      ...(authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}),
+    });
+  },
+
+  async ttsGenerate(
+    text: string,
+    options?: { profileId?: string; engine?: string; agentId?: string },
+  ): Promise<ArrayBuffer> {
+    const response = await fetch(`${getApiBase()}/tts/generate`, {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({
+        text,
+        profile_id: options?.profileId,
+        engine: options?.engine,
+        agent_id: options?.agentId,
+      }),
+    });
+    if (!response.ok) throw new Error(`TTS error: ${response.status}`);
+    return response.arrayBuffer();
+  },
+
+  ttsProfiles(agentId?: string) {
+    const params = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+    return request<TtsProfile[]>(`/tts/profiles${params}`);
+  },
 };
+
+export interface TtsProfile {
+  id: string;
+  name?: string | null;
+  default_engine?: string | null;
+  preset_engine?: string | null;
+  effects_chain?: unknown;
+}
