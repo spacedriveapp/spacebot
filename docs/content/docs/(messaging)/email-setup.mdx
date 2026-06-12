@@ -61,6 +61,7 @@ from_name = "Spacebot"
 poll_interval_secs = 30
 folders = ["INBOX"]
 allowed_senders = []
+sync_max_age_days = 0  # 0 = no limit; only import unread mail newer than N days
 ```
 
 Credentials support `env:VAR_NAME` references.
@@ -141,6 +142,27 @@ poll_interval_secs = 30
 ```
 
 Use a longer interval if your provider rate limits IMAP polling.
+
+## Limiting backfill on first connect
+
+By default, the first poll after connecting an account imports every unread email in the configured folders. On an inbox with years of unread mail this floods the agent with stale messages it shouldn't respond to.
+
+Set `sync_max_age_days` to bound how far back the poller looks. The IMAP server filters server-side, so the check is cheap even on large mailboxes.
+
+```toml
+[messaging.email]
+sync_max_age_days = 1  # only import unread emails from the last 24h
+```
+
+The same knob works on named instances:
+
+```toml
+[[messaging.email.instances]]
+name = "support"
+sync_max_age_days = 7  # import the last week of unread support mail
+```
+
+Default is `0` (no limit), which preserves the original behavior.
 
 ## Verify it's working
 
