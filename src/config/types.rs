@@ -2772,6 +2772,7 @@ impl std::fmt::Debug for EmailInstanceConfig {
             .field("allowed_senders", &"[REDACTED]")
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .field("sync_max_age_days", &self.sync_max_age_days)
             .finish()
     }
 }
@@ -2797,6 +2798,7 @@ impl std::fmt::Debug for EmailConfig {
             .field("allowed_senders", &"[REDACTED]")
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .field("sync_max_age_days", &self.sync_max_age_days)
             .finish()
     }
 }

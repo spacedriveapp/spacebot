@@ -718,17 +718,11 @@ fn poll_inbox_once(config: &EmailPollConfig) -> anyhow::Result<Vec<InboundMessag
             continue;
         }
 
-        // Combine UNSEEN with a SINCE date filter when sync_max_age_days is set,
-        // so first-connect doesn't flood the agent with years of unread email.
-        // Narrow the config field from u64 to u32 here (IMAP dates don't need
-        // more than ~5 billion years of range); build_since_date further guards
-        // against pathological inputs by returning None instead of producing a
-        // future SINCE date.
-        let since_days = u32::try_from(config.sync_max_age_days).ok();
-        let search_query = match build_since_date(since_days) {
-            Some(date) => format!("UNSEEN SINCE {date}"),
-            None => "UNSEEN".to_string(),
-        };
+        // Combine UNSEEN with a SINCE date filter when sync_max_age_days is
+        // set, so first-connect doesn't flood the agent with years of unread
+        // email. Assembly is in build_poll_search_query so the query
+        // construction is unit-testable.
+        let search_query = build_poll_search_query(config.sync_max_age_days);
 
         let message_uids = session
             .uid_search(&search_query)
@@ -1429,6 +1423,25 @@ fn build_since_date(days: Option<u32>) -> Option<String> {
     )
 }
 
+/// Build the IMAP search query for a poll cycle.
+///
+/// Returns `"UNSEEN"` when `sync_max_age_days` is zero (no limit) or
+/// outside a safe range; returns `"UNSEEN SINCE <dd-MMM-YYYY>"` otherwise.
+///
+/// The IMAP `SINCE` filter operates on whole dates with an inclusive,
+/// midnight-anchored boundary (RFC 3501 §6.4.4). That means
+/// `sync_max_age_days = 1` can include mail up to ~48h old depending on
+/// the current local time and the server's date, not strictly the last
+/// 24h. Document and name the field as a *backfill cap*, not a literal
+/// time window.
+fn build_poll_search_query(sync_max_age_days: u64) -> String {
+    let since_days = u32::try_from(sync_max_age_days).ok();
+    match build_since_date(since_days) {
+        Some(date) => format!("UNSEEN SINCE {date}"),
+        None => "UNSEEN".to_string(),
+    }
+}
+
 /// Maximum day count accepted by `build_since_date`. 1_000_000 days is
 /// ~2739 years, far past anything a user would type in TOML, and small
 /// enough to stay inside chrono's internal `TimeDelta` range.
@@ -1795,10 +1808,10 @@ struct EmailReplyContext {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, build_since_date,
-        derive_thread_key, extract_message_ids, is_local_mail_host, normalize_email_target,
-        normalize_reply_subject, normalize_search_folders, parse_primary_mailbox,
-        sort_and_limit_search_hits,
+        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, build_poll_search_query,
+        build_since_date, derive_thread_key, extract_message_ids, is_local_mail_host,
+        normalize_email_target, normalize_reply_subject, normalize_search_folders,
+        parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
     #[test]
@@ -1907,6 +1920,30 @@ mod tests {
     fn build_since_date_returns_none_for_zero_and_missing() {
         assert_eq!(build_since_date(None), None);
         assert_eq!(build_since_date(Some(0)), None);
+    }
+
+    #[test]
+    fn build_poll_search_query_returns_unseen_for_zero() {
+        // No backfill cap means we use the original `UNSEEN` query exactly.
+        assert_eq!(build_poll_search_query(0), "UNSEEN");
+    }
+
+    #[test]
+    fn build_poll_search_query_appends_since_for_nonzero() {
+        // A non-zero cap composes `UNSEEN SINCE <date>`. The exact date
+        // depends on the local clock; only assert the structure here.
+        let query = build_poll_search_query(7);
+        assert!(query.starts_with("UNSEEN SINCE "), "got {query:?}");
+        // The date suffix is 11 chars (dd-MMM-YYYY).
+        assert_eq!(query.len(), "UNSEEN SINCE ".len() + 11, "got {query:?}");
+    }
+
+    #[test]
+    fn build_poll_search_query_degrades_to_unseen_for_absurd_inputs() {
+        // u64::MAX is way past MAX_SINCE_DAYS. The helper must not panic and
+        // must not produce a future-dated query (which would silently exclude
+        // every message). Falling back to plain `UNSEEN` is the safe behavior.
+        assert_eq!(build_poll_search_query(u64::MAX), "UNSEEN");
     }
 
     #[test]
