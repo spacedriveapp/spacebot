@@ -164,7 +164,7 @@ sync_max_age_days = 7  # cap backfill at one week of unread support mail
 
 Default is `0` (no limit), which preserves the original behavior.
 
-**Semantics.** IMAP `SINCE` (RFC 3501 §6.4.4) is inclusive and matches against whole dates at midnight in the server's local time, not rolling 24-hour windows. `sync_max_age_days = 1` therefore bounds the *oldest* mail the poller will import to "received on or after yesterday's date", which can include mail up to ~48 hours old depending on the current time and the server's timezone. Treat the value as a backfill cap, not a literal "last N hours" window — pick a value that's comfortably larger than your real cutoff if you need to be strict (e.g. use 2 to approximate "last 24h").
+**Semantics.** IMAP `SINCE` (RFC 3501 §6.4.4) is inclusive and matches against whole dates at midnight in the server's local time, not rolling 24-hour windows. `sync_max_age_days = 1` therefore bounds the *oldest* mail the poller will import to "received on or after yesterday's date", which can include mail up to ~48 hours old depending on the current time and the server's timezone. Treat the value as a backfill cap, not a literal "last N hours" window: a smaller value is stricter (imports less old mail) and a larger value is more lenient, with an effective floor of roughly N×24h. Round up if you'd rather over-fetch than miss mail near the date boundary.
 
 ## Verify it's working
 
