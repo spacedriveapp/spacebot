@@ -388,6 +388,8 @@ fn cmd_start(
     debug: bool,
     foreground: bool,
 ) -> anyhow::Result<()> {
+    let foreground = foreground || cfg!(windows);
+
     // Use the config path (if provided) to derive the correct instance dir
     // for the PID check, so it matches the PID file written during daemonize.
     let instance_dir = resolve_instance_dir(&config_path);
