@@ -532,11 +532,20 @@ async fn process_chunk(
     let result = hook.prompt_once(&agent, &mut history, &user_prompt).await;
     classify_chunk_prompt_result(result, filename, chunk_number, total_chunks)?;
 
-    if !contract_state.has_terminal_outcome() {
-        return Err(anyhow::anyhow!(
-            "ingestion chunk {chunk_number}/{total_chunks} for {filename} completed without memory_persistence_complete signal"
-        ));
-    }
+    // A chunk is complete when the LLM run returns Ok — that is a deterministic
+    // fact the harness owns. We do NOT gate completion on the LLM calling
+    // memory_persistence_complete: a weak model may not emit that signal, yet
+    // any memory_save calls it made are already committed. Gating on the signal
+    // turned "model forgot to call the tool" into a permanent chunk failure,
+    // which the poll loop then retried forever (re-saving duplicates). The
+    // contract state is kept only for observability.
+    let saved = contract_state.saved_memory_ids().len();
+    tracing::info!(
+        file = %filename,
+        chunk = %format!("{chunk_number}/{total_chunks}"),
+        saved_memories = saved,
+        "chunk processed"
+    );
 
     Ok(())
 }
@@ -691,5 +700,17 @@ mod tests {
             result.is_err(),
             "max turns must be treated as chunk failure for retry"
         );
+    }
+
+    #[test]
+    fn test_chunk_success_does_not_require_terminal_contract_outcome() {
+        // After the fix, chunk success is decided by classify_chunk_prompt_result
+        // alone (the LLM run returning Ok), NOT by the memory_persistence contract.
+        // A run that returns Ok with no memory_persistence_complete signal is a
+        // legitimate success (the chunk may have had nothing worth saving, or the
+        // small model simply didn't emit the signal — memories it DID save are
+        // already committed).
+        let result = classify_chunk_prompt_result(Ok("processed chunk".to_string()), "notes.txt", 1, 3);
+        assert!(result.is_ok(), "Ok prompt result must classify as chunk success");
     }
 }
