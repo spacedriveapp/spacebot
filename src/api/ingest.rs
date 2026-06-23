@@ -221,6 +221,41 @@ pub(super) async fn upload_ingest_file(
     Ok(Json(IngestUploadResponse { uploaded }))
 }
 
+/// Remove an ingest file from the source of truth (disk) and purge its tracking
+/// rows. The disk file is the loop's input; deleting only the DB row lets the
+/// next poll cycle re-discover the file and re-create the row ("reappears").
+pub(super) async fn purge_ingest_file(
+    pool: &sqlx::SqlitePool,
+    ingest_dir: &Path,
+    content_hash: &str,
+) -> anyhow::Result<()> {
+    // Look up the on-disk filename for this hash, then remove the file.
+    if let Some(filename) = sqlx::query_scalar::<_, String>(
+        "SELECT filename FROM ingestion_files WHERE content_hash = ?",
+    )
+    .bind(content_hash)
+    .fetch_optional(pool)
+    .await?
+    {
+        let path = ingest_dir.join(&filename);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    sqlx::query("DELETE FROM ingestion_progress WHERE content_hash = ?")
+        .bind(content_hash)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM ingestion_files WHERE content_hash = ?")
+        .bind(content_hash)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Delete a completed ingestion file record from history.
 #[utoipa::path(
     delete,
@@ -242,15 +277,47 @@ pub(super) async fn delete_ingest_file(
 ) -> Result<Json<IngestDeleteResponse>, StatusCode> {
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let workspaces = state.agent_workspaces.load();
+    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let ingest_dir = workspace.join("ingest");
 
-    sqlx::query("DELETE FROM ingestion_files WHERE content_hash = ?")
-        .bind(&query.content_hash)
-        .execute(pool)
+    purge_ingest_file(pool, &ingest_dir, &query.content_hash)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to delete ingest file record");
+            tracing::warn!(%error, "failed to purge ingest file");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(IngestDeleteResponse { success: true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn test_purge_removes_disk_file_and_rows() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let ingest_dir = dir.path().to_path_buf();
+        let file = ingest_dir.join("notes.txt");
+        tokio::fs::write(&file, b"hello").await.unwrap();
+        let hash = crate::agent::ingestion::content_hash("hello");
+
+        sqlx::query("INSERT INTO ingestion_files (content_hash, filename, file_size, total_chunks, status) VALUES (?, 'notes.txt', 5, 1, 'failed')")
+            .bind(&hash).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ingestion_progress (content_hash, chunk_index, total_chunks, filename) VALUES (?, 0, 1, 'notes.txt')")
+            .bind(&hash).execute(&pool).await.unwrap();
+
+        purge_ingest_file(&pool, &ingest_dir, &hash).await.unwrap();
+
+        assert!(!file.exists(), "disk file must be removed");
+        let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_files WHERE content_hash = ?").bind(&hash).fetch_one(&pool).await.unwrap();
+        let prog: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_progress WHERE content_hash = ?").bind(&hash).fetch_one(&pool).await.unwrap();
+        assert_eq!(files, 0, "ingestion_files row must be deleted");
+        assert_eq!(prog, 0, "ingestion_progress rows must be deleted");
+    }
 }
