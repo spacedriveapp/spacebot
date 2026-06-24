@@ -56,7 +56,9 @@ fn retry_decision(attempts: i64) -> RetryDecision {
     if attempts >= MAX_INGEST_ATTEMPTS {
         RetryDecision::Quarantine
     } else {
-        RetryDecision::Retry { backoff_secs: backoff_secs(attempts) }
+        RetryDecision::Retry {
+            backoff_secs: backoff_secs(attempts),
+        }
     }
 }
 
@@ -448,7 +450,10 @@ struct IngestRetryState {
 
 /// Load the retry gate for a file: its status and whether it is still backing
 /// off (`next_attempt_at` in the future). Returns None if no row exists yet.
-async fn load_retry_state(pool: &SqlitePool, hash: &str) -> anyhow::Result<Option<IngestRetryState>> {
+async fn load_retry_state(
+    pool: &SqlitePool,
+    hash: &str,
+) -> anyhow::Result<Option<IngestRetryState>> {
     let row = sqlx::query_as::<_, (String, Option<i64>)>(
         "SELECT status, CAST((julianday(next_attempt_at) - julianday('now')) * 86400 AS INTEGER) \
          FROM ingestion_files WHERE content_hash = ?",
@@ -795,13 +800,17 @@ mod tests {
         // legitimate success (the chunk may have had nothing worth saving, or the
         // small model simply didn't emit the signal — memories it DID save are
         // already committed).
-        let result = classify_chunk_prompt_result(Ok("processed chunk".to_string()), "notes.txt", 1, 3);
-        assert!(result.is_ok(), "Ok prompt result must classify as chunk success");
+        let result =
+            classify_chunk_prompt_result(Ok("processed chunk".to_string()), "notes.txt", 1, 3);
+        assert!(
+            result.is_ok(),
+            "Ok prompt result must classify as chunk success"
+        );
     }
 
     #[test]
     fn test_backoff_secs_is_exponential_and_capped() {
-        assert_eq!(backoff_secs(1), 60);    // base 60s
+        assert_eq!(backoff_secs(1), 60); // base 60s
         assert_eq!(backoff_secs(2), 120);
         assert_eq!(backoff_secs(3), 240);
         assert_eq!(backoff_secs(20), MAX_INGEST_BACKOFF_SECS); // capped
@@ -811,7 +820,13 @@ mod tests {
     fn test_retry_decision_quarantines_at_cap() {
         // attempts is the count AFTER this failure.
         assert!(matches!(retry_decision(1), RetryDecision::Retry { .. }));
-        assert!(matches!(retry_decision(MAX_INGEST_ATTEMPTS - 1), RetryDecision::Retry { .. }));
-        assert!(matches!(retry_decision(MAX_INGEST_ATTEMPTS), RetryDecision::Quarantine));
+        assert!(matches!(
+            retry_decision(MAX_INGEST_ATTEMPTS - 1),
+            RetryDecision::Retry { .. }
+        ));
+        assert!(matches!(
+            retry_decision(MAX_INGEST_ATTEMPTS),
+            RetryDecision::Quarantine
+        ));
     }
 }

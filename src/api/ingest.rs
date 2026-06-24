@@ -278,7 +278,9 @@ pub(super) async fn delete_ingest_file(
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
     let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let workspace = workspaces
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let ingest_dir = workspace.join("ingest");
 
     purge_ingest_file(pool, &ingest_dir, &query.content_hash)
@@ -298,7 +300,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_purge_removes_disk_file_and_rows() {
-        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
         let dir = tempfile::tempdir().unwrap();
@@ -315,8 +321,18 @@ mod tests {
         purge_ingest_file(&pool, &ingest_dir, &hash).await.unwrap();
 
         assert!(!file.exists(), "disk file must be removed");
-        let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_files WHERE content_hash = ?").bind(&hash).fetch_one(&pool).await.unwrap();
-        let prog: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_progress WHERE content_hash = ?").bind(&hash).fetch_one(&pool).await.unwrap();
+        let files: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_files WHERE content_hash = ?")
+                .bind(&hash)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let prog: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_progress WHERE content_hash = ?")
+                .bind(&hash)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(files, 0, "ingestion_files row must be deleted");
         assert_eq!(prog, 0, "ingestion_progress rows must be deleted");
     }

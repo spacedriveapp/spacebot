@@ -808,7 +808,10 @@ mod tests {
         let merged = merged_memory_content(winner.clone(), loser);
         // Near-duplicates (merge fires at 0.95 similarity) must NOT be glued together,
         // and the importance-winner's content is kept as canonical.
-        assert!(!merged.contains("\n\n"), "must not concatenate near-duplicates");
+        assert!(
+            !merged.contains("\n\n"),
+            "must not concatenate near-duplicates"
+        );
         assert_eq!(merged, winner);
     }
 
