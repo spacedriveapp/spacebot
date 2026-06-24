@@ -315,15 +315,16 @@ fn merged_memory_content(winner: String, loser: &str) -> String {
     let winner_trimmed = winner.trim_end();
     let loser_trimmed = loser.trim_end();
 
-    if winner_trimmed.is_empty() {
-        return loser_trimmed.to_string();
-    }
-
     // Near-duplicates (merge fires at 0.95 cosine similarity) are NOT glued
     // together — concatenation produced bloated memories holding many reworded
-    // copies of the same fact. The winner is the importance-winner chosen by
-    // choose_merge_pair; keep its content as the single canonical version.
-    let canonical = winner_trimmed;
+    // copies of the same fact. Keep the importance-winner's content (chosen by
+    // choose_merge_pair) as the single canonical version, falling back to the
+    // loser only if the winner is empty. Either way the size cap below applies.
+    let canonical = if winner_trimmed.is_empty() {
+        loser_trimmed
+    } else {
+        winner_trimmed
+    };
 
     if canonical.len() <= MAX_MERGED_MEMORY_CONTENT_BYTES {
         return canonical.to_string();

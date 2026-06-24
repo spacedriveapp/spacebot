@@ -354,12 +354,15 @@ async fn process_file(
         return Ok(());
     }
 
-    // Full success: mark completed, clean up progress rows, remove the source file.
+    // Full success: mark completed, remove the source file, then clear progress.
+    // Order matters: remove the file BEFORE clearing chunk progress. If remove_file
+    // fails, the progress rows must survive so the next poll skips already-ingested
+    // chunks instead of re-processing them (which would re-create their memories).
     complete_ingestion_file(&deps.sqlite_pool, &hash, "completed").await?;
-    delete_progress(&deps.sqlite_pool, &hash).await?;
     tokio::fs::remove_file(path)
         .await
         .with_context(|| format!("failed to delete ingested file: {}", path.display()))?;
+    delete_progress(&deps.sqlite_pool, &hash).await?;
     tracing::info!(file = %filename, chunks = total_chunks, status = "completed", "file ingestion complete, file deleted");
     Ok(())
 }

@@ -237,11 +237,22 @@ pub(super) async fn purge_ingest_file(
     .fetch_optional(pool)
     .await?
     {
-        let path = ingest_dir.join(&filename);
+        // Defense-in-depth: the filename comes from the DB and is sanitized on
+        // write, but this is a destructive delete — reject any non-normal path
+        // component (`..`, absolute paths) before joining so we cannot escape
+        // ingest_dir.
+        let filename_path = Path::new(&filename);
+        if filename_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            anyhow::bail!("refusing to delete ingest file with unsafe path: {filename}");
+        }
+        let path = ingest_dir.join(filename_path);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
 
