@@ -909,13 +909,13 @@ fn activities_url(service_url: &str, bare_conv_id: &str) -> String {
 fn card_to_adaptive(card: &crate::Card) -> serde_json::Value {
     let mut body: Vec<serde_json::Value> = Vec::new();
 
-    if let Some(author) = &card.author {
-        if !author.name.trim().is_empty() {
-            body.push(serde_json::json!({
-                "type": "TextBlock", "text": author.name, "weight": "Bolder",
-                "isSubtle": true, "wrap": true, "spacing": "None"
-            }));
-        }
+    if let Some(author) = &card.author
+        && !author.name.trim().is_empty()
+    {
+        body.push(serde_json::json!({
+            "type": "TextBlock", "text": author.name, "weight": "Bolder",
+            "isSubtle": true, "wrap": true, "spacing": "None"
+        }));
     }
 
     // Title (linked if a url is present); a bare url with no title still links.
@@ -1318,6 +1318,9 @@ impl TeamsAdapter {
 ///
 /// This is the canonical constructor used by both the daemon startup path and
 /// the config-watcher reload path so the two never drift apart.
+// Discrete credential/listener args mirror `TeamsAdapter::new`; bundling them
+// into a struct would only move the argument list one call deeper.
+#[allow(clippy::too_many_arguments)]
 pub fn build_teams_adapter(
     runtime_key: impl Into<String>,
     app_id: impl Into<String>,
