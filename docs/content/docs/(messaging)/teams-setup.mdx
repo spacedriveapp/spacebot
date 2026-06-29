@@ -37,13 +37,48 @@ Then open **Channels** and add the **Microsoft Teams** channel.
 
 ## Step 3: Build and install the Teams app
 
-Teams needs an app package (a zip with a `manifest.json` and two icons) to surface the bot to users.
+Teams needs an app package (a zip with a `manifest.json` and two icons).
+
+<Tabs items={["Generate from Spacebot", "Manual"]}>
+<Tab value="Generate from Spacebot">
+
+1. In **Settings → Channels**, open the Microsoft Teams card and enter your **App ID** (Step 1).
+2. Click **Download Teams app package**. Spacebot builds a correct `manifest.json` (with the right schema, a distinct app id, and the Spacebot icon) and downloads `spacebot-teams-app.zip`.
+3. Upload it in Teams (**Apps → Manage your apps → Upload an app**).
+
+The package uses the default Spacebot icon. To use your own, unzip it, replace `icon-color.png` (192×192) and `icon-outline.png` (32×32, transparent), and re-zip.
+
+</Tab>
+<Tab value="Manual">
+
+Build the package by hand if you prefer. The `manifest.json`:
 
 <Callout type="info">
-The manifest `id` (the Teams app id) must be its **own** GUID, distinct from the bot's App ID. `bots[].botId` is the App ID from Step 1. Scopes are lowercase (`personal`, `team`, `groupchat`), and `validDomains` plus an `accentColor` are required.
+The manifest `id` (the Teams app id) must be its **own** GUID, distinct from the bot's App ID. `bots[].botId` is the App ID from Step 1. Scopes are lowercase (`personal`, `team`, `groupchat`); `validDomains` and `accentColor` are required; do **not** add a `packageName` key (schema 1.17 rejects it).
 </Callout>
 
-Upload the package in Teams (**Apps** → **Manage your apps** → **Upload an app**). Most tenants require admin approval: approve it in the **Teams admin center** under **Manage apps**, where you can also restrict who may install it.
+```json
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "GENERATE-A-FRESH-GUID",
+  "developer": { "name": "Spacebot", "websiteUrl": "https://example.com", "privacyUrl": "https://example.com", "termsOfUseUrl": "https://example.com" },
+  "icons": { "color": "icon-color.png", "outline": "icon-outline.png" },
+  "name": { "short": "Spacebot", "full": "Spacebot — AI assistant" },
+  "description": { "short": "AI assistant powered by Spacebot.", "full": "Chat with your Spacebot agent in Microsoft Teams." },
+  "accentColor": "#6264A7",
+  "bots": [{ "botId": "YOUR-APP-ID", "scopes": ["personal", "team", "groupchat"], "supportsFiles": false, "isNotificationOnly": false }],
+  "validDomains": []
+}
+```
+
+Zip `manifest.json` + `icon-color.png` (192×192) + `icon-outline.png` (32×32) at the **root** of the archive.
+
+</Tab>
+</Tabs>
+
+Most tenants require admin approval: approve it in the **Teams admin center** under **Manage apps**, where you can also restrict who may install it.
 
 ## Step 4: Configure Spacebot
 
