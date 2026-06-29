@@ -27,6 +27,8 @@ export function ChannelsSection() {
 
 	function isDefaultAdd(): boolean {
 		if (!addingPlatform) return true;
+		// Teams only supports a single default instance; never show the named-instance form.
+		if (addingPlatform === "teams") return true;
 		return !instances.some(
 			(inst) => inst.platform === addingPlatform && inst.name === null,
 		);

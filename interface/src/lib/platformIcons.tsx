@@ -1,5 +1,5 @@
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faDiscord, faSlack, faTelegram, faTwitch, faWhatsapp } from "@fortawesome/free-brands-svg-icons";
+import { faDiscord, faSlack, faTelegram, faTwitch, faWhatsapp, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import { faLink, faEnvelope, faComments, faComment, faServer, faCommentDots } from "@fortawesome/free-solid-svg-icons";
 
 interface PlatformIconProps {
@@ -19,6 +19,7 @@ export function PlatformIcon({ platform, className = "text-ink-faint", size = "1
 		webhook: faLink,
 		email: faEnvelope,
 		mattermost: faServer,
+		teams: faMicrosoft,
 		whatsapp: faWhatsapp,
 		signal: faComment,
 		matrix: faComments,

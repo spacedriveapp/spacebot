@@ -47,6 +47,20 @@ Upload the package in Teams (**Apps** → **Manage your apps** → **Upload an a
 
 ## Step 4: Configure Spacebot
 
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+1. Open your Spacebot dashboard
+2. Go to **Settings** → **Channels**
+3. Click **Setup** on the Microsoft Teams card
+4. Paste your **App ID**, **Client Secret**, and **Tenant ID** from the steps above
+5. Click **Save**
+
+Spacebot writes the config and starts the adapter. Make sure the bot's port is reachable through your public HTTPS endpoint.
+
+</Tab>
+<Tab value="TOML Config">
+
 Add a `[messaging.teams]` block to your config. Keep the client secret out of the file by referencing an environment variable.
 
 ```toml
@@ -77,6 +91,9 @@ Start Spacebot with the secret in the environment:
 ```bash
 TEAMS_CLIENT_SECRET="your-secret-value" spacebot start
 ```
+
+</Tab>
+</Tabs>
 
 ## DM permissions
 

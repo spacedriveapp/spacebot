@@ -40,7 +40,8 @@ type Platform =
 	| "email"
 	| "webhook"
 	| "mattermost"
-	| "signal";
+	| "signal"
+	| "teams";
 
 const PLATFORM_LABELS: Record<Platform, string> = {
 	discord: "Discord",
@@ -51,6 +52,7 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 	webhook: "Webhook",
 	mattermost: "Mattermost",
 	signal: "Signal",
+	teams: "Microsoft Teams",
 };
 
 const DOC_LINKS: Partial<Record<Platform, string>> = {
@@ -60,6 +62,7 @@ const DOC_LINKS: Partial<Record<Platform, string>> = {
 	twitch: "https://docs.spacebot.sh/twitch-setup",
 	mattermost: "https://docs.spacebot.sh/mattermost-setup",
 	signal: "https://docs.spacebot.sh/signal-setup",
+	teams: "https://docs.spacebot.sh/teams-setup",
 };
 
 // --- Platform Catalog (Left Column) ---
@@ -78,6 +81,7 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 		"webhook",
 		"mattermost",
 		"signal",
+		"teams",
 	];
 
 	const COMING_SOON = [
@@ -811,6 +815,22 @@ export function AddInstanceCard({
 					credentials.signal_dm_allowed_users = result.entries.join(",");
 				}
 			}
+		} else if (platform === "teams") {
+			if (
+				!credentialInputs.teams_app_id?.trim() ||
+				!credentialInputs.teams_client_secret?.trim() ||
+				!credentialInputs.teams_tenant_id?.trim()
+			) {
+				setMessage({
+					text: "App ID, client secret, and tenant ID are required",
+					type: "error",
+				});
+				return;
+			}
+			credentials.teams_app_id = credentialInputs.teams_app_id.trim();
+			credentials.teams_client_secret =
+				credentialInputs.teams_client_secret.trim();
+			credentials.teams_tenant_id = credentialInputs.teams_tenant_id.trim();
 		}
 
 		if (!isDefault && !instanceName.trim()) {
@@ -1304,6 +1324,63 @@ export function AddInstanceCard({
 					</>
 				)}
 
+				{platform === "teams" && (
+					<>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								App ID
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.teams_app_id ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										teams_app_id: e.target.value,
+									})
+								}
+								placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Client Secret
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.teams_client_secret ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										teams_client_secret: e.target.value,
+									})
+								}
+								placeholder="Your Azure app client secret"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Tenant ID
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.teams_tenant_id ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										teams_tenant_id: e.target.value,
+									})
+								}
+								placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
+							/>
+						</div>
+					</>
+				)}
+
 				{platform === "signal" && (
 					<>
 						<div>
@@ -1521,7 +1598,7 @@ function BindingForm({
 				</div>
 			)}
 
-			{(platform === "discord" || platform === "slack") && (
+			{(platform === "discord" || platform === "slack" || platform === "teams") && (
 				<div>
 					<label className="mb-1 block text-sm font-medium text-ink-dull">
 						Channel IDs
