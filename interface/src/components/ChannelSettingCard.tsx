@@ -1378,6 +1378,23 @@ export function AddInstanceCard({
 								}}
 							/>
 						</div>
+						{(credentialInputs.teams_app_id ?? "").trim() !== "" && (
+							<>
+								<div className="flex flex-wrap items-center gap-3 pt-1">
+									<a
+										href={api.teamsAppPackageUrl((credentialInputs.teams_app_id ?? "").trim())}
+										download="spacebot-teams-app.zip"
+										className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90"
+									>
+										Download Teams app package
+									</a>
+								</div>
+								<p className="text-xs text-ink-faint">
+									The package uses the default Spacebot icon. To use your own, unzip it, replace
+									<code> icon-color.png</code> (192×192) and <code>icon-outline.png</code> (32×32), and re-zip.
+								</p>
+							</>
+						)}
 					</>
 				)}
 
