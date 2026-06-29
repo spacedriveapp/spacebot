@@ -210,6 +210,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(messaging::messaging_status))
         .routes(routes!(messaging::disconnect_platform))
         .routes(routes!(messaging::toggle_platform))
+        .routes(routes!(messaging::download_teams_app_package))
         .routes(routes!(
             messaging::create_messaging_instance,
             messaging::delete_messaging_instance

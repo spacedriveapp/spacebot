@@ -1439,6 +1439,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messaging/teams/app-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["download_teams_app_package"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/messaging/toggle": {
         parameters: {
             query?: never;
@@ -8164,6 +8180,43 @@ export interface operations {
                 };
             };
             /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    download_teams_app_package: {
+        parameters: {
+            query: {
+                /** @description Bot App (client) ID */
+                app_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Teams app package (zip) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": unknown;
+                };
+            };
+            /** @description Missing or invalid app_id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Failed to build package */
             500: {
                 headers: {
                     [name: string]: unknown;

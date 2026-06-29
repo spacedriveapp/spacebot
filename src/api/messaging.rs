@@ -1,6 +1,7 @@
 use super::state::ApiState;
 
 use axum::Json;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -2430,6 +2431,60 @@ pub(super) async fn delete_messaging_instance(
         success: true,
         message: format!("{runtime_key} instance deleted"),
     }))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct TeamsPackageQuery {
+    /// The bot App (client) ID — becomes `bots[].botId` in the manifest.
+    app_id: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/messaging/teams/app-package",
+    params(("app_id" = String, Query, description = "Bot App (client) ID")),
+    responses(
+        (status = 200, description = "Teams app package (zip)", content_type = "application/zip"),
+        (status = 400, description = "Missing or invalid app_id"),
+        (status = 500, description = "Failed to build package"),
+    ),
+    tag = "messaging",
+)]
+pub(super) async fn download_teams_app_package(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<TeamsPackageQuery>,
+) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
+    let app_id = query.app_id.trim();
+    if app_id.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "app_id is required".into(),
+        ));
+    }
+
+    let instance_dir = state.instance_dir.load();
+    // `&instance_dir` (a `&Guard<Arc<PathBuf>>`) coerces to `&Path` via deref,
+    // matching how messaging.rs already uses the guard (it calls `.join()` on it).
+    // Do NOT use `.as_ref()` here — it's ambiguous and won't coerce to `&Path`.
+    let manifest_id = crate::api::teams_package::load_or_create_manifest_id(&instance_dir);
+
+    let bytes =
+        crate::api::teams_package::build_app_package(app_id, &manifest_id).map_err(|error| {
+            tracing::error!(%error, "failed to build teams app package");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build teams app package".into(),
+            )
+        })?;
+
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "application/zip"),
+        (
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=spacebot-teams-app.zip",
+        ),
+    ];
+    Ok((headers, bytes))
 }
 
 #[cfg(test)]
