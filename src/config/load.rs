@@ -17,9 +17,9 @@ use super::{
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
     MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
     ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
-    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
-    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
-    normalize_adapter, validate_named_messaging_adapters,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TeamsConfig, TeamsInstanceConfig,
+    TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig,
+    WarmupConfig, WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -2464,6 +2464,62 @@ impl Config {
                     max_attachment_bytes: mm.max_attachment_bytes,
                 })
             }),
+            teams: toml.messaging.teams.and_then(|t| {
+                let instances = t
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let app_id = instance.app_id.as_deref().and_then(resolve_env_value);
+                        let client_secret =
+                            instance.client_secret.as_deref().and_then(resolve_env_value);
+                        let tenant_id = instance.tenant_id.as_deref().and_then(resolve_env_value);
+                        let has_credentials =
+                            app_id.is_some() && client_secret.is_some() && tenant_id.is_some();
+                        if instance.enabled && !has_credentials {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "teams instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+                        TeamsInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            app_id: app_id.unwrap_or_default(),
+                            client_secret: client_secret.unwrap_or_default(),
+                            tenant_id: tenant_id.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let app_id = std::env::var("TEAMS_APP_ID")
+                    .ok()
+                    .or_else(|| t.app_id.as_deref().and_then(resolve_env_value));
+                let client_secret = std::env::var("TEAMS_CLIENT_SECRET")
+                    .ok()
+                    .or_else(|| t.client_secret.as_deref().and_then(resolve_env_value));
+                let tenant_id = std::env::var("TEAMS_TENANT_ID")
+                    .ok()
+                    .or_else(|| t.tenant_id.as_deref().and_then(resolve_env_value));
+
+                if (app_id.is_none() || client_secret.is_none() || tenant_id.is_none())
+                    && instances.is_empty()
+                {
+                    tracing::warn!("teams config present but no credentials found");
+                    return None;
+                }
+
+                Some(TeamsConfig {
+                    enabled: t.enabled,
+                    app_id: app_id.unwrap_or_default(),
+                    client_secret: client_secret.unwrap_or_default(),
+                    tenant_id: tenant_id.unwrap_or_default(),
+                    port: t.port,
+                    bind: t.bind,
+                    instances,
+                    dm_allowed_users: t.dm_allowed_users,
+                })
+            }),
         };
 
         let bindings: Vec<Binding> = toml
@@ -2681,5 +2737,192 @@ fn load_human_md(human_dir: &std::path::Path) -> Option<String> {
     match std::fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => Some(content),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod teams_config_tests {
+    use super::super::toml_schema::TomlConfig;
+    use super::Config;
+
+    fn parse_config(toml: &str) -> Config {
+        let toml_config: TomlConfig = toml::from_str(toml).expect("TOML parse failed");
+        Config::from_toml(toml_config, std::path::PathBuf::from("/tmp/test-spacebot"))
+            .expect("Config::from_toml failed")
+    }
+
+    /// Parses a minimal [messaging.teams] block with a default config and one
+    /// named instance, then asserts the fields are loaded correctly.
+    #[test]
+    fn test_teams_config_default_and_named_instance() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "app-id-default"
+client_secret = "secret-default"
+tenant_id = "tenant-default"
+port = 3979
+bind = "0.0.0.0"
+
+[[messaging.teams.instances]]
+name = "acme"
+enabled = true
+app_id = "app-id-acme"
+client_secret = "secret-acme"
+tenant_id = "tenant-acme"
+"#,
+        );
+
+        let teams = config
+            .messaging
+            .teams
+            .as_ref()
+            .expect("teams config should be present");
+
+        assert!(teams.enabled);
+        assert_eq!(teams.app_id, "app-id-default");
+        assert_eq!(teams.client_secret, "secret-default");
+        assert_eq!(teams.tenant_id, "tenant-default");
+        assert_eq!(teams.port, 3979);
+        assert_eq!(teams.bind, "0.0.0.0");
+        assert_eq!(teams.instances.len(), 1);
+
+        let inst = &teams.instances[0];
+        assert_eq!(inst.name, "acme");
+        assert!(inst.enabled);
+        assert_eq!(inst.app_id, "app-id-acme");
+        assert_eq!(inst.client_secret, "secret-acme");
+        assert_eq!(inst.tenant_id, "tenant-acme");
+    }
+
+    /// A named Teams instance with a missing client_secret should be disabled
+    /// with a warning, not cause a hard error.
+    #[test]
+    fn test_teams_instance_missing_secret_disables_instance() {
+        // Default credentials present so the top-level config loads, but
+        // the named instance has no client_secret.
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "app-id-default"
+client_secret = "secret-default"
+tenant_id = "tenant-default"
+
+[[messaging.teams.instances]]
+name = "no-secret"
+enabled = true
+app_id = "app-id-no-secret"
+tenant_id = "tenant-no-secret"
+# client_secret intentionally omitted
+"#,
+        );
+
+        let teams = config
+            .messaging
+            .teams
+            .as_ref()
+            .expect("default teams config should still be present");
+
+        // The named instance exists in the list but must be disabled because
+        // the client_secret was not provided.
+        let inst = teams
+            .instances
+            .iter()
+            .find(|i| i.name == "no-secret")
+            .expect("instance should be present even if disabled");
+        assert!(
+            !inst.enabled,
+            "instance with missing secret must be disabled"
+        );
+    }
+
+    /// When no credentials at all are present, the teams config should be None
+    /// rather than causing an error.
+    #[test]
+    fn test_teams_config_absent_without_credentials() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+# All credential fields absent
+"#,
+        );
+
+        assert!(
+            config.messaging.teams.is_none(),
+            "teams config without credentials should resolve to None"
+        );
+    }
+
+    /// Verifies that the TOML shape the handler writes round-trips correctly
+    /// through Config::from_toml for a default Teams instance.
+    #[test]
+    fn test_teams_handler_toml_round_trip() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "test-app-id"
+client_secret = "test-secret"
+tenant_id = "test-tenant"
+"#,
+        );
+
+        let teams = config
+            .messaging
+            .teams
+            .as_ref()
+            .expect("teams config should be present");
+
+        assert_eq!(teams.app_id, "test-app-id");
+        assert_eq!(teams.client_secret, "test-secret");
+        assert_eq!(teams.tenant_id, "test-tenant");
+        assert!(teams.enabled);
+    }
+
+    /// Verifies that a TOML block missing client_secret (simulating a handler
+    /// bug) results in None — the loader disables configs with missing credentials.
+    #[test]
+    fn test_teams_handler_toml_missing_secret_disabled() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "test-app-id"
+tenant_id = "test-tenant"
+"#,
+        );
+
+        assert!(
+            config.messaging.teams.is_none(),
+            "teams config without client_secret should resolve to None"
+        );
+    }
+
+    /// Debug output must not expose the client_secret value.
+    #[test]
+    fn test_teams_config_debug_redacts_secret() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "my-app-id"
+client_secret = "super-secret-value"
+tenant_id = "my-tenant"
+"#,
+        );
+
+        let teams = config.messaging.teams.as_ref().unwrap();
+        let debug_output = format!("{:?}", teams);
+        assert!(
+            !debug_output.contains("super-secret-value"),
+            "Debug output must not contain the raw client_secret"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED] in place of client_secret"
+        );
     }
 }

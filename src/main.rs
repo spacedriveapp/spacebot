@@ -1800,6 +1800,7 @@ async fn run(
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
         let mut mattermost_permissions = None;
+        let mut teams_permissions = None;
         let mut signal_permissions = None;
         initialize_agents(
             &config,
@@ -1820,6 +1821,7 @@ async fn run(
             &mut twitch_permissions,
             &mut mattermost_permissions,
             &mut signal_permissions,
+            &mut teams_permissions,
             agent_links.clone(),
             agent_humans.clone(),
             injection_tx.clone(),
@@ -1843,6 +1845,7 @@ async fn run(
             twitch_permissions,
             mattermost_permissions,
             signal_permissions,
+            teams_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
@@ -1861,6 +1864,7 @@ async fn run(
             None, // twitch_permissions
             None, // mattermost_permissions
             None, // signal_permissions
+            None, // teams_permissions
             bindings.clone(),
             None,
             llm_manager.clone(),
@@ -2585,6 +2589,7 @@ async fn run(
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
                                 let mut new_mattermost_permissions = None;
+                                let mut new_teams_permissions = None;
                                 let mut new_signal_permissions = None;
                                 match initialize_agents(
                                     &new_config,
@@ -2605,6 +2610,7 @@ async fn run(
                                     &mut new_twitch_permissions,
                                     &mut new_mattermost_permissions,
                                     &mut new_signal_permissions,
+                                    &mut new_teams_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
                                     injection_tx.clone(),
@@ -2627,6 +2633,7 @@ async fn run(
                                             new_twitch_permissions,
                                             new_mattermost_permissions,
                                             new_signal_permissions,
+                                            new_teams_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
@@ -2751,6 +2758,7 @@ async fn initialize_agents(
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     mattermost_permissions: &mut Option<Arc<ArcSwap<spacebot::config::MattermostPermissions>>>,
     signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
+    teams_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TeamsPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
@@ -3560,6 +3568,52 @@ async fn initialize_agents(
                     tracing::error!(%error, adapter = %instance.name, "failed to create named mattermost adapter");
                 }
             }
+        }
+    }
+
+    // Shared Teams permissions (hot-reloadable via file watcher)
+    *teams_permissions = config.messaging.teams.as_ref().map(|teams_config| {
+        let perms = spacebot::config::TeamsPermissions::from_config(teams_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(teams_config) = &config.messaging.teams
+        && teams_config.enabled
+    {
+        if !teams_config.app_id.is_empty()
+            && !teams_config.client_secret.is_empty()
+            && !teams_config.tenant_id.is_empty()
+        {
+            match spacebot::messaging::teams::build_teams_adapter(
+                "teams",
+                &teams_config.app_id,
+                &teams_config.client_secret,
+                &teams_config.tenant_id,
+                teams_config.port,
+                &teams_config.bind,
+                teams_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("teams permissions not initialized when teams is enabled")
+                })?,
+                &config.instance_dir,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build teams adapter");
+                }
+            }
+        }
+
+        // v1 supports a single Teams listener per port. Named [[messaging.teams.instances]]
+        // share the same port as the default instance and cannot each bind their own
+        // listener, so they are skipped with a clear warning rather than retried 12×
+        // and silently dropped by the manager. See docs/design-docs/teams-setup.md.
+        if teams_config.instances.iter().any(|i| i.enabled) {
+            tracing::warn!(
+                "Teams v1 supports a single listener per port; named [[messaging.teams.instances]] \
+                 are NOT started — see docs/design-docs/teams-setup.md"
+            );
         }
     }
 

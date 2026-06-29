@@ -29,9 +29,13 @@ pub fn parse_delivery_target(raw: &str) -> Option<BroadcastTarget> {
         return parse_signal_target_parts(parts.get(1..).unwrap_or(&[]));
     }
 
-    // Handle other platforms with named instances (telegram, discord, slack)
+    // Handle other platforms with named instances (telegram, discord, slack, teams)
     // Format: platform:<instance>:<target> or platform:<target>
-    if raw.starts_with("telegram:") || raw.starts_with("discord:") || raw.starts_with("slack:") {
+    if raw.starts_with("telegram:")
+        || raw.starts_with("discord:")
+        || raw.starts_with("slack:")
+        || raw.starts_with("teams:")
+    {
         let parts: Vec<&str> = raw.split(':').collect();
         return parse_named_instance_target(&parts);
     }
@@ -159,6 +163,57 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .and_then(normalize_email_target)
                 .or_else(|| from.as_deref().and_then(normalize_email_target))?
         }
+        "teams" => {
+            // Teams conversation IDs can contain colons (e.g. "19:meeting_abc==@thread.tacv2").
+            // We must NOT split greedily — instead strip only the known platform (and optional
+            // instance) prefix verbatim and keep the remainder as the bare conversation id.
+            //
+            // Channel id formats:
+            //   "teams:{conversation_id}"            → adapter "teams"
+            //   "teams:{instance}:{conversation_id}" → adapter "teams:{instance}"
+            //
+            // The `teams_conversation_id` metadata key is preferred when present so we can
+            // round-trip correctly even if the channel id is malformed.
+            if let Some(conv_id) = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("teams_conversation_id"))
+                .and_then(json_value_to_string)
+            {
+                return Some(BroadcastTarget {
+                    adapter: adapter.to_string(),
+                    target: conv_id,
+                });
+            }
+
+            // Derive the bare conversation id from the channel id by stripping the prefix.
+            // Channel id is "teams:{rest}" or "teams:{instance}:{rest}".
+            // We need to figure out whether {rest} starts with a valid instance name followed
+            // by another colon. Use the same heuristic as parse_named_instance_target.
+            let after_teams = channel.id.strip_prefix("teams:").unwrap_or(&channel.id);
+            // Check whether the first segment (up to the next ':') is a valid instance name.
+            let (resolved_adapter, bare_conv_id) =
+                if let Some((maybe_instance, rest)) = after_teams.split_once(':') {
+                    if is_valid_instance_name(maybe_instance) {
+                        (format!("teams:{maybe_instance}"), rest.to_string())
+                    } else {
+                        // The "instance" segment looks like a real conversation id start —
+                        // keep the whole `after_teams` as the bare conversation id.
+                        ("teams".to_string(), after_teams.to_string())
+                    }
+                } else {
+                    ("teams".to_string(), after_teams.to_string())
+                };
+
+            if bare_conv_id.is_empty() {
+                return None;
+            }
+
+            return Some(BroadcastTarget {
+                adapter: resolved_adapter,
+                target: bare_conv_id,
+            });
+        }
         "mattermost" => {
             let adapter = extract_mattermost_adapter_from_channel_id(&channel.id);
             let raw_target = if let Some(channel_id) = channel
@@ -212,6 +267,8 @@ pub fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         // Portal targets are full conversation IDs (e.g. "portal:chat:main")
         "portal" => Some(trimmed.to_string()),
         "signal" => normalize_signal_target(trimmed),
+        // Teams conversation IDs are opaque strings (may contain ':' and ';') — pass verbatim.
+        "teams" => normalize_teams_target(trimmed),
         _ => Some(trimmed.to_string()),
     }
 }
@@ -341,6 +398,20 @@ fn normalize_mattermost_target(raw_target: &str) -> Option<String> {
             Some(format!("dm:{user_id}"))
         }
         _ => None,
+    }
+}
+
+/// Normalize a raw Teams conversation id.
+///
+/// Teams conversation IDs are opaque strings that may contain `:`, `;`, `@`, `=`, and other
+/// characters. They are passed through verbatim after stripping any leading `teams:` prefix
+/// (which can be left over from double-prefixed strings) and rejecting empty inputs.
+fn normalize_teams_target(raw_target: &str) -> Option<String> {
+    let target = strip_repeated_prefix(raw_target, "teams");
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
     }
 }
 
@@ -578,12 +649,14 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
     }
 }
 
-/// Parse targets for platforms with named instance support (telegram, discord, slack).
+/// Parse targets for platforms with named instance support (telegram, discord, slack, teams).
 ///
 /// Handles formats:
-/// - Default adapter: ["telegram", target], ["discord", target], ["slack", target]
+/// - Default adapter: ["telegram", target], ["discord", target], ["slack", target], ["teams", target]
 /// - Legacy format: ["discord", guild_id, channel_id], ["slack", workspace_id, channel_id]
-/// - Named adapter: ["telegram", instance, target], ["discord", instance, target], ["slack", instance, target]
+/// - Named adapter: ["telegram", instance, target], ["discord", instance, target],
+///   ["slack", instance, target], ["teams", instance, target]
+/// - Teams multi-part IDs: ["teams", segment, ...] where the conversation id contains colons
 ///
 /// Returns None for invalid formats.
 fn parse_named_instance_target(parts: &[&str]) -> Option<BroadcastTarget> {
@@ -595,8 +668,9 @@ fn parse_named_instance_target(parts: &[&str]) -> Option<BroadcastTarget> {
     let is_telegram = platform == "telegram";
     let is_discord = platform == "discord";
     let is_slack = platform == "slack";
+    let is_teams = platform == "teams";
 
-    if !is_telegram && !is_discord && !is_slack {
+    if !is_telegram && !is_discord && !is_slack && !is_teams {
         return None;
     }
 
@@ -644,6 +718,21 @@ fn parse_named_instance_target(parts: &[&str]) -> Option<BroadcastTarget> {
             let normalized = normalize_target(platform, target)?;
             Some(BroadcastTarget {
                 adapter: (*platform).to_string(),
+                target: normalized,
+            })
+        }
+        // Teams multi-part conversation IDs: teams:{rest} where rest contains colons.
+        // The second segment was NOT a valid instance name (handled by the named-adapter arm
+        // above), so the entire `parts[1..]` sequence is the bare conversation id.
+        // We reconstruct it verbatim via join to preserve the colons.
+        ["teams", ..] if parts.len() > 2 => {
+            let conv_id = parts[1..].join(":");
+            if conv_id.is_empty() {
+                return None;
+            }
+            let normalized = normalize_teams_target(&conv_id)?;
+            Some(BroadcastTarget {
+                adapter: "teams".to_string(),
                 target: normalized,
             })
         }
@@ -1097,5 +1186,112 @@ mod tests {
         assert!(super::is_valid_instance_name("exactly_twenty_chars"));
         // 21 characters (over boundary)
         assert!(!super::is_valid_instance_name("exactly_twenty_chars_"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Teams tests
+    // ---------------------------------------------------------------------------
+
+    /// Simple `teams:{id}` default round-trips correctly.
+    #[test]
+    fn parse_teams_default_target() {
+        let parsed = parse_delivery_target("teams:conv-dm-001");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "teams".to_string(),
+                target: "conv-dm-001".to_string(),
+            })
+        );
+    }
+
+    /// `teams:{instance}:{id}` named round-trips with correct adapter and target.
+    #[test]
+    fn parse_teams_named_instance_target() {
+        let parsed = parse_delivery_target("teams:prod:conv-ch-999");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "teams:prod".to_string(),
+                target: "conv-ch-999".to_string(),
+            })
+        );
+    }
+
+    /// Conversation ID containing a colon is preserved verbatim, not truncated.
+    #[test]
+    fn parse_teams_conversation_id_with_colon_preserved() {
+        let parsed = parse_delivery_target("teams:19:meeting_abc==@thread.tacv2");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "teams".to_string(),
+                target: "19:meeting_abc==@thread.tacv2".to_string(),
+            })
+        );
+    }
+
+    /// Named instance + conversation ID containing a colon.
+    #[test]
+    fn parse_teams_named_instance_with_colon_in_id() {
+        let parsed = parse_delivery_target("teams:prod:19:meeting_abc==@thread.tacv2");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "teams:prod".to_string(),
+                target: "19:meeting_abc==@thread.tacv2".to_string(),
+            })
+        );
+    }
+
+    /// `teams:` with no conversation id is rejected.
+    #[test]
+    fn parse_teams_empty_conversation_id_rejected() {
+        assert!(parse_delivery_target("teams:").is_none());
+    }
+
+    /// `resolve_broadcast_target` for a teams channel returns the bare conversation id.
+    #[test]
+    fn resolve_teams_broadcast_target_from_channel_id() {
+        let channel = test_channel_info("teams:19:meeting_abc==@thread.tacv2", "teams");
+        let resolved = resolve_broadcast_target(&channel);
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "teams".to_string(),
+                target: "19:meeting_abc==@thread.tacv2".to_string(),
+            })
+        );
+    }
+
+    /// `resolve_broadcast_target` for a named-instance teams channel returns the correct adapter.
+    #[test]
+    fn resolve_teams_named_instance_broadcast_target() {
+        let channel = test_channel_info("teams:prod:19:meeting_abc==@thread.tacv2", "teams");
+        let resolved = resolve_broadcast_target(&channel);
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "teams:prod".to_string(),
+                target: "19:meeting_abc==@thread.tacv2".to_string(),
+            })
+        );
+    }
+
+    /// `resolve_broadcast_target` prefers `teams_conversation_id` from platform_meta when present.
+    #[test]
+    fn resolve_teams_broadcast_target_prefers_meta() {
+        let mut channel = test_channel_info("teams:old-conv-id", "teams");
+        channel.platform_meta = Some(serde_json::json!({
+            "teams_conversation_id": "19:canonical_conv_id@thread.tacv2"
+        }));
+        let resolved = resolve_broadcast_target(&channel);
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "teams".to_string(),
+                target: "19:canonical_conv_id@thread.tacv2".to_string(),
+            })
+        );
     }
 }
