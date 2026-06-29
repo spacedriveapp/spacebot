@@ -699,8 +699,7 @@ pub fn spawn_file_watcher(
                         // Teams: start default instance only (single-instance in v1).
                         if let Some(teams_config) = &config.messaging.teams
                             && teams_config.enabled
-                        {
-                            if !teams_config.app_id.is_empty()
+                            && !teams_config.app_id.is_empty()
                                 && !teams_config.client_secret.is_empty()
                                 && !teams_config.tenant_id.is_empty()
                                 && !manager.has_adapter("teams").await
@@ -732,6 +731,16 @@ pub fn spawn_file_watcher(
                                     }
                                 }
                             }
+
+                        // Named Teams instances cannot bind their own listener in v1;
+                        // warn on live config edits too (mirrors cold start in main.rs).
+                        if let Some(teams_config) = &config.messaging.teams
+                            && teams_config.instances.iter().any(|i| i.enabled)
+                        {
+                            tracing::warn!(
+                                "Teams v1 supports a single listener per port; named \
+                                 [[messaging.teams.instances]] are NOT started on config reload"
+                            );
                         }
                     });
                 }

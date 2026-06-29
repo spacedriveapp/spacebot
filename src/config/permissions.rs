@@ -545,8 +545,9 @@ impl MattermostPermissions {
 pub struct TeamsPermissions {
     /// Allowed Teams channel IDs (None = all channels accepted).
     pub channel_filter: Option<Vec<String>>,
-    /// AAD object IDs (or UPN strings) allowed to DM the bot.
-    /// Empty = DMs blocked entirely.
+    /// Teams user IDs allowed to DM the bot, matched against the inbound
+    /// `activity.from.id` (the user's MRI, e.g. `29:...`). A `"*"` entry
+    /// allows any DM sender. Empty = DMs blocked entirely.
     pub dm_allowed_users: Vec<String>,
 }
 
