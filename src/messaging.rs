@@ -1,4 +1,4 @@
-//! Messaging adapters (Discord, Slack, Telegram, Twitch, Signal, Email, Webhook, Portal, Mattermost).
+//! Messaging adapters (Discord, Slack, Telegram, Twitch, Signal, Email, Webhook, Portal, Mattermost, Teams).
 
 pub mod discord;
 pub mod email;
@@ -8,6 +8,7 @@ pub mod portal;
 pub mod signal;
 pub mod slack;
 pub mod target;
+pub mod teams;
 pub mod telegram;
 pub mod traits;
 pub mod twitch;

@@ -336,6 +336,16 @@ fn extract_platform_meta(
                 }
             }
         }
+        "teams" => {
+            // Store service URL and conversation type; teams_conversation_id is intentionally
+            // omitted so that resolve_broadcast_target always uses its prefix-stripping fallback,
+            // which correctly preserves the `:instance` suffix for named-instance channels.
+            for key in ["teams_service_url", "teams_conversation_type"] {
+                if let Some(value) = metadata.get(key) {
+                    meta.insert(key.to_string(), value.clone());
+                }
+            }
+        }
         _ => {}
     }
 
@@ -416,6 +426,49 @@ mod tests {
         assert!(
             all.iter()
                 .any(|c| c.id == "archived-channel" && !c.is_active)
+        );
+    }
+
+    #[test]
+    fn extract_platform_meta_teams_stores_service_url_and_conversation_type() {
+        let metadata: std::collections::HashMap<String, serde_json::Value> = [
+            (
+                "teams_service_url".to_string(),
+                serde_json::Value::String("https://smba.trafficmanager.net/amer/".into()),
+            ),
+            (
+                "teams_conversation_type".to_string(),
+                serde_json::Value::String("channel".into()),
+            ),
+            (
+                "teams_conversation_id".to_string(),
+                serde_json::Value::String("19:abc123@thread.tacv2".into()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let result =
+            extract_platform_meta("teams", &metadata).expect("teams metadata should produce Some");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result should be valid JSON");
+
+        assert_eq!(
+            parsed.get("teams_service_url").and_then(|v| v.as_str()),
+            Some("https://smba.trafficmanager.net/amer/")
+        );
+        assert_eq!(
+            parsed
+                .get("teams_conversation_type")
+                .and_then(|v| v.as_str()),
+            Some("channel")
+        );
+        // teams_conversation_id is intentionally not stored — resolve_broadcast_target
+        // uses prefix-stripping which handles named instances correctly.
+        assert!(
+            parsed.get("teams_conversation_id").is_none(),
+            "teams_conversation_id must not be stored in platform_meta"
         );
     }
 

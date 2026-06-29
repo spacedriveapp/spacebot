@@ -1,6 +1,7 @@
 use super::state::ApiState;
 
 use axum::Json;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,13 @@ pub(super) struct InstanceCredentials {
     mattermost_base_url: Option<String>,
     #[serde(default)]
     mattermost_token: Option<String>,
+    // Teams credentials
+    #[serde(default)]
+    teams_app_id: Option<String>,
+    #[serde(default)]
+    teams_client_secret: Option<String>,
+    #[serde(default)]
+    teams_tenant_id: Option<String>,
     // Signal credentials
     #[serde(default)]
     signal_http_url: Option<String>,
@@ -789,6 +797,47 @@ pub(super) async fn messaging_status(
                     PlatformStatus {
                         configured: has_url && has_token,
                         enabled: has_url && has_token && enabled,
+                    }
+                })
+                .unwrap_or(PlatformStatus {
+                    configured: false,
+                    enabled: false,
+                });
+
+            // Teams status (single-instance only in v1)
+            let _teams_status = doc
+                .get("messaging")
+                .and_then(|m| m.get("teams"))
+                .map(|t| {
+                    let has_app_id = t
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let has_client_secret = t
+                        .get("client_secret")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let has_tenant_id = t
+                        .get("tenant_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let enabled = t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let configured = has_app_id && has_client_secret && has_tenant_id;
+
+                    if configured {
+                        push_instance_status(
+                            &mut instances,
+                            bindings,
+                            "teams",
+                            None,
+                            true,
+                            enabled,
+                        );
+                    }
+
+                    PlatformStatus {
+                        configured,
+                        enabled: configured && enabled,
                     }
                 })
                 .unwrap_or(PlatformStatus {
@@ -1559,6 +1608,41 @@ pub(super) async fn toggle_platform(
                         }
                     }
                 }
+                "teams" => {
+                    if let Some(teams_config) = &new_config.messaging.teams
+                        && !teams_config.app_id.is_empty()
+                        && !teams_config.client_secret.is_empty()
+                        && !teams_config.tenant_id.is_empty()
+                    {
+                        let permissions = {
+                            let perms = crate::config::TeamsPermissions::from_config(
+                                teams_config,
+                                &new_config.bindings,
+                            );
+                            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                        };
+                        let instance_dir = state.instance_dir.load();
+                        match crate::messaging::teams::build_teams_adapter(
+                            "teams",
+                            &teams_config.app_id,
+                            &teams_config.client_secret,
+                            &teams_config.tenant_id,
+                            teams_config.port,
+                            &teams_config.bind,
+                            permissions,
+                            &instance_dir,
+                        ) {
+                            Ok(adapter) => {
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, "failed to start teams adapter on toggle");
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "failed to build teams adapter on toggle");
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1627,7 +1711,15 @@ pub(super) async fn create_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal"
+        "discord"
+            | "slack"
+            | "telegram"
+            | "twitch"
+            | "email"
+            | "webhook"
+            | "mattermost"
+            | "signal"
+            | "teams"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1669,6 +1761,14 @@ pub(super) async fn create_messaging_instance(
                 ),
             }));
         }
+    }
+
+    // Teams v1: single bot only — named instances not supported yet
+    if platform.as_str() == "teams" && request.name.is_some() {
+        return Ok(Json(MessagingInstanceActionResponse {
+            success: false,
+            message: "Teams supports a single bot in this version; named instances are not available yet.".to_string(),
+        }));
     }
 
     let config_path = state.config_path.read().await.clone();
@@ -1840,6 +1940,25 @@ pub(super) async fn create_messaging_instance(
                             // Omitted - preserve existing value by doing nothing
                         }
                     }
+                }
+                "teams" => {
+                    let app_id = credentials.teams_app_id.as_deref().unwrap_or("").trim();
+                    let client_secret = credentials
+                        .teams_client_secret
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim();
+                    let tenant_id = credentials.teams_tenant_id.as_deref().unwrap_or("").trim();
+                    if app_id.is_empty() || client_secret.is_empty() || tenant_id.is_empty() {
+                        return Ok(Json(MessagingInstanceActionResponse {
+                            success: false,
+                            message: "App ID, client secret, and tenant ID are all required"
+                                .to_string(),
+                        }));
+                    }
+                    platform_table["app_id"] = toml_edit::value(app_id);
+                    platform_table["client_secret"] = toml_edit::value(client_secret);
+                    platform_table["tenant_id"] = toml_edit::value(tenant_id);
                 }
                 _ => {}
             }
@@ -2080,7 +2199,15 @@ pub(super) async fn delete_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal"
+        "discord"
+            | "slack"
+            | "telegram"
+            | "twitch"
+            | "email"
+            | "webhook"
+            | "mattermost"
+            | "signal"
+            | "teams"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -2192,6 +2319,12 @@ pub(super) async fn delete_messaging_instance(
                     table.remove("group_allowed_users");
                     table.remove("ignore_stories");
                 }
+                "teams" => {
+                    table.remove("app_id");
+                    table.remove("client_secret");
+                    table.remove("tenant_id");
+                    table.remove("dm_allowed_users");
+                }
                 _ => {}
             }
         }
@@ -2298,6 +2431,60 @@ pub(super) async fn delete_messaging_instance(
         success: true,
         message: format!("{runtime_key} instance deleted"),
     }))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct TeamsPackageQuery {
+    /// The bot App (client) ID — becomes `bots[].botId` in the manifest.
+    app_id: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/messaging/teams/app-package",
+    params(("app_id" = String, Query, description = "Bot App (client) ID")),
+    responses(
+        (status = 200, description = "Teams app package (zip)", content_type = "application/zip"),
+        (status = 400, description = "Missing or invalid app_id"),
+        (status = 500, description = "Failed to build package"),
+    ),
+    tag = "messaging",
+)]
+pub(super) async fn download_teams_app_package(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<TeamsPackageQuery>,
+) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
+    let app_id = query.app_id.trim();
+    if app_id.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "app_id is required".into(),
+        ));
+    }
+
+    let instance_dir = state.instance_dir.load();
+    // `&instance_dir` (a `&Guard<Arc<PathBuf>>`) coerces to `&Path` via deref,
+    // matching how messaging.rs already uses the guard (it calls `.join()` on it).
+    // Do NOT use `.as_ref()` here — it's ambiguous and won't coerce to `&Path`.
+    let manifest_id = crate::api::teams_package::load_or_create_manifest_id(&instance_dir);
+
+    let bytes =
+        crate::api::teams_package::build_app_package(app_id, &manifest_id).map_err(|error| {
+            tracing::error!(%error, "failed to build teams app package");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build teams app package".into(),
+            )
+        })?;
+
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "application/zip"),
+        (
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=spacebot-teams-app.zip",
+        ),
+    ];
+    Ok((headers, bytes))
 }
 
 #[cfg(test)]

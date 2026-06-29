@@ -685,7 +685,7 @@ export interface paths {
         };
         /**
          * Serve a saved attachment file.
-         * @description Streams the file from disk with the correct Content-Type.
+         * @description Reads the file from disk with the correct Content-Type.
          *     Use `?download=true` to force a download prompt.
          *     Use `?thumbnail=true` to request a thumbnail (currently serves full file).
          */
@@ -730,6 +730,28 @@ export interface paths {
          *     Returns an attachment ID to include in the subsequent message send request.
          */
         post: operations["upload_attachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{agent_id}/wake": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manually wake a (typically dormant) agent.
+         * @description Fires the same wake path that `send_agent_message`, cron, and other
+         *     trigger sources use. Useful for debugging dormant deployments and
+         *     recovering an agent stuck on a missed trigger.
+         */
+        post: operations["wake_agent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1409,6 +1431,22 @@ export interface paths {
         };
         /** Get which messaging platforms are configured and enabled. */
         get: operations["messaging_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messaging/teams/app-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["download_teams_app_package"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3160,6 +3198,11 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Scope this secret belongs to. Older exports without a `scope` field
+             *     import as `InstanceShared` so existing backups continue to load.
+             */
+            scope?: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
             value: string;
@@ -3272,6 +3315,9 @@ export interface components {
             signal_http_url?: string | null;
             slack_app_token?: string | null;
             slack_bot_token?: string | null;
+            teams_app_id?: string | null;
+            teams_client_secret?: string | null;
+            teams_tenant_id?: string | null;
             telegram_token?: string | null;
             twitch_client_id?: string | null;
             twitch_client_secret?: string | null;
@@ -3923,11 +3969,35 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Visibility scope. `InstanceShared` is the default for system /
+             *     admin-managed secrets; `Agent` rows are per-agent tool credentials.
+             */
+            scope: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
         };
         SecretListResponse: {
             secrets: components["schemas"]["SecretListItem"][];
+        };
+        /**
+         * @description Secret scope determines visibility across agents on a shared instance.
+         *
+         *     Orthogonal to `SecretCategory` — `System` secrets are always
+         *     `InstanceShared` (singleton consumers like `LlmManager` /
+         *     `MessagingManager`); `Tool` secrets default to `Agent(...)` for
+         *     agentic-backend deployments where each tenant's worker subprocess must
+         *     not see another tenant's credentials, but can also be `InstanceShared`
+         *     when a single-tenant deployment legitimately wants every agent to share
+         *     the same `Tool` secret (e.g. one repo-wide `GH_TOKEN`).
+         */
+        SecretScope: {
+            /** @enum {string} */
+            kind: "instance_shared";
+        } | {
+            agent_id: string;
+            /** @enum {string} */
+            kind: "agent";
         };
         SetChannelArchiveRequest: {
             agent_id: string;
@@ -4079,6 +4149,8 @@ export interface components {
             /** Format: int64 */
             reasoning: number;
         };
+        /** @enum {string} */
+        ToolResultStatus: "pending" | "final" | "waiting_for_input";
         ToolsResponse: {
             binaries: components["schemas"]["BinaryEntry"][];
             tools_bin: string;
@@ -4133,7 +4205,10 @@ export interface components {
             type: "system_text";
         } | {
             call_id: string;
+            /** @description Accumulated streaming output for live display. Cleared when tool completes. */
+            live_output?: string | null;
             name: string;
+            status?: components["schemas"]["ToolResultStatus"];
             text: string;
             /** @enum {string} */
             type: "tool_result";
@@ -4339,6 +4414,11 @@ export interface components {
             reasoning_tokens: number;
             /** Format: int64 */
             request_count: number;
+        };
+        WakeAgentResponse: {
+            agent_id: string;
+            fired: boolean;
+            message: string;
         };
         WarmupSection: {
             eager_embedding_load: boolean;
@@ -6483,6 +6563,35 @@ export interface operations {
             };
         };
     };
+    wake_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WakeAgentResponse"];
+                };
+            };
+            /** @description Wake manager not running */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_bindings: {
         parameters: {
             query?: {
@@ -8071,6 +8180,43 @@ export interface operations {
                 };
             };
             /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    download_teams_app_package: {
+        parameters: {
+            query: {
+                /** @description Bot App (client) ID */
+                app_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Teams app package (zip) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/zip": unknown;
+                };
+            };
+            /** @description Missing or invalid app_id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Failed to build package */
             500: {
                 headers: {
                     [name: string]: unknown;

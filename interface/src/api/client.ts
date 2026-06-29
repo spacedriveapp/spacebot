@@ -2163,6 +2163,11 @@ export const api = {
 		);
 	},
 
+	teamsAppPackageUrl: (appId: string) => {
+		const params = new URLSearchParams({ app_id: appId });
+		return `${getApiBase()}/messaging/teams/app-package?${params.toString()}`;
+	},
+
 	attachmentUrl: (agentId: string, attachmentId: string, opts?: { thumbnail?: boolean; download?: boolean }) => {
 		const params = new URLSearchParams();
 		if (opts?.thumbnail) params.set("thumbnail", "true");
