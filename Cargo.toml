@@ -156,6 +156,9 @@ jsonwebtoken = "9.3"
 zip = "2"
 tempfile = "3"
 
+# Icon resizing for the generated Teams app package (already in the lockfile transitively).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Prometheus metrics (optional, behind "metrics" feature)
 prometheus = { version = "0.13", optional = true }
 pdf-extract = "0.10.0"

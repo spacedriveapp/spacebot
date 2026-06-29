@@ -32,6 +32,7 @@ pub(crate) mod ssh;
 mod state;
 mod system;
 mod tasks;
+mod teams_package;
 mod tools;
 mod usage;
 mod wiki;
