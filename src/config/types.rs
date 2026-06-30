@@ -1980,7 +1980,7 @@ pub(super) struct AdapterValidationState {
 pub(super) fn is_named_adapter_platform(platform: &str) -> bool {
     matches!(
         platform,
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "signal" | "mattermost"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "signal" | "mattermost" | "teams"
     )
 }
 
@@ -2282,6 +2282,34 @@ pub(super) fn build_adapter_validation_states(
         );
     }
 
+    if let Some(teams) = &messaging.teams {
+        validate_instance_names(
+            "teams",
+            teams
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let named_instances: std::collections::HashSet<String> = teams
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = teams.enabled
+            && !teams.app_id.trim().is_empty()
+            && !teams.client_secret.trim().is_empty()
+            && !teams.tenant_id.trim().is_empty();
+        validate_runtime_keys("teams", default_present, &named_instances)?;
+        states.insert(
+            "teams",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
     Ok(states)
 }
 
@@ -2473,6 +2501,7 @@ pub struct MessagingConfig {
     pub twitch: Option<TwitchConfig>,
     pub signal: Option<SignalConfig>,
     pub mattermost: Option<MattermostConfig>,
+    pub teams: Option<TeamsConfig>,
 }
 
 #[derive(Clone)]
@@ -3144,6 +3173,115 @@ impl std::fmt::Debug for MattermostInstanceConfig {
             .field("dm_allowed_users", &self.dm_allowed_users)
             .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Teams config
+// ---------------------------------------------------------------------------
+
+/// Microsoft Teams messaging adapter configuration.
+///
+/// Teams uses the Bot Framework webhook model: the adapter opens an HTTP server
+/// (`bind`:`port`) that receives Activity payloads from the Bot Framework
+/// service. `app_id`, `client_secret`, and `tenant_id` are used for OAuth token
+/// validation and proactive messaging.
+#[derive(Clone)]
+pub struct TeamsConfig {
+    pub enabled: bool,
+    /// Azure AD application (client) ID for the bot registration.
+    pub app_id: String,
+    /// Azure AD application client secret. Redacted in Debug output.
+    pub client_secret: String,
+    /// Azure AD tenant ID. Use "common" for multi-tenant bots.
+    pub tenant_id: String,
+    /// Port for the Teams webhook listener (default 3979).
+    pub port: u16,
+    /// Address to bind the Teams webhook listener on (default "0.0.0.0").
+    pub bind: String,
+    /// Additional named Teams bot instances for this platform.
+    pub instances: Vec<TeamsInstanceConfig>,
+    /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
+    pub dm_allowed_users: Vec<String>,
+}
+
+/// A single named Teams bot instance (multi-tenant / multi-app deployments).
+#[derive(Clone)]
+pub struct TeamsInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub app_id: String,
+    /// Azure AD application client secret. Redacted in Debug output.
+    pub client_secret: String,
+    pub tenant_id: String,
+    /// User IDs allowed to DM this bot instance.
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl std::fmt::Debug for TeamsInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeamsInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("app_id", &self.app_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("tenant_id", &self.tenant_id)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TeamsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeamsConfig")
+            .field("enabled", &self.enabled)
+            .field("app_id", &self.app_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("tenant_id", &self.tenant_id)
+            .field("port", &self.port)
+            .field("bind", &self.bind)
+            .field("instances", &self.instances)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+impl SystemSecrets for TeamsConfig {
+    fn section() -> &'static str {
+        "teams"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "client_secret",
+                secret_name: "TEAMS_CLIENT_SECRET",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TEAMS",
+                    field_suffix: "CLIENT_SECRET",
+                }),
+            },
+            SecretField {
+                toml_key: "app_id",
+                secret_name: "TEAMS_APP_ID",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TEAMS",
+                    field_suffix: "APP_ID",
+                }),
+            },
+            SecretField {
+                toml_key: "tenant_id",
+                secret_name: "TEAMS_TENANT_ID",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TEAMS",
+                    field_suffix: "TENANT_ID",
+                }),
+            },
+        ]
     }
 }
 

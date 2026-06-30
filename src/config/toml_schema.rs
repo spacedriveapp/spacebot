@@ -534,6 +534,8 @@ pub(super) struct TomlMessagingConfig {
     pub(super) signal: Option<TomlSignalConfig>,
     #[serde(default)]
     pub(super) mattermost: Option<TomlMattermostConfig>,
+    #[serde(default)]
+    pub(super) teams: Option<TomlTeamsConfig>,
 }
 
 #[derive(Deserialize)]
@@ -865,4 +867,41 @@ pub(super) struct TomlMattermostInstanceConfig {
 
 pub(super) fn default_mattermost_max_attachment_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlTeamsConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) app_id: Option<String>,
+    pub(super) client_secret: Option<String>,
+    pub(super) tenant_id: Option<String>,
+    #[serde(default = "default_teams_port")]
+    pub(super) port: u16,
+    #[serde(default = "default_teams_bind")]
+    pub(super) bind: String,
+    #[serde(default)]
+    pub(super) instances: Vec<TomlTeamsInstanceConfig>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlTeamsInstanceConfig {
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) app_id: Option<String>,
+    pub(super) client_secret: Option<String>,
+    pub(super) tenant_id: Option<String>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+}
+
+pub(super) fn default_teams_port() -> u16 {
+    3979
+}
+
+pub(super) fn default_teams_bind() -> String {
+    "0.0.0.0".into()
 }

@@ -1,0 +1,107 @@
+---
+title: Teams Setup
+description: Connect Spacebot to Microsoft Teams.
+---
+
+# Teams Setup
+
+Connect Spacebot to Microsoft Teams as a bot. Teams talks to your bot over the Azure Bot Service, so this takes a bit more setup than the other channels: an Entra (Azure AD) app registration, an Azure Bot resource, a Teams app package, and a public HTTPS endpoint Microsoft can reach.
+
+You need three values from Azure — an **App ID**, a **Client Secret**, and a **Tenant ID** — plus a public URL that forwards to Spacebot.
+
+<Callout type="warn">
+Teams requires a **public HTTPS endpoint**. The bot does not connect outbound like Slack; the Azure Bot Service delivers messages by POSTing to a URL you register. A localhost bind is not reachable. Put Spacebot behind a reverse proxy (Caddy, nginx) or a tunnel (cloudflared) that terminates TLS and forwards to the bot's port.
+</Callout>
+
+## Step 1: Register an Entra app
+
+In the [Azure portal](https://portal.azure.com), go to **Microsoft Entra ID** → **App registrations** → **New registration**.
+
+Name it (e.g. "Spacebot"), pick the supported account types for your org, and register.
+
+From the app's **Overview**, copy the **Application (client) ID** and the **Directory (tenant) ID**.
+
+Then go to **Certificates & secrets** → **New client secret**, create one, and copy its **Value** immediately (it is shown only once). This is your **Client Secret**.
+
+## Step 2: Create the Azure Bot
+
+Create an **Azure Bot** resource (the free **F0** SKU is enough). Point it at the app you just registered (use the existing App ID rather than creating a new identity).
+
+In the bot's **Configuration**, set the **Messaging endpoint** to your public URL with the `/api/messages` path:
+
+```
+https://your-public-host/api/messages
+```
+
+Then open **Channels** and add the **Microsoft Teams** channel.
+
+## Step 3: Build and install the Teams app
+
+Teams needs an app package (a zip with a `manifest.json` and two icons) to surface the bot to users.
+
+<Callout type="info">
+The manifest `id` (the Teams app id) must be its **own** GUID, distinct from the bot's App ID. `bots[].botId` is the App ID from Step 1. Scopes are lowercase (`personal`, `team`, `groupchat`), and `validDomains` plus an `accentColor` are required.
+</Callout>
+
+Upload the package in Teams (**Apps** → **Manage your apps** → **Upload an app**). Most tenants require admin approval: approve it in the **Teams admin center** under **Manage apps**, where you can also restrict who may install it.
+
+## Step 4: Configure Spacebot
+
+Add a `[messaging.teams]` block to your config. Keep the client secret out of the file by referencing an environment variable.
+
+```toml
+[messaging.teams]
+enabled = true
+
+# App ID and Tenant ID from Step 1 (not secret).
+app_id    = "00000000-0000-0000-0000-000000000000"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+
+# Reference the secret from the environment; never hardcode it.
+client_secret = "env:TEAMS_CLIENT_SECRET"
+
+# Inbound listener. The reverse proxy / tunnel forwards here.
+port = 3979
+bind = "0.0.0.0"
+
+# Teams user IDs allowed to DM the bot. "*" allows everyone.
+dm_allowed_users = ["*"]
+
+[[bindings]]
+agent_id = "main"
+channel  = "teams"
+```
+
+Start Spacebot with the secret in the environment:
+
+```bash
+TEAMS_CLIENT_SECRET="your-secret-value" spacebot start
+```
+
+## DM permissions
+
+Channel and group messages are open: the bot replies wherever it is @mentioned. Direct messages are **fail-closed** — an empty `dm_allowed_users` blocks every DM.
+
+- To allow specific people, list their Teams user IDs (the `29:...` MRI strings).
+- To allow everyone (org-wide deployments), set `dm_allowed_users = ["*"]`.
+
+<Callout type="info">
+You usually do not know a user's `29:...` MRI up front. The simplest path is to **@mention the bot in a channel** (channel messages are not gated), or set the `"*"` wildcard. To allowlist one person, send a DM once (it is dropped), read the dropped `sender_id` from the logs, and add that value.
+</Callout>
+
+## What works
+
+| Capability | Notes |
+|------------|-------|
+| Text replies | Plain text in DMs, channels, and group chats |
+| @mentions | The bot responds when @mentioned in a channel or group |
+| Adaptive Cards | Structured cards rendered from rich replies |
+| Typing indicator | Shown while the bot is working |
+| Inbound files and images | Delivered to the agent (personal scope) |
+| Buttons | Adaptive Card buttons; a click comes back to the agent |
+
+## Limitations
+
+- **One Teams bot per instance.** A single default `[messaging.teams]` adapter is supported. Named multi-bot instances are not yet available.
+- **Files are personal-scope.** Inbound file attachments work in 1:1 chats; channel files require Microsoft Graph and are out of scope.
+- **Rotate the client secret** before relying on it in production, and keep it in the environment rather than the config file.

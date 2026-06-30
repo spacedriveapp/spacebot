@@ -1413,7 +1413,7 @@ pub trait SystemSecrets {
 pub fn system_secret_registry() -> Vec<&'static SecretField> {
     use crate::config::{
         DefaultsConfig, DiscordConfig, EmailConfig, LlmConfig, MattermostConfig, SignalConfig,
-        SlackConfig, TelegramConfig, TwitchConfig,
+        SlackConfig, TeamsConfig, TelegramConfig, TwitchConfig,
     };
 
     let mut fields = Vec::new();
@@ -1429,6 +1429,7 @@ pub fn system_secret_registry() -> Vec<&'static SecretField> {
     fields.extend(EmailConfig::secret_fields());
     fields.extend(SignalConfig::secret_fields());
     fields.extend(MattermostConfig::secret_fields());
+    fields.extend(TeamsConfig::secret_fields());
     fields
 }
 
@@ -2095,6 +2096,31 @@ mod tests {
         assert!(
             has_secret("EMAIL_IMAP_PASSWORD"),
             "missing EMAIL_IMAP_PASSWORD"
+        );
+
+        // Teams adapter secrets must be present and auto-categorised as System
+        // (absence would allow TEAMS_CLIENT_SECRET to fall through to SecretCategory::Tool
+        // and be injected into worker prompts).
+        assert!(
+            has_secret("TEAMS_CLIENT_SECRET"),
+            "missing TEAMS_CLIENT_SECRET"
+        );
+        assert!(has_secret("TEAMS_APP_ID"), "missing TEAMS_APP_ID");
+        assert!(has_secret("TEAMS_TENANT_ID"), "missing TEAMS_TENANT_ID");
+        assert_eq!(
+            auto_categorize("TEAMS_CLIENT_SECRET"),
+            SecretCategory::System,
+            "TEAMS_CLIENT_SECRET must be System, not Tool"
+        );
+        assert_eq!(
+            auto_categorize("TEAMS_APP_ID"),
+            SecretCategory::System,
+            "TEAMS_APP_ID must be System, not Tool"
+        );
+        assert_eq!(
+            auto_categorize("TEAMS_TENANT_ID"),
+            SecretCategory::System,
+            "TEAMS_TENANT_ID must be System, not Tool"
         );
 
         // Adapter fields have instance patterns, LLM fields don't.

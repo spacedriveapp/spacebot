@@ -3886,6 +3886,13 @@ fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (
             .get("twitch_mentions_or_replies_to_bot")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        "teams" => {
+            message
+                .metadata
+                .get("teams_mentioned")
+                .and_then(|v| v.as_str())
+                == Some("true")
+        }
         _ => false,
     };
     let invoked_by_reply = match message.source.as_str() {
@@ -4451,6 +4458,36 @@ mod tests {
                 replied_flag: false,
             }
         ));
+    }
+
+    #[test]
+    fn teams_mention_metadata_true_string_yields_invoked_by_mention() {
+        let message = inbound_message(
+            "teams",
+            &[("teams_mentioned", serde_json::Value::String("true".into()))],
+            "hey bot",
+        );
+
+        let (invoked_by_command, invoked_by_mention, invoked_by_reply) =
+            compute_listen_mode_invocation(&message, "hey bot");
+
+        assert!(!invoked_by_command);
+        assert!(invoked_by_mention);
+        assert!(!invoked_by_reply);
+    }
+
+    #[test]
+    fn teams_mention_metadata_false_string_does_not_invoke() {
+        let message = inbound_message(
+            "teams",
+            &[("teams_mentioned", serde_json::Value::String("false".into()))],
+            "hey bot",
+        );
+
+        let (_invoked_by_command, invoked_by_mention, _invoked_by_reply) =
+            compute_listen_mode_invocation(&message, "hey bot");
+
+        assert!(!invoked_by_mention);
     }
 
     #[test]

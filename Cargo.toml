@@ -149,6 +149,9 @@ bollard = "0.18"
 # Semver parsing (for update version comparison)
 semver = "1"
 
+# JWT validation for inbound Bot Framework requests (ring-based, no openssl)
+jsonwebtoken = "9.3"
+
 # Skill installation
 zip = "2"
 tempfile = "3"
