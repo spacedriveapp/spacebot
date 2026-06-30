@@ -1081,6 +1081,23 @@ fn strip_runtime_prefix<'a>(routing_key: &'a str, runtime_key: &str) -> &'a str 
         .unwrap_or(routing_key)
 }
 
+/// Reconstruct the runtime-prefixed routing key for an outbound broadcast.
+///
+/// `resolve_broadcast_target` yields the *bare* Microsoft conversation id
+/// (e.g. `a:1-abc`), but the `service_urls` map — and inbound capture — key on
+/// the runtime-prefixed conversation id (e.g. `teams:a:1-abc`). Re-apply the
+/// prefix so the serviceUrl lookup hits; `send_activity` strips it again via
+/// [`strip_runtime_prefix`] for the Bot Connector URL. Idempotent if the target
+/// already carries the prefix.
+fn broadcast_routing_key(runtime_key: &str, target: &str) -> String {
+    let prefix = format!("{runtime_key}:");
+    if target.starts_with(&prefix) {
+        target.to_string()
+    } else {
+        format!("{prefix}{target}")
+    }
+}
+
 /// POST a fully-formed activity body to the Bot Connector.
 ///
 /// `service_url` MUST already be SSRF-validated by the caller
@@ -1539,7 +1556,8 @@ impl Messaging for TeamsAdapter {
         };
 
         let body = serde_json::json!({ "type": "message", "text": text });
-        self.send_activity(target, None, body).await
+        let routing_key = broadcast_routing_key(&self.runtime_key, target);
+        self.send_activity(&routing_key, None, body).await
     }
 
     async fn health_check(&self) -> crate::Result<()> {
@@ -1816,6 +1834,20 @@ vIyJeH8/89a9IXZXlMIA9KH9
         assert!(
             err.is_err(),
             "expired token should be rejected; got: {err:?}"
+        );
+    }
+
+    /// Regression: broadcast must key the serviceUrl lookup on the
+    /// runtime-prefixed conversation id (matching inbound capture), even though
+    /// `resolve_broadcast_target` hands it the bare id. Cross-channel sends to
+    /// Teams failed with "no serviceUrl for routing key" before this.
+    #[test]
+    fn broadcast_routing_key_prefixes_bare_conversation_id() {
+        assert_eq!(broadcast_routing_key("teams", "a:1-abc"), "teams:a:1-abc");
+        // Idempotent when the prefix is already present.
+        assert_eq!(
+            broadcast_routing_key("teams", "teams:a:1-abc"),
+            "teams:a:1-abc"
         );
     }
 
