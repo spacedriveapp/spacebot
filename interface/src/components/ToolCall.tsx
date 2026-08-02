@@ -2,17 +2,15 @@ import {useState} from "react";
 import {cx} from "class-variance-authority";
 import type {OpenCodePart} from "@/api/client";
 import type { TranscriptStep as SchemaTranscriptStep } from "@/api/types";
+import type { components } from "@/api/schema";
 
-// Extended TranscriptStep with live_output for streaming shell output
-type ToolResultStatus = "pending" | "final" | "waiting_for_input";
+type ToolResultStatus = components["schemas"]["ToolResultStatus"];
 
-type ExtendedTranscriptStep = SchemaTranscriptStep & {
-	live_output?: string;
-	status?: ToolResultStatus;
-};
-
-// Use the extended type for pairing
-type TranscriptStep = ExtendedTranscriptStep;
+// `live_output` and `status` used to be declared here as a local augmentation
+// because the generated schema predated the streaming-shell API. The schema now
+// carries both, so the augmentation is gone — keeping it would contradict the
+// generated types (`string | null` vs `string | undefined`) and break assignment.
+type TranscriptStep = SchemaTranscriptStep;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,15 +59,16 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 		{name: string; text: string; status: ToolResultStatus; liveOutput?: string}
 	>();
 
-	// First pass: index all tool_result steps by call_id
+	// First pass: index all tool_result steps by call_id.
+	// `live_output` arrives as `string | null` from the API; normalize the null
+	// away here so downstream consumers only deal with `string | undefined`.
 	for (const step of steps) {
 		if (step.type === "tool_result") {
-			const liveOutput = step.live_output;
 			resultsById.set(step.call_id, {
 				name: step.name,
 				text: step.text,
 				status: step.status ?? "final",
-				liveOutput,
+				liveOutput: step.live_output ?? undefined,
 			});
 		}
 	}

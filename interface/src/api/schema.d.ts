@@ -685,7 +685,7 @@ export interface paths {
         };
         /**
          * Serve a saved attachment file.
-         * @description Streams the file from disk with the correct Content-Type.
+         * @description Reads the file from disk with the correct Content-Type.
          *     Use `?download=true` to force a download prompt.
          *     Use `?thumbnail=true` to request a thumbnail (currently serves full file).
          */
@@ -730,6 +730,28 @@ export interface paths {
          *     Returns an attachment ID to include in the subsequent message send request.
          */
         post: operations["upload_attachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{agent_id}/wake": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manually wake a (typically dormant) agent.
+         * @description Fires the same wake path that `send_agent_message`, cron, and other
+         *     trigger sources use. Useful for debugging dormant deployments and
+         *     recovering an agent stuck on a missed trigger.
+         */
+        post: operations["wake_agent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2201,6 +2223,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/retry` — clear the failure budget and requeue.
+         * @description A human looked at the task, so the budget starts over rather than
+         *     immediately re-parking it on the next failure.
+         */
+        post: operations["retry_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/runs` — the per-attempt execution log for a task. */
+        get: operations["list_task_runs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tools": {
         parameters: {
             query?: never;
@@ -2992,9 +3052,15 @@ export interface components {
             /** @description Agent that owns (created) this task. */
             owner_agent_id: string;
             priority?: string | null;
+            /** @description Project this task acts on. */
+            project_id?: string | null;
+            /** @description Repo within the project. A project holds many repos. */
+            repo_id?: string | null;
             source_memory_id?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][];
             title: string;
+            /** @description Worktree to execute in. */
+            worktree_id?: string | null;
         };
         CreateWorktreeRequest: {
             branch: string;
@@ -3160,6 +3226,11 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Scope this secret belongs to. Older exports without a `scope` field
+             *     import as `InstanceShared` so existing backups continue to load.
+             */
+            scope?: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
             value: string;
@@ -3923,11 +3994,35 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Visibility scope. `InstanceShared` is the default for system /
+             *     admin-managed secrets; `Agent` rows are per-agent tool credentials.
+             */
+            scope: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
         };
         SecretListResponse: {
             secrets: components["schemas"]["SecretListItem"][];
+        };
+        /**
+         * @description Secret scope determines visibility across agents on a shared instance.
+         *
+         *     Orthogonal to `SecretCategory` — `System` secrets are always
+         *     `InstanceShared` (singleton consumers like `LlmManager` /
+         *     `MessagingManager`); `Tool` secrets default to `Agent(...)` for
+         *     agentic-backend deployments where each tenant's worker subprocess must
+         *     not see another tenant's credentials, but can also be `InstanceShared`
+         *     when a single-tenant deployment legitimately wants every agent to share
+         *     the same `Tool` secret (e.g. one repo-wide `GH_TOKEN`).
+         */
+        SecretScope: {
+            /** @enum {string} */
+            kind: "instance_shared";
+        } | {
+            agent_id: string;
+            /** @enum {string} */
+            kind: "agent";
         };
         SetChannelArchiveRequest: {
             agent_id: string;
@@ -3981,13 +4076,37 @@ export interface components {
             approved_by?: string | null;
             assigned_agent_id: string;
             completed_at?: string | null;
+            /**
+             * Format: int64
+             * @description Failures since the last success. Reset to 0 on completion and on an
+             *     operator-initiated retry.
+             */
+            consecutive_failures: number;
             created_at: string;
             created_by: string;
             description?: string | null;
             id: string;
+            /**
+             * @description Text of the most recent failure, kept on the task so the board can
+             *     show why it is parked without joining `task_runs`.
+             */
+            last_error?: string | null;
+            /**
+             * Format: int64
+             * @description Per-task override of [`DEFAULT_FAILURE_LIMIT`].
+             */
+            max_retries?: number | null;
             metadata: unknown;
             owner_agent_id: string;
             priority: components["schemas"]["TaskPriority"];
+            /** @description Project this task acts on, if any. */
+            project_id?: string | null;
+            /**
+             * @description Specific repo within the project. A project holds many repos, so this is
+             *     what makes a task about `api-gateway` distinguishable from one about
+             *     `web` in the same project.
+             */
+            repo_id?: string | null;
             source_memory_id?: string | null;
             status: components["schemas"]["TaskStatus"];
             subtasks: components["schemas"]["TaskSubtask"][];
@@ -3996,6 +4115,11 @@ export interface components {
             title: string;
             updated_at: string;
             worker_id?: string | null;
+            /**
+             * @description Worktree to execute in. When set, the worker's working directory is
+             *     resolved from it rather than from the repo or project root.
+             */
+            worktree_id?: string | null;
         };
         TaskActionResponse: {
             message: string;
@@ -4009,8 +4133,30 @@ export interface components {
         TaskResponse: {
             task: components["schemas"]["Task"];
         };
+        /** @description A single execution attempt against a task. */
+        TaskRun: {
+            /** Format: int64 */
+            attempt: number;
+            ended_at?: string | null;
+            error?: string | null;
+            id: string;
+            outcome?: null | components["schemas"]["TaskRunOutcome"];
+            started_at: string;
+            summary?: string | null;
+            /** Format: int64 */
+            task_number: number;
+            worker_id?: string | null;
+        };
+        /**
+         * @description Outcome of a single task execution attempt.
+         * @enum {string}
+         */
+        TaskRunOutcome: "completed" | "failed" | "timeout" | "cancelled" | "blocked" | "rate_limited";
+        TaskRunsResponse: {
+            runs: components["schemas"]["TaskRun"][];
+        };
         /** @enum {string} */
-        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
+        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "blocked" | "done";
         TaskSubtask: {
             completed: boolean;
             title: string;
@@ -4079,6 +4225,8 @@ export interface components {
             /** Format: int64 */
             reasoning: number;
         };
+        /** @enum {string} */
+        ToolResultStatus: "pending" | "final" | "waiting_for_input";
         ToolsResponse: {
             binaries: components["schemas"]["BinaryEntry"][];
             tools_bin: string;
@@ -4133,7 +4281,10 @@ export interface components {
             type: "system_text";
         } | {
             call_id: string;
+            /** @description Accumulated streaming output for live display. Cleared when tool completes. */
+            live_output?: string | null;
             name: string;
+            status?: components["schemas"]["ToolResultStatus"];
             text: string;
             /** @enum {string} */
             type: "tool_result";
@@ -4254,14 +4405,19 @@ export interface components {
         UpdateTaskRequest: {
             approved_by?: string | null;
             assigned_agent_id?: string | null;
+            /** @description Unbind the task from its project/repo/worktree entirely. */
+            clear_binding?: boolean;
             complete_subtask?: number | null;
             description?: string | null;
             metadata?: unknown;
             priority?: string | null;
+            project_id?: string | null;
+            repo_id?: string | null;
             status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][] | null;
             title?: string | null;
             worker_id?: string | null;
+            worktree_id?: string | null;
         };
         UploadSkillResponse: {
             installed: string[];
@@ -4339,6 +4495,11 @@ export interface components {
             reasoning_tokens: number;
             /** Format: int64 */
             request_count: number;
+        };
+        WakeAgentResponse: {
+            agent_id: string;
+            fired: boolean;
+            message: string;
         };
         WarmupSection: {
             eager_embedding_load: boolean;
@@ -6476,6 +6637,35 @@ export interface operations {
             };
             /** @description Internal server error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    wake_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WakeAgentResponse"];
+                };
+            };
+            /** @description Wake manager not running */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9914,6 +10104,71 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    retry_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRunsResponse"];
+                };
             };
             /** @description Task store not initialized */
             503: {
