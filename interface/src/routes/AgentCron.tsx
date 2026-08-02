@@ -114,7 +114,9 @@ function jobToFormData(job: CronJobWithStats): CronFormData {
 	};
 }
 
-function formDataToRequest(data: CronFormData): CreateCronRequest {
+function formDataToRequest(
+	data: CronFormData,
+): Omit<CreateCronRequest, "agent_id"> {
 	const active_start = data.active_start_hour
 		? parseInt(data.active_start_hour, 10)
 		: undefined;
@@ -225,7 +227,7 @@ export function AgentCron({agentId}: AgentCronProps) {
 	});
 
 	const saveMutation = useMutation({
-		mutationFn: (request: CreateCronRequest) =>
+		mutationFn: (request: Omit<CreateCronRequest, "agent_id">) =>
 			api.createCronJob(agentId, request),
 		onSuccess: () => {
 			queryClient.invalidateQueries({queryKey: ["cron-jobs", agentId]});

@@ -370,6 +370,9 @@ export type TaskSubtask = components["schemas"]["TaskSubtask"];
 export type TaskListResponse = components["schemas"]["TaskListResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
 export type TaskActionResponse = components["schemas"]["TaskActionResponse"];
+export type TaskRun = components["schemas"]["TaskRun"];
+export type TaskRunOutcome = components["schemas"]["TaskRunOutcome"];
+export type TaskRunsResponse = components["schemas"]["TaskRunsResponse"];
 
 // Requests
 export type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];
@@ -509,3 +512,32 @@ export type StorageStatus = components["schemas"]["StorageStatus"];
 // NOTE: Backup operations use raw binary data (zip/octet-stream), not JSON schema types:
 // - Backup export returns application/zip
 // - Backup restore accepts application/octet-stream
+
+// =============================================================================
+// Aliases consumed by client.ts
+// =============================================================================
+
+export type ActivityDay = components["schemas"]["ActivityDay"];
+export type ActivityResponse = components["schemas"]["ActivityResponse"];
+export type ActivityTotals = components["schemas"]["ActivityTotals"];
+export type Deployment = components["schemas"]["Deployment"];
+export type NotificationsResponse = components["schemas"]["NotificationsResponse"];
+export type PresetDefaults = components["schemas"]["PresetDefaults"];
+export type PresetMeta = components["schemas"]["PresetMeta"];
+export type ProcessTokens = components["schemas"]["ProcessTokens"];
+export type TokenSummary = components["schemas"]["TokenSummary"];
+export type UnreadCountResponse = components["schemas"]["UnreadCountResponse"];
+export type UpdateStatus = components["schemas"]["UpdateStatus"];
+export type UsageByModel = components["schemas"]["UsageByModel"];
+export type UsageResponse = components["schemas"]["UsageResponse"];
+export type UsageTotals = components["schemas"]["UsageTotals"];
+export type WikiHistoryResponse = components["schemas"]["WikiHistoryResponse"];
+export type WikiListResponse = components["schemas"]["WikiListResponse"];
+export type WikiPage = components["schemas"]["WikiPage"];
+export type WikiPageResponse = components["schemas"]["WikiPageResponse"];
+export type WikiPageSummary = components["schemas"]["WikiPageSummary"];
+export type WikiPageVersion = components["schemas"]["WikiPageVersion"];
+export type CreatePageRequest = components["schemas"]["CreatePageRequest"];
+export type EditPageRequest = components["schemas"]["EditPageRequest"];
+export type Notification = components["schemas"]["Notification"];
+export type SavedAttachmentMeta = components["schemas"]["SavedAttachmentMeta"];

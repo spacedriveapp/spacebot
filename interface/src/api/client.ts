@@ -289,24 +289,9 @@ export type ApiEvent =
 
 // -- Timeline types (discriminated union parts) --
 
-export interface AttachmentMeta {
-	id: string;
-	filename: string;
-	saved_filename: string;
-	mime_type: string;
-	size_bytes: number;
-}
+export type AttachmentMeta = Types.SavedAttachmentMeta;
 
-export interface TimelineMessage {
-	type: "message";
-	id: string;
-	role: "user" | "assistant";
-	sender_name: string | null;
-	sender_id: string | null;
-	content: string;
-	created_at: string;
-	attachments?: AttachmentMeta[];
-}
+export type TimelineMessage = Types.TimelineItem;
 
 export interface TimelineBranchRun {
 	type: "branch_run";
@@ -445,15 +430,7 @@ export interface PromptCaptureResponse {
 // --- Memory helper types (extended beyond schema) ---
 
 // Extended MemoryType with additional values not yet in schema
-export type MemoryType =
-	| "fact"
-	| "preference"
-	| "decision"
-	| "identity"
-	| "event"
-	| "observation"
-	| "goal"
-	| "todo";
+export type MemoryType = Types.MemoryType;
 
 export const MEMORY_TYPES: MemoryType[] = [
 	"fact", "preference", "decision", "identity",
@@ -463,34 +440,13 @@ export const MEMORY_TYPES: MemoryType[] = [
 export type MemorySort = "recent" | "importance" | "most_accessed";
 
 // Extended MemoryItem with forgotten field (not yet in schema)
-export interface MemoryItem {
-	id: string;
-	content: string;
-	memory_type: MemoryType;
-	importance: number;
-	created_at: string;
-	updated_at: string;
-	last_accessed_at: string;
-	access_count: number;
-	source: string | null;
-	channel_id: string | null;
-	forgotten: boolean;
-}
+export type MemoryItem = Types.Memory;
 
-export interface MemoriesListResponse {
-	memories: MemoryItem[];
-	total: number;
-}
+export type MemoriesListResponse = Types.MemoriesListResponse;
 
-export interface MemorySearchResultItem {
-	memory: MemoryItem;
-	score: number;
-	rank: number;
-}
+export type MemorySearchResultItem = Types.MemorySearchResult;
 
-export interface MemoriesSearchResponse {
-	results: MemorySearchResultItem[];
-}
+export type MemoriesSearchResponse = Types.MemoriesSearchResponse;
 
 export interface MemoryGraphParams {
 	limit?: number;
@@ -541,18 +497,9 @@ export const CORTEX_EVENT_TYPES: CortexEventType[] = [
 	"observation_created", "health_check",
 ];
 
-export interface CortexEvent {
-	id: string;
-	event_type: CortexEventType;
-	summary: string;
-	details: Record<string, unknown> | null;
-	created_at: string;
-}
+export type CortexEvent = Types.CortexEvent;
 
-export interface CortexEventsResponse {
-	events: CortexEvent[];
-	total: number;
-}
+export type CortexEventsResponse = Types.CortexEventsResponse;
 
 export interface CortexEventsParams {
 	limit?: number;
@@ -571,19 +518,9 @@ export type CortexChatSSEEvent =
 
 // -- Factory Presets --
 
-export interface PresetDefaults {
-	max_concurrent_workers: number | null;
-	max_turns: number | null;
-}
+export type PresetDefaults = Types.PresetDefaults;
 
-export interface PresetMeta {
-	id: string;
-	name: string;
-	description: string;
-	icon: string;
-	tags: string[];
-	defaults: PresetDefaults;
-}
+export type PresetMeta = Types.PresetMeta;
 
 export interface PresetsResponse {
 	presets: PresetMeta[];
@@ -591,262 +528,68 @@ export interface PresetsResponse {
 
 // -- Config types with frontend-specific extensions --
 
-export interface RoutingSection {
-	channel: string;
-	branch: string;
-	worker: string;
-	compactor: string;
-	cortex: string;
-	voice: string;
-	rate_limit_cooldown_secs: number;
-	channel_thinking_effort: string;
-	branch_thinking_effort: string;
-	worker_thinking_effort: string;
-	compactor_thinking_effort: string;
-	cortex_thinking_effort: string;
-}
+export type RoutingSection = Types.RoutingSection;
 
-export interface TuningSection {
-	max_concurrent_branches: number;
-	max_concurrent_workers: number;
-	max_turns: number;
-	branch_max_turns: number;
-	context_window: number;
-	history_backfill_count: number;
-}
+export type TuningSection = Types.TuningSection;
 
-export interface CompactionSection {
-	background_threshold: number;
-	aggressive_threshold: number;
-	emergency_threshold: number;
-}
+export type CompactionSection = Types.CompactionSection;
 
-export interface CortexSection {
-	tick_interval_secs: number;
-	worker_timeout_secs: number;
-	branch_timeout_secs: number;
-	circuit_breaker_threshold: number;
-	bulletin_interval_secs: number;
-	bulletin_max_words: number;
-	bulletin_max_turns: number;
-}
+export type CortexSection = Types.CortexSection;
 
-export interface CoalesceSection {
-	enabled: boolean;
-	debounce_ms: number;
-	max_wait_ms: number;
-	min_messages: number;
-	multi_user_only: boolean;
-}
+export type CoalesceSection = Types.CoalesceSection;
 
-export interface MemoryPersistenceSection {
-	enabled: boolean;
-	message_interval: number;
-}
+export type MemoryPersistenceSection = Types.MemoryPersistenceSection;
 
-export interface BrowserSection {
-	enabled: boolean;
-	headless: boolean;
-	evaluate_enabled: boolean;
-	persist_session: boolean;
-	close_policy: "close_browser" | "close_tabs" | "detach";
-}
+export type BrowserSection = Types.BrowserSection;
 
-export interface ChannelSection {
-	listen_only_mode: boolean;
-}
+export type ChannelSection = Types.ChannelSection;
 
-export interface SandboxSection {
-	mode: "enabled" | "disabled";
-	writable_paths: string[];
-}
+export type SandboxSection = Types.SandboxSection;
 
-export interface ProjectsSection {
-	use_worktrees: boolean;
-	worktree_name_template: string;
-	auto_create_worktrees: boolean;
-	auto_discover_repos: boolean;
-	auto_discover_worktrees: boolean;
-	disk_usage_warning_threshold: number;
-}
+export type ProjectsSection = Types.ProjectsSection;
 
-export interface DiscordSection {
-	enabled: boolean;
-	allow_bot_messages: boolean;
-}
+export type DiscordSection = Types.DiscordSection;
 
-export interface AgentConfigResponse {
-	routing: RoutingSection;
-	tuning: TuningSection;
-	compaction: CompactionSection;
-	cortex: CortexSection;
-	coalesce: CoalesceSection;
-	memory_persistence: MemoryPersistenceSection;
-	browser: BrowserSection;
-	channel: ChannelSection;
-	discord: DiscordSection;
-	sandbox: SandboxSection;
-	projects: ProjectsSection;
-}
+export type AgentConfigResponse = Types.AgentConfigResponse;
 
 // Partial update types - all fields are optional
-export interface RoutingUpdate {
-	channel?: string;
-	branch?: string;
-	worker?: string;
-	compactor?: string;
-	cortex?: string;
-	voice?: string;
-	rate_limit_cooldown_secs?: number;
-	channel_thinking_effort?: string;
-	branch_thinking_effort?: string;
-	worker_thinking_effort?: string;
-	compactor_thinking_effort?: string;
-	cortex_thinking_effort?: string;
-}
+export type RoutingUpdate = Types.RoutingUpdate;
 
-export interface TuningUpdate {
-	max_concurrent_branches?: number;
-	max_concurrent_workers?: number;
-	max_turns?: number;
-	branch_max_turns?: number;
-	context_window?: number;
-	history_backfill_count?: number;
-}
+export type TuningUpdate = Types.TuningUpdate;
 
-export interface CompactionUpdate {
-	background_threshold?: number;
-	aggressive_threshold?: number;
-	emergency_threshold?: number;
-}
+export type CompactionUpdate = Types.CompactionUpdate;
 
-export interface CortexUpdate {
-	tick_interval_secs?: number;
-	worker_timeout_secs?: number;
-	branch_timeout_secs?: number;
-	circuit_breaker_threshold?: number;
-	bulletin_interval_secs?: number;
-	bulletin_max_words?: number;
-	bulletin_max_turns?: number;
-}
+export type CortexUpdate = Types.CortexUpdate;
 
-export interface CoalesceUpdate {
-	enabled?: boolean;
-	debounce_ms?: number;
-	max_wait_ms?: number;
-	min_messages?: number;
-	multi_user_only?: boolean;
-}
+export type CoalesceUpdate = Types.CoalesceUpdate;
 
-export interface MemoryPersistenceUpdate {
-	enabled?: boolean;
-	message_interval?: number;
-}
+export type MemoryPersistenceUpdate = Types.MemoryPersistenceUpdate;
 
-export interface BrowserUpdate {
-	enabled?: boolean;
-	headless?: boolean;
-	evaluate_enabled?: boolean;
-	persist_session?: boolean;
-	close_policy?: "close_browser" | "close_tabs" | "detach";
-}
+export type BrowserUpdate = Types.BrowserUpdate;
 
-export interface ChannelUpdate {
-	listen_only_mode?: boolean;
-}
+export type ChannelUpdate = Types.ChannelUpdate;
 
-export interface SandboxUpdate {
-	mode?: "enabled" | "disabled";
-	writable_paths?: string[];
-}
+export type SandboxUpdate = Types.SandboxUpdate;
 
-export interface ProjectsUpdate {
-	use_worktrees?: boolean;
-	worktree_name_template?: string;
-	auto_create_worktrees?: boolean;
-	auto_discover_repos?: boolean;
-	auto_discover_worktrees?: boolean;
-	disk_usage_warning_threshold?: number;
-}
+export type ProjectsUpdate = Types.ProjectsUpdate;
 
-export interface DiscordUpdate {
-	allow_bot_messages?: boolean;
-}
+export type DiscordUpdate = Types.DiscordUpdate;
 
-export interface AgentConfigUpdateRequest {
-	agent_id: string;
-	routing?: RoutingUpdate;
-	tuning?: TuningUpdate;
-	compaction?: CompactionUpdate;
-	cortex?: CortexUpdate;
-	coalesce?: CoalesceUpdate;
-	memory_persistence?: MemoryPersistenceUpdate;
-	browser?: BrowserUpdate;
-	channel?: ChannelUpdate;
-	discord?: DiscordUpdate;
-	sandbox?: SandboxUpdate;
-	projects?: ProjectsUpdate;
-}
+export type AgentConfigUpdateRequest = Types.AgentConfigUpdateRequest;
 
 // -- Cron Types --
 
-export interface CronJobWithStats {
-	id: string;
-	prompt: string;
-	cron_expr: string | null;
-	interval_secs: number;
-	delivery_target: string;
-	enabled: boolean;
-	run_once: boolean;
-	active_hours: [number, number] | null;
-	timeout_secs: number | null;
-	execution_success_count: number;
-	execution_failure_count: number;
-	delivery_success_count: number;
-	delivery_failure_count: number;
-	delivery_skipped_count: number;
-	last_executed_at: string | null;
-}
+export type CronJobWithStats = Types.CronJobWithStats;
 
-export interface CronExecutionEntry {
-	id: string;
-	cron_id: string | null;
-	executed_at: string;
-	success: boolean;
-	execution_succeeded: boolean;
-	delivery_attempted: boolean;
-	delivery_succeeded: boolean | null;
-	result_summary: string | null;
-	execution_error: string | null;
-	delivery_error: string | null;
-}
+export type CronExecutionEntry = Types.CronExecutionEntry;
 
-export interface CronListResponse {
-	jobs: CronJobWithStats[];
-	timezone: string;
-}
+export type CronListResponse = Types.CronListResponse;
 
-export interface CronExecutionsResponse {
-	executions: CronExecutionEntry[];
-}
+export type CronExecutionsResponse = Types.CronExecutionsResponse;
 
-export interface CronActionResponse {
-	success: boolean;
-	message: string;
-}
+export type CronActionResponse = Types.CronActionResponse;
 
-export interface CreateCronRequest {
-	id: string;
-	prompt: string;
-	cron_expr?: string;
-	interval_secs?: number;
-	delivery_target: string;
-	active_start_hour?: number;
-	active_end_hour?: number;
-	enabled: boolean;
-	run_once: boolean;
-	timeout_secs?: number;
-}
+export type CreateCronRequest = Types.CreateCronRequest;
 
 export interface CronExecutionsParams {
 	cron_id?: string;
@@ -855,21 +598,9 @@ export interface CronExecutionsParams {
 
 // -- Update Types --
 
-export type Deployment = "docker" | "hosted" | "native";
+export type Deployment = Types.Deployment;
 
-export interface UpdateStatus {
-	current_version: string;
-	latest_version: string | null;
-	update_available: boolean;
-	release_url: string | null;
-	release_notes: string | null;
-	deployment: Deployment;
-	can_apply: boolean;
-	cannot_apply_reason: string | null;
-	docker_image: string | null;
-	checked_at: string | null;
-	error: string | null;
-}
+export type UpdateStatus = Types.UpdateStatus;
 
 export interface UpdateApplyResponse {
 	status: "updating" | "error";
@@ -878,257 +609,76 @@ export interface UpdateApplyResponse {
 
 // -- Global Settings Types --
 
-export interface OpenCodePermissions {
-	edit: string;
-	bash: string;
-	webfetch: string;
-}
+export type OpenCodePermissions = Types.OpenCodePermissionsResponse;
 
-export interface OpenCodeSettings {
-	enabled: boolean;
-	path: string;
-	max_servers: number;
-	server_startup_timeout_secs: number;
-	max_restart_retries: number;
-	permissions: OpenCodePermissions;
-}
+export type OpenCodeSettings = Types.OpenCodeSettingsResponse;
 
-export interface OpenCodeSettingsUpdate {
-	enabled?: boolean;
-	path?: string;
-	max_servers?: number;
-	server_startup_timeout_secs?: number;
-	max_restart_retries?: number;
-	permissions?: Partial<OpenCodePermissions>;
-}
+export type OpenCodeSettingsUpdate = Types.OpenCodeSettingsUpdate;
 
-export interface GlobalSettingsUpdate {
-	company_name?: string;
-	brave_search_key?: string | null;
-	api_enabled?: boolean;
-	api_port?: number;
-	api_bind?: string;
-	worker_log_mode?: string;
-	opencode?: OpenCodeSettingsUpdate;
-}
+export type GlobalSettingsUpdate = Types.GlobalSettingsUpdate;
 
 // -- Skills Types --
 
-export interface SkillInfo {
-	name: string;
-	description: string;
-	file_path: string;
-	base_dir: string;
-	source: "builtin" | "instance" | "workspace";
-	source_repo?: string;
-}
+export type SkillInfo = Types.SkillInfo;
 
-export interface SkillsListResponse {
-	skills: SkillInfo[];
-}
+export type SkillsListResponse = Types.SkillsListResponse;
 
-export interface InstallSkillRequest {
-	agent_id: string;
-	spec: string;
-	instance?: boolean;
-}
+export type InstallSkillRequest = Types.InstallSkillRequest;
 
-export interface InstallSkillResponse {
-	installed: string[];
-}
+export type InstallSkillResponse = Types.InstallSkillResponse;
 
-export interface RemoveSkillRequest {
-	agent_id: string;
-	name: string;
-}
+export type RemoveSkillRequest = Types.RemoveSkillRequest;
 
-export interface RemoveSkillResponse {
-	success: boolean;
-	path: string | null;
-}
+export type RemoveSkillResponse = Types.RemoveSkillResponse;
 
 // -- Skills Registry Types (skills.sh) --
 
 export type RegistryView = "all-time" | "trending" | "hot";
 
-export interface RegistrySkill {
-	source: string;
-	skillId: string;
-	name: string;
-	installs: number;
-	description?: string;
-	id?: string;
-}
+export type RegistrySkill = Types.RegistrySkill;
 
-export interface RegistryBrowseResponse {
-	skills: RegistrySkill[];
-	has_more: boolean;
-	total?: number;
-}
+export type RegistryBrowseResponse = Types.RegistryBrowseResponse;
 
-export interface RegistrySearchResponse {
-	skills: RegistrySkill[];
-	query: string;
-	count: number;
-}
+export type RegistrySearchResponse = Types.RegistrySearchResponse;
 
-export interface SkillContentResponse {
-	name: string;
-	description: string;
-	content: string;
-	file_path: string;
-	base_dir: string;
-	source: string;
-	source_repo?: string;
-}
+export type SkillContentResponse = Types.SkillContentResponse;
 
-export interface UploadSkillResponse {
-	installed: string[];
-}
+export type UploadSkillResponse = Types.UploadSkillResponse;
 
 // -- Task Types --
+//
+// Aliased straight from the generated OpenAPI schema rather than hand-written.
+// These used to be duplicated by hand here, which `check-typegen` cannot catch:
+// it only diffs `schema.d.ts` against the Rust, so a local redeclaration could
+// drift from the server indefinitely and the build stayed green.
+//
+// `TaskItem` is kept as the name most call sites use.
+export type Task = Types.Task;
+export type TaskStatus = Types.TaskStatus;
+export type TaskPriority = Types.TaskPriority;
+export type TaskSubtask = Types.TaskSubtask;
+export type TaskRun = Types.TaskRun;
+export type TaskRunOutcome = Types.TaskRunOutcome;
+export type TaskRunsResponse = Types.TaskRunsResponse;
+export type TaskListResponse = Types.TaskListResponse;
+export type TaskResponse = Types.TaskResponse;
+export type TaskActionResponse = Types.TaskActionResponse;
+export type TaskItem = Types.Task;
 
-export type TaskStatus =
-	| "pending_approval"
-	| "backlog"
-	| "ready"
-	| "in_progress"
-	| "blocked"
-	| "done";
-export type TaskPriority = "critical" | "high" | "medium" | "low";
+export type CreateTaskRequest = Types.CreateTaskRequest;
 
-export type TaskRunOutcome =
-	| "completed"
-	| "failed"
-	| "timeout"
-	| "cancelled"
-	| "blocked"
-	| "rate_limited"
-	| "abandoned";
-
-/// A single execution attempt against a task.
-export interface TaskRun {
-	id: string;
-	task_number: number;
-	attempt: number;
-	worker_id?: string;
-	/** Null while the attempt is still running. */
-	outcome?: TaskRunOutcome;
-	summary?: string;
-	error?: string;
-	started_at: string;
-	ended_at?: string;
-}
-
-export interface TaskRunsResponse {
-	runs: TaskRun[];
-}
-
-export interface TaskSubtask {
-	title: string;
-	completed: boolean;
-}
-
-export interface TaskItem {
-	id: string;
-	task_number: number;
-	title: string;
-	description?: string;
-	status: TaskStatus;
-	priority: TaskPriority;
-	owner_agent_id: string;
-	assigned_agent_id: string;
-	subtasks: TaskSubtask[];
-	metadata: Record<string, unknown>;
-	source_memory_id?: string;
-	worker_id?: string;
-	created_by: string;
-	approved_at?: string;
-	approved_by?: string;
-	created_at: string;
-	updated_at: string;
-	completed_at?: string;
-	/** Failures since the last success. Reset on completion and on manual retry. */
-	consecutive_failures: number;
-	/** Per-task override of the instance default failure limit. */
-	max_retries?: number;
-	/** Most recent failure text, shown on the card when the task is parked. */
-	last_error?: string;
-	/** Project this task acts on. */
-	project_id?: string | null;
-	/** Repo within the project. A project can hold several repos. */
-	repo_id?: string | null;
-	/** Worktree to execute in. */
-	worktree_id?: string | null;
-}
-
-export interface TaskListResponse {
-	tasks: TaskItem[];
-}
-
-export interface TaskResponse {
-	task: TaskItem;
-}
-
-export interface TaskActionResponse {
-	success: boolean;
-	message: string;
-}
-
-export interface CreateTaskRequest {
-	owner_agent_id: string;
-	assigned_agent_id?: string;
-	title: string;
-	description?: string;
-	status?: TaskStatus;
-	priority?: TaskPriority;
-	subtasks?: TaskSubtask[];
-	metadata?: Record<string, unknown>;
-	source_memory_id?: string;
-	created_by?: string;
-}
-
-export interface UpdateTaskRequest {
-	title?: string;
-	description?: string;
-	status?: TaskStatus;
-	priority?: TaskPriority;
-	assigned_agent_id?: string;
-	subtasks?: TaskSubtask[];
-	metadata?: Record<string, unknown>;
-	complete_subtask?: number;
-	worker_id?: string;
-	approved_by?: string;
-}
+export type UpdateTaskRequest = Types.UpdateTaskRequest;
 
 // -- Notification Types --
 
 export type NotificationKind = "task_approval" | "worker_failed" | "cortex_observation";
 export type NotificationSeverity = "info" | "warn" | "error";
 
-export interface NotificationItem {
-	id: string;
-	kind: NotificationKind;
-	severity: NotificationSeverity;
-	title: string;
-	body?: string;
-	agent_id?: string;
-	related_entity_type?: string;
-	related_entity_id?: string;
-	action_url?: string;
-	metadata?: string;
-	created_at: string;
-	read_at?: string;
-	dismissed_at?: string;
-}
+export type NotificationItem = Types.Notification;
 
-export interface NotificationsResponse {
-	notifications: NotificationItem[];
-}
+export type NotificationsResponse = Types.NotificationsResponse;
 
-export interface UnreadCountResponse {
-	count: number;
-}
+export type UnreadCountResponse = Types.UnreadCountResponse;
 
 export interface NotificationCreatedEvent {
 	type: "notification_created";
@@ -1144,97 +694,21 @@ export interface NotificationUpdatedEvent {
 
 // -- Messaging / Bindings Types --
 
-export interface BindingInfo {
-	agent_id: string;
-	channel: string;
-	adapter: string | null;
-	guild_id: string | null;
-	workspace_id: string | null;
-	chat_id: string | null;
-	channel_ids: string[];
-	require_mention: boolean;
-	dm_allowed_users: string[];
-}
+export type BindingInfo = Types.BindingResponse;
 
-export interface BindingsListResponse {
-	bindings: BindingInfo[];
-}
+export type BindingsListResponse = Types.BindingsListResponse;
 
-export interface CreateBindingRequest {
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-	channel_ids?: string[];
-	require_mention?: boolean;
-	dm_allowed_users?: string[];
-	platform_credentials?: {
-		discord_token?: string;
-		slack_bot_token?: string;
-		slack_app_token?: string;
-		telegram_token?: string;
-		email_imap_host?: string;
-		email_imap_port?: number;
-		email_imap_username?: string;
-		email_imap_password?: string;
-		email_smtp_host?: string;
-		email_smtp_port?: number;
-		email_smtp_username?: string;
-		email_smtp_password?: string;
-		email_from_address?: string;
-		email_from_name?: string;
-		twitch_username?: string;
-		twitch_oauth_token?: string;
-		twitch_client_id?: string;
-		twitch_client_secret?: string;
-		twitch_refresh_token?: string;
-	};
-}
+export type CreateBindingRequest = Types.CreateBindingRequest;
 
-export interface CreateBindingResponse {
-	success: boolean;
-	restart_required: boolean;
-	message: string;
-}
+export type CreateBindingResponse = Types.CreateBindingResponse;
 
-export interface UpdateBindingRequest {
-	original_agent_id: string;
-	original_channel: string;
-	original_adapter?: string;
-	original_guild_id?: string;
-	original_workspace_id?: string;
-	original_chat_id?: string;
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-	channel_ids?: string[];
-	require_mention?: boolean;
-	dm_allowed_users?: string[];
-}
+export type UpdateBindingRequest = Types.UpdateBindingRequest;
 
-export interface UpdateBindingResponse {
-	success: boolean;
-	message: string;
-}
+export type UpdateBindingResponse = Types.UpdateBindingResponse;
 
-export interface DeleteBindingRequest {
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-}
+export type DeleteBindingRequest = Types.DeleteBindingRequest;
 
-export interface DeleteBindingResponse {
-	success: boolean;
-	message: string;
-}
+export type DeleteBindingResponse = Types.DeleteBindingResponse;
 
 // -- Links & Topology Types --
 
@@ -1252,168 +726,56 @@ export interface LinksResponse {
 	links: AgentLinkResponse[];
 }
 
-export interface CreateHumanRequest {
-	id: string;
-	display_name?: string;
-	role?: string;
-	bio?: string;
-	description?: string;
-	discord_id?: string;
-	telegram_id?: string;
-	slack_id?: string;
-	email?: string;
-}
+export type CreateHumanRequest = Types.CreateHumanRequest;
 
-export interface UpdateHumanRequest {
-	display_name?: string;
-	role?: string;
-	bio?: string;
-	description?: string;
-	discord_id?: string;
-	telegram_id?: string;
-	slack_id?: string;
-	email?: string;
-}
+export type UpdateHumanRequest = Types.UpdateHumanRequest;
 
-export interface CreateGroupRequest {
-	name: string;
-	agent_ids?: string[];
-	color?: string;
-}
+export type CreateGroupRequest = Types.CreateGroupRequest;
 
-export interface UpdateGroupRequest {
-	name?: string;
-	agent_ids?: string[];
-	color?: string;
-}
+export type UpdateGroupRequest = Types.UpdateGroupRequest;
 
-export interface CreateLinkRequest {
-	from: string;
-	to: string;
-	direction?: LinkDirection;
-	kind?: LinkKind;
-}
+export type CreateLinkRequest = Types.CreateLinkRequest;
 
-export interface UpdateLinkRequest {
-	direction?: LinkDirection;
-	kind?: LinkKind;
-}
+export type UpdateLinkRequest = Types.UpdateLinkRequest;
 
 // -- Projects Types --
 
-export type ProjectStatus = "active" | "archived";
+export type ProjectStatus = Types.ProjectStatus;
 
-export interface Project {
-	id: string;
-	name: string;
-	description: string;
-	icon: string;
-	tags: string[];
-	root_path: string;
-	logo_path: string | null;
-	settings: Record<string, unknown>;
-	status: ProjectStatus;
-	sort_order: number;
-	created_at: string;
-	updated_at: string;
-}
+export type Project = Types.Project;
 
-export interface ProjectRepo {
-	id: string;
-	project_id: string;
-	name: string;
-	path: string;
-	remote_url: string;
-	default_branch: string;
-	current_branch: string | null;
-	description: string;
-	disk_usage_bytes: number | null;
-	created_at: string;
-	updated_at: string;
-}
+export type ProjectRepo = Types.ProjectRepo;
 
-export interface ProjectWorktree {
-	id: string;
-	project_id: string;
-	repo_id: string;
-	name: string;
-	path: string;
-	branch: string;
-	created_by: string;
-	disk_usage_bytes: number | null;
-	created_at: string;
-	updated_at: string;
-}
+export type ProjectWorktree = Types.ProjectWorktree;
 
-export interface ProjectWorktreeWithRepo extends ProjectWorktree {
-	repo_name: string;
-}
+export type ProjectWorktreeWithRepo = Types.ProjectWorktreeWithRepo;
 
 /** GET /agents/projects response */
-export interface ProjectListResponse {
-	projects: Project[];
-}
+export type ProjectListResponse = Types.ProjectListResponse;
 
 /** GET /agents/projects/:id response — project fields are flattened */
-export interface ProjectWithRelations extends Project {
-	repos: ProjectRepo[];
-	worktrees: ProjectWorktreeWithRepo[];
-}
+export type ProjectWithRelations = Types.ProjectWithRelations;
 
 export interface ProjectActionResponse {
 	success: boolean;
 	message: string;
 }
 
-export interface DiskUsageEntry {
-	name: string;
-	bytes: number;
-	is_dir: boolean;
-}
+export type DiskUsageEntry = Types.DiskUsageEntry;
 
-export interface DiskUsageResponse {
-	total_bytes: number;
-	entries: DiskUsageEntry[];
-}
+export type DiskUsageResponse = Types.DiskUsageResponse;
 
-export interface CreateProjectRequest {
-	name: string;
-	description?: string;
-	icon?: string;
-	tags?: string[];
-	root_path: string;
-	settings?: Record<string, unknown>;
-	auto_discover?: boolean;
-}
+export type CreateProjectRequest = Types.CreateProjectRequest;
 
-export interface UpdateProjectRequest {
-	name?: string;
-	description?: string;
-	icon?: string;
-	tags?: string[];
-	logo_path?: string | null;
-	settings?: Record<string, unknown>;
-	status?: ProjectStatus;
-}
+export type UpdateProjectRequest = Types.UpdateProjectRequest;
 
-export interface CreateRepoRequest {
-	name: string;
-	path: string;
-	remote_url?: string;
-	default_branch?: string;
-	description?: string;
-}
+export type CreateRepoRequest = Types.CreateRepoRequest;
 
-export interface CreateWorktreeRequest {
-	repo_id: string;
-	branch: string;
-	worktree_name?: string;
-	start_point?: string;
-}
+export type CreateWorktreeRequest = Types.CreateWorktreeRequest;
 
 // -- Secrets Types --
 
-export type SecretCategory = "system" | "tool";
+export type SecretCategory = Types.SecretCategory;
 export type StoreState = "unencrypted" | "locked" | "unlocked";
 
 export interface SecretStoreStatus {
@@ -1425,33 +787,15 @@ export interface SecretStoreStatus {
 	platform_managed: boolean;
 }
 
-export interface SecretListItem {
-	name: string;
-	category: SecretCategory;
-	created_at: string;
-	updated_at: string;
-}
+export type SecretListItem = Types.SecretListItem;
 
-export interface SecretListResponse {
-	secrets: SecretListItem[];
-}
+export type SecretListResponse = Types.SecretListResponse;
 
-export interface PutSecretResponse {
-	name: string;
-	category: SecretCategory;
-	reload_required: boolean;
-	message: string;
-}
+export type PutSecretResponse = Types.PutSecretResponse;
 
-export interface DeleteSecretResponse {
-	deleted: string;
-	warning?: string;
-}
+export type DeleteSecretResponse = Types.DeleteSecretResponse;
 
-export interface EncryptResponse {
-	master_key: string;
-	message: string;
-}
+export type EncryptResponse = Types.EncryptResponse;
 
 export interface UnlockResponse {
 	state: string;
@@ -1459,17 +803,9 @@ export interface UnlockResponse {
 	message: string;
 }
 
-export interface MigrationItem {
-	config_key: string;
-	secret_name: string;
-	category: SecretCategory;
-}
+export type MigrationItem = Types.MigrationItem;
 
-export interface MigrateResponse {
-	migrated: MigrationItem[];
-	skipped: string[];
-	message: string;
-}
+export type MigrateResponse = Types.MigrateResponse;
 
 export const api = {
 	status: () => fetchJson<Types.StatusResponse>("/status"),
@@ -1686,7 +1022,12 @@ export const api = {
 		return fetchJson<CronExecutionsResponse>(`/agents/cron/executions?${search}`);
 	},
 
-	createCronJob: async (agentId: string, request: CreateCronRequest) => {
+	// `agent_id` is supplied by the caller's route context and injected here,
+	// so the request object itself never carries it.
+	createCronJob: async (
+		agentId: string,
+		request: Omit<CreateCronRequest, "agent_id">,
+	) => {
 		const response = await fetch(`${getApiBase()}/agents/cron`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -2709,146 +2050,38 @@ export const api = {
 	},
 }
 
-export interface UsageTotals {
-	input_tokens: number;
-	output_tokens: number;
-	cache_read_tokens: number;
-	cache_write_tokens: number;
-	reasoning_tokens: number;
-	request_count: number;
-	estimated_cost_usd: number | null;
-	cost_status: string;
-}
+export type UsageTotals = Types.UsageTotals;
 
-export interface UsageByModel {
-	model: string;
-	input_tokens: number;
-	output_tokens: number;
-	cache_read_tokens: number;
-	cache_write_tokens: number;
-	reasoning_tokens: number;
-	request_count: number;
-	estimated_cost_usd: number | null;
-}
+export type UsageByModel = Types.UsageByModel;
 
-export interface UsageResponse {
-	total: UsageTotals;
-	by_model?: UsageByModel[];
-	by_day?: Array<{ date: string } & UsageTotals>;
-	by_agent?: Array<{ agent_id: string } & UsageTotals>;
-};
+export type UsageResponse = Types.UsageResponse;;
 
 // Activity types
-export interface ProcessTokens {
-	input: number;
-	output: number;
-	cache_read: number;
-	reasoning: number;
-	cost_usd: number;
-}
+export type ProcessTokens = Types.ProcessTokens;
 
-export interface TokenSummary {
-	input: number;
-	output: number;
-	cache_read: number;
-	reasoning: number;
-	cost_usd: number;
-	by_process: Record<string, ProcessTokens>;
-}
+export type TokenSummary = Types.TokenSummary;
 
-export interface ActivityDay {
-	date: string;
-	messages: number;
-	branches: number;
-	workers: number;
-	cortex: number;
-	cron: number;
-	active_channels: number;
-	tokens: TokenSummary;
-}
+export type ActivityDay = Types.ActivityDay;
 
-export interface ActivityTotals {
-	messages: number;
-	branches: number;
-	workers: number;
-	cortex: number;
-	cron: number;
-	active_channels: number;
-	tokens: TokenSummary;
-}
+export type ActivityTotals = Types.ActivityTotals;
 
-export interface ActivityResponse {
-	daily: ActivityDay[];
-	totals: ActivityTotals;
-}
+export type ActivityResponse = Types.ActivityResponse;
 
 // Wiki types
 export type WikiPageType = "entity" | "concept" | "decision" | "project" | "reference";
 
-export interface WikiPageSummary {
-	id: string;
-	slug: string;
-	title: string;
-	page_type: string;
-	version: number;
-	updated_at: string;
-	updated_by: string;
-}
+export type WikiPageSummary = Types.WikiPageSummary;
 
-export interface WikiPage {
-	id: string;
-	slug: string;
-	title: string;
-	page_type: string;
-	content: string;
-	related: string[];
-	created_by: string;
-	updated_by: string;
-	version: number;
-	archived: boolean;
-	created_at: string;
-	updated_at: string;
-}
+export type WikiPage = Types.WikiPage;
 
-export interface WikiPageVersion {
-	id: string;
-	page_id: string;
-	version: number;
-	content: string;
-	edit_summary: string | null;
-	author_type: string;
-	author_id: string;
-	created_at: string;
-}
+export type WikiPageVersion = Types.WikiPageVersion;
 
-export interface WikiListResponse {
-	pages: WikiPageSummary[];
-	total: number;
-}
+export type WikiListResponse = Types.WikiListResponse;
 
-export interface WikiPageResponse {
-	page: WikiPage;
-}
+export type WikiPageResponse = Types.WikiPageResponse;
 
-export interface WikiHistoryResponse {
-	versions: WikiPageVersion[];
-}
+export type WikiHistoryResponse = Types.WikiHistoryResponse;
 
-export interface CreateWikiPageRequest {
-	title: string;
-	page_type: WikiPageType;
-	content: string;
-	related?: string[];
-	edit_summary?: string;
-	author_id?: string;
-	author_type?: string;
-}
+export type CreateWikiPageRequest = Types.CreatePageRequest;
 
-export interface EditWikiPageRequest {
-	old_string: string;
-	new_string: string;
-	replace_all?: boolean;
-	edit_summary?: string;
-	author_id?: string;
-	author_type?: string;
-}
+export type EditWikiPageRequest = Types.EditPageRequest;

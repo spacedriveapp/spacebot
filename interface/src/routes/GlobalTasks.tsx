@@ -433,7 +433,7 @@ function BindingSection({
 	);
 }
 
-function GithubSection({metadata}: {metadata: Record<string, unknown>}) {
+function GithubSection({metadata}: {metadata: unknown}) {
 	const refs = getGithubReferences(metadata);
 	if (refs.length === 0) return null;
 

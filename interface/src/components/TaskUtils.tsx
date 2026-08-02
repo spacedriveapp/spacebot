@@ -52,7 +52,16 @@ function readGithubReference(
   return { kind, label, url };
 }
 
-export function getGithubReferences(metadata: Record<string, unknown>): GithubReference[] {
+/**
+ * Task metadata is a free-form JSON value on the server, so it arrives typed as
+ * `unknown` rather than as an object — it is not guaranteed to be one. Narrow
+ * here instead of asserting at each call site.
+ */
+export function getGithubReferences(metadata: unknown): GithubReference[] {
+  if (!isRecord(metadata)) {
+    return [];
+  }
+
   return [
     readGithubReference(metadata.github_issue, "issue"),
     readGithubReference(metadata.github_pr, "pr"),

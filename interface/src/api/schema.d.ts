@@ -2690,7 +2690,7 @@ export interface components {
             bindings: components["schemas"]["BindingResponse"][];
         };
         BrowserSection: {
-            close_policy: string;
+            close_policy: components["schemas"]["ClosePolicy"];
             enabled: boolean;
             evaluate_enabled: boolean;
             headless: boolean;
@@ -3057,6 +3057,14 @@ export interface components {
             /** @description Repo within the project. A project holds many repos. */
             repo_id?: string | null;
             source_memory_id?: string | null;
+            /**
+             * @description Status to create the task in. Defaults to `pending_approval`.
+             *
+             *     The dashboard has always sent `backlog` here; the field simply did not
+             *     exist, so serde dropped it and every task created from the UI came back
+             *     awaiting an approval the creator had just given by clicking "create".
+             */
+            status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][];
             title: string;
             /** @description Worktree to execute in. */
@@ -3935,23 +3943,33 @@ export interface components {
         };
         RoutingSection: {
             branch: string;
+            branch_thinking_effort: string;
             channel: string;
+            channel_thinking_effort: string;
             compactor: string;
+            compactor_thinking_effort: string;
             cortex: string;
+            cortex_thinking_effort: string;
             /** Format: int64 */
             rate_limit_cooldown_secs: number;
             voice: string;
             worker: string;
+            worker_thinking_effort: string;
         };
         RoutingUpdate: {
             branch?: string | null;
+            branch_thinking_effort?: string | null;
             channel?: string | null;
+            channel_thinking_effort?: string | null;
             compactor?: string | null;
+            compactor_thinking_effort?: string | null;
             cortex?: string | null;
+            cortex_thinking_effort?: string | null;
             /** Format: int64 */
             rate_limit_cooldown_secs?: number | null;
             voice?: string | null;
             worker?: string | null;
+            worker_thinking_effort?: string | null;
         };
         SandboxSection: {
             mode: string;

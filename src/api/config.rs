@@ -16,6 +16,15 @@ pub(super) struct RoutingSection {
     cortex: String,
     voice: String,
     rate_limit_cooldown_secs: u64,
+    // Per-process adaptive thinking effort. Honoured by
+    // `RoutingConfig::thinking_effort_for_model` and settable in the TOML, but
+    // absent from this response until now — so the dashboard's Thinking Effort
+    // control had nothing to read and nowhere to write.
+    channel_thinking_effort: String,
+    branch_thinking_effort: String,
+    worker_thinking_effort: String,
+    compactor_thinking_effort: String,
+    cortex_thinking_effort: String,
 }
 
 #[derive(Serialize, Debug, utoipa::ToSchema)]
@@ -82,7 +91,10 @@ pub(super) struct BrowserSection {
     headless: bool,
     evaluate_enabled: bool,
     persist_session: bool,
-    close_policy: String,
+    // Typed rather than stringly, so the response declares the same closed set
+    // the update accepts. As a bare `String` the dashboard could not tell which
+    // values were legal from the schema alone.
+    close_policy: ClosePolicy,
 }
 
 #[derive(Serialize, Debug, utoipa::ToSchema)]
@@ -172,6 +184,11 @@ pub(super) struct RoutingUpdate {
     cortex: Option<String>,
     voice: Option<String>,
     rate_limit_cooldown_secs: Option<u64>,
+    channel_thinking_effort: Option<String>,
+    branch_thinking_effort: Option<String>,
+    worker_thinking_effort: Option<String>,
+    compactor_thinking_effort: Option<String>,
+    cortex_thinking_effort: Option<String>,
 }
 
 #[derive(Deserialize, Debug, utoipa::ToSchema)]
@@ -309,6 +326,11 @@ pub(super) async fn get_agent_config(
             cortex: routing.cortex.clone(),
             voice: routing.voice.clone(),
             rate_limit_cooldown_secs: routing.rate_limit_cooldown_secs,
+            channel_thinking_effort: routing.channel_thinking_effort.clone(),
+            branch_thinking_effort: routing.branch_thinking_effort.clone(),
+            worker_thinking_effort: routing.worker_thinking_effort.clone(),
+            compactor_thinking_effort: routing.compactor_thinking_effort.clone(),
+            cortex_thinking_effort: routing.cortex_thinking_effort.clone(),
         },
         tuning: TuningSection {
             max_concurrent_branches: **rc.max_concurrent_branches.load(),
@@ -361,7 +383,7 @@ pub(super) async fn get_agent_config(
             headless: browser.headless,
             evaluate_enabled: browser.evaluate_enabled,
             persist_session: browser.persist_session,
-            close_policy: browser.close_policy.as_str().to_string(),
+            close_policy: browser.close_policy,
         },
         channel: ChannelSection {
             listen_only_mode: channel.listen_only_mode,
@@ -627,6 +649,20 @@ fn update_routing_table(
     }
     if let Some(v) = routing.rate_limit_cooldown_secs {
         table["rate_limit_cooldown_secs"] = toml_edit::value(v as i64);
+    }
+    for (key, value) in [
+        ("channel_thinking_effort", &routing.channel_thinking_effort),
+        ("branch_thinking_effort", &routing.branch_thinking_effort),
+        ("worker_thinking_effort", &routing.worker_thinking_effort),
+        (
+            "compactor_thinking_effort",
+            &routing.compactor_thinking_effort,
+        ),
+        ("cortex_thinking_effort", &routing.cortex_thinking_effort),
+    ] {
+        if let Some(v) = value {
+            table[key] = toml_edit::value(v.as_str());
+        }
     }
     Ok(())
 }

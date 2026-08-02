@@ -27,7 +27,12 @@ export function formatDuration(seconds: number): string {
 	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-export function formatCronSchedule(cronExpr: string | null, intervalSecs: number): string {
+// Nullable server fields arrive as `null`, and an absent optional as
+// `undefined`. Accept both rather than making every caller normalise.
+export function formatCronSchedule(
+	cronExpr: string | null | undefined,
+	intervalSecs: number,
+): string {
 	if (cronExpr) return cronExpr;
 	if (intervalSecs % 86400 === 0) return `every ${intervalSecs / 86400}d`;
 	if (intervalSecs % 3600 === 0) return `every ${intervalSecs / 3600}h`;

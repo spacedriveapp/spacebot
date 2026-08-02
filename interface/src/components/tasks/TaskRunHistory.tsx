@@ -34,9 +34,14 @@ const OUTCOME_STYLE: Record<
 	},
 };
 
-/** Badge treatment per outcome. A still-running attempt has no outcome yet. */
+/**
+ * Badge treatment per outcome. A still-running attempt has no outcome yet.
+ *
+ * Nullable columns come off the wire as `null`, not `undefined`, so every
+ * optional field here accepts both.
+ */
 function badgeVariantFor(
-	outcome?: TaskRunOutcome,
+	outcome?: TaskRunOutcome | null,
 ): "secondary" | "success" | "error" | "warning" {
 	if (!outcome) return "secondary";
 	if (outcome === "completed") return "success";
@@ -46,7 +51,7 @@ function badgeVariantFor(
 	return "error";
 }
 
-function formatDuration(startedAt: string, endedAt?: string): string | null {
+function formatDuration(startedAt: string, endedAt?: string | null): string | null {
 	if (!endedAt) return null;
 	const ms = new Date(endedAt).getTime() - new Date(startedAt).getTime();
 	if (!Number.isFinite(ms) || ms < 0) return null;

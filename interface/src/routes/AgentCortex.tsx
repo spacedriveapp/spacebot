@@ -2,6 +2,7 @@ import {useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {AnimatePresence, motion} from "framer-motion";
 import {api, type CortexEvent, type CortexEventType} from "@/api/client";
+import {asRecord, hasContent} from "@/lib/json";
 import {formatTimeAgo} from "@/lib/format";
 import {FilterButton} from "@spacedrive/primitives";
 
@@ -67,10 +68,10 @@ function EventTypeBadge({eventType}: {eventType: string}) {
 	);
 }
 
-function DetailsPanel({details}: {details: Record<string, unknown>}) {
+function DetailsPanel({details}: {details: unknown}) {
 	return (
 		<div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-tiny">
-			{Object.entries(details).map(([key, value]) => (
+			{Object.entries(asRecord(details)).map(([key, value]) => (
 				<div key={key} className="contents">
 					<span className="text-ink-faint">{key}</span>
 					<span className="font-mono text-ink-dull">
@@ -116,7 +117,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 
 	if (isGroupFiltering) {
 		events = events.filter((event) =>
-			activeGroupTypes.includes(event.event_type),
+			(activeGroupTypes as string[]).includes(event.event_type),
 		);
 		total = events.length;
 		events = events.slice(offset, offset + PAGE_SIZE);
@@ -230,7 +231,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 										<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">
 											{event.summary}
 										</span>
-										{event.details && (
+										{hasContent(event.details) && (
 											<span className="flex-shrink-0 text-tiny text-ink-faint">
 												{isExpanded ? "v" : ">"}
 											</span>
@@ -238,7 +239,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 									</button>
 
 									<AnimatePresence>
-										{isExpanded && event.details && (
+										{isExpanded && hasContent(event.details) && (
 											<motion.div
 												initial={{height: 0, opacity: 0}}
 												animate={{height: "auto", opacity: 1}}

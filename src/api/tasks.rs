@@ -61,6 +61,13 @@ pub(super) struct CreateTaskRequest {
     /// Worktree to execute in.
     #[serde(default)]
     worktree_id: Option<String>,
+    /// Status to create the task in. Defaults to `pending_approval`.
+    ///
+    /// The dashboard has always sent `backlog` here; the field simply did not
+    /// exist, so serde dropped it and every task created from the UI came back
+    /// awaiting an approval the creator had just given by clicking "create".
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -287,7 +294,8 @@ pub(super) async fn create_task(
 ) -> Result<Json<TaskResponse>, StatusCode> {
     let store = get_task_store(&state)?;
 
-    let status = crate::tasks::TaskStatus::PendingApproval;
+    let status = parse_status(request.status.as_deref())?
+        .unwrap_or(crate::tasks::TaskStatus::PendingApproval);
     let priority =
         parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
 
