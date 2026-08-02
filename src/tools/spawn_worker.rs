@@ -78,6 +78,10 @@ pub struct SpawnWorkerArgs {
     /// to the project root.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Repo ID within the project. A project can contain several repos, so set
+    /// this to point the worker at one of them rather than the project root.
+    #[serde(default)]
+    pub repo_id: Option<String>,
     /// Worktree ID within the project. If set, the worker's directory is
     /// automatically set to the worktree path.
     #[serde(default)]
@@ -171,6 +175,13 @@ impl Tool for SpawnWorkerTool {
                 }),
             );
             obj.insert(
+                "repo_id".to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Repo ID within the project. A project can contain several repos; set this to point the worker at one of them instead of the project root."
+                }),
+            );
+            obj.insert(
                 "worktree_id".to_string(),
                 serde_json::json!({
                     "type": "string",
@@ -234,6 +245,7 @@ impl Tool for SpawnWorkerTool {
             &self.state.deps,
             args.directory.as_deref(),
             args.project_id.as_deref(),
+            args.repo_id.as_deref(),
             args.worktree_id.as_deref(),
         )
         .await;
@@ -583,13 +595,19 @@ impl Tool for DetachedSpawnWorkerTool {
 
 /// Resolve a working directory from project/worktree IDs.
 ///
-/// Priority: explicit `directory` > `worktree_id` > `project_id` root.
-/// Returns the explicit directory if set, otherwise looks up worktree or
-/// project root from the store.
-async fn resolve_directory_from_project(
+/// Priority: explicit `directory` > `worktree_id` > `repo_id` > `project_id` root.
+///
+/// The `repo_id` step is what makes multi-repo projects work: a project holds
+/// many repos, so a task about `api-gateway` must land in that repo's directory
+/// rather than at the shared project root.
+///
+/// Both `project_repos.path` and `project_worktrees.path` are stored relative to
+/// the project root (see `projects/git.rs::DiscoveredRepo::relative_path`).
+pub(crate) async fn resolve_directory_from_project(
     deps: &crate::AgentDeps,
     directory: Option<&str>,
     project_id: Option<&str>,
+    repo_id: Option<&str>,
     worktree_id: Option<&str>,
 ) -> Option<String> {
     // Explicit directory takes precedence.
@@ -617,6 +635,27 @@ async fn resolve_directory_from_project(
         }
         if let Ok(Some(project)) = store.get_project(&worktree.project_id).await {
             let abs_path = std::path::Path::new(&project.root_path).join(&worktree.path);
+            return Some(abs_path.to_string_lossy().to_string());
+        }
+    }
+
+    // Repo resolution: a project can hold many repos, so a repo-scoped task
+    // resolves to that repo's directory, not the shared project root.
+    if let Some(repo_id) = repo_id
+        && let Ok(Some(repo)) = store.get_repo(repo_id).await
+    {
+        if let Some(pid) = project_id
+            && pid != repo.project_id
+        {
+            tracing::warn!(
+                repo_id,
+                provided_project_id = pid,
+                actual_project_id = %repo.project_id,
+                "project_id/repo_id mismatch — using repo's project"
+            );
+        }
+        if let Ok(Some(project)) = store.get_project(&repo.project_id).await {
+            let abs_path = std::path::Path::new(&project.root_path).join(&repo.path);
             return Some(abs_path.to_string_lossy().to_string());
         }
     }

@@ -66,6 +66,16 @@ pub struct TaskCreateArgs {
     pub subtasks: Vec<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Project this task acts on. Scopes the task to a codebase.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Repo within the project. A project can hold several repos — set this so
+    /// the task is about one of them specifically.
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    /// Worktree to execute in.
+    #[serde(default)]
+    pub worktree_id: Option<String>,
 }
 
 fn default_priority() -> String {
@@ -109,6 +119,18 @@ impl Tool for TaskCreateTool {
                     "metadata": {
                         "type": "object",
                         "description": "Optional metadata object"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project this task acts on. Scopes the task to a codebase."
+                    },
+                    "repo_id": {
+                        "type": "string",
+                        "description": "Repo within the project. A project can hold several repos — set this when the task is about one of them specifically."
+                    },
+                    "worktree_id": {
+                        "type": "string",
+                        "description": "Worktree to execute in."
                     }
                 },
                 "required": ["title"]
@@ -143,6 +165,11 @@ impl Tool for TaskCreateTool {
                 metadata: args.metadata.unwrap_or_else(|| serde_json::json!({})),
                 source_memory_id: None,
                 created_by: self.created_by.clone(),
+                binding: crate::tasks::TaskProjectBinding {
+                    project_id: args.project_id,
+                    repo_id: args.repo_id,
+                    worktree_id: args.worktree_id,
+                },
             })
             .await
             .map_err(|error| TaskCreateError(format!("{error}")))?;
@@ -257,6 +284,9 @@ mod tests {
                 priority: "medium".to_string(),
                 subtasks: Vec::new(),
                 metadata: None,
+                project_id: None,
+                repo_id: None,
+                worktree_id: None,
             })
             .await
             .expect("task create should succeed");

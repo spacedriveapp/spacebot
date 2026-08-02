@@ -52,6 +52,15 @@ pub(super) struct CreateTaskRequest {
     source_memory_id: Option<String>,
     #[serde(default)]
     created_by: Option<String>,
+    /// Project this task acts on.
+    #[serde(default)]
+    project_id: Option<String>,
+    /// Repo within the project. A project holds many repos.
+    #[serde(default)]
+    repo_id: Option<String>,
+    /// Worktree to execute in.
+    #[serde(default)]
+    worktree_id: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -76,6 +85,15 @@ pub(super) struct UpdateTaskRequest {
     worker_id: Option<String>,
     #[serde(default)]
     approved_by: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    repo_id: Option<String>,
+    #[serde(default)]
+    worktree_id: Option<String>,
+    /// Unbind the task from its project/repo/worktree entirely.
+    #[serde(default)]
+    clear_binding: bool,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -103,6 +121,11 @@ pub(super) struct TaskResponse {
 pub(super) struct TaskActionResponse {
     success: bool,
     message: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskRunsResponse {
+    runs: Vec<crate::tasks::TaskRun>,
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +307,11 @@ pub(super) async fn create_task(
             metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
             source_memory_id: request.source_memory_id,
             created_by: request.created_by.unwrap_or_else(|| "human".to_string()),
+            binding: crate::tasks::TaskProjectBinding {
+                project_id: request.project_id,
+                repo_id: request.repo_id,
+                worktree_id: request.worktree_id,
+            },
         })
         .await
         .map_err(|error| {
@@ -322,6 +350,21 @@ pub(super) async fn update_task(
     let status = parse_status(request.status.as_deref())?;
     let priority = parse_priority(request.priority.as_deref())?;
 
+    // Only send a binding when at least one field was supplied; otherwise the
+    // existing columns are left alone.
+    let binding = if request.project_id.is_some()
+        || request.repo_id.is_some()
+        || request.worktree_id.is_some()
+    {
+        Some(crate::tasks::TaskProjectBinding {
+            project_id: request.project_id,
+            repo_id: request.repo_id,
+            worktree_id: request.worktree_id,
+        })
+    } else {
+        None
+    };
+
     let task = store
         .update(
             number,
@@ -334,9 +377,11 @@ pub(super) async fn update_task(
                 subtasks: request.subtasks,
                 metadata: request.metadata,
                 worker_id: request.worker_id,
-                clear_worker_id: false,
                 approved_by: request.approved_by,
                 complete_subtask: request.complete_subtask,
+                binding,
+                clear_binding: request.clear_binding,
+                ..Default::default()
             },
         )
         .await
@@ -453,6 +498,81 @@ pub(super) async fn approve_task(
     {
         tracing::warn!(%error, task_number = number, "failed to auto-dismiss approval notification");
     }
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `GET /tasks/{number}/runs` — the per-attempt execution log for a task.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/runs",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskRunsResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_runs(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskRunsResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let runs = store.list_runs(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task runs");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(TaskRunsResponse { runs }))
+}
+
+/// `POST /tasks/{number}/retry` — clear the failure budget and requeue.
+///
+/// A human looked at the task, so the budget starts over rather than
+/// immediately re-parking it on the next failure.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/retry",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn retry_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    store.clear_failures(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to clear task failure budget");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let task = store
+        .update(
+            number,
+            crate::tasks::UpdateTaskInput {
+                status: Some(crate::tasks::TaskStatus::Ready),
+                clear_worker_id: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to requeue task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
 }
 

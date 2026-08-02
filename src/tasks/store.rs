@@ -20,15 +20,20 @@ pub enum TaskStatus {
     Backlog,
     Ready,
     InProgress,
+    /// Parked and not eligible for pickup. Today this is only reached by
+    /// exhausting the failure budget; `block_kind` in a later change will
+    /// distinguish dependency waits from human gates.
+    Blocked,
     Done,
 }
 
 impl TaskStatus {
-    pub const ALL: [TaskStatus; 5] = [
+    pub const ALL: [TaskStatus; 6] = [
         TaskStatus::PendingApproval,
         TaskStatus::Backlog,
         TaskStatus::Ready,
         TaskStatus::InProgress,
+        TaskStatus::Blocked,
         TaskStatus::Done,
     ];
 
@@ -38,6 +43,7 @@ impl TaskStatus {
             TaskStatus::Backlog => "backlog",
             TaskStatus::Ready => "ready",
             TaskStatus::InProgress => "in_progress",
+            TaskStatus::Blocked => "blocked",
             TaskStatus::Done => "done",
         }
     }
@@ -48,9 +54,15 @@ impl TaskStatus {
             "backlog" => Some(TaskStatus::Backlog),
             "ready" => Some(TaskStatus::Ready),
             "in_progress" => Some(TaskStatus::InProgress),
+            "blocked" => Some(TaskStatus::Blocked),
             "done" => Some(TaskStatus::Done),
             _ => None,
         }
+    }
+
+    /// Whether a task in this status is eligible for the pickup loop.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, TaskStatus::Done)
     }
 }
 
@@ -129,6 +141,113 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    /// Failures since the last success. Reset to 0 on completion and on an
+    /// operator-initiated retry.
+    pub consecutive_failures: i64,
+    /// Per-task override of [`DEFAULT_FAILURE_LIMIT`].
+    pub max_retries: Option<i64>,
+    /// Text of the most recent failure, kept on the task so the board can
+    /// show why it is parked without joining `task_runs`.
+    pub last_error: Option<String>,
+    /// Project this task acts on, if any.
+    pub project_id: Option<String>,
+    /// Specific repo within the project. A project holds many repos, so this is
+    /// what makes a task about `api-gateway` distinguishable from one about
+    /// `web` in the same project.
+    pub repo_id: Option<String>,
+    /// Worktree to execute in. When set, the worker's working directory is
+    /// resolved from it rather than from the repo or project root.
+    pub worktree_id: Option<String>,
+}
+
+/// The codebase a task acts on. Every field is optional and independently
+/// meaningful: a project alone scopes the task, a repo narrows it, a worktree
+/// pins the exact checkout.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskProjectBinding {
+    pub project_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub worktree_id: Option<String>,
+}
+
+impl TaskProjectBinding {
+    pub fn is_empty(&self) -> bool {
+        self.project_id.is_none() && self.repo_id.is_none() && self.worktree_id.is_none()
+    }
+}
+
+/// How many consecutive failures a task may accumulate before it is parked in
+/// [`TaskStatus::Blocked`] instead of being requeued.
+pub const DEFAULT_FAILURE_LIMIT: i64 = 2;
+
+/// Outcome of a single task execution attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRunOutcome {
+    Completed,
+    Failed,
+    Timeout,
+    Cancelled,
+    Blocked,
+    /// Provider rate limit. Deliberately does **not** count against the
+    /// failure budget — a quota outage is not the task's fault.
+    RateLimited,
+}
+
+impl TaskRunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskRunOutcome::Completed => "completed",
+            TaskRunOutcome::Failed => "failed",
+            TaskRunOutcome::Timeout => "timeout",
+            TaskRunOutcome::Cancelled => "cancelled",
+            TaskRunOutcome::Blocked => "blocked",
+            TaskRunOutcome::RateLimited => "rate_limited",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(TaskRunOutcome::Completed),
+            "failed" => Some(TaskRunOutcome::Failed),
+            "timeout" => Some(TaskRunOutcome::Timeout),
+            "cancelled" => Some(TaskRunOutcome::Cancelled),
+            "blocked" => Some(TaskRunOutcome::Blocked),
+            "rate_limited" => Some(TaskRunOutcome::RateLimited),
+            _ => None,
+        }
+    }
+
+    /// Whether this outcome should increment `consecutive_failures`.
+    ///
+    /// `RateLimited` is excluded on purpose: a long provider quota outage must
+    /// not trip the circuit breaker on otherwise-healthy tasks.
+    pub fn counts_as_failure(self) -> bool {
+        matches!(
+            self,
+            TaskRunOutcome::Failed | TaskRunOutcome::Timeout | TaskRunOutcome::Blocked
+        )
+    }
+}
+
+impl std::fmt::Display for TaskRunOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// A single execution attempt against a task.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskRun {
+    pub id: String,
+    pub task_number: i64,
+    pub attempt: i64,
+    pub worker_id: Option<String>,
+    pub outcome: Option<TaskRunOutcome>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +262,29 @@ pub struct CreateTaskInput {
     pub metadata: Value,
     pub source_memory_id: Option<String>,
     pub created_by: String,
+    /// Codebase this task acts on. Empty for tasks that aren't about code.
+    pub binding: TaskProjectBinding,
+}
+
+/// Defaults exist so callers can use `..Default::default()` and stay source
+/// compatible as fields are added. Every field that must be set for the task to
+/// make sense (agents, title) defaults to empty and is expected to be provided.
+impl Default for CreateTaskInput {
+    fn default() -> Self {
+        Self {
+            owner_agent_id: String::new(),
+            assigned_agent_id: String::new(),
+            title: String::new(),
+            description: None,
+            status: TaskStatus::Backlog,
+            priority: TaskPriority::Medium,
+            subtasks: Vec::new(),
+            metadata: Value::Object(serde_json::Map::new()),
+            source_memory_id: None,
+            created_by: String::new(),
+            binding: TaskProjectBinding::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +301,11 @@ pub struct UpdateTaskInput {
     pub complete_subtask: Option<usize>,
     /// Reassign the task to a different agent.
     pub assigned_agent_id: Option<String>,
+    /// Rebind the task to a different codebase. `None` leaves each field as-is;
+    /// use `clear_binding` to unset.
+    pub binding: Option<TaskProjectBinding>,
+    /// Clear all three binding columns.
+    pub clear_binding: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -236,9 +383,10 @@ impl TaskStore {
                 INSERT INTO tasks (
                     id, task_number, title, description, status, priority,
                     owner_agent_id, assigned_agent_id,
-                    subtasks, metadata, source_memory_id, created_by
+                    subtasks, metadata, source_memory_id, created_by,
+                    project_id, repo_id, worktree_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&task_id)
@@ -253,6 +401,9 @@ impl TaskStore {
             .bind(&metadata_json)
             .bind(&input.source_memory_id)
             .bind(&input.created_by)
+            .bind(&input.binding.project_id)
+            .bind(&input.binding.repo_id)
+            .bind(&input.binding.worktree_id)
             .execute(&mut *tx)
             .await;
 
@@ -540,6 +691,17 @@ impl TaskStore {
             query.push_str("worker_id = ?, ");
         }
 
+        // Binding: clear wins over set, and an absent binding leaves the
+        // existing columns untouched rather than nulling them.
+        let next_binding = if input.clear_binding {
+            Some(TaskProjectBinding::default())
+        } else {
+            input.binding.clone()
+        };
+        if next_binding.is_some() {
+            query.push_str("project_id = ?, repo_id = ?, worktree_id = ?, ");
+        }
+
         query.push_str(
             "approved_by = COALESCE(?, approved_by), \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
@@ -569,6 +731,13 @@ impl TaskStore {
 
         if !clear_worker {
             sql = sql.bind(next_worker_id);
+        }
+
+        if let Some(binding) = &next_binding {
+            sql = sql
+                .bind(binding.project_id.clone())
+                .bind(binding.repo_id.clone())
+                .bind(binding.worktree_id.clone());
         }
 
         sql.bind(input.approved_by)
@@ -652,13 +821,222 @@ impl TaskStore {
 
         row.map(task_from_row).transpose()
     }
+
+    // -- Attempt log --------------------------------------------------------
+
+    /// Open a new attempt row for a task. The attempt number is one past the
+    /// highest existing attempt, allocated inside the transaction so two
+    /// concurrent starts cannot collide on the unique index.
+    pub async fn start_run(&self, task_number: i64, worker_id: Option<&str>) -> Result<TaskRun> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open task run transaction")?;
+
+        let next_attempt: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM task_runs WHERE task_number = ?",
+        )
+        .bind(task_number)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to allocate next task run attempt")?;
+
+        let run_id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO task_runs (id, task_number, attempt, worker_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&run_id)
+        .bind(task_number)
+        .bind(next_attempt)
+        .bind(worker_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to insert task run")?;
+
+        let row = sqlx::query(&format!("{RUN_SELECT_COLUMNS} FROM task_runs WHERE id = ?"))
+            .bind(&run_id)
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to read back inserted task run")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit task run transaction")?;
+
+        task_run_from_row(row)
+    }
+
+    /// Close an attempt row with its outcome. Idempotent — closing an already
+    /// closed run overwrites the outcome rather than erroring, so a duplicate
+    /// completion path can't fail the caller.
+    pub async fn finish_run(
+        &self,
+        run_id: &str,
+        outcome: TaskRunOutcome,
+        summary: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE task_runs SET outcome = ?, summary = ?, error = ?, \
+             ended_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        )
+        .bind(outcome.as_str())
+        .bind(summary)
+        .bind(error)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to finish task run")?;
+
+        Ok(())
+    }
+
+    /// Attach a worker to an already-open run row. Used when the run is opened
+    /// before the worker id is known.
+    pub async fn set_run_worker(&self, run_id: &str, worker_id: &str) -> Result<()> {
+        sqlx::query("UPDATE task_runs SET worker_id = ? WHERE id = ?")
+            .bind(worker_id)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to set task run worker")?;
+        Ok(())
+    }
+
+    /// All attempts for a task, oldest first.
+    pub async fn list_runs(&self, task_number: i64) -> Result<Vec<TaskRun>> {
+        let rows = sqlx::query(&format!(
+            "{RUN_SELECT_COLUMNS} FROM task_runs WHERE task_number = ? ORDER BY attempt ASC"
+        ))
+        .bind(task_number)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list task runs")?;
+
+        rows.into_iter().map(task_run_from_row).collect()
+    }
+
+    // -- Failure budget -----------------------------------------------------
+
+    /// Record a failed attempt and decide whether the task may be retried.
+    ///
+    /// Runs as one transaction so the increment and the status change cannot
+    /// interleave with a concurrent claim.
+    pub async fn record_failure(
+        &self,
+        task_number: i64,
+        outcome: TaskRunOutcome,
+        error: &str,
+    ) -> Result<FailureDisposition> {
+        if !outcome.counts_as_failure() {
+            return Ok(FailureDisposition::NotCounted);
+        }
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open failure budget transaction")?;
+
+        let row = sqlx::query(
+            "SELECT consecutive_failures, max_retries FROM tasks WHERE task_number = ?",
+        )
+        .bind(task_number)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to read task failure budget")?;
+
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .context("failed to commit empty failure budget transaction")?;
+            return Ok(FailureDisposition::TaskMissing);
+        };
+
+        let previous: i64 = row.try_get("consecutive_failures").unwrap_or(0);
+        let limit: i64 = row
+            .try_get::<Option<i64>, _>("max_retries")
+            .ok()
+            .flatten()
+            .unwrap_or(DEFAULT_FAILURE_LIMIT);
+        let failures = previous + 1;
+        let exhausted = failures >= limit;
+
+        let next_status = if exhausted {
+            TaskStatus::Blocked
+        } else {
+            TaskStatus::Ready
+        };
+
+        sqlx::query(
+            "UPDATE tasks SET consecutive_failures = ?, last_error = ?, status = ?, \
+             worker_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ?",
+        )
+        .bind(failures)
+        .bind(error)
+        .bind(next_status.as_str())
+        .bind(task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to persist task failure budget")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit failure budget transaction")?;
+
+        Ok(if exhausted {
+            FailureDisposition::Parked { failures, limit }
+        } else {
+            FailureDisposition::Requeued { failures, limit }
+        })
+    }
+
+    /// Reset the failure budget. Called on successful completion, and on an
+    /// operator-initiated retry — a human looked at it, so the budget starts
+    /// over rather than immediately re-parking the task.
+    pub async fn clear_failures(&self, task_number: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET consecutive_failures = 0, last_error = NULL \
+             WHERE task_number = ?",
+        )
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to clear task failure budget")?;
+
+        Ok(())
+    }
+}
+
+/// What [`TaskStore::record_failure`] decided to do with a failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureDisposition {
+    /// Budget remains — task returned to `ready` for another attempt.
+    Requeued { failures: i64, limit: i64 },
+    /// Budget exhausted — task parked in `blocked` for a human.
+    Parked { failures: i64, limit: i64 },
+    /// Outcome does not count against the budget (rate limits).
+    NotCounted,
+    /// The task row disappeared between execution and bookkeeping.
+    TaskMissing,
 }
 
 /// Column list used by all SELECT queries. Kept in sync with `task_from_row`.
 const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
      owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
-     created_by, approved_at, approved_by, created_at, updated_at, completed_at";
+     created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
+     consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id";
 
+const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
+     summary, error, started_at, ended_at";
+
+/// The single source of truth for legal status transitions.
+///
+/// Both the HTTP API and the dashboard's drag-and-drop consume this, so the
+/// board can never render a move the API rejects.
 pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
     if current == next {
         return true;
@@ -674,9 +1052,27 @@ pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
             | (TaskStatus::Ready, TaskStatus::InProgress)
             | (TaskStatus::InProgress, TaskStatus::Done)
             | (TaskStatus::InProgress, TaskStatus::Ready)
+            | (TaskStatus::InProgress, TaskStatus::Blocked)
             | (TaskStatus::Backlog, TaskStatus::Ready)
             | (TaskStatus::Done, TaskStatus::Ready)
+            // Unblocking is always operator- or sweep-initiated.
+            | (TaskStatus::Blocked, TaskStatus::Ready)
+            | (TaskStatus::Blocked, TaskStatus::Done)
     )
+}
+
+/// Every legal `(from, to)` pair, for export to the dashboard so the UI and the
+/// API agree on what a drag is allowed to do.
+pub fn legal_transitions() -> Vec<(TaskStatus, TaskStatus)> {
+    let mut pairs = Vec::new();
+    for from in TaskStatus::ALL {
+        for to in TaskStatus::ALL {
+            if from != to && can_transition(from, to) {
+                pairs.push((from, to));
+            }
+        }
+    }
+    pairs
 }
 
 fn merge_json_object(current: Value, patch: Option<Value>) -> Value {
@@ -762,11 +1158,7 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         subtasks: parse_subtasks(&subtasks_value),
         metadata: parse_metadata(&metadata_value),
         source_memory_id: row.try_get("source_memory_id").ok(),
-        worker_id: row
-            .try_get::<Option<String>, _>("worker_id")
-            .ok()
-            .flatten()
-            .and_then(|value| if value.is_empty() { None } else { Some(value) }),
+        worker_id: read_optional_id(&row, "worker_id"),
         created_by: row
             .try_get("created_by")
             .context("failed to read task created_by")?,
@@ -775,6 +1167,48 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         created_at,
         updated_at,
         completed_at: read_optional_timestamp(&row, "completed_at"),
+        consecutive_failures: row.try_get("consecutive_failures").unwrap_or(0),
+        max_retries: row.try_get("max_retries").ok().flatten(),
+        last_error: row
+            .try_get::<Option<String>, _>("last_error")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
+        project_id: read_optional_id(&row, "project_id"),
+        repo_id: read_optional_id(&row, "repo_id"),
+        worktree_id: read_optional_id(&row, "worktree_id"),
+    })
+}
+
+/// Read a nullable TEXT id, treating the empty string as absent.
+fn read_optional_id(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<String> {
+    row.try_get::<Option<String>, _>(column)
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+}
+
+fn task_run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TaskRun> {
+    let outcome = row
+        .try_get::<Option<String>, _>("outcome")
+        .ok()
+        .flatten()
+        .and_then(|value| TaskRunOutcome::parse(&value));
+
+    Ok(TaskRun {
+        id: row.try_get("id").context("failed to read task run id")?,
+        task_number: row
+            .try_get("task_number")
+            .context("failed to read task run task_number")?,
+        attempt: row
+            .try_get("attempt")
+            .context("failed to read task run attempt")?,
+        worker_id: row.try_get::<Option<String>, _>("worker_id").ok().flatten(),
+        outcome,
+        summary: row.try_get::<Option<String>, _>("summary").ok().flatten(),
+        error: row.try_get::<Option<String>, _>("error").ok().flatten(),
+        started_at: read_timestamp(&row, "started_at")?,
+        ended_at: read_optional_timestamp(&row, "ended_at"),
     })
 }
 
@@ -803,14 +1237,15 @@ fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Optio
         .map(|v| v.and_utc().to_rfc3339())
 }
 
+/// Create the task tables in a test pool.
+///
+/// This is the single definition of the test schema — `cortex.rs` and any other
+/// module that needs a bare pool with task tables calls this rather than
+/// hand-rolling its own `CREATE TABLE`. Keep it in sync with
+/// `migrations/global/`; when a migration adds a column, add it here too and
+/// every test site picks it up.
 #[cfg(test)]
-pub(crate) async fn setup_test_store() -> TaskStore {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("in-memory sqlite should connect");
-
+pub(crate) async fn create_task_schema(pool: &SqlitePool) {
     sqlx::query(
         r#"
         CREATE TABLE tasks (
@@ -831,13 +1266,39 @@ pub(crate) async fn setup_test_store() -> TaskStore {
             approved_by TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            completed_at TEXT
+            completed_at TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER,
+            last_error TEXT,
+            project_id TEXT,
+            repo_id TEXT,
+            worktree_id TEXT
         )
         "#,
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("tasks schema should be created");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE task_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            task_number INTEGER NOT NULL,
+            attempt INTEGER NOT NULL,
+            worker_id TEXT,
+            outcome TEXT,
+            summary TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            ended_at TEXT,
+            UNIQUE (task_number, attempt)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("task_runs schema should be created");
 
     sqlx::query(
         "CREATE TABLE task_number_seq (
@@ -845,9 +1306,20 @@ pub(crate) async fn setup_test_store() -> TaskStore {
             next_number INTEGER NOT NULL DEFAULT 1
         )",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("task_number_seq should be created");
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_test_store() -> TaskStore {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite should connect");
+
+    create_task_schema(&pool).await;
 
     sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
         .execute(&pool)
@@ -870,14 +1342,349 @@ mod tests {
             owner_agent_id: "agent-test".to_string(),
             assigned_agent_id: "agent-test".to_string(),
             title: title.to_string(),
-            description: None,
             status,
-            priority: TaskPriority::Medium,
-            subtasks: Vec::new(),
-            metadata: serde_json::json!({}),
-            source_memory_id: None,
             created_by: "branch".to_string(),
+            ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn binding_round_trips_through_create_and_read() {
+        let store = setup_store().await;
+        let created = store
+            .create(CreateTaskInput {
+                binding: TaskProjectBinding {
+                    project_id: Some("proj-platform".into()),
+                    repo_id: Some("repo-api".into()),
+                    worktree_id: Some("wt-feature".into()),
+                },
+                ..self_assigned_input("bound task", TaskStatus::Backlog)
+            })
+            .await
+            .expect("should create");
+
+        assert_eq!(created.project_id.as_deref(), Some("proj-platform"));
+        assert_eq!(created.repo_id.as_deref(), Some("repo-api"));
+        assert_eq!(created.worktree_id.as_deref(), Some("wt-feature"));
+
+        let fetched = store
+            .get_by_number(created.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(fetched.repo_id.as_deref(), Some("repo-api"));
+    }
+
+    #[tokio::test]
+    async fn unbound_tasks_have_no_binding() {
+        let store = setup_store().await;
+        let created = store
+            .create(self_assigned_input("plain task", TaskStatus::Backlog))
+            .await
+            .expect("should create");
+
+        assert!(created.project_id.is_none());
+        assert!(created.repo_id.is_none());
+        assert!(created.worktree_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn two_tasks_in_one_project_can_target_different_repos() {
+        // The multi-repo case the board previously could not express at all:
+        // one project, two repos, one task each.
+        let store = setup_store().await;
+
+        let api_task = store
+            .create(CreateTaskInput {
+                binding: TaskProjectBinding {
+                    project_id: Some("proj-platform".into()),
+                    repo_id: Some("repo-api".into()),
+                    worktree_id: None,
+                },
+                ..self_assigned_input("change the contract", TaskStatus::Backlog)
+            })
+            .await
+            .expect("should create");
+
+        let web_task = store
+            .create(CreateTaskInput {
+                binding: TaskProjectBinding {
+                    project_id: Some("proj-platform".into()),
+                    repo_id: Some("repo-web".into()),
+                    worktree_id: None,
+                },
+                ..self_assigned_input("regenerate clients", TaskStatus::Backlog)
+            })
+            .await
+            .expect("should create");
+
+        assert_eq!(api_task.project_id, web_task.project_id);
+        assert_ne!(
+            api_task.repo_id, web_task.repo_id,
+            "two tasks in the same project must be able to name different repos"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rebinds_and_clears() {
+        let store = setup_store().await;
+        let created = store
+            .create(CreateTaskInput {
+                binding: TaskProjectBinding {
+                    project_id: Some("proj-a".into()),
+                    repo_id: Some("repo-1".into()),
+                    worktree_id: None,
+                },
+                ..self_assigned_input("movable", TaskStatus::Backlog)
+            })
+            .await
+            .expect("should create");
+
+        // Rebind to a different repo.
+        let rebound = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    binding: Some(TaskProjectBinding {
+                        project_id: Some("proj-a".into()),
+                        repo_id: Some("repo-2".into()),
+                        worktree_id: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(rebound.repo_id.as_deref(), Some("repo-2"));
+
+        // An update that says nothing about the binding must leave it alone.
+        let untouched = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    title: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(
+            untouched.repo_id.as_deref(),
+            Some("repo-2"),
+            "an unrelated update must not silently unbind the task"
+        );
+
+        // Explicit clear.
+        let cleared = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    clear_binding: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert!(cleared.project_id.is_none());
+        assert!(cleared.repo_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn runs_are_numbered_sequentially_per_task() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("multi attempt", TaskStatus::Ready))
+            .await
+            .expect("should create");
+
+        let first = store
+            .start_run(task.task_number, Some("worker-1"))
+            .await
+            .expect("first run");
+        let second = store
+            .start_run(task.task_number, Some("worker-2"))
+            .await
+            .expect("second run");
+
+        assert_eq!(first.attempt, 1);
+        assert_eq!(second.attempt, 2);
+        assert!(first.outcome.is_none(), "a fresh run has no outcome yet");
+
+        store
+            .finish_run(&first.id, TaskRunOutcome::Failed, None, Some("boom"))
+            .await
+            .expect("finish first");
+
+        let runs = store.list_runs(task.task_number).await.expect("list runs");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].outcome, Some(TaskRunOutcome::Failed));
+        assert_eq!(runs[0].error.as_deref(), Some("boom"));
+        assert!(runs[0].ended_at.is_some());
+        assert!(runs[1].ended_at.is_none(), "open run stays open");
+    }
+
+    #[tokio::test]
+    async fn failure_budget_requeues_then_parks() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("flaky", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        // First failure: budget remains, back to ready.
+        let first = store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "attempt 1 failed")
+            .await
+            .expect("record first failure");
+        assert_eq!(
+            first,
+            FailureDisposition::Requeued {
+                failures: 1,
+                limit: DEFAULT_FAILURE_LIMIT
+            }
+        );
+        let after_first = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after_first.status, TaskStatus::Ready);
+        assert_eq!(after_first.consecutive_failures, 1);
+        assert_eq!(after_first.last_error.as_deref(), Some("attempt 1 failed"));
+
+        // Second failure hits the limit: parked, not requeued.
+        let second = store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "attempt 2 failed")
+            .await
+            .expect("record second failure");
+        assert_eq!(
+            second,
+            FailureDisposition::Parked {
+                failures: 2,
+                limit: DEFAULT_FAILURE_LIMIT
+            }
+        );
+        let after_second = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after_second.status,
+            TaskStatus::Blocked,
+            "an exhausted budget must park the task instead of hot-looping"
+        );
+        assert_eq!(after_second.consecutive_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn rate_limits_do_not_spend_the_failure_budget() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("quota", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        for _ in 0..5 {
+            let disposition = store
+                .record_failure(task.task_number, TaskRunOutcome::RateLimited, "429")
+                .await
+                .expect("record rate limit");
+            assert_eq!(disposition, FailureDisposition::NotCounted);
+        }
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.consecutive_failures, 0,
+            "a provider quota outage must not trip the circuit breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_failures_resets_the_budget() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("retryable", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "nope")
+            .await
+            .expect("record failure");
+        store
+            .clear_failures(task.task_number)
+            .await
+            .expect("clear failures");
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.consecutive_failures, 0);
+        assert!(after.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn max_retries_overrides_the_default_limit() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("one shot", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        sqlx::query("UPDATE tasks SET max_retries = 1 WHERE task_number = ?")
+            .bind(task.task_number)
+            .execute(store.pool())
+            .await
+            .expect("set max_retries");
+
+        let disposition = store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "failed once")
+            .await
+            .expect("record failure");
+        assert_eq!(
+            disposition,
+            FailureDisposition::Parked {
+                failures: 1,
+                limit: 1
+            },
+            "a max_retries of 1 must park on the first failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_tasks_are_not_claimable() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("parked", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        // Burn the budget so the task lands in Blocked.
+        for _ in 0..DEFAULT_FAILURE_LIMIT {
+            store
+                .record_failure(task.task_number, TaskRunOutcome::Failed, "dead end")
+                .await
+                .expect("record failure");
+        }
+
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim should succeed");
+        assert!(
+            claimed.is_none(),
+            "the pickup loop must not re-claim a task parked by the failure budget"
+        );
     }
 
     #[tokio::test]
@@ -1186,6 +1993,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 source_memory_id: None,
                 created_by: "branch".to_string(),
+                ..Default::default()
             })
             .await
             .expect("should create");

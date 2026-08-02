@@ -3706,12 +3706,67 @@ enum DetachedRouting {
     Requeue,
 }
 
+/// Emit the logging + events for a failed attempt whose status was already
+/// persisted by [`TaskStore::record_failure`].
+///
+/// `record_failure` writes the status inside its own transaction so the
+/// increment and the transition are atomic, which means this path deliberately
+/// skips the normal `task_store.update` call.
+#[allow(clippy::too_many_arguments)]
+fn emit_requeue_outcome(
+    task: &crate::tasks::Task,
+    worker_id: WorkerId,
+    result_text: &str,
+    new_status: TaskStatus,
+    logger: &CortexLogger,
+    run_logger: &crate::conversation::history::ProcessRunLogger,
+    event_tx: &tokio::sync::broadcast::Sender<ProcessEvent>,
+    agent_id: &str,
+    message: &str,
+    log_event: &str,
+    extra: Option<serde_json::Value>,
+) {
+    run_logger.log_worker_completed(worker_id, result_text, false);
+
+    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: Arc::from(agent_id),
+        task_number: task.task_number,
+        status: new_status.as_str().to_string(),
+        action: "updated".to_string(),
+    });
+
+    let mut payload = serde_json::json!({
+        "task_number": task.task_number,
+        "worker_id": worker_id.to_string(),
+        "status": new_status.as_str(),
+    });
+    if let (Some(serde_json::Value::Object(extra)), Some(target)) = (extra, payload.as_object_mut())
+    {
+        for (key, value) in extra {
+            target.insert(key, value);
+        }
+    }
+
+    logger.log(log_event, message, Some(payload));
+
+    let _ = event_tx.send(ProcessEvent::WorkerComplete {
+        agent_id: Arc::from(agent_id),
+        worker_id,
+        channel_id: None,
+        result: result_text.to_string(),
+        notify: true,
+        success: false,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_detached_completion(
     routing: DetachedRouting,
     task: &crate::tasks::Task,
     worker_id: WorkerId,
     result_text: &str,
+    run_id: Option<&str>,
+    run_outcome: crate::tasks::TaskRunOutcome,
     task_store: &Arc<TaskStore>,
     run_logger: &crate::conversation::history::ProcessRunLogger,
     logger: &CortexLogger,
@@ -3723,6 +3778,95 @@ async fn handle_detached_completion(
     injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
 ) {
     let success = matches!(routing, DetachedRouting::Success);
+
+    // Close the attempt row before touching task status, so the log reflects
+    // what happened even if the status write then fails.
+    if let Some(run_id) = run_id {
+        let (summary, error) = if success {
+            (Some(result_text), None)
+        } else {
+            (None, Some(result_text))
+        };
+        if let Err(error) = task_store
+            .finish_run(run_id, run_outcome, summary, error)
+            .await
+        {
+            tracing::warn!(%error, task_number = task.task_number, "failed to close task run row");
+        }
+    }
+
+    // Requeue no longer means "straight back to ready". The failure budget
+    // decides: retry while budget remains, otherwise park in `blocked` so a
+    // human sees it instead of the task hot-looping forever.
+    if matches!(routing, DetachedRouting::Requeue) {
+        let disposition = task_store
+            .record_failure(task.task_number, run_outcome, result_text)
+            .await;
+
+        match disposition {
+            Ok(crate::tasks::FailureDisposition::Requeued { failures, limit }) => {
+                emit_requeue_outcome(
+                    task,
+                    worker_id,
+                    result_text,
+                    TaskStatus::Ready,
+                    logger,
+                    run_logger,
+                    event_tx,
+                    agent_id,
+                    &format!(
+                        "Picked-up task #{} failed (attempt {failures}/{limit}), requeued: {result_text}",
+                        task.task_number
+                    ),
+                    "task_pickup_failed",
+                    Some(serde_json::json!({ "failures": failures, "limit": limit })),
+                );
+                return;
+            }
+            Ok(crate::tasks::FailureDisposition::Parked { failures, limit }) => {
+                emit_requeue_outcome(
+                    task,
+                    worker_id,
+                    result_text,
+                    TaskStatus::Blocked,
+                    logger,
+                    run_logger,
+                    event_tx,
+                    agent_id,
+                    &format!(
+                        "Picked-up task #{} exhausted its retry budget ({failures}/{limit}) and was blocked: {result_text}",
+                        task.task_number
+                    ),
+                    "task_pickup_budget_exhausted",
+                    Some(serde_json::json!({ "failures": failures, "limit": limit })),
+                );
+                return;
+            }
+            Ok(crate::tasks::FailureDisposition::NotCounted) => {
+                // Rate limited. Requeue without spending budget.
+                tracing::info!(
+                    task_number = task.task_number,
+                    "task attempt hit a provider rate limit — requeueing without counting a failure"
+                );
+            }
+            Ok(crate::tasks::FailureDisposition::TaskMissing) => {
+                tracing::warn!(
+                    task_number = task.task_number,
+                    "task row missing while recording failure — task may have been deleted"
+                );
+                run_logger.log_worker_completed(worker_id, result_text, false);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    task_number = task.task_number,
+                    "failed to record task failure — falling through to plain requeue"
+                );
+            }
+        }
+    }
+
     let new_status = match routing {
         DetachedRouting::Success | DetachedRouting::Terminal => TaskStatus::Done,
         DetachedRouting::Requeue => TaskStatus::Ready,
@@ -3738,6 +3882,15 @@ async fn handle_detached_completion(
             ..Default::default()
         },
     };
+
+    // A clean completion clears the failure budget so a task that failed twice
+    // and then succeeded doesn't carry a hair trigger into its next run.
+    if success
+        && task.consecutive_failures > 0
+        && let Err(error) = task_store.clear_failures(task.task_number).await
+    {
+        tracing::warn!(%error, task_number = task.task_number, "failed to clear failure budget");
+    }
 
     let update_result = task_store.update(task.task_number, update_input).await;
     let persisted = match update_result {
@@ -3996,6 +4149,30 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         }
     }
 
+    // A task bound to a project/repo/worktree names its working directory
+    // explicitly. Without this the worker only sees the global project listing
+    // and has to guess which repo the task is about — the whole point of the
+    // binding is that it doesn't have to.
+    if let Some(directory) = crate::tools::spawn_worker::resolve_directory_from_project(
+        deps,
+        None,
+        task.project_id.as_deref(),
+        task.repo_id.as_deref(),
+        task.worktree_id.as_deref(),
+    )
+    .await
+    {
+        task_prompt.push_str("\n\nWorking directory: ");
+        task_prompt.push_str(&directory);
+        task_prompt.push_str("\nThis task is scoped to that directory. Work there unless the task explicitly says otherwise.");
+
+        // Deliberately no sandbox mutation here. A task can only bind to a
+        // registered project (enforced by the FK), whose root is already in the
+        // allowlist via `refresh_project_paths`, and repo/worktree paths live
+        // under that root. Widening the sandbox as a side effect of task pickup
+        // would be a quiet privilege escalation.
+    }
+
     let screenshot_dir = deps
         .runtime_config
         .workspace_dir
@@ -4043,6 +4220,24 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         worker_id,
     )
     .await?;
+
+    // Open an attempt row so this execution is recorded even if the process
+    // dies before completion. A failure to log must not abort the run.
+    let run_id = match deps
+        .task_store
+        .start_run(task.task_number, Some(&worker_id.to_string()))
+        .await
+    {
+        Ok(run) => Some(run.id),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                "failed to open task run row — continuing without attempt logging"
+            );
+            None
+        }
+    };
 
     let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
         agent_id: deps.agent_id.clone(),
@@ -4157,6 +4352,36 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                         | Ok(WorkerOutcome::Blocked { .. }) => DetachedRouting::Terminal,
                         Ok(WorkerOutcome::Failed { .. }) | Err(_) => DetachedRouting::Requeue,
                     };
+                    // Classify for the attempt log. A rate-limited failure is
+                    // recorded but deliberately excluded from the failure
+                    // budget — a provider quota outage is not the task's fault.
+                    let run_outcome = match &outcome_or_error {
+                        Ok(WorkerOutcome::Success { .. }) | Ok(WorkerOutcome::Partial { .. }) => {
+                            crate::tasks::TaskRunOutcome::Completed
+                        }
+                        Ok(WorkerOutcome::Cancelled { .. }) => {
+                            crate::tasks::TaskRunOutcome::Cancelled
+                        }
+                        Ok(WorkerOutcome::Timeout { .. }) => crate::tasks::TaskRunOutcome::Timeout,
+                        Ok(WorkerOutcome::Blocked { .. }) => crate::tasks::TaskRunOutcome::Blocked,
+                        Ok(WorkerOutcome::Failed { reason }) => {
+                            if crate::llm::routing::is_rate_limit_error(reason) {
+                                crate::tasks::TaskRunOutcome::RateLimited
+                            } else {
+                                crate::tasks::TaskRunOutcome::Failed
+                            }
+                        }
+                        Err(WorkerCompletionError::Cancelled { .. }) => {
+                            crate::tasks::TaskRunOutcome::Cancelled
+                        }
+                        Err(WorkerCompletionError::Failed { message }) => {
+                            if crate::llm::routing::is_rate_limit_error(message) {
+                                crate::tasks::TaskRunOutcome::RateLimited
+                            } else {
+                                crate::tasks::TaskRunOutcome::Failed
+                            }
+                        }
+                    };
                     let (result_text, _notify, _success) = map_worker_completion(outcome_or_error);
                     let result_text = scrub(result_text);
                     handle_detached_completion(
@@ -4164,6 +4389,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                         &task,
                         worker_id,
                         &result_text,
+                        run_id.as_deref(),
+                        run_outcome,
                         &task_store,
                         &run_logger,
                         &logger,
@@ -5534,31 +5761,7 @@ mod tests {
             .await
             .expect("failed to create sqlite memory pool");
 
-        sqlx::query(
-            "CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL DEFAULT 'backlog',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT,
-                metadata TEXT,
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("failed to create tasks table");
+        crate::tasks::store::create_task_schema(&pool).await;
 
         let task_store = TaskStore::new(pool.clone());
         let registry = crate::agent::process_control::ProcessControlRegistry::new();
@@ -5618,31 +5821,7 @@ mod tests {
             .await
             .expect("failed to create sqlite memory pool");
 
-        sqlx::query(
-            "CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL DEFAULT 'backlog',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT,
-                metadata TEXT,
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("failed to create tasks table");
+        crate::tasks::store::create_task_schema(&pool).await;
 
         let task_store = TaskStore::new(pool.clone());
         let registry = crate::agent::process_control::ProcessControlRegistry::new();

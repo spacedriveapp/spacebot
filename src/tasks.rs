@@ -4,6 +4,7 @@ pub mod migration;
 pub mod store;
 
 pub use store::{
-    CreateTaskInput, Task, TaskListFilter, TaskPriority, TaskStatus, TaskStore, TaskSubtask,
-    TaskUpdateResult, UpdateTaskInput, WorkerTaskUpdateResult,
+    CreateTaskInput, DEFAULT_FAILURE_LIMIT, FailureDisposition, Task, TaskListFilter, TaskPriority,
+    TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus, TaskStore, TaskSubtask,
+    TaskUpdateResult, UpdateTaskInput, WorkerTaskUpdateResult, can_transition, legal_transitions,
 };

@@ -330,6 +330,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 source_memory_id: None,
                 created_by: "branch".to_string(),
+                ..Default::default()
             })
             .await
             .expect("task should be created");
@@ -380,6 +381,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 source_memory_id: None,
                 created_by: "branch".to_string(),
+                ..Default::default()
             })
             .await
             .expect("task should be created");
@@ -428,6 +430,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 source_memory_id: None,
                 created_by: "branch".to_string(),
+                ..Default::default()
             })
             .await
             .expect("assigned task should be created");
@@ -443,6 +446,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 source_memory_id: None,
                 created_by: "branch".to_string(),
+                ..Default::default()
             })
             .await
             .expect("other task should be created");
