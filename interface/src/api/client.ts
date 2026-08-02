@@ -672,6 +672,7 @@ export type ContractProblem = Types.ContractProblem;
 export type ContractSide = Types.ContractSide;
 export type TaskInputBinding = Types.TaskInputBinding;
 export type TaskContractResponse = Types.TaskContractResponse;
+export type TaskProvenanceResponse = Types.TaskProvenanceResponse;
 export type TaskItem = Types.Task;
 
 export type CreateTaskRequest = Types.CreateTaskRequest;
@@ -1735,6 +1736,9 @@ export const api = {
 	/** Resolves live, so it shows what the task would get if it ran now. */
 	getTaskContract: (taskNumber: number) =>
 		fetchJson<TaskContractResponse>(`/tasks/${taskNumber}/contract`),
+	/** Where this card came from, and what it filed. */
+	getTaskProvenance: (taskNumber: number) =>
+		fetchJson<TaskProvenanceResponse>(`/tasks/${taskNumber}/provenance`),
 	listTaskDependencies: (taskNumber: number) =>
 		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
 	/** The legal status moves, so the board never offers one the API rejects. */

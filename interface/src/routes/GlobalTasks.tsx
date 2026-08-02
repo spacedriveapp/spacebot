@@ -29,6 +29,7 @@ import {
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {ContractSection} from "@/components/tasks/ContractSection";
+import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 import {RepoChip} from "@/components/tasks/RepoChip";
@@ -408,6 +409,13 @@ export function GlobalTasks() {
 						}}
 					/>
 					<ContractSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
+					/>
+					<ProvenanceSection
 						taskNumber={(activeTask as unknown as TaskItem).task_number}
 						onSelectTask={(number) => {
 							const target = rawTasks.find((t) => t.task_number === number);

@@ -2343,6 +2343,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/provenance` — where this card came from and what it
+         *     spawned.
+         * @description A worker-filed card is otherwise indistinguishable from one a human wrote,
+         *     which makes a surprising board impossible to explain.
+         */
+        get: operations["get_task_provenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/retry": {
         parameters: {
             query?: never;
@@ -4479,6 +4501,20 @@ export interface components {
         };
         /** @enum {string} */
         TaskPriority: "critical" | "high" | "medium" | "low";
+        TaskProvenanceResponse: {
+            /** @description Cards this task filed. */
+            filed: components["schemas"]["Task"][];
+            /**
+             * Format: int64
+             * @description The task that filed this one, when a worker did.
+             */
+            filed_by_task_number?: number | null;
+            /**
+             * Format: int64
+             * @description How many more this task may still file before hitting the cap.
+             */
+            remaining_fan_out: number;
+        };
         TaskResponse: {
             task: components["schemas"]["Task"];
         };
@@ -10799,6 +10835,42 @@ export interface operations {
             };
             /** @description Task pending approval */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_provenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskProvenanceResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

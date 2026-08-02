@@ -383,6 +383,8 @@ export type ContractSide = components["schemas"]["ContractSide"];
 export type TaskInputBinding = components["schemas"]["TaskInputBinding"];
 export type TaskContractResponse =
 	components["schemas"]["TaskContractResponse"];
+export type TaskProvenanceResponse =
+	components["schemas"]["TaskProvenanceResponse"];
 export type TaskTransitionsResponse =
 	components["schemas"]["TaskTransitionsResponse"];
 

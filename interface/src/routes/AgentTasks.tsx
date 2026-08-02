@@ -23,6 +23,7 @@ import {
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {ContractSection} from "@/components/tasks/ContractSection";
+import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 
@@ -277,6 +278,9 @@ export function AgentTasks({agentId}: {agentId: string}) {
 						taskNumber={(activeTask as unknown as TaskItem).task_number}
 					/>
 					<ContractSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+					/>
+					<ProvenanceSection
 						taskNumber={(activeTask as unknown as TaskItem).task_number}
 					/>
 					<GithubSection

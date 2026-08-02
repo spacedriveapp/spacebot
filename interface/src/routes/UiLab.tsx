@@ -7,6 +7,7 @@
 import { useState } from "react";
 import type {
 	TaskContractResponse,
+	TaskProvenanceResponse,
 	TaskDependenciesResponse,
 	TaskEdgeSummary,
 	TaskItem,
@@ -18,6 +19,7 @@ import { RepoChip, type BindingNames } from "@/components/tasks/RepoChip";
 import { ALL_REPOS, RepoFilter } from "@/components/tasks/RepoFilter";
 import { DependencySectionView } from "@/components/tasks/DependencySection";
 import { ContractSectionView } from "@/components/tasks/ContractSection";
+import { ProvenanceSectionView } from "@/components/tasks/ProvenanceSection";
 import { indexEdges } from "@/components/tasks/DependencyBadges";
 
 const BINDING_NAMES: BindingNames = {
@@ -228,6 +230,29 @@ const CONTRACT_BROKEN: TaskContractResponse = {
 	],
 };
 
+const PROVENANCE: TaskProvenanceResponse = {
+	filed_by_task_number: 128,
+	remaining_fan_out: 7,
+	filed: [
+		fixtureTask({
+			task_number: 151,
+			title: "Regenerate the web client",
+			status: "ready",
+		}),
+		fixtureTask({
+			task_number: 152,
+			title: "Regenerate the mobile client",
+			status: "backlog",
+			block_kind: "dependency",
+		}),
+		fixtureTask({
+			task_number: 153,
+			title: "Update the integration tests",
+			status: "done",
+		}),
+	],
+};
+
 export function UiLab() {
 	const [collapsed, setCollapsed] = useState(false);
 	const [retrying, setRetrying] = useState<number | null>(null);
@@ -329,6 +354,15 @@ export function UiLab() {
 				</h2>
 				<div className="rounded-md border border-app-line bg-app-box/20">
 					<ContractSectionView data={CONTRACT_BROKEN} onSelectTask={() => {}} />
+				</div>
+			</section>
+
+			<section className="mb-10 max-w-2xl">
+				<h2 className="mb-2 font-mono text-xs font-semibold tracking-wide text-ink-dull">
+					ProvenanceSection
+				</h2>
+				<div className="rounded-md border border-app-line bg-app-box/20">
+					<ProvenanceSectionView data={PROVENANCE} onSelectTask={() => {}} />
 				</div>
 			</section>
 
