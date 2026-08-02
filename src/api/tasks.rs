@@ -168,6 +168,42 @@ pub(super) struct AddDependencyRequest {
     parent_task_number: i64,
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskContractResponse {
+    input_schema: Option<serde_json::Value>,
+    output_schema: Option<serde_json::Value>,
+    /// Inputs as they were resolved at the last claim.
+    inputs: Option<serde_json::Value>,
+    outputs: Option<serde_json::Value>,
+    /// What the bindings resolve to right now, which may differ from `inputs`
+    /// if the graph changed since the last attempt.
+    resolved_inputs: Option<serde_json::Value>,
+    bindings: Vec<crate::tasks::TaskInputBinding>,
+    /// Why resolution fails, if it does. Empty when the contract is satisfied.
+    problems: Vec<crate::tasks::ContractProblem>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct SetContractRequest {
+    #[serde(default)]
+    input_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct SetBindingRequest {
+    /// Upstream task to read from. Omit for a literal.
+    #[serde(default)]
+    source_task_number: Option<i64>,
+    /// RFC 6901 JSON Pointer into that task's outputs.
+    #[serde(default)]
+    source_pointer: Option<String>,
+    /// Literal JSON value, used when no source task is given.
+    #[serde(default)]
+    literal_value: Option<serde_json::Value>,
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct BlockTaskRequest {
     /// dependency | needs_input | capability | transient
@@ -965,4 +1001,179 @@ pub(super) async fn unblock_task(
 
     emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
+}
+
+/// `GET /tasks/{number}/contract` — the declared contract, its bindings, and
+/// what those bindings currently resolve to.
+///
+/// Resolution runs live rather than being read back from the last claim, so the
+/// page shows what the task *would* get if it ran now. A graph that has drifted
+/// since the last attempt is exactly the case worth seeing.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/contract",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_contract(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for contract");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let bindings = store.list_input_bindings(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list input bindings");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let (resolved_inputs, problems) = match store.resolve_inputs(number).await {
+        Ok(crate::tasks::ContractResolution::Resolved { inputs }) => (Some(inputs), Vec::new()),
+        Ok(crate::tasks::ContractResolution::Unresolved { problems }) => (None, problems),
+        Ok(crate::tasks::ContractResolution::NotRequired) => (None, Vec::new()),
+        Err(error) => {
+            tracing::warn!(%error, task_number = number, "failed to resolve inputs for contract view");
+            (None, Vec::new())
+        }
+    };
+
+    Ok(Json(TaskContractResponse {
+        input_schema: task.input_schema,
+        output_schema: task.output_schema,
+        inputs: task.inputs,
+        outputs: task.outputs,
+        resolved_inputs,
+        bindings,
+        problems,
+    }))
+}
+
+/// `PUT /tasks/{number}/contract` — declare what a task needs and produces.
+#[utoipa::path(
+    put,
+    path = "/tasks/{number}/contract",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = SetContractRequest,
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn set_task_contract(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<SetContractRequest>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    store
+        .set_contract(
+            number,
+            request.input_schema.as_ref(),
+            request.output_schema.as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to set task contract");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    get_task_contract(State(state), Path(number)).await
+}
+
+/// `PUT /tasks/{number}/bindings/{key}` — point one input at its source.
+#[utoipa::path(
+    put,
+    path = "/tasks/{number}/bindings/{key}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("key" = String, Path, description = "Input key"),
+    ),
+    request_body = SetBindingRequest,
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 422, description = "A binding must name either a source task or a literal"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn set_task_binding(
+    State(state): State<Arc<ApiState>>,
+    Path((number, key)): Path<(i64, String)>,
+    Json(request): Json<SetBindingRequest>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    // A binding that names neither a source nor a literal resolves to nothing
+    // and would fail silently at claim time — reject it while somebody is
+    // looking at it.
+    if request.source_task_number.is_none() && request.literal_value.is_none() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    store
+        .set_input_binding(&crate::tasks::TaskInputBinding {
+            child_task_number: number,
+            input_key: key,
+            source_task_number: request.source_task_number,
+            source_pointer: request.source_pointer,
+            literal_value: request.literal_value,
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to set input binding");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    get_task_contract(State(state), Path(number)).await
+}
+
+/// `DELETE /tasks/{number}/bindings/{key}` — unbind one input.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/bindings/{key}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("key" = String, Path, description = "Input key"),
+    ),
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Binding not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn remove_task_binding(
+    State(state): State<Arc<ApiState>>,
+    Path((number, key)): Path<(i64, String)>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let removed = store
+        .remove_input_binding(number, &key)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to remove input binding");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !removed {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    get_task_contract(State(state), Path(number)).await
 }

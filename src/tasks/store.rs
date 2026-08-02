@@ -1652,6 +1652,49 @@ impl TaskStore {
         Ok(OutputSubmission::Accepted)
     }
 
+    /// Submit outputs for the task a specific worker is executing.
+    ///
+    /// Scoped exactly like `update_worker_task`: a worker may only complete the
+    /// task it was spawned for. Without this a worker could write outputs onto
+    /// another agent's task, and downstream tasks would consume them as fact.
+    pub async fn submit_worker_outputs(
+        &self,
+        worker_id: &str,
+        task_number: i64,
+        outputs: &Value,
+    ) -> Result<WorkerOutputSubmission> {
+        let owns: Option<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks WHERE worker_id = ? AND task_number = ?",
+        )
+        .bind(worker_id)
+        .bind(task_number)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to check worker task ownership")?;
+
+        if owns.is_none() {
+            let assigned: Option<i64> = sqlx::query_scalar(
+                "SELECT task_number FROM tasks WHERE worker_id = ? \
+                 ORDER BY task_number DESC LIMIT 1",
+            )
+            .bind(worker_id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("failed to look up the worker's own task")?;
+
+            return Ok(match assigned {
+                Some(assigned_task_number) => WorkerOutputSubmission::WrongTask {
+                    assigned_task_number,
+                },
+                None => WorkerOutputSubmission::NotAssigned,
+            });
+        }
+
+        Ok(WorkerOutputSubmission::Submitted(
+            self.submit_outputs(task_number, outputs).await?,
+        ))
+    }
+
     /// Set or clear a task's declared contract.
     pub async fn set_contract(
         &self,
@@ -2014,6 +2057,18 @@ pub enum ContractResolution {
     Resolved { inputs: Value },
     /// The graph cannot supply what this task was promised.
     Unresolved { problems: Vec<ContractProblem> },
+}
+
+/// The result of a worker submitting outputs for its own task.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkerOutputSubmission {
+    Submitted(OutputSubmission),
+    /// The worker is not bound to any task.
+    NotAssigned,
+    /// The worker tried to write to a task other than its own.
+    WrongTask {
+        assigned_task_number: i64,
+    },
 }
 
 /// The result of a worker submitting its outputs.

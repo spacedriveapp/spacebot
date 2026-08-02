@@ -4400,6 +4400,68 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         )
         .map_err(|error| anyhow::anyhow!("failed to append tool-use enforcement: {error}"))?;
 
+    // Resolve the input contract before spending anything on a worker.
+    //
+    // A task whose inputs cannot be assembled is a broken *graph*, not a failed
+    // agent — the upstream task never produced what this one was promised, and
+    // the worker has not run yet. So it parks as a `dependency` block, which
+    // costs no failure budget and clears itself once the upstream lands.
+    let resolved_inputs = match deps.task_store.resolve_inputs(task.task_number).await {
+        Ok(crate::tasks::ContractResolution::NotRequired) => None,
+        Ok(crate::tasks::ContractResolution::Resolved { inputs }) => {
+            if let Err(error) = deps.task_store.set_inputs(task.task_number, &inputs).await {
+                tracing::warn!(%error, task_number = task.task_number, "failed to persist resolved inputs");
+            }
+            Some(inputs)
+        }
+        Ok(crate::tasks::ContractResolution::Unresolved { problems }) => {
+            let reason = problems
+                .iter()
+                .map(|problem| problem.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            logger.log(
+                "task_pickup_inputs_unresolved",
+                &format!(
+                    "Task #{} cannot start — its inputs are not available: {reason}",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "problems": problems,
+                })),
+            );
+
+            if let Err(error) = deps
+                .task_store
+                .block_task(
+                    task.task_number,
+                    crate::tasks::BlockKind::Dependency,
+                    &reason,
+                )
+                .await
+            {
+                tracing::warn!(%error, task_number = task.task_number, "failed to park task with unresolved inputs");
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Backlog.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            return Ok(());
+        }
+        Err(error) => {
+            // A storage failure here is our bug, not the graph's. Blocking the
+            // task would punish it for our problem, so the run proceeds without
+            // resolved inputs and the worker sees the task as contract-free.
+            tracing::warn!(%error, task_number = task.task_number, "failed to resolve task inputs");
+            None
+        }
+    };
+
     let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
     if let Some(description) = &task.description {
         task_prompt.push_str("\n\nDescription:\n");
@@ -4411,6 +4473,27 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             let marker = if subtask.completed { "[x]" } else { "[ ]" };
             task_prompt.push_str(&format!("{}. {} {}\n", index + 1, marker, subtask.title));
         }
+    }
+
+    // The contract goes in the prompt as data, not prose. The worker is told
+    // exactly what it was given and exactly what shape it must return, because
+    // the return value is checked — a worker that guesses the shape gets its
+    // completion rejected and has to spend a segment recovering.
+    if let Some(inputs) = &resolved_inputs {
+        task_prompt.push_str("\n\nInputs (resolved from upstream tasks):\n");
+        task_prompt
+            .push_str(&serde_json::to_string_pretty(inputs).unwrap_or_else(|_| inputs.to_string()));
+    }
+    if let Some(schema) = &task.output_schema {
+        task_prompt.push_str("\n\nRequired output shape (JSON Schema):\n");
+        task_prompt
+            .push_str(&serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string()));
+        task_prompt.push_str(
+            "\n\nWhen the work is done, call `task_complete` with an `outputs` object \
+             matching that schema. It is validated: if it does not match you will be \
+             told what is wrong and must correct it. Downstream tasks read these values, \
+             so do not invent them.",
+        );
     }
 
     // A task bound to a project/repo/worktree runs *in* that directory — the

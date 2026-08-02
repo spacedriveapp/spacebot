@@ -20,6 +20,7 @@
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
 //! - `task_update` — scoped to the worker's assigned task
+//! - `task_complete` — structured, schema-validated result for that task
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
@@ -60,6 +61,7 @@ pub mod skills_search;
 pub mod skip;
 pub mod spacebot_docs;
 pub mod spawn_worker;
+pub mod task_complete;
 pub mod task_create;
 pub mod task_list;
 pub mod task_update;
@@ -148,6 +150,9 @@ pub use spacebot_docs::{
 };
 pub use spawn_worker::{
     DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
+};
+pub use task_complete::{
+    TaskCompleteArgs, TaskCompleteError, TaskCompleteOutput, TaskCompleteTool,
 };
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
@@ -962,10 +967,11 @@ pub fn create_worker_tool_server(
             ),
         )
         .tool(TaskUpdateTool::for_worker(
-            task_store,
+            task_store.clone(),
             agent_id.clone(),
             worker_id,
         ))
+        .tool(TaskCompleteTool::new(task_store, worker_id))
         .tool({
             let mut status_tool =
                 SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx.clone());
