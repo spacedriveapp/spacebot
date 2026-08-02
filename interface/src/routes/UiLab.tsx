@@ -37,9 +37,18 @@ const AGENTS: Record<string, string> = {
 	"agent-web": "Web Agent",
 };
 
+// Counted rather than random. `crypto.randomUUID` is undefined outside a
+// secure context, so calling it throws as soon as the app is reached over a
+// LAN or tailnet address instead of localhost — `lib/id.ts::generateId` exists
+// for exactly that reason and is the right choice for real client-side ids.
+// Fixtures want stable ids across reloads more than they want unique ones,
+// so a counter beats both.
+let nextFixtureId = 0;
+
 function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
+	nextFixtureId += 1;
 	return {
-		id: crypto.randomUUID(),
+		id: `fixture-${nextFixtureId}`,
 		task_number: 1,
 		title: "Untitled",
 		status: "blocked",
