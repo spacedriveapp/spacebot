@@ -248,6 +248,15 @@ pub struct Task {
     pub block_reason: Option<String>,
     /// Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
     pub block_recurrences: i64,
+    /// JSON Schema this task's resolved inputs must satisfy before it runs.
+    pub input_schema: Option<Value>,
+    /// JSON Schema this task's outputs must satisfy to complete.
+    pub output_schema: Option<Value>,
+    /// Inputs as resolved at claim time. Persisted so the value the worker
+    /// actually saw survives a crash and stays readable after upstream changes.
+    pub inputs: Option<Value>,
+    /// Validated outputs. What downstream tasks read from.
+    pub outputs: Option<Value>,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -1417,6 +1426,253 @@ impl TaskStore {
         Ok(sweep)
     }
 
+    // -- Contracts ----------------------------------------------------------
+
+    /// Declare where one of a task's inputs comes from.
+    ///
+    /// Replaces any existing binding for the same key, so re-pointing an input
+    /// is one call rather than delete-then-add.
+    pub async fn set_input_binding(&self, binding: &TaskInputBinding) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO task_input_bindings \
+                 (child_task_number, input_key, source_task_number, source_pointer, literal_value) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (child_task_number, input_key) DO UPDATE SET \
+                 source_task_number = excluded.source_task_number, \
+                 source_pointer = excluded.source_pointer, \
+                 literal_value = excluded.literal_value",
+        )
+        .bind(binding.child_task_number)
+        .bind(&binding.input_key)
+        .bind(binding.source_task_number)
+        .bind(&binding.source_pointer)
+        .bind(binding.literal_value.as_ref().map(|v| v.to_string()))
+        .execute(&self.pool)
+        .await
+        .context("failed to set task input binding")?;
+
+        Ok(())
+    }
+
+    pub async fn remove_input_binding(
+        &self,
+        child_task_number: i64,
+        input_key: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM task_input_bindings WHERE child_task_number = ? AND input_key = ?",
+        )
+        .bind(child_task_number)
+        .bind(input_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to remove task input binding")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_input_bindings(
+        &self,
+        child_task_number: i64,
+    ) -> Result<Vec<TaskInputBinding>> {
+        let rows = sqlx::query(
+            "SELECT child_task_number, input_key, source_task_number, source_pointer, literal_value \
+             FROM task_input_bindings WHERE child_task_number = ? ORDER BY input_key ASC",
+        )
+        .bind(child_task_number)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list task input bindings")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(TaskInputBinding {
+                    child_task_number: row
+                        .try_get("child_task_number")
+                        .context("failed to read binding child_task_number")?,
+                    input_key: row
+                        .try_get("input_key")
+                        .context("failed to read binding input_key")?,
+                    source_task_number: row.try_get("source_task_number").ok().flatten(),
+                    source_pointer: row.try_get("source_pointer").ok().flatten(),
+                    literal_value: row
+                        .try_get::<Option<String>, _>("literal_value")
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
+                })
+            })
+            .collect()
+    }
+
+    /// Assemble a task's inputs from its bindings and check them against its
+    /// input schema.
+    ///
+    /// Returns the resolved object on success. Every failure mode here is a
+    /// *graph* problem, not a worker problem — the upstream task has not
+    /// produced what this one was promised — which is why the caller blocks
+    /// with `dependency` rather than spending the failure budget on it.
+    pub async fn resolve_inputs(&self, task_number: i64) -> Result<ContractResolution> {
+        let Some(task) = self.get_by_number(task_number).await? else {
+            return Ok(ContractResolution::Unresolved {
+                problems: vec![ContractProblem::TaskMissing { task_number }],
+            });
+        };
+
+        let bindings = self.list_input_bindings(task_number).await?;
+
+        // No contract and no bindings is the overwhelmingly common case today.
+        // Skipping it entirely keeps existing tasks on exactly the old path.
+        if bindings.is_empty() && task.input_schema.is_none() {
+            return Ok(ContractResolution::NotRequired);
+        }
+
+        let mut resolved = serde_json::Map::new();
+        let mut problems = Vec::new();
+
+        for binding in &bindings {
+            match self.resolve_one_binding(binding).await {
+                Ok(value) => {
+                    resolved.insert(binding.input_key.clone(), value);
+                }
+                Err(problem) => problems.push(problem),
+            }
+        }
+
+        let inputs = Value::Object(resolved);
+
+        if let Some(schema) = &task.input_schema {
+            problems.extend(validation_problems(schema, &inputs, ContractSide::Input));
+        }
+
+        if problems.is_empty() {
+            Ok(ContractResolution::Resolved { inputs })
+        } else {
+            Ok(ContractResolution::Unresolved { problems })
+        }
+    }
+
+    async fn resolve_one_binding(
+        &self,
+        binding: &TaskInputBinding,
+    ) -> std::result::Result<Value, ContractProblem> {
+        // A literal needs no upstream task at all.
+        let Some(source) = binding.source_task_number else {
+            return binding
+                .literal_value
+                .clone()
+                .ok_or_else(|| ContractProblem::EmptyLiteral {
+                    input_key: binding.input_key.clone(),
+                });
+        };
+
+        let task = self
+            .get_by_number(source)
+            .await
+            .map_err(|error| ContractProblem::Storage {
+                input_key: binding.input_key.clone(),
+                message: error.to_string(),
+            })?
+            .ok_or(ContractProblem::SourceMissing {
+                input_key: binding.input_key.clone(),
+                source_task_number: source,
+            })?;
+
+        let outputs = task.outputs.ok_or(ContractProblem::SourceHasNoOutputs {
+            input_key: binding.input_key.clone(),
+            source_task_number: source,
+        })?;
+
+        let pointer = binding.source_pointer.as_deref().unwrap_or("");
+        // RFC 6901: the empty pointer selects the whole document.
+        let value = if pointer.is_empty() {
+            Some(&outputs)
+        } else {
+            outputs.pointer(pointer)
+        };
+
+        value
+            .cloned()
+            .ok_or_else(|| ContractProblem::PointerMissed {
+                input_key: binding.input_key.clone(),
+                source_task_number: source,
+                pointer: pointer.to_string(),
+            })
+    }
+
+    /// Persist a task's resolved inputs.
+    pub async fn set_inputs(&self, task_number: i64, inputs: &Value) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET inputs = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ?",
+        )
+        .bind(inputs.to_string())
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to persist task inputs")?;
+
+        Ok(())
+    }
+
+    /// Check a proposed output against the task's declared output schema and
+    /// persist it if it fits.
+    ///
+    /// Rejecting is the entire point. Without it a contract is a comment: the
+    /// worker says it produced something, nothing checks, and the downstream
+    /// task discovers the gap at runtime with no idea who broke it. The
+    /// rejection carries the validation errors so the worker can correct and
+    /// retry inside its own budget rather than failing the task.
+    pub async fn submit_outputs(
+        &self,
+        task_number: i64,
+        outputs: &Value,
+    ) -> Result<OutputSubmission> {
+        let Some(task) = self.get_by_number(task_number).await? else {
+            return Ok(OutputSubmission::TaskMissing);
+        };
+
+        if let Some(schema) = &task.output_schema {
+            let problems = validation_problems(schema, outputs, ContractSide::Output);
+            if !problems.is_empty() {
+                return Ok(OutputSubmission::Rejected { problems });
+            }
+        }
+
+        sqlx::query(
+            "UPDATE tasks SET outputs = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ?",
+        )
+        .bind(outputs.to_string())
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to persist task outputs")?;
+
+        Ok(OutputSubmission::Accepted)
+    }
+
+    /// Set or clear a task's declared contract.
+    pub async fn set_contract(
+        &self,
+        task_number: i64,
+        input_schema: Option<&Value>,
+        output_schema: Option<&Value>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET input_schema = ?, output_schema = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE task_number = ?",
+        )
+        .bind(input_schema.map(|value| value.to_string()))
+        .bind(output_schema.map(|value| value.to_string()))
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to set task contract")?;
+
+        Ok(())
+    }
+
     // -- Attempt log --------------------------------------------------------
 
     /// Open a new attempt row for a task. The attempt number is one past the
@@ -1680,6 +1936,124 @@ pub struct BlockOutcome {
     pub escalated: bool,
 }
 
+/// Where one of a task's inputs comes from.
+///
+/// Either a pointer into an upstream task's outputs, or a literal baked into
+/// the graph. `source_task_number` being `None` means literal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskInputBinding {
+    pub child_task_number: i64,
+    /// Key in the child's input object.
+    pub input_key: String,
+    /// Upstream task to read from. `None` for a literal.
+    pub source_task_number: Option<i64>,
+    /// RFC 6901 JSON Pointer into that task's outputs. Empty selects the whole
+    /// outputs object.
+    pub source_pointer: Option<String>,
+    /// JSON literal, used when `source_task_number` is `None`.
+    pub literal_value: Option<Value>,
+}
+
+/// Which half of a contract a problem came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractSide {
+    Input,
+    Output,
+}
+
+/// A specific reason a contract could not be satisfied.
+///
+/// Deliberately granular. "Validation failed" sends a human reading prompts and
+/// guessing; naming the key and the upstream task that should have supplied it
+/// points straight at the broken edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContractProblem {
+    #[error("task #{task_number} does not exist")]
+    TaskMissing { task_number: i64 },
+    #[error("input `{input_key}` is bound to task #{source_task_number}, which does not exist")]
+    SourceMissing {
+        input_key: String,
+        source_task_number: i64,
+    },
+    #[error(
+        "input `{input_key}` needs output from task #{source_task_number}, which has not produced any yet"
+    )]
+    SourceHasNoOutputs {
+        input_key: String,
+        source_task_number: i64,
+    },
+    #[error("input `{input_key}`: task #{source_task_number} produced no value at `{pointer}`")]
+    PointerMissed {
+        input_key: String,
+        source_task_number: i64,
+        pointer: String,
+    },
+    #[error("input `{input_key}` is declared a literal but carries no value")]
+    EmptyLiteral { input_key: String },
+    #[error("{side:?} at `{path}` does not match the declared schema: {message}")]
+    SchemaViolation {
+        side: ContractSide,
+        /// JSON Pointer to the offending value, `""` for the document root.
+        path: String,
+        message: String,
+    },
+    #[error("declared {side:?} schema is not a valid JSON Schema: {message}")]
+    InvalidSchema { side: ContractSide, message: String },
+    #[error("input `{input_key}` could not be read: {message}")]
+    Storage { input_key: String, message: String },
+}
+
+/// The result of assembling a task's inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContractResolution {
+    /// The task declares no contract and has no bindings — nothing to do.
+    NotRequired,
+    /// Inputs assembled and validated.
+    Resolved { inputs: Value },
+    /// The graph cannot supply what this task was promised.
+    Unresolved { problems: Vec<ContractProblem> },
+}
+
+/// The result of a worker submitting its outputs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputSubmission {
+    Accepted,
+    /// The output does not match the declared schema. The worker is told why
+    /// and may correct it within its own segment budget.
+    Rejected {
+        problems: Vec<ContractProblem>,
+    },
+    TaskMissing,
+}
+
+/// Validate `value` against `schema`, converting failures into problems.
+///
+/// A schema that will not compile is itself reported as a problem rather than
+/// silently skipped: a task declaring an unusable contract is misconfigured,
+/// and quietly accepting anything would hide that.
+fn validation_problems(schema: &Value, value: &Value, side: ContractSide) -> Vec<ContractProblem> {
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(validator) => validator,
+        Err(error) => {
+            return vec![ContractProblem::InvalidSchema {
+                side,
+                message: error.to_string(),
+            }];
+        }
+    };
+
+    validator
+        .iter_errors(value)
+        .map(|error| ContractProblem::SchemaViolation {
+            side,
+            path: error.instance_path().to_string(),
+            message: error.to_string(),
+        })
+        .collect()
+}
+
 /// How many edges touch a task, and how many still gate it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskEdgeSummary {
@@ -1770,7 +2144,8 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
      created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
      consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
-     block_kind, block_reason, block_recurrences";
+     block_kind, block_reason, block_recurrences, \
+     input_schema, output_schema, inputs, outputs";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -1933,7 +2308,31 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .flatten()
             .filter(|value| !value.is_empty()),
         block_recurrences: row.try_get("block_recurrences").unwrap_or(0),
+        input_schema: read_optional_json(&row, "input_schema"),
+        output_schema: read_optional_json(&row, "output_schema"),
+        inputs: read_optional_json(&row, "inputs"),
+        outputs: read_optional_json(&row, "outputs"),
     })
+}
+
+/// Read a nullable TEXT column holding JSON.
+///
+/// A column that fails to parse is treated as absent rather than failing the
+/// whole read: one malformed contract should not make a task unreadable.
+fn read_optional_json(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<Value> {
+    let raw = row
+        .try_get::<Option<String>, _>(column)
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())?;
+
+    match serde_json::from_str(&raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(%error, column, "task column held invalid JSON — treating as absent");
+            None
+        }
+    }
 }
 
 /// Read a nullable TEXT id, treating the empty string as absent.
@@ -2031,7 +2430,11 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             worktree_id TEXT,
             block_kind TEXT,
             block_reason TEXT,
-            block_recurrences INTEGER NOT NULL DEFAULT 0
+            block_recurrences INTEGER NOT NULL DEFAULT 0,
+            input_schema TEXT,
+            output_schema TEXT,
+            inputs TEXT,
+            outputs TEXT
         )
         "#,
     )
@@ -2072,6 +2475,23 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("task_dependencies schema should be created");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE task_input_bindings (
+            child_task_number INTEGER NOT NULL,
+            input_key TEXT NOT NULL,
+            source_task_number INTEGER,
+            source_pointer TEXT,
+            literal_value TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (child_task_number, input_key)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("task_input_bindings schema should be created");
 
     sqlx::query(
         "CREATE TABLE task_number_seq (
@@ -3425,6 +3845,353 @@ mod tests {
         assert!(
             !by_number.contains_key(&lonely.task_number),
             "a task with no edges must be absent, not present with zeroes"
+        );
+    }
+    // -- Contracts ----------------------------------------------------------
+
+    fn tag_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["tag"],
+            "properties": {"tag": {"type": "string"}},
+        })
+    }
+
+    #[tokio::test]
+    async fn a_binding_resolves_through_a_json_pointer_into_a_parent_output() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "build", TaskStatus::InProgress).await;
+        let child = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        let accepted = store
+            .submit_outputs(
+                parent.task_number,
+                &serde_json::json!({"image": {"tag": "v1.4.2", "digest": "sha256:abc"}}),
+            )
+            .await
+            .expect("submit");
+        assert_eq!(accepted, OutputSubmission::Accepted);
+
+        store
+            .set_contract(child.task_number, Some(&tag_schema()), None)
+            .await
+            .expect("set contract");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(parent.task_number),
+                source_pointer: Some("/image/tag".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let resolution = store
+            .resolve_inputs(child.task_number)
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolution,
+            ContractResolution::Resolved {
+                inputs: serde_json::json!({"tag": "v1.4.2"})
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_literal_binding_needs_no_upstream_task() {
+        let store = setup_store().await;
+        let task = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: task.task_number,
+                input_key: "environment".into(),
+                source_task_number: None,
+                source_pointer: None,
+                literal_value: Some(serde_json::json!("staging")),
+            })
+            .await
+            .expect("bind");
+
+        let resolution = store
+            .resolve_inputs(task.task_number)
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolution,
+            ContractResolution::Resolved {
+                inputs: serde_json::json!({"environment": "staging"})
+            }
+        );
+    }
+
+    /// The failure that actually happens in a hand-built graph: the edge exists
+    /// but the upstream task never produced the field. The problem must name
+    /// the key, the task, and the pointer — "validation failed" would send
+    /// somebody reading prompts to guess.
+    #[tokio::test]
+    async fn an_unresolved_pointer_names_the_key_task_and_path() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "build", TaskStatus::InProgress).await;
+        let child = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        store
+            .submit_outputs(
+                parent.task_number,
+                &serde_json::json!({"digest": "sha256:abc"}),
+            )
+            .await
+            .expect("submit");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(parent.task_number),
+                source_pointer: Some("/image/tag".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let resolution = store
+            .resolve_inputs(child.task_number)
+            .await
+            .expect("resolve");
+        match resolution {
+            ContractResolution::Unresolved { problems } => {
+                assert_eq!(
+                    problems,
+                    vec![ContractProblem::PointerMissed {
+                        input_key: "tag".into(),
+                        source_task_number: parent.task_number,
+                        pointer: "/image/tag".into(),
+                    }]
+                );
+            }
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parent_that_has_not_produced_output_yet_is_reported_as_such() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "build", TaskStatus::InProgress).await;
+        let child = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(parent.task_number),
+                source_pointer: Some("/tag".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        match store
+            .resolve_inputs(child.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Unresolved { problems } => assert_eq!(
+                problems,
+                vec![ContractProblem::SourceHasNoOutputs {
+                    input_key: "tag".into(),
+                    source_task_number: parent.task_number,
+                }]
+            ),
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inputs_that_miss_the_declared_schema_are_unresolved() {
+        let store = setup_store().await;
+        let task = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        store
+            .set_contract(task.task_number, Some(&tag_schema()), None)
+            .await
+            .expect("set contract");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: task.task_number,
+                input_key: "tag".into(),
+                source_task_number: None,
+                source_pointer: None,
+                literal_value: Some(serde_json::json!(42)),
+            })
+            .await
+            .expect("bind");
+
+        match store
+            .resolve_inputs(task.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Unresolved { problems } => {
+                assert!(
+                    problems.iter().any(|p| matches!(
+                        p,
+                        ContractProblem::SchemaViolation {
+                            side: ContractSide::Input,
+                            ..
+                        }
+                    )),
+                    "a number where a string was declared must be a schema violation: {problems:?}"
+                );
+            }
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+    }
+
+    /// The whole point of the contract. Without rejection it is a comment: the
+    /// worker claims it produced something, nothing checks, and the downstream
+    /// task discovers the gap at runtime with no idea who broke it.
+    #[tokio::test]
+    async fn an_output_that_misses_its_schema_is_rejected_and_not_persisted() {
+        let store = setup_store().await;
+        let task = task_at(&store, "build", TaskStatus::InProgress).await;
+
+        store
+            .set_contract(task.task_number, None, Some(&tag_schema()))
+            .await
+            .expect("set contract");
+
+        let submission = store
+            .submit_outputs(
+                task.task_number,
+                &serde_json::json!({"digest": "sha256:abc"}),
+            )
+            .await
+            .expect("submit");
+
+        match submission {
+            OutputSubmission::Rejected { problems } => {
+                assert!(!problems.is_empty());
+                assert!(
+                    problems[0].to_string().contains("tag"),
+                    "the rejection must say what is missing: {problems:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert!(
+            after.outputs.is_none(),
+            "a rejected output must not be readable by downstream tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_output_is_accepted_and_persisted() {
+        let store = setup_store().await;
+        let task = task_at(&store, "build", TaskStatus::InProgress).await;
+        store
+            .set_contract(task.task_number, None, Some(&tag_schema()))
+            .await
+            .expect("set contract");
+
+        let submission = store
+            .submit_outputs(task.task_number, &serde_json::json!({"tag": "v1.4.2"}))
+            .await
+            .expect("submit");
+        assert_eq!(submission, OutputSubmission::Accepted);
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.outputs, Some(serde_json::json!({"tag": "v1.4.2"})));
+    }
+
+    /// A task declaring an unusable schema is misconfigured. Quietly accepting
+    /// anything would hide that, so it surfaces as a problem in its own right.
+    #[tokio::test]
+    async fn an_invalid_schema_is_reported_rather_than_ignored() {
+        let store = setup_store().await;
+        let task = task_at(&store, "build", TaskStatus::InProgress).await;
+        store
+            .set_contract(
+                task.task_number,
+                None,
+                Some(&serde_json::json!({"type": "not-a-real-type"})),
+            )
+            .await
+            .expect("set contract");
+
+        match store
+            .submit_outputs(task.task_number, &serde_json::json!({"anything": true}))
+            .await
+            .expect("submit")
+        {
+            OutputSubmission::Rejected { problems } => assert!(
+                matches!(problems.as_slice(), [ContractProblem::InvalidSchema { .. }]),
+                "expected InvalidSchema, got {problems:?}"
+            ),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the overwhelming majority of tasks have no contract
+    /// and must stay on exactly the path they were on before F4.
+    #[tokio::test]
+    async fn a_task_without_a_contract_is_unaffected() {
+        let store = setup_store().await;
+        let task = task_at(&store, "ordinary", TaskStatus::InProgress).await;
+
+        assert_eq!(
+            store
+                .resolve_inputs(task.task_number)
+                .await
+                .expect("resolve"),
+            ContractResolution::NotRequired
+        );
+        assert_eq!(
+            store
+                .submit_outputs(task.task_number, &serde_json::json!({"whatever": 1}))
+                .await
+                .expect("submit"),
+            OutputSubmission::Accepted,
+            "with no declared schema any output is acceptable"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebinding_an_input_replaces_rather_than_duplicates() {
+        let store = setup_store().await;
+        let task = task_at(&store, "deploy", TaskStatus::Backlog).await;
+
+        for value in ["staging", "production"] {
+            store
+                .set_input_binding(&TaskInputBinding {
+                    child_task_number: task.task_number,
+                    input_key: "environment".into(),
+                    source_task_number: None,
+                    source_pointer: None,
+                    literal_value: Some(serde_json::json!(value)),
+                })
+                .await
+                .expect("bind");
+        }
+
+        let bindings = store
+            .list_input_bindings(task.task_number)
+            .await
+            .expect("list");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].literal_value,
+            Some(serde_json::json!("production"))
         );
     }
 }

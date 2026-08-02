@@ -160,6 +160,7 @@ open = "5.3.3"
 urlencoding = "2.1.3"
 url = "2"
 moka = "0.12.13"
+jsonschema = { version = "0.49.3", default-features = false, features = ["resolve-async"] }
 
 [features]
 metrics = ["dep:prometheus"]
