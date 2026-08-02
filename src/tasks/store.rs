@@ -182,6 +182,17 @@ impl TaskProjectBinding {
     }
 }
 
+impl Task {
+    /// The codebase this task is bound to, as a single value.
+    pub fn binding(&self) -> TaskProjectBinding {
+        TaskProjectBinding {
+            project_id: self.project_id.clone(),
+            repo_id: self.repo_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+        }
+    }
+}
+
 /// A partial update to a task's binding.
 ///
 /// Each field is independently three-valued, which [`TaskProjectBinding`] is

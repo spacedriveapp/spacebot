@@ -278,6 +278,7 @@ impl Tool for SpawnWorkerTool {
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
                 &worker_context,
+                resolved_directory.as_deref().map(std::path::PathBuf::from),
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?

@@ -4160,28 +4160,36 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         }
     }
 
-    // A task bound to a project/repo/worktree names its working directory
-    // explicitly. Without this the worker only sees the global project listing
-    // and has to guess which repo the task is about — the whole point of the
-    // binding is that it doesn't have to.
-    if let Some(directory) = crate::tools::spawn_worker::resolve_directory_from_project(
-        deps,
-        None,
-        task.project_id.as_deref(),
-        task.repo_id.as_deref(),
-        task.worktree_id.as_deref(),
-    )
-    .await
-    {
-        task_prompt.push_str("\n\nWorking directory: ");
-        task_prompt.push_str(&directory);
-        task_prompt.push_str("\nThis task is scoped to that directory. Work there unless the task explicitly says otherwise.");
+    // A task bound to a project/repo/worktree runs *in* that directory — the
+    // worker's shell and file tools are rooted there, not merely told about it.
+    //
+    // Deliberately no sandbox mutation here. A task can only bind to a
+    // registered project (the FK is enforced), whose root is already in the
+    // allowlist via `refresh_project_paths`, and repo/worktree paths live under
+    // that root. Widening the sandbox as a side effect of task pickup would be
+    // a quiet privilege escalation, so `with_working_dir` rejects anything the
+    // allowlist doesn't already cover.
+    let bound_directory = if task.binding().is_empty() {
+        None
+    } else {
+        crate::tools::spawn_worker::resolve_directory_from_project(
+            deps,
+            None,
+            task.project_id.as_deref(),
+            task.repo_id.as_deref(),
+            task.worktree_id.as_deref(),
+        )
+        .await
+    };
 
-        // Deliberately no sandbox mutation here. A task can only bind to a
-        // registered project (enforced by the FK), whose root is already in the
-        // allowlist via `refresh_project_paths`, and repo/worktree paths live
-        // under that root. Widening the sandbox as a side effect of task pickup
-        // would be a quiet privilege escalation.
+    if let Some(directory) = &bound_directory {
+        task_prompt.push_str("\n\nWorking directory: ");
+        task_prompt.push_str(directory);
+        task_prompt.push_str(
+            "\nYour shell and file tools already run here — relative paths resolve \
+             against this directory. This task is scoped to it; work here unless the \
+             task explicitly says otherwise.",
+        );
     }
 
     let screenshot_dir = deps
@@ -4221,6 +4229,44 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     // stored in ChannelState. The inject_tx is dropped here — detached task
     // workers don't support mid-flight context injection.
     drop(inject_tx);
+
+    // Root the worker in its bound directory. A rejection here means the
+    // binding points somewhere the sandbox does not allow, which is a
+    // misconfiguration — running the task in the workspace instead would do the
+    // work in the wrong tree, so park it for a human rather than guess.
+    let worker = match &bound_directory {
+        Some(directory) => match worker.with_working_dir(std::path::Path::new(directory)) {
+            Ok(worker) => worker,
+            Err(error) => {
+                let message = format!(
+                    "task #{} is bound to a directory the worker may not use: {error}",
+                    task.task_number
+                );
+                tracing::error!(task_number = task.task_number, %error, "refusing to run task outside its binding");
+                logger.log(
+                    "task_pickup_binding_rejected",
+                    &message,
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "directory": directory,
+                    })),
+                );
+                if let Err(error) = deps
+                    .task_store
+                    .record_failure(
+                        task.task_number,
+                        crate::tasks::TaskRunOutcome::Failed,
+                        &message,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, task_number = task.task_number, "failed to record binding rejection");
+                }
+                return Ok(());
+            }
+        },
+        None => worker,
+    };
 
     let worker_id = worker.id;
     let (detached_worker_lifecycle, mut detached_cancel_rx) = register_detached_worker_for_pickup(
