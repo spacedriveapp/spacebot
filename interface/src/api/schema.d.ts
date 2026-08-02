@@ -2224,6 +2224,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/bindings/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** `PUT /tasks/{number}/bindings/{key}` — point one input at its source. */
+        put: operations["set_task_binding"];
+        post?: never;
+        /** `DELETE /tasks/{number}/bindings/{key}` — unbind one input. */
+        delete: operations["remove_task_binding"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/block": {
         parameters: {
             query?: never;
@@ -2235,6 +2253,30 @@ export interface paths {
         put?: never;
         /** `POST /tasks/{number}/block` — park a task with a typed reason. */
         post: operations["block_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/contract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/contract` — the declared contract, its bindings, and
+         *     what those bindings currently resolve to.
+         * @description Resolution runs live rather than being read back from the last claim, so the
+         *     page shows what the task *would* get if it ran now. A graph that has drifted
+         *     since the last attempt is exactly the case worth seeing.
+         */
+        get: operations["get_task_contract"];
+        /** `PUT /tasks/{number}/contract` — declare what a task needs and produces. */
+        put: operations["set_task_contract"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2891,6 +2933,64 @@ export interface components {
             /** Format: float */
             emergency_threshold?: number | null;
         };
+        /**
+         * @description A specific reason a contract could not be satisfied.
+         *
+         *     Deliberately granular. "Validation failed" sends a human reading prompts and
+         *     guessing; naming the key and the upstream task that should have supplied it
+         *     points straight at the broken edge.
+         */
+        ContractProblem: {
+            /** @enum {string} */
+            kind: "task_missing";
+            /** Format: int64 */
+            task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "source_missing";
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "source_has_no_outputs";
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "pointer_missed";
+            pointer: string;
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "empty_literal";
+        } | {
+            /** @enum {string} */
+            kind: "schema_violation";
+            message: string;
+            /** @description JSON Pointer to the offending value, `""` for the document root. */
+            path: string;
+            side: components["schemas"]["ContractSide"];
+        } | {
+            /** @enum {string} */
+            kind: "invalid_schema";
+            message: string;
+            side: components["schemas"]["ContractSide"];
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "storage";
+            message: string;
+        };
+        /**
+         * @description Which half of a contract a problem came from.
+         * @enum {string}
+         */
+        ContractSide: "input" | "output";
         /** @description Response payload for conversation defaults endpoint. */
         ConversationDefaultsResponse: {
             /** @description All available models. */
@@ -4160,10 +4260,25 @@ export interface components {
             /** @enum {string} */
             kind: "agent";
         };
+        SetBindingRequest: {
+            /** @description Literal JSON value, used when no source task is given. */
+            literal_value?: unknown;
+            /** @description RFC 6901 JSON Pointer into that task's outputs. */
+            source_pointer?: string | null;
+            /**
+             * Format: int64
+             * @description Upstream task to read from. Omit for a literal.
+             */
+            source_task_number?: number | null;
+        };
         SetChannelArchiveRequest: {
             agent_id: string;
             archived: boolean;
             channel_id: string;
+        };
+        SetContractRequest: {
+            input_schema?: unknown;
+            output_schema?: unknown;
         };
         SkillContentResponse: {
             base_dir: string;
@@ -4230,6 +4345,13 @@ export interface components {
             created_by: string;
             description?: string | null;
             id: string;
+            /** @description JSON Schema this task's resolved inputs must satisfy before it runs. */
+            input_schema?: unknown;
+            /**
+             * @description Inputs as resolved at claim time. Persisted so the value the worker
+             *     actually saw survives a crash and stays readable after upstream changes.
+             */
+            inputs?: unknown;
             /**
              * @description Text of the most recent failure, kept on the task so the board can
              *     show why it is parked without joining `task_runs`.
@@ -4245,6 +4367,10 @@ export interface components {
              */
             max_retries?: number | null;
             metadata: unknown;
+            /** @description JSON Schema this task's outputs must satisfy to complete. */
+            output_schema?: unknown;
+            /** @description Validated outputs. What downstream tasks read from. */
+            outputs?: unknown;
             owner_agent_id: string;
             priority: components["schemas"]["TaskPriority"];
             /** @description Project this task acts on, if any. */
@@ -4272,6 +4398,21 @@ export interface components {
         TaskActionResponse: {
             message: string;
             success: boolean;
+        };
+        TaskContractResponse: {
+            bindings: components["schemas"]["TaskInputBinding"][];
+            input_schema?: unknown;
+            /** @description Inputs as they were resolved at the last claim. */
+            inputs?: unknown;
+            output_schema?: unknown;
+            outputs?: unknown;
+            /** @description Why resolution fails, if it does. Empty when the contract is satisfied. */
+            problems: components["schemas"]["ContractProblem"][];
+            /**
+             * @description What the bindings resolve to right now, which may differ from `inputs`
+             *     if the graph changed since the last attempt.
+             */
+            resolved_inputs?: unknown;
         };
         TaskDependenciesResponse: {
             /**
@@ -4303,6 +4444,30 @@ export interface components {
             parents: number;
             /** Format: int64 */
             task_number: number;
+        };
+        /**
+         * @description Where one of a task's inputs comes from.
+         *
+         *     Either a pointer into an upstream task's outputs, or a literal baked into
+         *     the graph. `source_task_number` being `None` means literal.
+         */
+        TaskInputBinding: {
+            /** Format: int64 */
+            child_task_number: number;
+            /** @description Key in the child's input object. */
+            input_key: string;
+            /** @description JSON literal, used when `source_task_number` is `None`. */
+            literal_value?: unknown;
+            /**
+             * @description RFC 6901 JSON Pointer into that task's outputs. Empty selects the whole
+             *     outputs object.
+             */
+            source_pointer?: string | null;
+            /**
+             * Format: int64
+             * @description Upstream task to read from. `None` for a literal.
+             */
+            source_task_number?: number | null;
         };
         TaskListResponse: {
             /**
@@ -10277,6 +10442,86 @@ export interface operations {
             };
         };
     };
+    set_task_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Input key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBindingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description A binding must name either a source task or a literal */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_task_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Input key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Binding not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     block_task: {
         parameters: {
             query?: never;
@@ -10310,6 +10555,82 @@ export interface operations {
             };
             /** @description Unknown block kind */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_contract: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_task_contract: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetContractRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

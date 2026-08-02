@@ -5,12 +5,19 @@
  * running backend. Not linked from navigation; reachable at /__uilab.
  */
 import { useState } from "react";
-import type { TaskDependenciesResponse, TaskEdgeSummary, TaskItem, TaskRun } from "@/api/client";
+import type {
+	TaskContractResponse,
+	TaskDependenciesResponse,
+	TaskEdgeSummary,
+	TaskItem,
+	TaskRun,
+} from "@/api/client";
 import { BlockedTasksSection } from "@/components/tasks/BlockedTasksSection";
 import { TaskRunHistoryView } from "@/components/tasks/TaskRunHistory";
 import { RepoChip, type BindingNames } from "@/components/tasks/RepoChip";
 import { ALL_REPOS, RepoFilter } from "@/components/tasks/RepoFilter";
 import { DependencySectionView } from "@/components/tasks/DependencySection";
+import { ContractSectionView } from "@/components/tasks/ContractSection";
 import { indexEdges } from "@/components/tasks/DependencyBadges";
 
 const BINDING_NAMES: BindingNames = {
@@ -154,6 +161,73 @@ const RUNS: TaskRun[] = [
 	},
 ];
 
+/** A healthy contract: every input resolved, output produced. */
+const CONTRACT_OK: TaskContractResponse = {
+	input_schema: {
+		type: "object",
+		required: ["tag", "environment"],
+		properties: {tag: {type: "string"}, environment: {type: "string"}},
+	},
+	output_schema: {
+		type: "object",
+		required: ["deployment_url"],
+		properties: {deployment_url: {type: "string"}},
+	},
+	inputs: {tag: "v1.4.2", environment: "staging"},
+	resolved_inputs: {tag: "v1.4.2", environment: "staging"},
+	outputs: {deployment_url: "https://staging.platform.internal"},
+	bindings: [
+		{
+			child_task_number: 151,
+			input_key: "tag",
+			source_task_number: 142,
+			source_pointer: "/image/tag",
+			literal_value: null,
+		},
+		{
+			child_task_number: 151,
+			input_key: "environment",
+			source_task_number: null,
+			source_pointer: null,
+			literal_value: "staging",
+		},
+	],
+	problems: [],
+};
+
+/** The case that matters: the graph cannot supply what the task was promised. */
+const CONTRACT_BROKEN: TaskContractResponse = {
+	input_schema: CONTRACT_OK.input_schema,
+	output_schema: CONTRACT_OK.output_schema,
+	inputs: null,
+	resolved_inputs: {environment: "production"},
+	outputs: null,
+	bindings: [
+		{
+			child_task_number: 152,
+			input_key: "tag",
+			source_task_number: 142,
+			source_pointer: "/image/tag",
+			literal_value: null,
+		},
+		{
+			child_task_number: 152,
+			input_key: "environment",
+			source_task_number: null,
+			source_pointer: null,
+			literal_value: "production",
+		},
+	],
+	problems: [
+		{
+			kind: "pointer_missed",
+			input_key: "tag",
+			source_task_number: 142,
+			pointer: "/image/tag",
+		},
+	],
+};
+
 export function UiLab() {
 	const [collapsed, setCollapsed] = useState(false);
 	const [retrying, setRetrying] = useState<number | null>(null);
@@ -237,6 +311,24 @@ export function UiLab() {
 						data={DEPENDENCIES}
 						onSelectTask={() => {}}
 					/>
+				</div>
+			</section>
+
+			<section className="mb-10 max-w-2xl">
+				<h2 className="mb-2 font-mono text-xs font-semibold tracking-wide text-ink-dull">
+					ContractSection — satisfied
+				</h2>
+				<div className="rounded-md border border-app-line bg-app-box/20">
+					<ContractSectionView data={CONTRACT_OK} onSelectTask={() => {}} />
+				</div>
+			</section>
+
+			<section className="mb-10 max-w-2xl">
+				<h2 className="mb-2 font-mono text-xs font-semibold tracking-wide text-ink-dull">
+					ContractSection — unresolved
+				</h2>
+				<div className="rounded-md border border-app-line bg-app-box/20">
+					<ContractSectionView data={CONTRACT_BROKEN} onSelectTask={() => {}} />
 				</div>
 			</section>
 

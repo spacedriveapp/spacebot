@@ -668,6 +668,10 @@ export type TaskEdgeSummary = Types.TaskEdgeSummary;
 export type TaskDependenciesResponse = Types.TaskDependenciesResponse;
 export type TaskTransition = Types.TaskTransition;
 export type TaskTransitionsResponse = Types.TaskTransitionsResponse;
+export type ContractProblem = Types.ContractProblem;
+export type ContractSide = Types.ContractSide;
+export type TaskInputBinding = Types.TaskInputBinding;
+export type TaskContractResponse = Types.TaskContractResponse;
 export type TaskItem = Types.Task;
 
 export type CreateTaskRequest = Types.CreateTaskRequest;
@@ -1728,6 +1732,9 @@ export const api = {
 	/** Per-attempt execution log for a task, oldest first. */
 	listTaskRuns: (taskNumber: number) =>
 		fetchJson<TaskRunsResponse>(`/tasks/${taskNumber}/runs`),
+	/** Resolves live, so it shows what the task would get if it ran now. */
+	getTaskContract: (taskNumber: number) =>
+		fetchJson<TaskContractResponse>(`/tasks/${taskNumber}/contract`),
 	listTaskDependencies: (taskNumber: number) =>
 		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
 	/** The legal status moves, so the board never offers one the API rejects. */

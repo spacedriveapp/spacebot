@@ -22,6 +22,7 @@ import {
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {ContractSection} from "@/components/tasks/ContractSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 
@@ -273,6 +274,9 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					/>
 					{/* GitHub metadata (not part of the shared TaskDetail) */}
 					<DependencySection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+					/>
+					<ContractSection
 						taskNumber={(activeTask as unknown as TaskItem).task_number}
 					/>
 					<GithubSection

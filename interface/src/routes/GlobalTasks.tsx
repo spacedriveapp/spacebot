@@ -28,6 +28,7 @@ import {
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {ContractSection} from "@/components/tasks/ContractSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 import {RepoChip} from "@/components/tasks/RepoChip";
@@ -400,6 +401,13 @@ export function GlobalTasks() {
 						metadata={(activeTask as unknown as TaskItem).metadata}
 					/>
 					<DependencySection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
+					/>
+					<ContractSection
 						taskNumber={(activeTask as unknown as TaskItem).task_number}
 						onSelectTask={(number) => {
 							const target = rawTasks.find((t) => t.task_number === number);

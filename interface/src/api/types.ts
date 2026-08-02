@@ -378,6 +378,11 @@ export type TaskEdgeSummary = components["schemas"]["TaskEdgeSummary"];
 export type TaskDependenciesResponse =
 	components["schemas"]["TaskDependenciesResponse"];
 export type TaskTransition = components["schemas"]["TaskTransition"];
+export type ContractProblem = components["schemas"]["ContractProblem"];
+export type ContractSide = components["schemas"]["ContractSide"];
+export type TaskInputBinding = components["schemas"]["TaskInputBinding"];
+export type TaskContractResponse =
+	components["schemas"]["TaskContractResponse"];
 export type TaskTransitionsResponse =
 	components["schemas"]["TaskTransitionsResponse"];
 
