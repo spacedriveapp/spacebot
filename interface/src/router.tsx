@@ -23,6 +23,7 @@ import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {GlobalTasks} from "@/routes/GlobalTasks";
+import {UiLab} from "@/routes/UiLab";
 import {Wiki} from "@/routes/Wiki";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
@@ -114,6 +115,16 @@ const tasksRoute = createRoute({
 	path: "/tasks",
 	component: function TasksPage() {
 		return <GlobalTasks />;
+	},
+});
+
+// Development-only visual harness for task components. Tree-shaken out of
+// production builds via the import.meta.env.DEV guard on the route list below.
+const uiLabRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/__uilab",
+	component: function UiLabPage() {
+		return <UiLab />;
 	},
 });
 
@@ -278,6 +289,7 @@ const routeTree = rootRoute.addChildren([
 	agentCronRoute,
 	agentConfigRoute,
 	channelRoute,
+	...(import.meta.env.DEV ? [uiLabRoute] : []),
 ]);
 
 export const router = createRouter({
