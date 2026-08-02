@@ -118,3 +118,74 @@ pub async fn connect_instance_db(data_dir: &Path) -> Result<SqlitePool> {
 
     Ok(pool)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Foreign keys must actually be enforced.
+    ///
+    /// Nothing in this repo issues `PRAGMA foreign_keys`, which reads like the
+    /// constraints are decorative — SQLite itself defaults the pragma off. They
+    /// are not: sqlx sets `foreign_keys = ON` on every connection it opens
+    /// (sqlx-sqlite `options/mod.rs`, default pragma map). This test pins that
+    /// behaviour so an options change or a driver swap fails here rather than
+    /// silently leaving dangling `project_id`s on tasks.
+    #[tokio::test]
+    async fn instance_db_enforces_task_project_foreign_keys() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = connect_instance_db(dir.path())
+            .await
+            .expect("instance db should connect and migrate");
+
+        let enforced: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("read foreign_keys pragma");
+        assert_eq!(enforced, 1, "foreign key enforcement must be on");
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, root_path) VALUES ('p1', 'platform', '/tmp/p1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert project");
+
+        sqlx::query(
+            "INSERT INTO tasks (id, task_number, title, owner_agent_id, assigned_agent_id, \
+             created_by, project_id) VALUES ('t1', 1, 'bound', 'a', 'a', 'test', 'p1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bound task");
+
+        // A binding to a project that does not exist must be rejected outright.
+        let dangling = sqlx::query(
+            "INSERT INTO tasks (id, task_number, title, owner_agent_id, assigned_agent_id, \
+             created_by, project_id) VALUES ('t2', 2, 'dangling', 'a', 'a', 'test', 'nope')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            dangling.is_err(),
+            "a task must not be bindable to a project that does not exist"
+        );
+
+        // Deleting the project unbinds the task rather than destroying it.
+        sqlx::query("DELETE FROM projects WHERE id = 'p1'")
+            .execute(&pool)
+            .await
+            .expect("delete project");
+
+        let (survived, project_id): (i64, Option<String>) =
+            sqlx::query_as("SELECT task_number, project_id FROM tasks WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .expect("task should survive its project");
+        assert_eq!(survived, 1);
+        assert!(
+            project_id.is_none(),
+            "ON DELETE SET NULL must unbind the task, not cascade the delete"
+        );
+    }
+}
