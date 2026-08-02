@@ -97,6 +97,37 @@ impl std::fmt::Display for BlockKind {
     }
 }
 
+/// How many cards one task may file. Bounds a single runaway decomposition.
+pub const MAX_TASKS_FILED_PER_TASK: i64 = 10;
+
+/// How many filing hops are allowed from a human or agent to a filed card.
+///
+/// Fan-out and depth need separate bounds: a cap of 10 with unbounded depth
+/// still permits 10^n tasks. Three hops is enough for
+/// "epic -> service -> change" and stops well short of a self-sustaining tree.
+pub const MAX_FILING_DEPTH: i64 = 3;
+
+/// Hard stop for the `created_by` walk, independent of the policy limit above,
+/// so a malformed chain cannot loop forever.
+const MAX_FILING_DEPTH_WALK: i64 = 32;
+
+/// `created_by` prefix marking a card filed by a task rather than by a human,
+/// a branch, or the cortex. The suffix is the filing task number, which is what
+/// makes provenance and the fan-out cap possible without another column.
+pub const FILED_BY_TASK_PREFIX: &str = "task:";
+
+/// Render the `created_by` value for a card filed by a task.
+pub fn filer_id(task_number: i64) -> String {
+    format!("{FILED_BY_TASK_PREFIX}{task_number}")
+}
+
+/// Read the filing task number back out of a `created_by` value.
+pub fn parse_filer_task_number(created_by: &str) -> Option<i64> {
+    created_by
+        .strip_prefix(FILED_BY_TASK_PREFIX)
+        .and_then(|rest| rest.parse().ok())
+}
+
 /// How many times a task may be unblocked and re-blocked for the *same* reason
 /// before it escalates to a human instead of continuing to bounce.
 ///
@@ -1424,6 +1455,107 @@ impl TaskStore {
         }
 
         Ok(sweep)
+    }
+
+    // -- Worker-filed cards -------------------------------------------------
+
+    /// The task a worker is currently executing, if any.
+    pub async fn task_number_for_worker(&self, worker_id: &str) -> Result<Option<i64>> {
+        sqlx::query_scalar(
+            "SELECT task_number FROM tasks WHERE worker_id = ? ORDER BY task_number DESC LIMIT 1",
+        )
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to look up the worker's task")
+        .map_err(Into::into)
+    }
+
+    /// How many tasks a given filer has already created.
+    ///
+    /// Bounds fan-out. A worker decomposing its task into children is the
+    /// mechanism that breaks the delegation depth ceiling, and it is also the
+    /// mechanism by which a confused model files two hundred cards nobody asked
+    /// for. Hermes leaves this unbounded and their own docs flag it as a risk.
+    pub async fn count_tasks_filed_by(&self, created_by: &str) -> Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE created_by = ?")
+            .bind(created_by)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count filed tasks")
+            .map_err(Into::into)
+    }
+
+    /// How many filing hops separate this task from a human or an agent.
+    ///
+    /// A per-task fan-out cap alone still permits `cap^depth` tasks, so depth
+    /// needs its own bound. Walks the `created_by` chain, which records the
+    /// filing task for worker-filed cards. A cycle is impossible — a task can
+    /// only be filed by one that already exists — but the walk is bounded
+    /// anyway rather than trusting that.
+    pub async fn filing_depth(&self, task_number: i64) -> Result<i64> {
+        let mut depth = 0i64;
+        let mut current = task_number;
+
+        while depth < MAX_FILING_DEPTH_WALK {
+            let created_by: Option<String> =
+                sqlx::query_scalar("SELECT created_by FROM tasks WHERE task_number = ?")
+                    .bind(current)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .context("failed to read task creator")?;
+
+            let Some(parent) = created_by.as_deref().and_then(parse_filer_task_number) else {
+                return Ok(depth);
+            };
+
+            depth += 1;
+            current = parent;
+        }
+
+        Ok(depth)
+    }
+
+    /// Of the tasks a worker claims it filed, the ones it did not.
+    ///
+    /// Server-side verification of a model's claim about its own actions. A
+    /// worker reporting children it never created leaves whoever reads the
+    /// board believing work is scheduled when it is not — worse than the worker
+    /// failing outright, because the failure is invisible.
+    pub async fn unverified_filed_tasks(
+        &self,
+        created_by: &str,
+        claimed: &[i64],
+    ) -> Result<Vec<i64>> {
+        let mut unverified = Vec::new();
+
+        for task_number in claimed {
+            let actual: Option<String> =
+                sqlx::query_scalar("SELECT created_by FROM tasks WHERE task_number = ?")
+                    .bind(task_number)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .context("failed to verify filed task")?;
+
+            if actual.as_deref() != Some(created_by) {
+                unverified.push(*task_number);
+            }
+        }
+
+        Ok(unverified)
+    }
+
+    /// Tasks filed by a given filer, for the provenance view.
+    pub async fn list_tasks_filed_by(&self, created_by: &str) -> Result<Vec<Task>> {
+        let rows = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE created_by = ? ORDER BY task_number ASC"
+        ))
+        .bind(created_by)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list filed tasks")?;
+
+        rows.into_iter().map(task_from_row).collect()
     }
 
     // -- Contracts ----------------------------------------------------------

@@ -21,6 +21,7 @@
 //! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
 //! - `task_update` — scoped to the worker's assigned task
 //! - `task_complete` — structured, schema-validated result for that task
+//! - `task_create` — files follow-up cards, bounded by fan-out and depth caps
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
@@ -971,7 +972,15 @@ pub fn create_worker_tool_server(
             agent_id.clone(),
             worker_id,
         ))
-        .tool(TaskCompleteTool::new(task_store, worker_id))
+        .tool(TaskCompleteTool::new(task_store.clone(), worker_id))
+        // Workers file cards rather than spawning sub-workers. The pickup loop
+        // already schedules, observes, and recovers those, so decomposition
+        // reuses machinery instead of adding a second execution path.
+        .tool(TaskCreateTool::for_task_worker(
+            task_store,
+            agent_id.to_string(),
+            worker_id,
+        ))
         .tool({
             let mut status_tool =
                 SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx.clone());

@@ -183,6 +183,16 @@ pub(super) struct TaskContractResponse {
     problems: Vec<crate::tasks::ContractProblem>,
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskProvenanceResponse {
+    /// The task that filed this one, when a worker did.
+    filed_by_task_number: Option<i64>,
+    /// Cards this task filed.
+    filed: Vec<crate::tasks::Task>,
+    /// How many more this task may still file before hitting the cap.
+    remaining_fan_out: i64,
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct SetContractRequest {
     #[serde(default)]
@@ -1176,4 +1186,50 @@ pub(super) async fn remove_task_binding(
     }
 
     get_task_contract(State(state), Path(number)).await
+}
+
+/// `GET /tasks/{number}/provenance` — where this card came from and what it
+/// spawned.
+///
+/// A worker-filed card is otherwise indistinguishable from one a human wrote,
+/// which makes a surprising board impossible to explain.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/provenance",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskProvenanceResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_provenance(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskProvenanceResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for provenance");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let filer = crate::tasks::filer_id(number);
+    let filed = store.list_tasks_filed_by(&filer).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list filed tasks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let remaining_fan_out = (crate::tasks::MAX_TASKS_FILED_PER_TASK - filed.len() as i64).max(0);
+
+    Ok(Json(TaskProvenanceResponse {
+        filed_by_task_number: crate::tasks::parse_filer_task_number(&task.created_by),
+        filed,
+        remaining_fan_out,
+    }))
 }

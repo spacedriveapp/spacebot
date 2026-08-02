@@ -44,6 +44,9 @@ pub struct TaskCompleteArgs {
     pub summary: String,
     /// Machine-readable result, validated against the task's output schema.
     pub outputs: serde_json::Value,
+    /// Task numbers you filed while working on this. Verified server-side.
+    #[serde(default)]
+    pub created_tasks: Vec<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +85,11 @@ impl Tool for TaskCompleteTool {
                     "outputs": {
                         "type": "object",
                         "description": "The task's result, matching the output schema given in your instructions."
+                    },
+                    "created_tasks": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Task numbers you filed while working on this. Verified against what was actually created — reporting a card you did not file rejects the completion."
                     }
                 },
                 "required": ["task_number", "summary", "outputs"]
@@ -90,6 +98,34 @@ impl Tool for TaskCompleteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Check the claim about filed cards before accepting the completion.
+        //
+        // A worker reporting children it never created leaves whoever reads the
+        // board believing work is scheduled when it is not — worse than the
+        // worker failing outright, because the failure is invisible until
+        // someone wonders why nothing happened. Verified against `created_by`,
+        // which only the store writes.
+        if !args.created_tasks.is_empty() {
+            let filer = crate::tasks::filer_id(args.task_number);
+            let unverified = self
+                .task_store
+                .unverified_filed_tasks(&filer, &args.created_tasks)
+                .await
+                .map_err(|error| TaskCompleteError(format!("{error}")))?;
+
+            if !unverified.is_empty() {
+                let list = unverified
+                    .iter()
+                    .map(|number| format!("#{number}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(TaskCompleteError(format!(
+                    "you reported filing {list}, but this task did not create them. \
+                     File them with task_create, or drop them from created_tasks."
+                )));
+            }
+        }
+
         let submission = self
             .task_store
             .submit_worker_outputs(&self.worker_id.to_string(), args.task_number, &args.outputs)
@@ -203,6 +239,7 @@ mod tests {
                 task_number,
                 summary: "built it".into(),
                 outputs: serde_json::json!({"tag": "v1.0.0"}),
+                created_tasks: Vec::new(),
             })
             .await
             .expect("valid output should be accepted");
@@ -234,6 +271,7 @@ mod tests {
                 task_number,
                 summary: "built it".into(),
                 outputs: serde_json::json!({"digest": "sha256:abc"}),
+                created_tasks: Vec::new(),
             })
             .await
             .expect_err("output missing a required field must be rejected");
@@ -269,6 +307,7 @@ mod tests {
                 task_number,
                 summary: "not mine".into(),
                 outputs: serde_json::json!({"tag": "v9"}),
+                created_tasks: Vec::new(),
             })
             .await
             .expect_err("a worker must not complete a task it was not given");
@@ -292,8 +331,89 @@ mod tests {
             task_number,
             summary: "done".into(),
             outputs: serde_json::json!({"anything": [1, 2, 3]}),
+            created_tasks: Vec::new(),
         })
         .await
         .expect("an undeclared contract constrains nothing");
+    }
+    /// Server-side verification of a model's claim about its own actions.
+    ///
+    /// A worker reporting children it never filed leaves whoever reads the
+    /// board believing work is scheduled when it is not — worse than failing
+    /// outright, because nothing looks wrong until somebody wonders why
+    /// nothing happened.
+    #[tokio::test]
+    async fn rejects_a_completion_claiming_cards_it_did_not_file() {
+        let worker_id = uuid::Uuid::new_v4();
+        let (store, task_number) = store_with_task(worker_id).await;
+
+        // A real card, but filed by somebody else.
+        let other = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-1".into(),
+                assigned_agent_id: "agent-1".into(),
+                title: "not mine".into(),
+                status: TaskStatus::Backlog,
+                created_by: "human".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create other task");
+
+        let tool = TaskCompleteTool::new(store.clone(), worker_id);
+        let error = tool
+            .call(TaskCompleteArgs {
+                task_number,
+                summary: "decomposed the work".into(),
+                outputs: serde_json::json!({}),
+                created_tasks: vec![other.task_number, 9999],
+            })
+            .await
+            .expect_err("claiming cards it did not file must be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains(&format!("#{}", other.task_number)));
+        assert!(
+            message.contains("#9999"),
+            "a nonexistent card counts too: {message}"
+        );
+
+        let task = store
+            .get_by_number(task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert!(
+            task.outputs.is_none(),
+            "a rejected completion must not record outputs either"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_a_completion_reporting_cards_it_really_filed() {
+        let worker_id = uuid::Uuid::new_v4();
+        let (store, task_number) = store_with_task(worker_id).await;
+
+        let child = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-1".into(),
+                assigned_agent_id: "agent-1".into(),
+                title: "filed child".into(),
+                status: TaskStatus::Ready,
+                created_by: crate::tasks::filer_id(task_number),
+                ..Default::default()
+            })
+            .await
+            .expect("create child");
+
+        let tool = TaskCompleteTool::new(store.clone(), worker_id);
+        tool.call(TaskCompleteArgs {
+            task_number,
+            summary: "decomposed the work".into(),
+            outputs: serde_json::json!({"filed": 1}),
+            created_tasks: vec![child.task_number],
+        })
+        .await
+        .expect("a truthful claim should be accepted");
     }
 }
