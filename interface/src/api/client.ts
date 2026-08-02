@@ -988,8 +988,40 @@ export interface UploadSkillResponse {
 
 // -- Task Types --
 
-export type TaskStatus = "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
+export type TaskStatus =
+	| "pending_approval"
+	| "backlog"
+	| "ready"
+	| "in_progress"
+	| "blocked"
+	| "done";
 export type TaskPriority = "critical" | "high" | "medium" | "low";
+
+export type TaskRunOutcome =
+	| "completed"
+	| "failed"
+	| "timeout"
+	| "cancelled"
+	| "blocked"
+	| "rate_limited";
+
+/// A single execution attempt against a task.
+export interface TaskRun {
+	id: string;
+	task_number: number;
+	attempt: number;
+	worker_id?: string;
+	/** Null while the attempt is still running. */
+	outcome?: TaskRunOutcome;
+	summary?: string;
+	error?: string;
+	started_at: string;
+	ended_at?: string;
+}
+
+export interface TaskRunsResponse {
+	runs: TaskRun[];
+}
 
 export interface TaskSubtask {
 	title: string;
@@ -1015,6 +1047,18 @@ export interface TaskItem {
 	created_at: string;
 	updated_at: string;
 	completed_at?: string;
+	/** Failures since the last success. Reset on completion and on manual retry. */
+	consecutive_failures: number;
+	/** Per-task override of the instance default failure limit. */
+	max_retries?: number;
+	/** Most recent failure text, shown on the card when the task is parked. */
+	last_error?: string;
+	/** Project this task acts on. */
+	project_id?: string | null;
+	/** Repo within the project. A project can hold several repos. */
+	repo_id?: string | null;
+	/** Worktree to execute in. */
+	worktree_id?: string | null;
 }
 
 export interface TaskListResponse {
@@ -2330,6 +2374,18 @@ export const api = {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ assigned_agent_id: assignedAgentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	/** Per-attempt execution log for a task, oldest first. */
+	listTaskRuns: (taskNumber: number) =>
+		fetchJson<TaskRunsResponse>(`/tasks/${taskNumber}/runs`),
+	/** Clear the failure budget and requeue. Used by the manual retry action. */
+	retryTask: async (taskNumber: number): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/retry`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;

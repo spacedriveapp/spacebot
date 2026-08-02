@@ -26,6 +26,11 @@ import {
 	GithubMetadataBadges,
 	getGithubReferences,
 } from "@/components/TaskUtils";
+import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
+import {RepoChip} from "@/components/tasks/RepoChip";
+import {ALL_REPOS, RepoFilter} from "@/components/tasks/RepoFilter";
+import {useBindingNames} from "@/hooks/useBindingNames";
 
 const TASK_LIMIT = 200;
 
@@ -122,10 +127,45 @@ export function GlobalTasks() {
 
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
 
+	const {names: bindingNames} = useBindingNames();
+	const [repoFilter, setRepoFilter] = useState<string>(ALL_REPOS);
+
+	const rawTasks = (data?.tasks ?? []) as TaskItem[];
+
+	// Repo ids present on the board, so the filter only lists repos with work.
+	const presentRepoIds = useMemo(() => {
+		const ids = new Set<string>();
+		for (const task of rawTasks) {
+			if (task.repo_id) ids.add(task.repo_id);
+		}
+		return ids;
+	}, [rawTasks]);
+
+	const matchesRepo = useCallback(
+		(task: TaskItem) => repoFilter === ALL_REPOS || task.repo_id === repoFilter,
+		[repoFilter],
+	);
+
+	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
+	// split out and rendered by BlockedTasksSection instead.
+	const blockedTasks = useMemo(
+		() => rawTasks.filter((t) => t.status === "blocked" && matchesRepo(t)),
+		[rawTasks, matchesRepo],
+	);
+	const boardTasks = useMemo(
+		() =>
+			tasks.filter((t) => {
+				const item = t as unknown as TaskItem;
+				return item.status !== "blocked" && matchesRepo(item);
+			}),
+		[tasks, matchesRepo],
+	);
+
 	const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Set<UiTaskStatus>>(
 		() => new Set(),
 	);
+	const [blockedCollapsed, setBlockedCollapsed] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
@@ -171,6 +211,11 @@ export function GlobalTasks() {
 			setCreateOpen(false);
 			void invalidate();
 		},
+	});
+
+	const retryMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
 	});
 
 	const handleStatusChange = useCallback(
@@ -237,6 +282,12 @@ export function GlobalTasks() {
 						<span className="text-sm text-ink-dull">
 							{tasks.length} task{tasks.length !== 1 ? "s" : ""}
 						</span>
+						<RepoFilter
+							names={bindingNames}
+							value={repoFilter}
+							onChange={setRepoFilter}
+							presentRepoIds={presentRepoIds}
+						/>
 						{agents.length > 1 && (
 							<AgentPicker
 								agents={agents}
@@ -286,8 +337,27 @@ export function GlobalTasks() {
 					</div>
 				) : (
 					<div className="flex-1 overflow-y-auto">
+						{/* Blocked tasks render separately: TaskList groups by
+						    TASK_STATUS_ORDER and silently drops any status it
+						    doesn't know, so a blocked task handed to it would
+						    vanish from the board entirely. */}
+						<BlockedTasksSection
+							tasks={blockedTasks}
+							collapsed={blockedCollapsed}
+							onToggle={() => setBlockedCollapsed((v) => !v)}
+							onRetry={(task) => retryMutation.mutate(task.task_number)}
+							retryingTaskNumber={
+								retryMutation.isPending
+									? (retryMutation.variables ?? null)
+									: null
+							}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							activeTaskId={activeTaskId}
+							resolveAgentName={resolveAgentName}
+							bindingNames={bindingNames}
+						/>
 						<TaskList
-							tasks={tasks}
+							tasks={boardTasks}
 							activeTaskId={activeTaskId ?? undefined}
 							collapsedGroups={collapsedGroups}
 							onToggleGroup={handleToggleGroup}
@@ -314,8 +384,51 @@ export function GlobalTasks() {
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
 					/>
+					<BindingSection
+						task={activeTask as unknown as TaskItem}
+						names={bindingNames}
+					/>
+					<div className="border-t border-app-line/40 px-4 py-3">
+						<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
+							Attempts
+						</h3>
+						<TaskRunHistory
+							taskNumber={(activeTask as unknown as TaskItem).task_number}
+						/>
+					</div>
 				</div>
 			)}
+		</div>
+	);
+}
+
+/** Which codebase the selected task acts on. Hidden for unbound tasks. */
+function BindingSection({
+	task,
+	names,
+}: {
+	task: TaskItem;
+	names: ReturnType<typeof useBindingNames>["names"];
+}) {
+	if (!task.project_id && !task.repo_id && !task.worktree_id) return null;
+
+	const project = task.project_id
+		? (names.projects.get(task.project_id) ?? task.project_id)
+		: null;
+
+	return (
+		<div className="border-t border-app-line/40 px-4 py-3">
+			<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
+				Codebase
+			</h3>
+			<div className="flex flex-wrap items-center gap-1.5">
+				<RepoChip task={task} names={names} />
+				{/* The chip shows the most specific binding; name the project too
+				    when it isn't already what's displayed. */}
+				{project && (task.repo_id || task.worktree_id) && (
+					<span className="text-[11px] text-ink-faint">in {project}</span>
+				)}
+			</div>
 		</div>
 	);
 }

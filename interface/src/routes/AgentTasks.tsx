@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import {
 	api,
@@ -20,6 +20,8 @@ import {
 	GithubMetadataBadges,
 	getGithubReferences,
 } from "@/components/TaskUtils";
+import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 
 const TASK_LIMIT = 200;
 
@@ -46,10 +48,22 @@ export function AgentTasks({agentId}: {agentId: string}) {
 
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
 
+	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
+	// split out and rendered by BlockedTasksSection instead.
+	const blockedTasks = useMemo(
+		() => (data?.tasks ?? []).filter((t) => t.status === "blocked"),
+		[data],
+	);
+	const boardTasks = useMemo(
+		() => tasks.filter((t) => (t as unknown as TaskItem).status !== "blocked"),
+		[tasks],
+	);
+
 	const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Set<UiTaskStatus>>(
 		() => new Set(),
 	);
+	const [blockedCollapsed, setBlockedCollapsed] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
@@ -95,6 +109,11 @@ export function AgentTasks({agentId}: {agentId: string}) {
 			setCreateOpen(false);
 			void invalidate();
 		},
+	});
+
+	const retryMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
 	});
 
 	const handleStatusChange = useCallback(
@@ -199,8 +218,23 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					</div>
 				) : (
 					<div className="flex-1 overflow-y-auto">
+						{/* TaskList drops any status outside TASK_STATUS_ORDER,
+						    so blocked tasks are rendered separately. */}
+						<BlockedTasksSection
+							tasks={blockedTasks}
+							collapsed={blockedCollapsed}
+							onToggle={() => setBlockedCollapsed((v) => !v)}
+							onRetry={(task) => retryMutation.mutate(task.task_number)}
+							retryingTaskNumber={
+								retryMutation.isPending
+									? (retryMutation.variables ?? null)
+									: null
+							}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							activeTaskId={activeTaskId}
+						/>
 						<TaskList
-							tasks={tasks}
+							tasks={boardTasks}
 							activeTaskId={activeTaskId ?? undefined}
 							collapsedGroups={collapsedGroups}
 							onToggleGroup={handleToggleGroup}
@@ -226,6 +260,14 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
 					/>
+					<div className="border-t border-app-line/40 px-4 py-3">
+						<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
+							Attempts
+						</h3>
+						<TaskRunHistory
+							taskNumber={(activeTask as unknown as TaskItem).task_number}
+						/>
+					</div>
 				</div>
 			)}
 		</div>
