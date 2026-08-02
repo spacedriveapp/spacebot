@@ -3849,6 +3849,17 @@ async fn handle_detached_completion(
                     "task attempt hit a provider rate limit — requeueing without counting a failure"
                 );
             }
+            Ok(crate::tasks::FailureDisposition::NoLongerRunning { status }) => {
+                // Somebody moved the task while the worker was in flight.
+                // Their decision wins — do not drag it back to `ready`.
+                tracing::info!(
+                    task_number = task.task_number,
+                    status = status.map(|s| s.as_str()).unwrap_or("unknown"),
+                    "task left in_progress while its worker ran — leaving the new status alone"
+                );
+                run_logger.log_worker_completed(worker_id, result_text, false);
+                return;
+            }
             Ok(crate::tasks::FailureDisposition::TaskMissing) => {
                 tracing::warn!(
                     task_number = task.task_number,

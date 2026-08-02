@@ -4094,6 +4094,10 @@ export interface components {
             /**
              * Format: int64
              * @description Per-task override of [`DEFAULT_FAILURE_LIMIT`].
+             *
+             *     Despite the name (inherited from the column), this is a *failure* limit,
+             *     not a retry count: the task is parked once `consecutive_failures`
+             *     reaches it, so `max_retries = 1` allows one attempt and zero retries.
              */
             max_retries?: number | null;
             metadata: unknown;

@@ -60,7 +60,9 @@ impl TaskStatus {
         }
     }
 
-    /// Whether a task in this status is eligible for the pickup loop.
+    /// Whether this status is an end state — nothing further will move the
+    /// task on its own. Used as the gate predicate for dependency edges: a
+    /// child is eligible only once every parent is terminal.
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskStatus::Done)
     }
@@ -145,6 +147,10 @@ pub struct Task {
     /// operator-initiated retry.
     pub consecutive_failures: i64,
     /// Per-task override of [`DEFAULT_FAILURE_LIMIT`].
+    ///
+    /// Despite the name (inherited from the column), this is a *failure* limit,
+    /// not a retry count: the task is parked once `consecutive_failures`
+    /// reaches it, so `max_retries = 1` allows one attempt and zero retries.
     pub max_retries: Option<i64>,
     /// Text of the most recent failure, kept on the task so the board can
     /// show why it is parked without joining `task_runs`.
@@ -173,6 +179,48 @@ pub struct TaskProjectBinding {
 impl TaskProjectBinding {
     pub fn is_empty(&self) -> bool {
         self.project_id.is_none() && self.repo_id.is_none() && self.worktree_id.is_none()
+    }
+}
+
+/// A partial update to a task's binding.
+///
+/// Each field is independently three-valued, which [`TaskProjectBinding`] is
+/// not: `None` leaves the column alone, `Some(None)` clears it, `Some(Some(id))`
+/// sets it. Using the flat binding here would make "set the repo" indistinguishable
+/// from "set the repo and unbind the project", which is exactly the bug this type
+/// exists to prevent — a `PATCH` naming one field must not null its siblings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskBindingPatch {
+    pub project_id: Option<Option<String>>,
+    pub repo_id: Option<Option<String>>,
+    pub worktree_id: Option<Option<String>>,
+}
+
+impl TaskBindingPatch {
+    /// A patch that clears all three columns.
+    pub fn clear_all() -> Self {
+        Self {
+            project_id: Some(None),
+            repo_id: Some(None),
+            worktree_id: Some(None),
+        }
+    }
+
+    /// Whether this patch touches any column at all.
+    pub fn is_noop(&self) -> bool {
+        self.project_id.is_none() && self.repo_id.is_none() && self.worktree_id.is_none()
+    }
+}
+
+impl From<TaskProjectBinding> for TaskBindingPatch {
+    /// Sets every field, including the absent ones. Use this only when the
+    /// caller genuinely supplied a complete binding.
+    fn from(binding: TaskProjectBinding) -> Self {
+        Self {
+            project_id: Some(binding.project_id),
+            repo_id: Some(binding.repo_id),
+            worktree_id: Some(binding.worktree_id),
+        }
     }
 }
 
@@ -301,10 +349,10 @@ pub struct UpdateTaskInput {
     pub complete_subtask: Option<usize>,
     /// Reassign the task to a different agent.
     pub assigned_agent_id: Option<String>,
-    /// Rebind the task to a different codebase. `None` leaves each field as-is;
-    /// use `clear_binding` to unset.
-    pub binding: Option<TaskProjectBinding>,
-    /// Clear all three binding columns.
+    /// Rebind the task to a different codebase, one column at a time. An
+    /// untouched field is left as-is rather than nulled.
+    pub binding: TaskBindingPatch,
+    /// Clear all three binding columns, overriding `binding`.
     pub clear_binding: bool,
 }
 
@@ -691,15 +739,22 @@ impl TaskStore {
             query.push_str("worker_id = ?, ");
         }
 
-        // Binding: clear wins over set, and an absent binding leaves the
-        // existing columns untouched rather than nulling them.
-        let next_binding = if input.clear_binding {
-            Some(TaskProjectBinding::default())
+        // Binding: clear wins over set, and each column is emitted only when
+        // the patch actually names it. Emitting all three unconditionally is
+        // what made a single-field PATCH silently unbind its siblings.
+        let binding_patch = if input.clear_binding {
+            TaskBindingPatch::clear_all()
         } else {
             input.binding.clone()
         };
-        if next_binding.is_some() {
-            query.push_str("project_id = ?, repo_id = ?, worktree_id = ?, ");
+        if binding_patch.project_id.is_some() {
+            query.push_str("project_id = ?, ");
+        }
+        if binding_patch.repo_id.is_some() {
+            query.push_str("repo_id = ?, ");
+        }
+        if binding_patch.worktree_id.is_some() {
+            query.push_str("worktree_id = ?, ");
         }
 
         query.push_str(
@@ -733,11 +788,15 @@ impl TaskStore {
             sql = sql.bind(next_worker_id);
         }
 
-        if let Some(binding) = &next_binding {
-            sql = sql
-                .bind(binding.project_id.clone())
-                .bind(binding.repo_id.clone())
-                .bind(binding.worktree_id.clone());
+        // Bind order must match the fragment order pushed above.
+        if let Some(project_id) = &binding_patch.project_id {
+            sql = sql.bind(project_id.clone());
+        }
+        if let Some(repo_id) = &binding_patch.repo_id {
+            sql = sql.bind(repo_id.clone());
+        }
+        if let Some(worktree_id) = &binding_patch.worktree_id {
+            sql = sql.bind(worktree_id.clone());
         }
 
         sql.bind(input.approved_by)
@@ -941,7 +1000,7 @@ impl TaskStore {
             .context("failed to open failure budget transaction")?;
 
         let row = sqlx::query(
-            "SELECT consecutive_failures, max_retries FROM tasks WHERE task_number = ?",
+            "SELECT status, consecutive_failures, max_retries FROM tasks WHERE task_number = ?",
         )
         .bind(task_number)
         .fetch_optional(&mut *tx)
@@ -954,6 +1013,23 @@ impl TaskStore {
                 .context("failed to commit empty failure budget transaction")?;
             return Ok(FailureDisposition::TaskMissing);
         };
+
+        // A worker runs for minutes. If a human completed, cancelled, or
+        // reassigned the task in that window, the attempt's failure must not
+        // drag it back to `ready`. `BEGIN IMMEDIATE` holds the write lock, so
+        // this read and the update below cannot interleave with another writer.
+        let current_status = row
+            .try_get::<String, _>("status")
+            .ok()
+            .and_then(|value| TaskStatus::parse(&value));
+        if current_status != Some(TaskStatus::InProgress) {
+            tx.commit()
+                .await
+                .context("failed to commit no-op failure budget transaction")?;
+            return Ok(FailureDisposition::NoLongerRunning {
+                status: current_status,
+            });
+        }
 
         let previous: i64 = row.try_get("consecutive_failures").unwrap_or(0);
         let limit: i64 = row
@@ -973,7 +1049,7 @@ impl TaskStore {
         sqlx::query(
             "UPDATE tasks SET consecutive_failures = ?, last_error = ?, status = ?, \
              worker_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE task_number = ?",
+             WHERE task_number = ? AND status = 'in_progress'",
         )
         .bind(failures)
         .bind(error)
@@ -1020,6 +1096,9 @@ pub enum FailureDisposition {
     Parked { failures: i64, limit: i64 },
     /// Outcome does not count against the budget (rate limits).
     NotCounted,
+    /// The task moved out of `in_progress` while the worker was in flight — a
+    /// human completed, reassigned, or requeued it. Left untouched.
+    NoLongerRunning { status: Option<TaskStatus> },
     /// The task row disappeared between execution and bookkeeping.
     TaskMissing,
 }
@@ -1033,10 +1112,8 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
 
-/// The single source of truth for legal status transitions.
-///
-/// Both the HTTP API and the dashboard's drag-and-drop consume this, so the
-/// board can never render a move the API rejects.
+/// The single source of truth for legal status transitions, enforced by the
+/// store on every update.
 pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
     if current == next {
         return true;
@@ -1059,20 +1136,6 @@ pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
             | (TaskStatus::Blocked, TaskStatus::Ready)
             | (TaskStatus::Blocked, TaskStatus::Done)
     )
-}
-
-/// Every legal `(from, to)` pair, for export to the dashboard so the UI and the
-/// API agree on what a drag is allowed to do.
-pub fn legal_transitions() -> Vec<(TaskStatus, TaskStatus)> {
-    let mut pairs = Vec::new();
-    for from in TaskStatus::ALL {
-        for to in TaskStatus::ALL {
-            if from != to && can_transition(from, to) {
-                pairs.push((from, to));
-            }
-        }
-    }
-    pairs
 }
 
 fn merge_json_object(current: Value, patch: Option<Value>) -> Value {
@@ -1440,16 +1503,56 @@ mod tests {
             .await
             .expect("should create");
 
-        // Rebind to a different repo.
+        // Rebind only the repo. The project must survive untouched — naming one
+        // column in a patch must never null its siblings.
         let rebound = store
             .update(
                 created.task_number,
                 UpdateTaskInput {
-                    binding: Some(TaskProjectBinding {
-                        project_id: Some("proj-a".into()),
-                        repo_id: Some("repo-2".into()),
-                        worktree_id: None,
-                    }),
+                    binding: TaskBindingPatch {
+                        repo_id: Some(Some("repo-2".into())),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(rebound.repo_id.as_deref(), Some("repo-2"));
+        assert_eq!(
+            rebound.project_id.as_deref(),
+            Some("proj-a"),
+            "patching the repo must not unbind the project"
+        );
+
+        // A single column can also be cleared on its own.
+        let repo_cleared = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    binding: TaskBindingPatch {
+                        repo_id: Some(None),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert!(repo_cleared.repo_id.is_none());
+        assert_eq!(repo_cleared.project_id.as_deref(), Some("proj-a"));
+
+        // Put the repo back for the remaining assertions.
+        let rebound = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    binding: TaskBindingPatch {
+                        repo_id: Some(Some("repo-2".into())),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             )
@@ -1555,6 +1658,20 @@ mod tests {
         assert_eq!(after_first.consecutive_failures, 1);
         assert_eq!(after_first.last_error.as_deref(), Some("attempt 1 failed"));
 
+        // The requeued task gets picked up again before it can fail again —
+        // `record_failure` only acts on a task that is actually running.
+        store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("re-claim")
+            .expect("exists");
+
         // Second failure hits the limit: parked, not requeued.
         let second = store
             .record_failure(task.task_number, TaskRunOutcome::Failed, "attempt 2 failed")
@@ -1578,6 +1695,53 @@ mod tests {
             "an exhausted budget must park the task instead of hot-looping"
         );
         assert_eq!(after_second.consecutive_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn failure_does_not_override_a_status_changed_mid_run() {
+        let store = setup_store().await;
+        let task = store
+            .create(self_assigned_input("long runner", TaskStatus::InProgress))
+            .await
+            .expect("should create");
+
+        // A human marks it done while the worker is still in flight.
+        store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+
+        // The worker then fails. The human's decision must win.
+        let disposition = store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "too late")
+            .await
+            .expect("record failure");
+        assert_eq!(
+            disposition,
+            FailureDisposition::NoLongerRunning {
+                status: Some(TaskStatus::Done)
+            }
+        );
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.status,
+            TaskStatus::Done,
+            "a late failure must not resurrect a task somebody already closed"
+        );
+        assert_eq!(after.consecutive_failures, 0);
+        assert!(after.last_error.is_none());
     }
 
     #[tokio::test]
@@ -1669,8 +1833,16 @@ mod tests {
             .await
             .expect("should create");
 
-        // Burn the budget so the task lands in Blocked.
-        for _ in 0..DEFAULT_FAILURE_LIMIT {
+        // Burn the budget so the task lands in Blocked, going through a real
+        // claim each round — `record_failure` only acts on a running task.
+        for round in 0..DEFAULT_FAILURE_LIMIT {
+            if round > 0 {
+                store
+                    .claim_next_ready("agent-test")
+                    .await
+                    .expect("claim should succeed")
+                    .expect("a requeued task must be claimable again");
+            }
             store
                 .record_failure(task.task_number, TaskRunOutcome::Failed, "dead end")
                 .await

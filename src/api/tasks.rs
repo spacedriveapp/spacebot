@@ -350,19 +350,13 @@ pub(super) async fn update_task(
     let status = parse_status(request.status.as_deref())?;
     let priority = parse_priority(request.priority.as_deref())?;
 
-    // Only send a binding when at least one field was supplied; otherwise the
-    // existing columns are left alone.
-    let binding = if request.project_id.is_some()
-        || request.repo_id.is_some()
-        || request.worktree_id.is_some()
-    {
-        Some(crate::tasks::TaskProjectBinding {
-            project_id: request.project_id,
-            repo_id: request.repo_id,
-            worktree_id: request.worktree_id,
-        })
-    } else {
-        None
+    // Each binding column is patched independently: naming only `repo_id` must
+    // rebind the repo and leave the project and worktree exactly as they were.
+    // Use `clear_binding` to unbind entirely.
+    let binding = crate::tasks::TaskBindingPatch {
+        project_id: request.project_id.map(Some),
+        repo_id: request.repo_id.map(Some),
+        worktree_id: request.worktree_id.map(Some),
     };
 
     let task = store
