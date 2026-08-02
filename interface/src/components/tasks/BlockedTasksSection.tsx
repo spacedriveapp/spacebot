@@ -1,8 +1,15 @@
 import { Badge, Button } from "@spacedrive/primitives";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faBan, faChevronDown, faRotateRight } from "@fortawesome/free-solid-svg-icons";
-import type { TaskItem } from "@/api/client";
+import {
+	faBan,
+	faChevronDown,
+	faLockOpen,
+	faRotateRight,
+} from "@fortawesome/free-solid-svg-icons";
+import type { TaskEdgeSummary, TaskItem } from "@/api/client";
 import { RepoChip, type BindingNames } from "./RepoChip";
+import { BlockKindChip, isActionableBlock } from "./BlockKindChip";
+import { DependencyBadges } from "./DependencyBadges";
 
 /**
  * Blocked tasks, rendered locally rather than through `TaskList`.
@@ -32,6 +39,10 @@ export interface BlockedTasksSectionProps {
 	retryingTaskNumber?: number | null;
 	resolveAgentName?: (agentId: string) => string;
 	bindingNames?: BindingNames;
+	/** Edge counts keyed by task number, from the list response. */
+	edges?: Map<number, TaskEdgeSummary>;
+	/** Release a task a human has resolved. Shown for sticky blocks only. */
+	onUnblock?: (task: TaskItem) => void;
 }
 
 export function BlockedTasksSection({
@@ -44,6 +55,8 @@ export function BlockedTasksSection({
 	retryingTaskNumber,
 	resolveAgentName,
 	bindingNames,
+	edges,
+	onUnblock,
 }: BlockedTasksSectionProps) {
 	if (tasks.length === 0) return null;
 
@@ -94,6 +107,11 @@ export function BlockedTasksSection({
 											{task.title}
 										</span>
 										<RepoChip task={task} names={bindingNames} />
+										<BlockKindChip
+											kind={task.block_kind}
+											reason={task.block_reason}
+										/>
+										<DependencyBadges summary={edges?.get(task.task_number)} />
 										{task.consecutive_failures > 0 && (
 											<Badge variant="error" size="sm" className="shrink-0">
 												{task.consecutive_failures}
@@ -104,12 +122,12 @@ export function BlockedTasksSection({
 
 									{/* The reason is why a human is here, but it must not outshout
 									    the title — muted, clamped, full text on hover. */}
-									{task.last_error && (
+									{(task.block_reason ?? task.last_error) && (
 										<p
 											className="line-clamp-2 w-full break-all font-mono text-[11px] leading-relaxed text-ink-dull"
-											title={task.last_error}
+											title={task.block_reason ?? task.last_error ?? ""}
 										>
-											{task.last_error}
+											{task.block_reason ?? task.last_error}
 										</p>
 									)}
 
@@ -122,7 +140,22 @@ export function BlockedTasksSection({
 
 								{/* Always visible: on a queue that exists for human attention,
 								    the primary action must not be hidden behind hover. */}
-								{onRetry && (
+								{onUnblock && isActionableBlock(task.block_kind) && (
+									<Button
+										variant="gray"
+										size="sm"
+										onClick={() => onUnblock(task)}
+										className="shrink-0"
+										title="Mark the obstacle resolved and requeue"
+									>
+										<FontAwesomeIcon
+											icon={faLockOpen}
+											className="mr-1.5 h-3 w-3"
+										/>
+										Unblock
+									</Button>
+								)}
+								{onRetry && !isActionableBlock(task.block_kind) && (
 									<Button
 										variant="gray"
 										size="sm"

@@ -2150,6 +2150,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/transitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/transitions` — every legal status move.
+         * @description The dashboard reads this instead of hand-maintaining a second transition
+         *     table in TypeScript, so a board can never offer a move the API rejects.
+         */
+        get: operations["list_task_transitions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}": {
         parameters: {
             query?: never;
@@ -2198,6 +2219,63 @@ export interface paths {
         /** `POST /tasks/{number}/assign` — reassign a task to a different agent. */
         post: operations["assign_task"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/block": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /tasks/{number}/block` — park a task with a typed reason. */
+        post: operations["block_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/dependencies` — the edges around a task. */
+        get: operations["list_task_dependencies"];
+        put?: never;
+        /**
+         * `POST /tasks/{number}/dependencies` — make this task wait on another.
+         * @description Rejects self-loops, unknown tasks, and any edge that would close a cycle.
+         *     The cycle response names the path so the caller can see which existing edge
+         *     conflicts, rather than being told only that something is wrong.
+         */
+        post: operations["add_task_dependency"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/dependencies/{parent}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** `DELETE /tasks/{number}/dependencies/{parent}` — drop an edge. */
+        delete: operations["remove_task_dependency"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2255,6 +2333,26 @@ export interface paths {
         get: operations["list_task_runs"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/unblock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/unblock` — release a parked task.
+         * @description Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+         */
+        post: operations["unblock_task"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2539,6 +2637,10 @@ export interface components {
             platform: string;
             runtime_key: string;
         };
+        AddDependencyRequest: {
+            /** Format: int64 */
+            parent_task_number: number;
+        };
         AgentConfigResponse: {
             browser: components["schemas"]["BrowserSection"];
             channel: components["schemas"]["ChannelSection"];
@@ -2688,6 +2790,20 @@ export interface components {
         };
         BindingsListResponse: {
             bindings: components["schemas"]["BindingResponse"][];
+        };
+        /**
+         * @description Why a task is parked.
+         *
+         *     The kinds differ in how they recover, which is the entire reason the column
+         *     exists. `dependency` and `transient` clear themselves; `needs_input` and
+         *     `capability` are sticky and only an explicit unblock releases them.
+         * @enum {string}
+         */
+        BlockKind: "dependency" | "needs_input" | "capability" | "transient";
+        BlockTaskRequest: {
+            /** @description dependency | needs_input | capability | transient */
+            kind: string;
+            reason: string;
         };
         BrowserSection: {
             close_policy: components["schemas"]["ClosePolicy"];
@@ -3047,6 +3163,8 @@ export interface components {
             /** @description Agent assigned to execute. Defaults to `owner_agent_id`. */
             assigned_agent_id?: string | null;
             created_by?: string | null;
+            /** @description Task numbers that must finish before this one may run. */
+            depends_on?: number[];
             description?: string | null;
             metadata?: unknown;
             /** @description Agent that owns (created) this task. */
@@ -4093,6 +4211,14 @@ export interface components {
             approved_at?: string | null;
             approved_by?: string | null;
             assigned_agent_id: string;
+            block_kind?: null | components["schemas"]["BlockKind"];
+            /** @description Human-readable explanation shown on the card. */
+            block_reason?: string | null;
+            /**
+             * Format: int64
+             * @description Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
+             */
+            block_recurrences: number;
             completed_at?: string | null;
             /**
              * Format: int64
@@ -4147,7 +4273,43 @@ export interface components {
             message: string;
             success: boolean;
         };
+        TaskDependenciesResponse: {
+            /**
+             * @description The subset of `parents` that has not finished yet — what the board
+             *     should name when explaining why a task is not moving.
+             */
+            blocked_by: number[];
+            /** @description Tasks waiting on this one. */
+            children: number[];
+            /** @description Tasks this one waits on. */
+            parents: number[];
+        };
+        /** @description How many edges touch a task, and how many still gate it. */
+        TaskEdgeSummary: {
+            /**
+             * Format: int64
+             * @description The subset of `parents` that has not finished — why the task is waiting.
+             */
+            blocked_by: number;
+            /**
+             * Format: int64
+             * @description Tasks waiting on this one.
+             */
+            children: number;
+            /**
+             * Format: int64
+             * @description Tasks this one waits on.
+             */
+            parents: number;
+            /** Format: int64 */
+            task_number: number;
+        };
         TaskListResponse: {
+            /**
+             * @description Edge counts for every task that has any. Tasks with no dependencies are
+             *     absent rather than listed with zeroes.
+             */
+            edges: components["schemas"]["TaskEdgeSummary"][];
             tasks: components["schemas"]["Task"][];
         };
         /** @enum {string} */
@@ -4182,6 +4344,13 @@ export interface components {
         TaskSubtask: {
             completed: boolean;
             title: string;
+        };
+        TaskTransition: {
+            from: components["schemas"]["TaskStatus"];
+            to: components["schemas"]["TaskStatus"];
+        };
+        TaskTransitionsResponse: {
+            transitions: components["schemas"]["TaskTransition"][];
         };
         /** @description A unified timeline item combining messages, branch runs, and worker runs. */
         TimelineItem: {
@@ -9890,6 +10059,25 @@ export interface operations {
             };
         };
     };
+    list_task_transitions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskTransitionsResponse"];
+                };
+            };
+        };
+    };
     get_task: {
         parameters: {
             query?: never;
@@ -10089,6 +10277,174 @@ export interface operations {
             };
         };
     };
+    block_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BlockTaskRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown block kind */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_dependencies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_task_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Child task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Edge would create a cycle */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A task cannot depend on itself */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_task_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Child task number */
+                number: number;
+                /** @description Parent task number */
+                parent: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Edge not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     execute_task: {
         parameters: {
             query?: never;
@@ -10191,6 +10547,42 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskRunsResponse"];
                 };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unblock_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found or not blocked */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Task store not initialized */
             503: {

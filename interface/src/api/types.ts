@@ -373,6 +373,13 @@ export type TaskActionResponse = components["schemas"]["TaskActionResponse"];
 export type TaskRun = components["schemas"]["TaskRun"];
 export type TaskRunOutcome = components["schemas"]["TaskRunOutcome"];
 export type TaskRunsResponse = components["schemas"]["TaskRunsResponse"];
+export type BlockKind = components["schemas"]["BlockKind"];
+export type TaskEdgeSummary = components["schemas"]["TaskEdgeSummary"];
+export type TaskDependenciesResponse =
+	components["schemas"]["TaskDependenciesResponse"];
+export type TaskTransition = components["schemas"]["TaskTransition"];
+export type TaskTransitionsResponse =
+	components["schemas"]["TaskTransitionsResponse"];
 
 // Requests
 export type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];

@@ -1156,6 +1156,47 @@ impl TaskStore {
         .map_err(Into::into)
     }
 
+    /// Edge counts for every task that has any, in one query.
+    ///
+    /// The board draws a dependency badge on each card. Asking per card would
+    /// be a request per row on a view whose whole purpose is showing many rows,
+    /// so this returns the entire adjacency summary and lets the caller index
+    /// into it. Tasks with no edges are absent rather than present with zeroes.
+    pub async fn dependency_summaries(&self) -> Result<Vec<TaskEdgeSummary>> {
+        let rows = sqlx::query(
+            "SELECT task_number, \
+                    SUM(is_parent_side) AS children, \
+                    SUM(1 - is_parent_side) AS parents, \
+                    SUM(blocking) AS blocked_by \
+               FROM ( \
+                 SELECT d.parent_task_number AS task_number, 1 AS is_parent_side, 0 AS blocking \
+                   FROM task_dependencies d \
+                 UNION ALL \
+                 SELECT d.child_task_number AS task_number, 0 AS is_parent_side, \
+                        CASE WHEN p.status <> 'done' THEN 1 ELSE 0 END AS blocking \
+                   FROM task_dependencies d \
+                   JOIN tasks p ON p.task_number = d.parent_task_number \
+               ) \
+              GROUP BY task_number",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to summarize task dependencies")?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(TaskEdgeSummary {
+                    task_number: row
+                        .try_get("task_number")
+                        .context("failed to read edge summary task_number")?,
+                    parents: row.try_get("parents").unwrap_or(0),
+                    children: row.try_get("children").unwrap_or(0),
+                    blocked_by: row.try_get("blocked_by").unwrap_or(0),
+                })
+            })
+            .collect()
+    }
+
     /// Parents of `child` that have not reached a terminal status.
     pub async fn unfinished_parents(&self, child: i64) -> Result<Vec<i64>> {
         sqlx::query_scalar(
@@ -1639,6 +1680,18 @@ pub struct BlockOutcome {
     pub escalated: bool,
 }
 
+/// How many edges touch a task, and how many still gate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskEdgeSummary {
+    pub task_number: i64,
+    /// Tasks this one waits on.
+    pub parents: i64,
+    /// Tasks waiting on this one.
+    pub children: i64,
+    /// The subset of `parents` that has not finished — why the task is waiting.
+    pub blocked_by: i64,
+}
+
 /// What a [`TaskStore::recompute_ready`] pass changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadySweep {
@@ -1746,6 +1799,24 @@ pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
             | (TaskStatus::Blocked, TaskStatus::Ready)
             | (TaskStatus::Blocked, TaskStatus::Done)
     )
+}
+
+/// Every legal `(from, to)` status move.
+///
+/// Exported over the API so the dashboard's drag-and-drop consumes the same
+/// table the store enforces. Hermes renders a board column its PATCH handler
+/// has no branch for, so dragging a card there 400s — the failure mode of
+/// keeping two copies of this in two languages.
+pub fn legal_transitions() -> Vec<(TaskStatus, TaskStatus)> {
+    let mut pairs = Vec::new();
+    for from in TaskStatus::ALL {
+        for to in TaskStatus::ALL {
+            if from != to && can_transition(from, to) {
+                pairs.push((from, to));
+            }
+        }
+    }
+    pairs
 }
 
 fn merge_json_object(current: Value, patch: Option<Value>) -> Value {
@@ -3310,5 +3381,50 @@ mod tests {
         assert_eq!(after.status, TaskStatus::Blocked);
         assert_eq!(after.block_kind, Some(BlockKind::Transient));
         assert_eq!(after.block_reason.as_deref(), Some("boom"));
+    }
+    #[tokio::test]
+    async fn dependency_summaries_counts_both_directions_in_one_pass() {
+        let store = setup_store().await;
+        let done_parent = task_at(&store, "done parent", TaskStatus::InProgress).await;
+        let live_parent = task_at(&store, "live parent", TaskStatus::InProgress).await;
+        let hub = task_at(&store, "hub", TaskStatus::Backlog).await;
+        let child = task_at(&store, "child", TaskStatus::Backlog).await;
+        let lonely = task_at(&store, "lonely", TaskStatus::Backlog).await;
+
+        for parent in [&done_parent, &live_parent] {
+            store
+                .link_tasks(parent.task_number, hub.task_number)
+                .await
+                .expect("link");
+        }
+        store
+            .link_tasks(hub.task_number, child.task_number)
+            .await
+            .expect("link");
+        finish(&store, done_parent.task_number).await;
+
+        let summaries = store.dependency_summaries().await.expect("summaries");
+        let by_number: std::collections::HashMap<i64, TaskEdgeSummary> = summaries
+            .into_iter()
+            .map(|summary| (summary.task_number, summary))
+            .collect();
+
+        let hub_summary = by_number.get(&hub.task_number).expect("hub has edges");
+        assert_eq!(hub_summary.parents, 2);
+        assert_eq!(hub_summary.children, 1);
+        assert_eq!(
+            hub_summary.blocked_by, 1,
+            "only the unfinished parent still gates the hub"
+        );
+
+        let child_summary = by_number.get(&child.task_number).expect("child has edges");
+        assert_eq!(child_summary.parents, 1);
+        assert_eq!(child_summary.children, 0);
+        assert_eq!(child_summary.blocked_by, 1);
+
+        assert!(
+            !by_number.contains_key(&lonely.task_number),
+            "a task with no edges must be absent, not present with zeroes"
+        );
     }
 }

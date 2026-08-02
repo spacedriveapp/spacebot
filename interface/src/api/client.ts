@@ -663,6 +663,11 @@ export type TaskRunsResponse = Types.TaskRunsResponse;
 export type TaskListResponse = Types.TaskListResponse;
 export type TaskResponse = Types.TaskResponse;
 export type TaskActionResponse = Types.TaskActionResponse;
+export type BlockKind = Types.BlockKind;
+export type TaskEdgeSummary = Types.TaskEdgeSummary;
+export type TaskDependenciesResponse = Types.TaskDependenciesResponse;
+export type TaskTransition = Types.TaskTransition;
+export type TaskTransitionsResponse = Types.TaskTransitionsResponse;
 export type TaskItem = Types.Task;
 
 export type CreateTaskRequest = Types.CreateTaskRequest;
@@ -1723,6 +1728,51 @@ export const api = {
 	/** Per-attempt execution log for a task, oldest first. */
 	listTaskRuns: (taskNumber: number) =>
 		fetchJson<TaskRunsResponse>(`/tasks/${taskNumber}/runs`),
+	listTaskDependencies: (taskNumber: number) =>
+		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
+	/** The legal status moves, so the board never offers one the API rejects. */
+	listTaskTransitions: () =>
+		fetchJson<TaskTransitionsResponse>("/tasks/transitions"),
+	addTaskDependency: async (taskNumber: number, parentTaskNumber: number) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/dependencies`,
+			{
+				method: "POST",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify({parent_task_number: parentTaskNumber}),
+			},
+		);
+		if (!response.ok) {
+			// The server explains cycles and self-loops in the body; surfacing
+			// only a status code would strip the one detail that helps.
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskDependenciesResponse;
+	},
+	removeTaskDependency: async (taskNumber: number, parentTaskNumber: number) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/dependencies/${parentTaskNumber}`,
+			{method: "DELETE"},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskDependenciesResponse;
+	},
+	blockTask: async (taskNumber: number, kind: BlockKind, reason: string) => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/block`, {
+			method: "POST",
+			headers: {"Content-Type": "application/json"},
+			body: JSON.stringify({kind, reason}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskResponse;
+	},
+	unblockTask: async (taskNumber: number) => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/unblock`, {
+			method: "POST",
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskResponse;
+	},
 	/** Clear the failure budget and requeue. Used by the manual retry action. */
 	retryTask: async (taskNumber: number): Promise<TaskResponse> => {
 		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/retry`, {

@@ -5,11 +5,13 @@
  * running backend. Not linked from navigation; reachable at /__uilab.
  */
 import { useState } from "react";
-import type { TaskItem, TaskRun } from "@/api/client";
+import type { TaskDependenciesResponse, TaskEdgeSummary, TaskItem, TaskRun } from "@/api/client";
 import { BlockedTasksSection } from "@/components/tasks/BlockedTasksSection";
 import { TaskRunHistoryView } from "@/components/tasks/TaskRunHistory";
 import { RepoChip, type BindingNames } from "@/components/tasks/RepoChip";
 import { ALL_REPOS, RepoFilter } from "@/components/tasks/RepoFilter";
+import { DependencySectionView } from "@/components/tasks/DependencySection";
+import { indexEdges } from "@/components/tasks/DependencyBadges";
 
 const BINDING_NAMES: BindingNames = {
 	projects: new Map([["proj-platform", "platform"]]),
@@ -41,6 +43,7 @@ function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
 		created_at: new Date().toISOString(),
 		updated_at: new Date().toISOString(),
 		consecutive_failures: 0,
+		block_recurrences: 0,
 		...overrides,
 	};
 }
@@ -54,7 +57,8 @@ const BLOCKED: TaskItem[] = [
 		max_retries: 2,
 		project_id: "proj-platform",
 		repo_id: "repo-web",
-		last_error:
+		block_kind: "transient",
+		block_reason:
 			"worker exceeded 1800s wall-clock timeout after 10 segments. Last tool call: shell(`bun run codegen`) — no output for 22m.",
 	}),
 	fixtureTask({
@@ -63,18 +67,30 @@ const BLOCKED: TaskItem[] = [
 		consecutive_failures: 2,
 		project_id: "proj-platform",
 		repo_id: "repo-auth",
-		last_error: "capability: no secret named STAGING_DB_URL is available to this agent",
+		block_kind: "capability",
+		block_reason: "no secret named STAGING_DB_URL is available to this agent",
 	}),
 	fixtureTask({
 		task_number: 96,
 		title: "Backfill wiki pages for the ingestion subsystem",
 		priority: "low",
-		consecutive_failures: 3,
-		max_retries: 3,
-		last_error:
-			"context overflow after 2 compaction attempts: system prompt alone exceeds the context window",
+		consecutive_failures: 0,
+		block_kind: "needs_input",
+		block_reason:
+			"two candidate page hierarchies — flat per-module, or nested by subsystem. Which?",
 	}),
 ];
+
+const EDGES: TaskEdgeSummary[] = [
+	{task_number: 142, parents: 3, children: 2, blocked_by: 1},
+	{task_number: 138, parents: 0, children: 4, blocked_by: 0},
+];
+
+const DEPENDENCIES: TaskDependenciesResponse = {
+	parents: [128, 131, 133],
+	children: [151, 152],
+	blocked_by: [133],
+};
 
 const RUNS: TaskRun[] = [
 	{
@@ -166,6 +182,8 @@ export function UiLab() {
 						retryingTaskNumber={retrying}
 						resolveAgentName={(id) => AGENTS[id] ?? id}
 						bindingNames={BINDING_NAMES}
+						edges={indexEdges(EDGES)}
+						onUnblock={() => {}}
 					/>
 				</div>
 			</section>
@@ -207,6 +225,18 @@ export function UiLab() {
 							names={BINDING_NAMES}
 						/>
 					</div>
+				</div>
+			</section>
+
+			<section className="mb-10 max-w-2xl">
+				<h2 className="mb-2 font-mono text-xs font-semibold tracking-wide text-ink-dull">
+					DependencySection
+				</h2>
+				<div className="rounded-md border border-app-line bg-app-box/20">
+					<DependencySectionView
+						data={DEPENDENCIES}
+						onSelectTask={() => {}}
+					/>
 				</div>
 			</section>
 

@@ -149,6 +149,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
             tasks::add_task_dependency
         ))
         .routes(routes!(tasks::remove_task_dependency))
+        .routes(routes!(tasks::list_task_transitions))
         .routes(routes!(tasks::block_task))
         .routes(routes!(tasks::unblock_task))
         // Wiki routes

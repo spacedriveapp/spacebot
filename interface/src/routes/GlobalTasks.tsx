@@ -27,6 +27,8 @@ import {
 	getGithubReferences,
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 import {RepoChip} from "@/components/tasks/RepoChip";
 import {ALL_REPOS, RepoFilter} from "@/components/tasks/RepoFilter";
@@ -127,6 +129,9 @@ export function GlobalTasks() {
 
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
 
+	// Edge counts arrive with the list, so badges cost no extra requests.
+	const edgesByTask = useMemo(() => indexEdges(data?.edges), [data?.edges]);
+
 	const {names: bindingNames} = useBindingNames();
 	const [repoFilter, setRepoFilter] = useState<string>(ALL_REPOS);
 
@@ -215,6 +220,14 @@ export function GlobalTasks() {
 
 	const retryMutation = useMutation({
 		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Distinct from retry: retry re-runs the work, unblock says the obstacle a
+	// human was asked about is gone. A missing credential is not fixed by
+	// running the same task again.
+	const unblockMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.unblockTask(taskNumber),
 		onSuccess: () => void invalidate(),
 	});
 
@@ -355,6 +368,8 @@ export function GlobalTasks() {
 							activeTaskId={activeTaskId}
 							resolveAgentName={resolveAgentName}
 							bindingNames={bindingNames}
+							edges={edgesByTask}
+							onUnblock={(task) => unblockMutation.mutate(task.task_number)}
 						/>
 						<TaskList
 							tasks={boardTasks}
@@ -383,6 +398,13 @@ export function GlobalTasks() {
 					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
+					/>
+					<DependencySection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
 					/>
 					<BindingSection
 						task={activeTask as unknown as TaskItem}

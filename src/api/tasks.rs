@@ -120,6 +120,9 @@ pub(super) struct AssignRequest {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskListResponse {
     tasks: Vec<crate::tasks::Task>,
+    /// Edge counts for every task that has any. Tasks with no dependencies are
+    /// absent rather than listed with zeroes.
+    edges: Vec<crate::tasks::TaskEdgeSummary>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -136,6 +139,17 @@ pub(super) struct TaskActionResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskRunsResponse {
     runs: Vec<crate::tasks::TaskRun>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskTransition {
+    from: crate::tasks::TaskStatus,
+    to: crate::tasks::TaskStatus,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskTransitionsResponse {
+    transitions: Vec<TaskTransition>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -267,7 +281,35 @@ pub(super) async fn list_tasks(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(TaskListResponse { tasks }))
+    // Edge counts ride along with the list rather than being fetched per card.
+    // The board draws a badge on every row; a request per row would defeat the
+    // point of a list endpoint. A failure here degrades the badges, not the
+    // board, so it is logged rather than propagated.
+    let edges = store.dependency_summaries().await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to summarize task dependencies");
+        Vec::new()
+    });
+
+    Ok(Json(TaskListResponse { tasks, edges }))
+}
+
+/// `GET /tasks/transitions` — every legal status move.
+///
+/// The dashboard reads this instead of hand-maintaining a second transition
+/// table in TypeScript, so a board can never offer a move the API rejects.
+#[utoipa::path(
+    get,
+    path = "/tasks/transitions",
+    responses((status = 200, body = TaskTransitionsResponse)),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_transitions() -> Json<TaskTransitionsResponse> {
+    Json(TaskTransitionsResponse {
+        transitions: crate::tasks::legal_transitions()
+            .into_iter()
+            .map(|(from, to)| TaskTransition { from, to })
+            .collect(),
+    })
 }
 
 /// `GET /tasks/{number}` — get a task by globally unique number.

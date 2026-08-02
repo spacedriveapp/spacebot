@@ -21,6 +21,8 @@ import {
 	getGithubReferences,
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 
 const TASK_LIMIT = 200;
@@ -50,6 +52,9 @@ export function AgentTasks({agentId}: {agentId: string}) {
 
 	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
 	// split out and rendered by BlockedTasksSection instead.
+	// Edge counts arrive with the list, so badges cost no extra requests.
+	const edgesByTask = useMemo(() => indexEdges(data?.edges), [data?.edges]);
+
 	const blockedTasks = useMemo(
 		() => (data?.tasks ?? []).filter((t) => t.status === "blocked"),
 		[data],
@@ -113,6 +118,14 @@ export function AgentTasks({agentId}: {agentId: string}) {
 
 	const retryMutation = useMutation({
 		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Distinct from retry: retry re-runs the work, unblock says the obstacle a
+	// human was asked about is gone. A missing credential is not fixed by
+	// running the same task again.
+	const unblockMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.unblockTask(taskNumber),
 		onSuccess: () => void invalidate(),
 	});
 
@@ -232,6 +245,8 @@ export function AgentTasks({agentId}: {agentId: string}) {
 							}
 							onTaskClick={(task) => setActiveTaskId(task.id)}
 							activeTaskId={activeTaskId}
+							edges={edgesByTask}
+							onUnblock={(task) => unblockMutation.mutate(task.task_number)}
 						/>
 						<TaskList
 							tasks={boardTasks}
@@ -257,6 +272,9 @@ export function AgentTasks({agentId}: {agentId: string}) {
 						onClose={() => setActiveTaskId(null)}
 					/>
 					{/* GitHub metadata (not part of the shared TaskDetail) */}
+					<DependencySection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
 					/>
