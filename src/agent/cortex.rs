@@ -4276,6 +4276,42 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
             Err(error) => tracing::warn!(%error, "task reaper pass failed"),
         }
 
+        // Then reconcile the dependency graph. A child whose last parent just
+        // finished is still sitting in `backlog`; nothing promotes it except
+        // this sweep, so it has to run before the claim or the graph stalls one
+        // tick behind reality forever.
+        match deps.task_store.recompute_ready(&deps.agent_id).await {
+            Ok(sweep) if sweep.is_empty() => {}
+            Ok(sweep) => {
+                logger.log(
+                    "task_ready_sweep",
+                    &format!(
+                        "Dependency sweep promoted {} and demoted {} task(s)",
+                        sweep.promoted.len(),
+                        sweep.demoted.len()
+                    ),
+                    Some(serde_json::json!({
+                        "promoted": sweep.promoted,
+                        "demoted": sweep.demoted,
+                    })),
+                );
+                let moves = sweep
+                    .promoted
+                    .iter()
+                    .map(|number| (*number, TaskStatus::Ready))
+                    .chain(sweep.demoted.iter().map(|n| (*n, TaskStatus::Backlog)));
+                for (task_number, status) in moves {
+                    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: deps.agent_id.clone(),
+                        task_number,
+                        status: status.as_str().to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
+            }
+            Err(error) => tracing::warn!(%error, "dependency ready sweep failed"),
+        }
+
         if let Err(error) = pickup_one_ready_task(deps, logger).await {
             tracing::warn!(%error, "ready-task pickup pass failed");
         }

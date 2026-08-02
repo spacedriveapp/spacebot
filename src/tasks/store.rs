@@ -20,12 +20,90 @@ pub enum TaskStatus {
     Backlog,
     Ready,
     InProgress,
-    /// Parked and not eligible for pickup. Today this is only reached by
-    /// exhausting the failure budget; `block_kind` in a later change will
-    /// distinguish dependency waits from human gates.
+    /// Stuck and waiting on a human. `block_kind` says why.
+    ///
+    /// Deliberately *not* where a task waiting on its dependencies lives — that
+    /// task sits in `Backlog`, which already means "not yet eligible". Putting
+    /// both in one status would make the board unable to answer the only
+    /// question it exists to answer: what needs me?
     Blocked,
     Done,
 }
+
+/// Why a task is parked.
+///
+/// The kinds differ in how they recover, which is the entire reason the column
+/// exists. `dependency` and `transient` clear themselves; `needs_input` and
+/// `capability` are sticky and only an explicit unblock releases them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockKind {
+    /// Waiting on an upstream task. Cleared automatically by the ready sweep.
+    /// Never a human gate, so a task carrying it stays in `Backlog`.
+    Dependency,
+    /// Needs a human decision.
+    NeedsInput,
+    /// The agent lacks a tool, credential, or permission it needs.
+    Capability,
+    /// Flaky failure or provider outage. Retried under the F1 failure budget.
+    Transient,
+}
+
+impl BlockKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockKind::Dependency => "dependency",
+            BlockKind::NeedsInput => "needs_input",
+            BlockKind::Capability => "capability",
+            BlockKind::Transient => "transient",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dependency" => Some(BlockKind::Dependency),
+            "needs_input" => Some(BlockKind::NeedsInput),
+            "capability" => Some(BlockKind::Capability),
+            "transient" => Some(BlockKind::Transient),
+            _ => None,
+        }
+    }
+
+    /// Whether only an explicit unblock may release this task.
+    ///
+    /// The automatic sweep must skip sticky kinds. A human parked the task
+    /// knowing it could not proceed; resurrecting it on a timer would throw
+    /// that decision away and hand the worker the same dead end again.
+    pub fn is_sticky(self) -> bool {
+        matches!(self, BlockKind::NeedsInput | BlockKind::Capability)
+    }
+
+    /// The status a task takes when blocked for this reason.
+    ///
+    /// `dependency` is ordinary scheduling, not an incident: the task goes back
+    /// to `Backlog` and the sweep promotes it when its parents land. Everything
+    /// else is a stop that wants attention.
+    pub fn resting_status(self) -> TaskStatus {
+        match self {
+            BlockKind::Dependency => TaskStatus::Backlog,
+            _ => TaskStatus::Blocked,
+        }
+    }
+}
+
+impl std::fmt::Display for BlockKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// How many times a task may be unblocked and re-blocked for the *same* reason
+/// before it escalates to a human instead of continuing to bounce.
+///
+/// Borrowed from Hermes, which learned it by running the system: a cron that
+/// unblocks and a worker that re-blocks will trade a card forever, burning a
+/// worker spawn each round, and nothing in the loop notices.
+pub const BLOCK_RECURRENCE_LIMIT: i64 = 2;
 
 impl TaskStatus {
     pub const ALL: [TaskStatus; 6] = [
@@ -164,6 +242,12 @@ pub struct Task {
     /// Worktree to execute in. When set, the worker's working directory is
     /// resolved from it rather than from the repo or project root.
     pub worktree_id: Option<String>,
+    /// Why this task is parked, when it is.
+    pub block_kind: Option<BlockKind>,
+    /// Human-readable explanation shown on the card.
+    pub block_reason: Option<String>,
+    /// Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
+    pub block_recurrences: i64,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -332,6 +416,11 @@ pub struct CreateTaskInput {
     pub created_by: String,
     /// Codebase this task acts on. Empty for tasks that aren't about code.
     pub binding: TaskProjectBinding,
+    /// Tasks that must finish before this one may run.
+    ///
+    /// Applied after the row exists, so a bad edge fails the create rather than
+    /// leaving an orphan task with a half-built graph.
+    pub depends_on: Vec<i64>,
 }
 
 /// Defaults exist so callers can use `..Default::default()` and stay source
@@ -351,6 +440,7 @@ impl Default for CreateTaskInput {
             source_memory_id: None,
             created_by: String::new(),
             binding: TaskProjectBinding::default(),
+            depends_on: Vec::new(),
         }
     }
 }
@@ -480,6 +570,35 @@ impl TaskStore {
                     tx.commit()
                         .await
                         .context("failed to commit task create transaction")?;
+
+                    // Edges are applied after the row exists, because
+                    // `link_tasks` validates both endpoints. A rejected edge
+                    // deletes the task rather than leaving it behind with a
+                    // graph the caller did not ask for — a half-linked task is
+                    // worse than none, since the scheduler would run it early.
+                    for parent in &input.depends_on {
+                        if let Err(error) = self.link_tasks(*parent, task_number).await {
+                            let _ = self.delete(task_number).await;
+                            return Err(anyhow::anyhow!(
+                                "failed to link task #{task_number} to parent #{parent}: {error}"
+                            )
+                            .into());
+                        }
+                    }
+
+                    // Anything waiting on a parent starts in backlog; the ready
+                    // sweep promotes it once every parent lands.
+                    if !input.depends_on.is_empty() && input.status == TaskStatus::Ready {
+                        sqlx::query(
+                            "UPDATE tasks SET status = 'backlog', block_kind = 'dependency', \
+                             block_reason = 'waiting on an upstream task' \
+                             WHERE task_number = ? AND status = 'ready'",
+                        )
+                        .bind(task_number)
+                        .execute(&self.pool)
+                        .await
+                        .context("failed to park newly linked task")?;
+                    }
 
                     return self
                         .get_by_number(task_number)
@@ -878,6 +997,10 @@ impl TaskStore {
     pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
         let row = sqlx::query(
             "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
+             AND NOT EXISTS (\
+               SELECT 1 FROM task_dependencies d \
+                 JOIN tasks p ON p.task_number = d.parent_task_number \
+                WHERE d.child_task_number = tasks.task_number AND p.status <> 'done') \
              ORDER BY CASE priority \
                WHEN 'critical' THEN 0 \
                WHEN 'high' THEN 1 \
@@ -902,7 +1025,11 @@ impl TaskStore {
         let result = sqlx::query(
             "UPDATE tasks SET status = 'in_progress', \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE task_number = ? AND status = 'ready'",
+             WHERE task_number = ? AND status = 'ready' \
+             AND NOT EXISTS (\
+               SELECT 1 FROM task_dependencies d \
+                 JOIN tasks p ON p.task_number = d.parent_task_number \
+                WHERE d.child_task_number = tasks.task_number AND p.status <> 'done')",
         )
         .bind(task_number)
         .execute(&self.pool)
@@ -926,6 +1053,327 @@ impl TaskStore {
         .context("failed to fetch task by worker id")?;
 
         row.map(task_from_row).transpose()
+    }
+
+    // -- Dependency graph ---------------------------------------------------
+
+    /// Add a `parent → child` edge.
+    ///
+    /// Rejects at link time rather than at execution time: a cycle discovered
+    /// while scheduling is a deadlock nobody can see, whereas a cycle rejected
+    /// here names the exact edge that would have caused it.
+    pub async fn link_tasks(
+        &self,
+        parent: i64,
+        child: i64,
+    ) -> std::result::Result<(), DependencyError> {
+        if parent == child {
+            return Err(DependencyError::SelfLoop { task_number: child });
+        }
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| DependencyError::Storage(error.to_string()))?;
+
+        for number in [parent, child] {
+            let exists: Option<i64> =
+                sqlx::query_scalar("SELECT task_number FROM tasks WHERE task_number = ?")
+                    .bind(number)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|error| DependencyError::Storage(error.to_string()))?;
+            if exists.is_none() {
+                return Err(DependencyError::UnknownTask {
+                    task_number: number,
+                });
+            }
+        }
+
+        // Walk down from `child`: if `parent` is reachable, this edge closes a
+        // loop. Done inside the write transaction so a concurrent link cannot
+        // slip an edge in between the check and the insert.
+        if let Some(path) = reachable_path(&mut tx, child, parent).await? {
+            return Err(DependencyError::WouldCycle { path });
+        }
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO task_dependencies (parent_task_number, child_task_number) \
+             VALUES (?, ?)",
+        )
+        .bind(parent)
+        .bind(child)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| DependencyError::Storage(error.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| DependencyError::Storage(error.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Remove a `parent → child` edge. Returns whether an edge was removed.
+    pub async fn unlink_tasks(&self, parent: i64, child: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM task_dependencies \
+             WHERE parent_task_number = ? AND child_task_number = ?",
+        )
+        .bind(parent)
+        .bind(child)
+        .execute(&self.pool)
+        .await
+        .context("failed to unlink tasks")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Task numbers this task waits on.
+    pub async fn list_parents(&self, child: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT parent_task_number FROM task_dependencies \
+             WHERE child_task_number = ? ORDER BY parent_task_number ASC",
+        )
+        .bind(child)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list task parents")
+        .map_err(Into::into)
+    }
+
+    /// Task numbers waiting on this task.
+    pub async fn list_children(&self, parent: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT child_task_number FROM task_dependencies \
+             WHERE parent_task_number = ? ORDER BY child_task_number ASC",
+        )
+        .bind(parent)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list task children")
+        .map_err(Into::into)
+    }
+
+    /// Parents of `child` that have not reached a terminal status.
+    pub async fn unfinished_parents(&self, child: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT d.parent_task_number FROM task_dependencies d \
+             JOIN tasks p ON p.task_number = d.parent_task_number \
+             WHERE d.child_task_number = ? AND p.status <> 'done' \
+             ORDER BY d.parent_task_number ASC",
+        )
+        .bind(child)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list unfinished parents")
+        .map_err(Into::into)
+    }
+
+    // -- Blocking -----------------------------------------------------------
+
+    /// Park a task with a typed reason.
+    ///
+    /// Returns the status the task came to rest in, which depends on the kind:
+    /// a dependency wait is ordinary scheduling and rests in `Backlog`, while
+    /// everything else rests in `Blocked` where a human will see it.
+    ///
+    /// Re-blocking for the same reason increments `block_recurrences`; past
+    /// [`BLOCK_RECURRENCE_LIMIT`] the task escalates to `PendingApproval`
+    /// instead, which already raises a notification. That breaks the loop where
+    /// a sweep unblocks a card and a worker immediately re-blocks it.
+    pub async fn block_task(
+        &self,
+        task_number: i64,
+        kind: BlockKind,
+        reason: &str,
+    ) -> Result<Option<BlockOutcome>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open block transaction")?;
+
+        let row =
+            sqlx::query("SELECT block_kind, block_recurrences FROM tasks WHERE task_number = ?")
+                .bind(task_number)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("failed to read current block state")?;
+
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .context("failed to commit empty block transaction")?;
+            return Ok(None);
+        };
+
+        let previous_kind = row
+            .try_get::<Option<String>, _>("block_kind")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(BlockKind::parse);
+        let previous_recurrences: i64 = row.try_get("block_recurrences").unwrap_or(0);
+
+        // Only a repeat of the *same* reason counts. Bouncing between different
+        // reasons is a task making progress through different obstacles, not a
+        // loop, and escalating it would be noise.
+        let recurrences = if previous_kind == Some(kind) {
+            previous_recurrences + 1
+        } else {
+            0
+        };
+
+        let escalated = recurrences >= BLOCK_RECURRENCE_LIMIT;
+        let status = if escalated {
+            TaskStatus::PendingApproval
+        } else {
+            kind.resting_status()
+        };
+
+        sqlx::query(
+            "UPDATE tasks SET status = ?, block_kind = ?, block_reason = ?, \
+             block_recurrences = ?, worker_id = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ?",
+        )
+        .bind(status.as_str())
+        .bind(kind.as_str())
+        .bind(reason)
+        .bind(recurrences)
+        .bind(task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to block task")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit block transaction")?;
+
+        Ok(Some(BlockOutcome {
+            status,
+            kind,
+            recurrences,
+            escalated,
+        }))
+    }
+
+    /// Release a parked task back to the scheduler.
+    ///
+    /// Clears the reason but deliberately keeps `block_recurrences`: the
+    /// counter exists to notice a task being unblocked and re-blocked in a
+    /// loop, and resetting it here would erase the very evidence of that.
+    /// A task with unfinished parents goes to `backlog`, not `ready`.
+    pub async fn unblock_task(&self, task_number: i64) -> Result<Option<Task>> {
+        let unfinished = self.unfinished_parents(task_number).await?;
+        let status = if unfinished.is_empty() {
+            TaskStatus::Ready
+        } else {
+            TaskStatus::Backlog
+        };
+
+        let result = sqlx::query(
+            "UPDATE tasks SET status = ?, block_kind = NULL, block_reason = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND status IN ('blocked', 'backlog', 'pending_approval')",
+        )
+        .bind(status.as_str())
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to unblock task")?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.get_by_number(task_number).await
+    }
+
+    // -- Ready sweep --------------------------------------------------------
+
+    /// Reconcile which of an agent's tasks are eligible for pickup.
+    ///
+    /// Run before claiming. Three repairs, in one pass:
+    ///
+    /// - `backlog` whose parents are all done, with no sticky block → `ready`
+    /// - `ready` with an unfinished parent → back to `backlog` (repairs drift
+    ///   from a parent being reopened, or an edge added after promotion)
+    /// - `blocked(dependency)` whose parents are all done → `ready`
+    ///
+    /// Sticky kinds are never touched. That is the whole point of typing the
+    /// block: a human parked those, and a sweep that resurrects them would hand
+    /// the worker the same dead end it already reported.
+    pub async fn recompute_ready(&self, assigned_agent_id: &str) -> Result<ReadySweep> {
+        let mut sweep = ReadySweep::default();
+
+        // Promote: eligible and waiting.
+        let promoted: Vec<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks t \
+             WHERE t.assigned_agent_id = ? \
+               AND t.status = 'backlog' \
+               AND (t.block_kind IS NULL OR t.block_kind = 'dependency') \
+               AND NOT EXISTS (\
+                 SELECT 1 FROM task_dependencies d \
+                   JOIN tasks p ON p.task_number = d.parent_task_number \
+                  WHERE d.child_task_number = t.task_number AND p.status <> 'done') \
+               AND EXISTS (\
+                 SELECT 1 FROM task_dependencies d WHERE d.child_task_number = t.task_number)",
+        )
+        .bind(assigned_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find promotable tasks")?;
+
+        for task_number in promoted {
+            let updated = sqlx::query(
+                "UPDATE tasks SET status = 'ready', block_kind = NULL, block_reason = NULL, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                 WHERE task_number = ? AND status = 'backlog'",
+            )
+            .bind(task_number)
+            .execute(&self.pool)
+            .await
+            .context("failed to promote task")?;
+            if updated.rows_affected() > 0 {
+                sweep.promoted.push(task_number);
+            }
+        }
+
+        // Demote: promoted too early, or a parent came back.
+        let demoted: Vec<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks t \
+             WHERE t.assigned_agent_id = ? \
+               AND t.status = 'ready' \
+               AND EXISTS (\
+                 SELECT 1 FROM task_dependencies d \
+                   JOIN tasks p ON p.task_number = d.parent_task_number \
+                  WHERE d.child_task_number = t.task_number AND p.status <> 'done')",
+        )
+        .bind(assigned_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find tasks to demote")?;
+
+        for task_number in demoted {
+            let updated = sqlx::query(
+                "UPDATE tasks SET status = 'backlog', block_kind = 'dependency', \
+                 block_reason = 'waiting on an upstream task', \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                 WHERE task_number = ? AND status = 'ready'",
+            )
+            .bind(task_number)
+            .execute(&self.pool)
+            .await
+            .context("failed to demote task")?;
+            if updated.rows_affected() > 0 {
+                sweep.demoted.push(task_number);
+            }
+        }
+
+        Ok(sweep)
     }
 
     // -- Attempt log --------------------------------------------------------
@@ -1112,14 +1560,24 @@ impl TaskStore {
             TaskStatus::Ready
         };
 
+        // A parked task carries a reason. Exhausting the budget is a
+        // `transient` block: repeated failures nobody classified further.
+        // Requeued tasks clear any stale reason so the card does not keep
+        // showing why a previous attempt stopped.
+        let block_kind = exhausted.then_some(BlockKind::Transient.as_str());
+        let block_reason = exhausted.then_some(error);
+
         sqlx::query(
             "UPDATE tasks SET consecutive_failures = ?, last_error = ?, status = ?, \
+             block_kind = ?, block_reason = ?, \
              worker_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE task_number = ? AND status = 'in_progress'",
         )
         .bind(failures)
         .bind(error)
         .bind(next_status.as_str())
+        .bind(block_kind)
+        .bind(block_reason)
         .bind(task_number)
         .execute(&mut *tx)
         .await
@@ -1153,6 +1611,91 @@ impl TaskStore {
     }
 }
 
+/// Why a dependency edge was refused.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum DependencyError {
+    #[error("task #{task_number} cannot depend on itself")]
+    SelfLoop { task_number: i64 },
+    #[error("task #{task_number} does not exist")]
+    UnknownTask { task_number: i64 },
+    #[error(
+        "that edge would create a cycle: {}",
+        .path.iter().map(|n| format!("#{n}")).collect::<Vec<_>>().join(" -> ")
+    )]
+    WouldCycle { path: Vec<i64> },
+    #[error("dependency storage error: {0}")]
+    Storage(String),
+}
+
+/// What [`TaskStore::block_task`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockOutcome {
+    /// Where the task came to rest.
+    pub status: TaskStatus,
+    pub kind: BlockKind,
+    /// Consecutive blocks for this same kind.
+    pub recurrences: i64,
+    /// Whether the recurrence limit forced an escalation to a human.
+    pub escalated: bool,
+}
+
+/// What a [`TaskStore::recompute_ready`] pass changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadySweep {
+    /// Tasks whose parents all finished, now eligible for pickup.
+    pub promoted: Vec<i64>,
+    /// Tasks that were eligible but should not have been.
+    pub demoted: Vec<i64>,
+}
+
+impl ReadySweep {
+    pub fn is_empty(&self) -> bool {
+        self.promoted.is_empty() && self.demoted.is_empty()
+    }
+}
+
+/// Walk the edges downward from `start`, looking for `target`.
+///
+/// Returns the path that reaches it, so a rejection can name the loop instead
+/// of just asserting one exists. Iterative rather than recursive: the graph is
+/// user-built and a deep chain must not blow the stack.
+async fn reachable_path(
+    tx: &mut sqlx::SqliteConnection,
+    start: i64,
+    target: i64,
+) -> std::result::Result<Option<Vec<i64>>, DependencyError> {
+    // Each entry is the path taken to reach its final node, so the answer is
+    // available without a second traversal to reconstruct it.
+    let mut frontier: Vec<Vec<i64>> = vec![vec![start]];
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    seen.insert(start);
+
+    while let Some(path) = frontier.pop() {
+        let node = *path.last().expect("paths are never empty");
+        if node == target {
+            return Ok(Some(path));
+        }
+
+        let children: Vec<i64> = sqlx::query_scalar(
+            "SELECT child_task_number FROM task_dependencies WHERE parent_task_number = ?",
+        )
+        .bind(node)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| DependencyError::Storage(error.to_string()))?;
+
+        for child in children {
+            if seen.insert(child) {
+                let mut next = path.clone();
+                next.push(child);
+                frontier.push(next);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// What [`TaskStore::record_failure`] decided to do with a failed attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureDisposition {
@@ -1173,7 +1716,8 @@ pub enum FailureDisposition {
 const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
      owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
      created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
-     consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id";
+     consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
+     block_kind, block_reason, block_recurrences";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -1306,6 +1850,18 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         project_id: read_optional_id(&row, "project_id"),
         repo_id: read_optional_id(&row, "repo_id"),
         worktree_id: read_optional_id(&row, "worktree_id"),
+        block_kind: row
+            .try_get::<Option<String>, _>("block_kind")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(BlockKind::parse),
+        block_reason: row
+            .try_get::<Option<String>, _>("block_reason")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
+        block_recurrences: row.try_get("block_recurrences").unwrap_or(0),
     })
 }
 
@@ -1401,7 +1957,10 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             last_error TEXT,
             project_id TEXT,
             repo_id TEXT,
-            worktree_id TEXT
+            worktree_id TEXT,
+            block_kind TEXT,
+            block_reason TEXT,
+            block_recurrences INTEGER NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -1428,6 +1987,20 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("task_runs schema should be created");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE task_dependencies (
+            parent_task_number INTEGER NOT NULL,
+            child_task_number INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (parent_task_number, child_task_number)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("task_dependencies schema should be created");
 
     sqlx::query(
         "CREATE TABLE task_number_seq (
@@ -2279,5 +2852,463 @@ mod tests {
 
         assert_eq!(updated.assigned_agent_id, "agent-other");
         assert_eq!(updated.owner_agent_id, "agent-test");
+    }
+    // -- Dependencies -------------------------------------------------------
+
+    async fn task_at(store: &TaskStore, title: &str, status: TaskStatus) -> Task {
+        store
+            .create(self_assigned_input(title, status))
+            .await
+            .expect("should create")
+    }
+
+    async fn finish(store: &TaskStore, task_number: i64) {
+        store
+            .update(
+                task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+    }
+
+    #[tokio::test]
+    async fn link_rejects_self_loops_and_unknown_tasks() {
+        let store = setup_store().await;
+        let task = task_at(&store, "lonely", TaskStatus::Backlog).await;
+
+        let self_loop = store
+            .link_tasks(task.task_number, task.task_number)
+            .await
+            .expect_err("a task must not depend on itself");
+        assert!(matches!(self_loop, DependencyError::SelfLoop { .. }));
+
+        let unknown = store
+            .link_tasks(9999, task.task_number)
+            .await
+            .expect_err("an edge to a task that does not exist must be refused");
+        assert!(matches!(unknown, DependencyError::UnknownTask { .. }));
+    }
+
+    /// A cycle found while scheduling is a deadlock nobody can see. Reject at
+    /// link time, and name the path so the caller knows which edge conflicts.
+    #[tokio::test]
+    async fn link_rejects_a_three_node_cycle() {
+        let store = setup_store().await;
+        let a = task_at(&store, "a", TaskStatus::Backlog).await;
+        let b = task_at(&store, "b", TaskStatus::Backlog).await;
+        let c = task_at(&store, "c", TaskStatus::Backlog).await;
+
+        store
+            .link_tasks(a.task_number, b.task_number)
+            .await
+            .expect("a -> b");
+        store
+            .link_tasks(b.task_number, c.task_number)
+            .await
+            .expect("b -> c");
+
+        let error = store
+            .link_tasks(c.task_number, a.task_number)
+            .await
+            .expect_err("c -> a closes the loop");
+        match error {
+            DependencyError::WouldCycle { path } => {
+                assert_eq!(
+                    path,
+                    vec![a.task_number, b.task_number, c.task_number],
+                    "the rejection must name the path that would close"
+                );
+            }
+            other => panic!("expected WouldCycle, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_is_not_claimable_until_every_parent_is_done() {
+        let store = setup_store().await;
+        let first = task_at(&store, "parent one", TaskStatus::InProgress).await;
+        let second = task_at(&store, "parent two", TaskStatus::InProgress).await;
+        let child = task_at(&store, "child", TaskStatus::Ready).await;
+
+        for parent in [&first, &second] {
+            store
+                .link_tasks(parent.task_number, child.task_number)
+                .await
+                .expect("link");
+        }
+
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a ready task with unfinished parents must not be claimable"
+        );
+
+        finish(&store, first.task_number).await;
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "one remaining parent still gates the child"
+        );
+
+        finish(&store, second.task_number).await;
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("the child becomes claimable once every parent is done");
+        assert_eq!(claimed.task_number, child.task_number);
+    }
+
+    #[tokio::test]
+    async fn sweep_promotes_a_child_when_the_last_parent_finishes() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "parent", TaskStatus::InProgress).await;
+        let child = task_at(&store, "child", TaskStatus::Backlog).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(sweep.is_empty(), "nothing to do while the parent runs");
+
+        finish(&store, parent.task_number).await;
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![child.task_number]);
+        let after = store
+            .get_by_number(child.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Ready);
+        assert!(
+            after.block_kind.is_none(),
+            "promotion clears the block reason"
+        );
+    }
+
+    /// Drift repair: an edge added after a task was already promoted, or a
+    /// parent reopened, must pull the child back out of the ready queue.
+    #[tokio::test]
+    async fn sweep_demotes_a_ready_task_that_gained_an_unfinished_parent() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "parent", TaskStatus::InProgress).await;
+        let child = task_at(&store, "child", TaskStatus::Ready).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(sweep.demoted, vec![child.task_number]);
+        let after = store
+            .get_by_number(child.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Backlog);
+        assert_eq!(after.block_kind, Some(BlockKind::Dependency));
+    }
+
+    /// The reason typed blocks exist. A human parked these knowing the task
+    /// could not proceed; a sweep that resurrects them hands the worker the
+    /// same dead end and throws the human's decision away.
+    #[tokio::test]
+    async fn sweep_never_resurrects_a_sticky_block() {
+        for kind in [BlockKind::NeedsInput, BlockKind::Capability] {
+            let store = setup_store().await;
+            let task = task_at(&store, "parked", TaskStatus::InProgress).await;
+            store
+                .block_task(task.task_number, kind, "needs a human")
+                .await
+                .expect("block")
+                .expect("task exists");
+
+            let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+            assert!(sweep.is_empty(), "{kind} must not be swept back to ready");
+
+            let after = store
+                .get_by_number(task.task_number)
+                .await
+                .expect("fetch")
+                .expect("exists");
+            assert_eq!(after.status, TaskStatus::Blocked);
+            assert_eq!(after.block_kind, Some(kind));
+        }
+    }
+
+    /// A dependency wait is ordinary scheduling, not an incident: it rests in
+    /// the backlog rather than the blocked column a human is meant to triage.
+    #[tokio::test]
+    async fn a_dependency_block_rests_in_backlog_not_blocked() {
+        let store = setup_store().await;
+        let task = task_at(&store, "waiting", TaskStatus::InProgress).await;
+
+        let outcome = store
+            .block_task(task.task_number, BlockKind::Dependency, "waiting on #1")
+            .await
+            .expect("block")
+            .expect("task exists");
+
+        assert_eq!(outcome.status, TaskStatus::Backlog);
+        assert!(!outcome.escalated);
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Backlog);
+    }
+
+    /// The loop breaker: a sweep that unblocks and a worker that re-blocks will
+    /// otherwise trade a card forever, burning a worker spawn each round.
+    #[tokio::test]
+    async fn repeated_blocks_for_the_same_reason_escalate_to_a_human() {
+        let store = setup_store().await;
+        let task = task_at(&store, "bouncing", TaskStatus::InProgress).await;
+
+        // The first block is not a recurrence — it is just a block.
+        let first = store
+            .block_task(task.task_number, BlockKind::Capability, "no credential")
+            .await
+            .expect("block")
+            .expect("exists");
+        assert_eq!(first.recurrences, 0);
+        assert!(!first.escalated);
+        assert_eq!(first.status, TaskStatus::Blocked);
+
+        // Hitting the same wall again is tolerated once.
+        let second = store
+            .block_task(task.task_number, BlockKind::Capability, "no credential")
+            .await
+            .expect("block")
+            .expect("exists");
+        assert_eq!(second.recurrences, 1);
+        assert!(!second.escalated);
+
+        // Twice over is a loop, not bad luck.
+        let third = store
+            .block_task(task.task_number, BlockKind::Capability, "no credential")
+            .await
+            .expect("block")
+            .expect("exists");
+        assert_eq!(third.recurrences, BLOCK_RECURRENCE_LIMIT);
+        assert!(third.escalated);
+        assert_eq!(
+            third.status,
+            TaskStatus::PendingApproval,
+            "escalation must land somewhere that raises a notification"
+        );
+    }
+
+    /// Different obstacles in sequence are progress, not a loop — escalating
+    /// those would be noise.
+    #[tokio::test]
+    async fn blocks_for_different_reasons_do_not_escalate() {
+        let store = setup_store().await;
+        let task = task_at(&store, "varied", TaskStatus::InProgress).await;
+
+        store
+            .block_task(task.task_number, BlockKind::Capability, "no credential")
+            .await
+            .expect("block")
+            .expect("exists");
+        let second = store
+            .block_task(task.task_number, BlockKind::NeedsInput, "which region?")
+            .await
+            .expect("block")
+            .expect("exists");
+
+        assert_eq!(second.recurrences, 0);
+        assert!(!second.escalated);
+        assert_eq!(second.status, TaskStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn unblock_lands_in_ready_or_backlog_depending_on_parents() {
+        let store = setup_store().await;
+
+        let free = task_at(&store, "free", TaskStatus::InProgress).await;
+        store
+            .block_task(free.task_number, BlockKind::NeedsInput, "?")
+            .await
+            .expect("block")
+            .expect("exists");
+        let released = store
+            .unblock_task(free.task_number)
+            .await
+            .expect("unblock")
+            .expect("exists");
+        assert_eq!(released.status, TaskStatus::Ready);
+        assert!(released.block_kind.is_none());
+
+        let parent = task_at(&store, "parent", TaskStatus::InProgress).await;
+        let gated = task_at(&store, "gated", TaskStatus::InProgress).await;
+        store
+            .link_tasks(parent.task_number, gated.task_number)
+            .await
+            .expect("link");
+        store
+            .block_task(gated.task_number, BlockKind::NeedsInput, "?")
+            .await
+            .expect("block")
+            .expect("exists");
+        let released = store
+            .unblock_task(gated.task_number)
+            .await
+            .expect("unblock")
+            .expect("exists");
+        assert_eq!(
+            released.status,
+            TaskStatus::Backlog,
+            "unblocking must not jump the dependency queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_in_and_fan_out_edges_round_trip() {
+        let store = setup_store().await;
+        let hub = task_at(&store, "hub", TaskStatus::Backlog).await;
+        let mut parents = Vec::new();
+        let mut children = Vec::new();
+
+        for index in 0..3 {
+            let parent = task_at(&store, &format!("parent {index}"), TaskStatus::Backlog).await;
+            store
+                .link_tasks(parent.task_number, hub.task_number)
+                .await
+                .expect("fan-in link");
+            parents.push(parent.task_number);
+
+            let child = task_at(&store, &format!("child {index}"), TaskStatus::Backlog).await;
+            store
+                .link_tasks(hub.task_number, child.task_number)
+                .await
+                .expect("fan-out link");
+            children.push(child.task_number);
+        }
+
+        parents.sort_unstable();
+        children.sort_unstable();
+        assert_eq!(
+            store.list_parents(hub.task_number).await.expect("parents"),
+            parents
+        );
+        assert_eq!(
+            store
+                .list_children(hub.task_number)
+                .await
+                .expect("children"),
+            children
+        );
+        assert_eq!(
+            store
+                .unfinished_parents(hub.task_number)
+                .await
+                .expect("unfinished"),
+            parents,
+            "no parent has finished yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_depends_on_parks_the_task_and_links_it() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "upstream", TaskStatus::InProgress).await;
+
+        let child = store
+            .create(CreateTaskInput {
+                depends_on: vec![parent.task_number],
+                ..self_assigned_input("downstream", TaskStatus::Ready)
+            })
+            .await
+            .expect("create with dependency");
+
+        assert_eq!(
+            child.status,
+            TaskStatus::Backlog,
+            "a task created with unmet dependencies must not start out claimable"
+        );
+        assert_eq!(child.block_kind, Some(BlockKind::Dependency));
+        assert_eq!(
+            store
+                .list_parents(child.task_number)
+                .await
+                .expect("parents"),
+            vec![parent.task_number]
+        );
+    }
+
+    /// A rejected edge must not leave a task behind: a half-linked task is
+    /// worse than none, because the scheduler would happily run it early.
+    #[tokio::test]
+    async fn create_with_a_bad_dependency_leaves_no_orphan() {
+        let store = setup_store().await;
+        let before = store
+            .list(TaskListFilter::default())
+            .await
+            .expect("list")
+            .len();
+
+        let result = store
+            .create(CreateTaskInput {
+                depends_on: vec![4242],
+                ..self_assigned_input("doomed", TaskStatus::Ready)
+            })
+            .await;
+
+        assert!(result.is_err(), "an unknown parent must fail the create");
+        assert_eq!(
+            store
+                .list(TaskListFilter::default())
+                .await
+                .expect("list")
+                .len(),
+            before,
+            "the failed create must not leave a task behind"
+        );
+    }
+
+    /// F1's budget parks a task; F3 says why. Without a kind the sweep cannot
+    /// tell it apart from a dependency wait.
+    #[tokio::test]
+    async fn an_exhausted_budget_parks_the_task_as_transient() {
+        let store = setup_store().await;
+        let task = task_at(&store, "doomed", TaskStatus::InProgress).await;
+
+        for round in 0..DEFAULT_FAILURE_LIMIT {
+            if round > 0 {
+                store
+                    .claim_next_ready("agent-test")
+                    .await
+                    .expect("claim")
+                    .expect("requeued");
+            }
+            store
+                .record_failure(task.task_number, TaskRunOutcome::Failed, "boom")
+                .await
+                .expect("record failure");
+        }
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Blocked);
+        assert_eq!(after.block_kind, Some(BlockKind::Transient));
+        assert_eq!(after.block_reason.as_deref(), Some("boom"));
     }
 }

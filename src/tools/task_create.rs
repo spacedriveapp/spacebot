@@ -76,6 +76,9 @@ pub struct TaskCreateArgs {
     /// Worktree to execute in.
     #[serde(default)]
     pub worktree_id: Option<String>,
+    /// Task numbers that must finish before this one may run.
+    #[serde(default)]
+    pub depends_on: Vec<i64>,
 }
 
 fn default_priority() -> String {
@@ -131,6 +134,11 @@ impl Tool for TaskCreateTool {
                     "worktree_id": {
                         "type": "string",
                         "description": "Worktree to execute in."
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Task numbers that must all finish before this task becomes eligible. The task waits in the backlog until then."
                     }
                 },
                 "required": ["title"]
@@ -170,6 +178,7 @@ impl Tool for TaskCreateTool {
                     repo_id: args.repo_id,
                     worktree_id: args.worktree_id,
                 },
+                depends_on: args.depends_on,
             })
             .await
             .map_err(|error| TaskCreateError(format!("{error}")))?;
@@ -287,6 +296,7 @@ mod tests {
                 project_id: None,
                 repo_id: None,
                 worktree_id: None,
+                depends_on: Vec::new(),
             })
             .await
             .expect("task create should succeed");

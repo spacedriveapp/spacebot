@@ -4,8 +4,8 @@ pub mod migration;
 pub mod store;
 
 pub use store::{
-    CreateTaskInput, DEFAULT_FAILURE_LIMIT, FailureDisposition, Task, TaskBindingPatch,
-    TaskListFilter, TaskPriority, TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus,
-    TaskStore, TaskSubtask, TaskUpdateResult, UpdateTaskInput, WorkerTaskUpdateResult,
-    can_transition,
+    BLOCK_RECURRENCE_LIMIT, BlockKind, BlockOutcome, CreateTaskInput, DEFAULT_FAILURE_LIMIT,
+    DependencyError, FailureDisposition, ReadySweep, Task, TaskBindingPatch, TaskListFilter,
+    TaskPriority, TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus, TaskStore, TaskSubtask,
+    TaskUpdateResult, UpdateTaskInput, WorkerTaskUpdateResult, can_transition,
 };

@@ -61,6 +61,9 @@ pub(super) struct CreateTaskRequest {
     /// Worktree to execute in.
     #[serde(default)]
     worktree_id: Option<String>,
+    /// Task numbers that must finish before this one may run.
+    #[serde(default)]
+    depends_on: Vec<i64>,
     /// Status to create the task in. Defaults to `pending_approval`.
     ///
     /// The dashboard has always sent `backlog` here; the field simply did not
@@ -133,6 +136,29 @@ pub(super) struct TaskActionResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskRunsResponse {
     runs: Vec<crate::tasks::TaskRun>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskDependenciesResponse {
+    /// Tasks this one waits on.
+    parents: Vec<i64>,
+    /// Tasks waiting on this one.
+    children: Vec<i64>,
+    /// The subset of `parents` that has not finished yet — what the board
+    /// should name when explaining why a task is not moving.
+    blocked_by: Vec<i64>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct AddDependencyRequest {
+    parent_task_number: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct BlockTaskRequest {
+    /// dependency | needs_input | capability | transient
+    kind: String,
+    reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +346,7 @@ pub(super) async fn create_task(
                 repo_id: request.repo_id,
                 worktree_id: request.worktree_id,
             },
+            depends_on: request.depends_on,
         })
         .await
         .map_err(|error| {
@@ -676,6 +703,220 @@ pub(super) async fn assign_task(
         .await
         .map_err(|error| {
             tracing::warn!(%error, task_number = number, "failed to assign task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `GET /tasks/{number}/dependencies` — the edges around a task.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/dependencies",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_dependencies(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskDependenciesResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let parents = store.list_parents(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task parents");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let children = store.list_children(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task children");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let blocked_by = store.unfinished_parents(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list unfinished parents");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(TaskDependenciesResponse {
+        parents,
+        children,
+        blocked_by,
+    }))
+}
+
+/// `POST /tasks/{number}/dependencies` — make this task wait on another.
+///
+/// Rejects self-loops, unknown tasks, and any edge that would close a cycle.
+/// The cycle response names the path so the caller can see which existing edge
+/// conflicts, rather than being told only that something is wrong.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/dependencies",
+    params(("number" = i64, Path, description = "Child task number")),
+    request_body = AddDependencyRequest,
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Edge would create a cycle"),
+        (status = 422, description = "A task cannot depend on itself"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn add_task_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<AddDependencyRequest>,
+) -> Result<Json<TaskDependenciesResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state)
+        .map_err(|status| (status, "task store not initialized".to_string()))?;
+
+    store
+        .link_tasks(request.parent_task_number, number)
+        .await
+        .map_err(|error| {
+            let status = match &error {
+                crate::tasks::DependencyError::SelfLoop { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+                crate::tasks::DependencyError::UnknownTask { .. } => StatusCode::NOT_FOUND,
+                crate::tasks::DependencyError::WouldCycle { .. } => StatusCode::CONFLICT,
+                crate::tasks::DependencyError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string())
+        })?;
+
+    // A task that just gained an unfinished parent must not stay claimable.
+    if let Ok(unfinished) = store.unfinished_parents(number).await
+        && !unfinished.is_empty()
+        && let Err(error) = store
+            .block_task(
+                number,
+                crate::tasks::BlockKind::Dependency,
+                &format!(
+                    "waiting on {}",
+                    unfinished
+                        .iter()
+                        .map(|n| format!("#{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .await
+    {
+        tracing::warn!(%error, task_number = number, "failed to park newly dependent task");
+    }
+
+    list_task_dependencies(State(state), Path(number))
+        .await
+        .map_err(|status| (status, "failed to read dependencies".to_string()))
+}
+
+/// `DELETE /tasks/{number}/dependencies/{parent}` — drop an edge.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/dependencies/{parent}",
+    params(
+        ("number" = i64, Path, description = "Child task number"),
+        ("parent" = i64, Path, description = "Parent task number"),
+    ),
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 404, description = "Edge not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn remove_task_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path((number, parent)): Path<(i64, i64)>,
+) -> Result<Json<TaskDependenciesResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let removed = store.unlink_tasks(parent, number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to unlink tasks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if !removed {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    list_task_dependencies(State(state), Path(number)).await
+}
+
+/// `POST /tasks/{number}/block` — park a task with a typed reason.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/block",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = BlockTaskRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 422, description = "Unknown block kind"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn block_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<BlockTaskRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let kind =
+        crate::tasks::BlockKind::parse(&request.kind).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    store
+        .block_task(number, kind, &request.reason)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to block task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read blocked task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `POST /tasks/{number}/unblock` — release a parked task.
+///
+/// Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/unblock",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found or not blocked"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn unblock_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .unblock_task(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to unblock task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;

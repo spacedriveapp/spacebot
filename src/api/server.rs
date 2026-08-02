@@ -144,6 +144,13 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::assign_task))
         .routes(routes!(tasks::list_task_runs))
         .routes(routes!(tasks::retry_task))
+        .routes(routes!(
+            tasks::list_task_dependencies,
+            tasks::add_task_dependency
+        ))
+        .routes(routes!(tasks::remove_task_dependency))
+        .routes(routes!(tasks::block_task))
+        .routes(routes!(tasks::unblock_task))
         // Wiki routes
         .routes(routes!(wiki::list_pages, wiki::create_page))
         .routes(routes!(wiki::search_pages))
