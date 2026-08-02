@@ -108,9 +108,20 @@ const RUNS: TaskRun[] = [
 		ended_at: "2026-08-02T09:55:00Z",
 	},
 	{
-		id: "r4",
+		id: "r3b",
 		task_number: 142,
 		attempt: 4,
+		worker_id: "deadbeef-0000-1111-2222-333344445555",
+		outcome: "abandoned",
+		error:
+			"worker deadbeef-0000-1111-2222-333344445555 is gone without reporting an outcome — the process most likely died or the agent restarted mid-run",
+		started_at: "2026-08-02T09:58:00Z",
+		ended_at: "2026-08-02T10:01:00Z",
+	},
+	{
+		id: "r4",
+		task_number: 142,
+		attempt: 5,
 		worker_id: "55555555-6666-7777-8888-999999999999",
 		outcome: "completed",
 		summary:
@@ -121,7 +132,7 @@ const RUNS: TaskRun[] = [
 	{
 		id: "r5",
 		task_number: 142,
-		attempt: 5,
+		attempt: 6,
 		worker_id: "77777777-8888-9999-aaaa-bbbbbbbbbbbb",
 		started_at: "2026-08-02T10:30:00Z",
 	},

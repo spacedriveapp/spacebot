@@ -251,6 +251,10 @@ pub enum TaskRunOutcome {
     /// Provider rate limit. Deliberately does **not** count against the
     /// failure budget — a quota outage is not the task's fault.
     RateLimited,
+    /// The worker vanished without reporting anything — process died, host
+    /// restarted, cortex was killed mid-run. Recorded by the reaper, never by
+    /// the worker itself, since by definition nothing was left to report it.
+    Abandoned,
 }
 
 impl TaskRunOutcome {
@@ -262,6 +266,7 @@ impl TaskRunOutcome {
             TaskRunOutcome::Cancelled => "cancelled",
             TaskRunOutcome::Blocked => "blocked",
             TaskRunOutcome::RateLimited => "rate_limited",
+            TaskRunOutcome::Abandoned => "abandoned",
         }
     }
 
@@ -273,6 +278,7 @@ impl TaskRunOutcome {
             "cancelled" => Some(TaskRunOutcome::Cancelled),
             "blocked" => Some(TaskRunOutcome::Blocked),
             "rate_limited" => Some(TaskRunOutcome::RateLimited),
+            "abandoned" => Some(TaskRunOutcome::Abandoned),
             _ => None,
         }
     }
@@ -284,7 +290,10 @@ impl TaskRunOutcome {
     pub fn counts_as_failure(self) -> bool {
         matches!(
             self,
-            TaskRunOutcome::Failed | TaskRunOutcome::Timeout | TaskRunOutcome::Blocked
+            TaskRunOutcome::Failed
+                | TaskRunOutcome::Timeout
+                | TaskRunOutcome::Blocked
+                | TaskRunOutcome::Abandoned
         )
     }
 }
@@ -564,6 +573,33 @@ impl TaskStore {
             ..Default::default()
         })
         .await
+    }
+
+    /// Tasks this agent left running that have not been touched for
+    /// `min_age_secs`.
+    ///
+    /// The age floor is what keeps the reaper from eating a task that was
+    /// claimed moments ago and whose worker has not finished registering yet.
+    /// Scoped to one agent because the task table is instance-wide: another
+    /// agent's running task is not this one's to reap.
+    pub async fn list_stale_in_progress(
+        &self,
+        assigned_agent_id: &str,
+        min_age_secs: i64,
+    ) -> Result<Vec<Task>> {
+        let rows = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks \
+             WHERE status = 'in_progress' AND assigned_agent_id = ? \
+             AND updated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?) \
+             ORDER BY task_number ASC"
+        ))
+        .bind(assigned_agent_id)
+        .bind(format!("-{} seconds", min_age_secs.max(0)))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list stale in-progress tasks")?;
+
+        rows.into_iter().map(task_from_row).collect()
     }
 
     /// Fetch a single task by its globally unique number.
@@ -973,6 +1009,25 @@ impl TaskStore {
             .await
             .context("failed to set task run worker")?;
         Ok(())
+    }
+
+    /// The still-open attempt for a task, if one exists.
+    ///
+    /// An attempt with no `ended_at` means the process died before it could
+    /// close the row — the reaper uses this to write a terminal outcome rather
+    /// than leaving the log claiming the work is still running.
+    pub async fn open_run(&self, task_number: i64) -> Result<Option<TaskRun>> {
+        let row = sqlx::query(&format!(
+            "{RUN_SELECT_COLUMNS} FROM task_runs \
+             WHERE task_number = ? AND ended_at IS NULL \
+             ORDER BY attempt DESC LIMIT 1"
+        ))
+        .bind(task_number)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to look up open task run")?;
+
+        row.map(task_run_from_row).transpose()
     }
 
     /// All attempts for a task, oldest first.

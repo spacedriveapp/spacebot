@@ -4155,7 +4155,7 @@ export interface components {
          * @description Outcome of a single task execution attempt.
          * @enum {string}
          */
-        TaskRunOutcome: "completed" | "failed" | "timeout" | "cancelled" | "blocked" | "rate_limited";
+        TaskRunOutcome: "completed" | "failed" | "timeout" | "cancelled" | "blocked" | "rate_limited" | "abandoned";
         TaskRunsResponse: {
             runs: components["schemas"]["TaskRun"][];
         };

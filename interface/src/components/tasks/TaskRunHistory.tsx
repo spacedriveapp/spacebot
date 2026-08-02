@@ -5,6 +5,7 @@ import {
 	faBan,
 	faCheck,
 	faClock,
+	faPlugCircleXmark,
 	faSpinner,
 	faTriangleExclamation,
 	faXmark,
@@ -24,6 +25,13 @@ const OUTCOME_STYLE: Record<
 	// Rate limits are recorded but deliberately don't spend the failure budget,
 	// so they read as neutral rather than as a failure.
 	rate_limited: { icon: faClock, className: "text-status-warning", label: "Rate limited" },
+	// The worker never reported back — the reaper wrote this row, not the run.
+	// Distinct from "failed" because nothing observed the work; it just stopped.
+	abandoned: {
+		icon: faPlugCircleXmark,
+		className: "text-status-error",
+		label: "Abandoned",
+	},
 };
 
 /** Badge treatment per outcome. A still-running attempt has no outcome yet. */

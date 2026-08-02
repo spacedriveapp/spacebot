@@ -4026,6 +4026,212 @@ async fn handle_detached_completion(
     });
 }
 
+/// How long a task must sit untouched in `in_progress` before the reaper will
+/// consider it abandoned.
+///
+/// A claim and its worker registration are separate writes, so a task picked up
+/// microseconds ago legitimately has no live worker yet. This floor is what
+/// stops the reaper from killing healthy work it merely caught mid-handshake.
+const ORPHANED_TASK_GRACE_SECS: i64 = 300;
+
+/// Return tasks whose worker died to the failure budget.
+///
+/// A task moves to `in_progress` at claim time and back out when its worker
+/// reports. If the process dies in between — host restart, OOM, `kill -9` —
+/// nothing reports, so the task stays `in_progress` forever with an open
+/// `task_runs` row, and `claim_next_ready` only looks at `ready`, so it is
+/// never retried. The work silently stops existing.
+///
+/// Liveness is decided by the detached-worker registry rather than a heartbeat
+/// column: the registry is in-memory, so after a restart it is empty and every
+/// previously-running task is correctly seen as orphaned. That makes the
+/// restart path the same code as the steady-state path, with no separate
+/// recovery routine to drift out of sync.
+async fn reap_orphaned_task_pickups(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+) -> anyhow::Result<usize> {
+    let reaped = reap_orphaned_task_pickups_in(
+        deps.task_store.as_ref(),
+        &deps.process_control_registry,
+        &deps.agent_id,
+        ORPHANED_TASK_GRACE_SECS,
+    )
+    .await?;
+
+    for entry in &reaped {
+        let (event, message) = if entry.new_status == TaskStatus::Blocked {
+            (
+                "task_pickup_reaped_budget_exhausted",
+                format!(
+                    "Task #{} was abandoned once too often ({}/{}) and was blocked: {}",
+                    entry.task_number, entry.failures, entry.limit, entry.reason
+                ),
+            )
+        } else {
+            (
+                "task_pickup_reaped",
+                format!(
+                    "Task #{} was abandoned (attempt {}/{}) and requeued: {}",
+                    entry.task_number, entry.failures, entry.limit, entry.reason
+                ),
+            )
+        };
+
+        logger.log(
+            event,
+            &message,
+            Some(serde_json::json!({
+                "task_number": entry.task_number,
+                "worker_id": entry.worker_id,
+                "failures": entry.failures,
+                "limit": entry.limit,
+            })),
+        );
+
+        let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+            agent_id: deps.agent_id.clone(),
+            task_number: entry.task_number,
+            status: entry.new_status.as_str().to_string(),
+            action: "updated".to_string(),
+        });
+    }
+
+    Ok(reaped.len())
+}
+
+/// A task the reaper returned to the scheduler.
+#[derive(Debug, Clone)]
+struct ReapedTask {
+    task_number: i64,
+    worker_id: Option<String>,
+    new_status: TaskStatus,
+    failures: i64,
+    limit: i64,
+    reason: String,
+}
+
+/// The reaper's decision logic, separated from logging and event emission so
+/// it can be exercised against a bare task store and registry.
+async fn reap_orphaned_task_pickups_in(
+    task_store: &TaskStore,
+    registry: &ProcessControlRegistry,
+    agent_id: &str,
+    grace_secs: i64,
+) -> anyhow::Result<Vec<ReapedTask>> {
+    let stale = task_store
+        .list_stale_in_progress(agent_id, grace_secs)
+        .await?;
+
+    if stale.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let live: std::collections::HashSet<WorkerId> = registry
+        .detached_worker_snapshots()
+        .await
+        .into_iter()
+        .map(|snapshot| snapshot.worker_id)
+        .collect();
+
+    let mut reaped = Vec::new();
+
+    for task in stale {
+        // A task whose worker is still registered is simply slow, not dead.
+        let worker_alive = task
+            .worker_id
+            .as_deref()
+            .and_then(|id| id.parse::<WorkerId>().ok())
+            .is_some_and(|id| live.contains(&id));
+        if worker_alive {
+            continue;
+        }
+
+        let reason = match &task.worker_id {
+            Some(worker_id) => format!(
+                "worker {worker_id} is gone without reporting an outcome — \
+                 the process most likely died or the agent restarted mid-run"
+            ),
+            None => "task was claimed but no worker was ever registered for it".to_string(),
+        };
+
+        // Close the attempt row first so the log stops claiming this run is
+        // still in flight, even if the status write below fails.
+        match task_store.open_run(task.task_number).await {
+            Ok(Some(run)) => {
+                if let Err(error) = task_store
+                    .finish_run(
+                        &run.id,
+                        crate::tasks::TaskRunOutcome::Abandoned,
+                        None,
+                        Some(&reason),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, task_number = task.task_number, "failed to close abandoned run row");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, task_number = task.task_number, "failed to look up open run for abandoned task");
+            }
+        }
+
+        let outcome = task_store
+            .record_failure(
+                task.task_number,
+                crate::tasks::TaskRunOutcome::Abandoned,
+                &reason,
+            )
+            .await;
+
+        let (new_status, failures, limit) = match outcome {
+            Ok(crate::tasks::FailureDisposition::Requeued { failures, limit }) => {
+                (TaskStatus::Ready, failures, limit)
+            }
+            Ok(crate::tasks::FailureDisposition::Parked { failures, limit }) => {
+                (TaskStatus::Blocked, failures, limit)
+            }
+            Ok(other) => {
+                // Somebody moved the task between the listing and now. Their
+                // decision stands.
+                tracing::debug!(
+                    task_number = task.task_number,
+                    ?other,
+                    "abandoned task changed underneath the reaper"
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, task_number = task.task_number, "failed to reap abandoned task");
+                continue;
+            }
+        };
+
+        // Drop any registry entry left behind by a worker that never
+        // unregistered itself, so a stale row can't shield the next attempt
+        // from being reaped in turn.
+        if let Some(worker_id) = task
+            .worker_id
+            .as_deref()
+            .and_then(|id| id.parse::<WorkerId>().ok())
+        {
+            registry.unregister_detached_worker(worker_id).await;
+        }
+
+        reaped.push(ReapedTask {
+            task_number: task.task_number,
+            worker_id: task.worker_id.clone(),
+            new_status,
+            failures,
+            limit,
+            reason,
+        });
+    }
+
+    Ok(reaped)
+}
+
 /// One-shot wake for dormant agents.
 ///
 /// Triggered by `agent::wake::WakeManager` when an external event delivers
@@ -4058,6 +4264,17 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
     loop {
         let interval = deps.runtime_config.cortex.load().tick_interval_secs;
         tokio::time::sleep(Duration::from_secs(interval.max(5))).await;
+
+        // Reap before claiming. Tasks whose worker died are invisible to
+        // `claim_next_ready` until they are returned to `ready`, so a pickup
+        // pass that skipped this would never see them again. On the first tick
+        // after a restart this is what recovers everything that was running
+        // when the process went down.
+        match reap_orphaned_task_pickups(deps, logger).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "reaped abandoned task pickups"),
+            Err(error) => tracing::warn!(%error, "task reaper pass failed"),
+        }
 
         if let Err(error) = pickup_one_ready_task(deps, logger).await {
             tracing::warn!(%error, "ready-task pickup pass failed");
@@ -4940,7 +5157,8 @@ mod tests {
         maintenance_task_timeout, maintenance_timeout_action,
         mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
         maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
-        parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
+        parse_structured_success_flag, push_signal_into_buffer, reap_orphaned_task_pickups_in,
+        record_bulletin_refresh_failure, register_detached_worker_for_pickup,
         should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
         summarize_signal_text, take_lagged_control_flag,
     };
@@ -6168,6 +6386,219 @@ mod tests {
             "lagged dropped events exceeded budget: {} > {}",
             lagged_dropped_events,
             MAX_DROPPED_EVENTS_BUDGET
+        );
+    }
+    // -- Dead-job reaper ----------------------------------------------------
+
+    async fn reaper_fixture() -> (
+        TaskStore,
+        crate::agent::process_control::ProcessControlRegistry,
+    ) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create sqlite memory pool");
+        crate::tasks::store::create_task_schema(&pool).await;
+        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
+            .execute(&pool)
+            .await
+            .expect("seed task number sequence");
+
+        (
+            TaskStore::new(pool),
+            crate::agent::process_control::ProcessControlRegistry::new(),
+        )
+    }
+
+    async fn running_task(store: &TaskStore, agent_id: &str, title: &str) -> crate::tasks::Task {
+        store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: agent_id.to_string(),
+                assigned_agent_id: agent_id.to_string(),
+                title: title.to_string(),
+                status: TaskStatus::InProgress,
+                created_by: "test".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create running task")
+    }
+
+    /// The restart case: the registry is empty after a process restart, so
+    /// everything that was running when the process died is orphaned.
+    #[tokio::test]
+    async fn reaper_requeues_a_task_whose_worker_vanished() {
+        let (store, registry) = reaper_fixture().await;
+        let task = running_task(&store, "agent-1", "orphan").await;
+        let worker_id = uuid::Uuid::new_v4();
+        store
+            .update(
+                task.task_number,
+                crate::tasks::UpdateTaskInput {
+                    worker_id: Some(worker_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("bind worker")
+            .expect("task exists");
+        let run = store
+            .start_run(task.task_number, Some(&worker_id.to_string()))
+            .await
+            .expect("open attempt row");
+
+        let reaped = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("reap");
+
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].task_number, task.task_number);
+        assert_eq!(reaped[0].new_status, TaskStatus::Ready);
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.status,
+            TaskStatus::Ready,
+            "an abandoned task must become claimable again"
+        );
+        assert_eq!(after.consecutive_failures, 1);
+        assert!(after.worker_id.is_none(), "the dead worker must be unbound");
+
+        let runs = store.list_runs(task.task_number).await.expect("list runs");
+        let closed = runs
+            .iter()
+            .find(|candidate| candidate.id == run.id)
+            .expect("the attempt row survives");
+        assert_eq!(
+            closed.outcome,
+            Some(crate::tasks::TaskRunOutcome::Abandoned)
+        );
+        assert!(
+            closed.ended_at.is_some(),
+            "the attempt log must stop claiming the run is still in flight"
+        );
+    }
+
+    /// A registered worker is slow, not dead. Reaping it would kill live work.
+    #[tokio::test]
+    async fn reaper_leaves_a_task_whose_worker_is_still_registered() {
+        let (store, registry) = reaper_fixture().await;
+        let task = running_task(&store, "agent-1", "healthy").await;
+        let worker_id = uuid::Uuid::new_v4();
+        let agent_id: crate::AgentId = Arc::from("agent-1");
+
+        register_detached_worker_for_pickup(
+            &registry,
+            &store,
+            &agent_id,
+            task.task_number,
+            worker_id,
+        )
+        .await
+        .expect("register worker");
+
+        let reaped = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("reap");
+
+        assert!(reaped.is_empty(), "a live worker must not be reaped");
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::InProgress);
+        assert_eq!(after.consecutive_failures, 0);
+    }
+
+    /// The grace period covers the window between claiming a task and
+    /// registering its worker — two separate writes.
+    #[tokio::test]
+    async fn reaper_respects_the_grace_period_for_freshly_claimed_tasks() {
+        let (store, registry) = reaper_fixture().await;
+        let task = running_task(&store, "agent-1", "just claimed").await;
+
+        let reaped = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 300)
+            .await
+            .expect("reap");
+
+        assert!(
+            reaped.is_empty(),
+            "a task claimed moments ago must survive the reaper"
+        );
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::InProgress);
+    }
+
+    /// Tasks live in one instance-wide table, so the reaper must not touch
+    /// work belonging to another agent whose registry it cannot see.
+    #[tokio::test]
+    async fn reaper_ignores_other_agents_tasks() {
+        let (store, registry) = reaper_fixture().await;
+        let theirs = running_task(&store, "agent-2", "not mine").await;
+
+        let reaped = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("reap");
+
+        assert!(reaped.is_empty());
+        let after = store
+            .get_by_number(theirs.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::InProgress);
+    }
+
+    /// A task that keeps getting abandoned must eventually stop being retried
+    /// — otherwise the reaper and the pickup loop trade it forever.
+    #[tokio::test]
+    async fn repeatedly_abandoned_tasks_exhaust_the_budget_and_park() {
+        let (store, registry) = reaper_fixture().await;
+        let task = running_task(&store, "agent-1", "cursed").await;
+
+        let first = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("first reap");
+        assert_eq!(first[0].new_status, TaskStatus::Ready);
+
+        // Claimed again, dies again.
+        store
+            .claim_next_ready("agent-1")
+            .await
+            .expect("claim")
+            .expect("requeued task is claimable");
+
+        let second = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("second reap");
+        assert_eq!(second[0].new_status, TaskStatus::Blocked);
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Blocked);
+        assert!(after.last_error.is_some());
+
+        // And a parked task is not picked up again.
+        assert!(
+            store
+                .claim_next_ready("agent-1")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a parked task must stay out of the pickup loop"
         );
     }
 }

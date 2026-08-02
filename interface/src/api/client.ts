@@ -1003,7 +1003,8 @@ export type TaskRunOutcome =
 	| "timeout"
 	| "cancelled"
 	| "blocked"
-	| "rate_limited";
+	| "rate_limited"
+	| "abandoned";
 
 /// A single execution attempt against a task.
 export interface TaskRun {
