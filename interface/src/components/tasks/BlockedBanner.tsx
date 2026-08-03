@@ -10,9 +10,10 @@ import { BlockKindChip } from "./BlockKindChip";
  * That panel comes from `@spacedrive/ai`, which has no `blocked` status and
  * crashes when handed one, so the drawer passes it an adapted copy reading
  * `pending_approval`. Without this banner the drawer would quietly assert a
- * status the task does not have and offer an Approve button for an approval
- * nobody is waiting on. The adapted row stays — it cannot be removed from a
- * component we do not own — but it is no longer the only thing the reader sees.
+ * status the task does not have. The adapted label stays — it cannot be
+ * removed from a component we do not own — but it is no longer the only thing
+ * the reader sees, and the actions belong to this banner rather than to a
+ * status control that thinks the task is awaiting approval.
  */
 export interface BlockedBannerProps {
 	task: TaskItem;
@@ -51,9 +52,10 @@ export function BlockedBanner({
 			)}
 
 			<p className="mb-2 text-[11px] text-ink-faint">
-				Not picked up automatically. The status control below reads
-				&ldquo;pending approval&rdquo; because the shared panel cannot render
-				this state.
+				Not picked up automatically. The panel below labels this task
+				&ldquo;pending approval&rdquo; because it cannot render this state, and
+				the move buttons are hidden — every way out of blocked runs through
+				the action here.
 			</p>
 
 			{sticky && onUnblock && (

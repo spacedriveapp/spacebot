@@ -33,6 +33,11 @@ import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
 import {BlockedBanner} from "@/components/tasks/BlockedBanner";
 import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
+import {StatusMoves} from "@/components/tasks/StatusMoves";
+import {
+	planStatusChange,
+	useTaskTransitions,
+} from "@/components/tasks/taskTransitions";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
 import {RepoChip} from "@/components/tasks/RepoChip";
 import {ALL_REPOS, RepoFilter} from "@/components/tasks/RepoFilter";
@@ -235,28 +240,58 @@ export function GlobalTasks() {
 		onSuccess: () => void invalidate(),
 	});
 
+	// The store's legal moves. TaskList's row menu offers all five statuses it
+	// knows regardless of the one the card is in, so the table is what stops a
+	// doomed request from ever being sent.
+	const transitions = useTaskTransitions();
+	const [moveError, setMoveError] = useState<string | null>(null);
+
+	const handleMove = useCallback(
+		(task: TaskItem, status: TaskStatus) => {
+			const move = planStatusChange(task, status, transitions);
+			if (move.action === "refuse") {
+				setMoveError(move.reason);
+				return;
+			}
+			setMoveError(null);
+			switch (move.action) {
+				// Leaving a blocked state is unblock's job, not a status write —
+				// it has to clear the reason and re-check dependencies.
+				case "unblock":
+					unblockMutation.mutate(task.task_number);
+					break;
+				case "approve":
+					approveMutation.mutate(task.task_number);
+					break;
+				case "execute":
+					executeMutation.mutate(task.task_number);
+					break;
+				case "update":
+					updateMutation.mutate({
+						taskNumber: task.task_number,
+						status: move.status,
+					});
+					break;
+			}
+		},
+		[
+			transitions,
+			updateMutation,
+			approveMutation,
+			executeMutation,
+			unblockMutation,
+		],
+	);
+
 	const handleStatusChange = useCallback(
 		(task: Task, status: UiTaskStatus) => {
 			// Resolve the real task by id: a blocked task reaches the drawer with
 			// an adapted status, and branching on that would approve a task that
 			// was never awaiting approval.
 			const adapted = task as unknown as TaskItem;
-			const t = rawTasks.find((c) => c.id === adapted.id) ?? adapted;
-			if (t.status === "blocked") {
-				// Leaving a blocked state is unblock's job, not a status write —
-				// it has to clear the reason and re-check dependencies.
-				unblockMutation.mutate(t.task_number);
-				return;
-			}
-			if (t.status === "pending_approval" && status === "ready") {
-				approveMutation.mutate(t.task_number);
-			} else if (t.status === "backlog" && status === "in_progress") {
-				executeMutation.mutate(t.task_number);
-			} else {
-				updateMutation.mutate({taskNumber: t.task_number, status});
-			}
+			handleMove(rawTasks.find((c) => c.id === adapted.id) ?? adapted, status);
 		},
-		[updateMutation, approveMutation, executeMutation, unblockMutation, rawTasks],
+		[handleMove, rawTasks],
 	);
 
 	const handleDelete = useCallback(
@@ -341,6 +376,24 @@ export function GlobalTasks() {
 					</div>
 				)}
 
+				{/* The row menu comes from @spacedrive/ai and cannot be narrowed to
+				    the legal moves, so a refusal is explained here instead of
+				    being sent and bounced by the API as a bare 400. */}
+				{moveError && (
+					<div className="flex items-start gap-2 border-b border-status-warning/30 bg-status-warning/5 px-4 py-2">
+						<p className="min-w-0 flex-1 text-xs text-status-warning">
+							{moveError}
+						</p>
+						<button
+							type="button"
+							onClick={() => setMoveError(null)}
+							className="shrink-0 text-xs text-ink-faint hover:text-ink-dull"
+						>
+							Dismiss
+						</button>
+					</div>
+				)}
+
 				{/* Task list */}
 				{isLoading ? (
 					<div className="py-8 text-center text-sm text-ink-faint">
@@ -408,6 +461,9 @@ export function GlobalTasks() {
 						onRetry={(t) => retryMutation.mutate(t.task_number)}
 						busy={unblockMutation.isPending || retryMutation.isPending}
 					/>
+					{/* No onStatusChange: TaskDetail would render a <select> of all
+					    five statuses it knows and offer moves the store refuses.
+					    StatusMoves below shows the legal ones and nothing else. */}
 					<TaskDetail
 						task={
 							toDesignSystemTask(
@@ -415,10 +471,19 @@ export function GlobalTasks() {
 							) as unknown as Task
 						}
 						resolveAgentName={resolveAgentName}
-						onStatusChange={handleStatusChange}
 						onSubtaskToggle={handleSubtaskToggle}
 						onDelete={handleDelete}
 						onClose={() => setActiveTaskId(null)}
+					/>
+					<StatusMoves
+						task={activeTask as unknown as TaskItem}
+						table={transitions}
+						onMove={handleMove}
+						busy={
+							updateMutation.isPending ||
+							approveMutation.isPending ||
+							executeMutation.isPending
+						}
 					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}

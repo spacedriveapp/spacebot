@@ -1761,6 +1761,55 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return (await response.json()) as TaskContractResponse;
 	},
+	/**
+	 * Wire one input to where its value comes from.
+	 *
+	 * Keyed by input key rather than by an id, so setting the same key twice
+	 * rewires it instead of leaving two bindings fighting over one input.
+	 *
+	 * Exactly one source is meaningful: an upstream task's output at a JSON
+	 * Pointer, or a literal. The server rejects a body carrying neither.
+	 */
+	setTaskBinding: async (
+		taskNumber: number,
+		inputKey: string,
+		body: {
+			source_task_number?: number;
+			source_pointer?: string;
+			literal_value?: unknown;
+		},
+	) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/bindings/${encodeURIComponent(inputKey)}`,
+			{
+				method: "PUT",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify(body),
+			},
+		);
+		if (!response.ok) {
+			// 422 is the "neither a source nor a literal" rejection, and it comes
+			// back with an empty body — a bare status code would leave the caller
+			// with nothing to say, so name the rule that was broken.
+			if (response.status === 422) {
+				throw new Error(
+					"A binding must either read from a task or carry a literal value.",
+				);
+			}
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskContractResponse;
+	},
+	removeTaskBinding: async (taskNumber: number, inputKey: string) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/bindings/${encodeURIComponent(inputKey)}`,
+			{method: "DELETE"},
+		);
+		if (!response.ok) {
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskContractResponse;
+	},
 	listTaskDependencies: (taskNumber: number) =>
 		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
 	/** The legal status moves, so the board never offers one the API rejects. */
