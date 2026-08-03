@@ -117,6 +117,26 @@ hard timeout that is a required field rather than an inherited default. Tool sec
 are *not* injected into the environment: a worker gets them because a worker is trusted
 to use them, and a template command is authored once and run forever.
 
+**But `Sandbox::wrap` contains less than its name suggests, and this matters here.**
+`containment_active()` is `mode_enabled() && backend != None`, where the backend is
+bubblewrap on Linux or `sandbox-exec` on macOS. With no backend installed — which is
+the case on the current preview host — `mode = "enabled"` in config yields *no OS-level
+containment at all*: the read/write prompt allowlists come back empty and `wrap` builds
+an ordinary `Command` with a `PATH` adjustment. What remains is `is_path_allowed`,
+which the *file tools* consult voluntarily and which a shell command does not go
+through.
+
+For a worker that is a considered risk: an agent runs a command in the moment, watched,
+as part of work someone asked for. A command step is different in kind — stored,
+repeated, and unattended — so it should not inherit that posture silently. A command
+step must **refuse to run when containment is inert**, unless the instance explicitly
+opts out. Failing closed is the only honest default for stored code execution, and it
+also turns an invisible property into a visible one.
+
+That the two conditions read alike from the config surface — `mode_enabled()` says yes,
+`containment_active()` says no — is the same one-label-two-conditions shape this
+codebase keeps paying for, this time in the security layer.
+
 ## What it does not become
 
 Not a general job runner. No retries of its own (the failure budget already exists),
