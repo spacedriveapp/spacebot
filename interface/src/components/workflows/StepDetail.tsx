@@ -5,6 +5,8 @@ import {
 	faArrowRightLong,
 	faPen,
 	faQuoteLeft,
+	faRotate,
+	faTriangleExclamation,
 	faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
@@ -16,6 +18,13 @@ import type {
 	WorkflowStep,
 } from "@/api/client";
 import {ancestorsOf, parentsByStep, wouldCycle} from "./graph";
+import {
+	DEFAULT_LOOP_MAX_ITERATIONS,
+	MAX_LOOP_ITERATIONS,
+	loopBodies,
+	readPredicate,
+	type LoopBody,
+} from "./loops";
 import {parseJson} from "./schemaForm";
 
 const PRIORITIES: TaskPriority[] = ["critical", "high", "medium", "low"];
@@ -30,7 +39,11 @@ export interface StepDetailProps {
 	agents: {id: string; display_name?: string | null}[];
 	onSave: (stepKey: string, body: SaveStepRequest) => void;
 	onDelete: (stepKey: string) => void;
-	onAddEdge: (parentStepKey: string, childStepKey: string) => void;
+	onAddEdge: (
+		parentStepKey: string,
+		childStepKey: string,
+		kind?: "normal" | "on_exhausted",
+	) => void;
 	onRemoveEdge: (parentStepKey: string, childStepKey: string) => void;
 	onSetBinding: (
 		stepKey: string,
@@ -69,12 +82,16 @@ export function StepDetail(props: StepDetailProps) {
 		() => ancestorsOf(edges, step.step_key),
 		[edges, step.step_key],
 	);
+	const bodies = useMemo(() => loopBodies(steps, edges), [steps, edges]);
+	const ownBody = step.loop_group ? (bodies.get(step.loop_group) ?? null) : null;
 
 	return (
 		<div className="flex h-full min-h-0 flex-col overflow-y-auto">
 			<StepFields
 				key={step.step_key}
 				step={step}
+				steps={steps}
+				edges={edges}
 				agents={props.agents}
 				busy={props.stepBusy}
 				error={props.stepError ?? null}
@@ -86,9 +103,12 @@ export function StepDetail(props: StepDetailProps) {
 				steps={steps}
 				edges={edges}
 				parents={parents}
+				bodies={bodies}
 				busy={props.edgeBusy}
 				error={props.edgeError ?? null}
-				onAdd={(parentKey) => props.onAddEdge(parentKey, step.step_key)}
+				onAdd={(parentKey, kind) =>
+					props.onAddEdge(parentKey, step.step_key, kind)
+				}
 				onRemove={(parentKey) => props.onRemoveEdge(parentKey, step.step_key)}
 			/>
 			<Bindings
@@ -96,6 +116,7 @@ export function StepDetail(props: StepDetailProps) {
 				steps={steps}
 				parents={parents}
 				ancestors={ancestors}
+				body={ownBody}
 				bindings={stepBindings}
 				hasRunInput={props.hasRunInput}
 				busy={props.bindingBusy}
@@ -139,6 +160,8 @@ function Section({
  */
 function StepFields({
 	step,
+	steps,
+	edges,
 	agents,
 	busy,
 	error,
@@ -146,6 +169,8 @@ function StepFields({
 	onDelete,
 }: {
 	step: WorkflowStep;
+	steps: WorkflowStep[];
+	edges: WorkflowEdge[];
 	agents: {id: string; display_name?: string | null}[];
 	busy?: boolean;
 	error: string | null;
@@ -164,6 +189,23 @@ function StepFields({
 	const [localError, setLocalError] = useState<string | null>(null);
 	const [confirmDelete, setConfirmDelete] = useState(false);
 
+	const [loopGroup, setLoopGroup] = useState(step.loop_group ?? "");
+	const [maxIterations, setMaxIterations] = useState(() =>
+		step.loop_max_iterations == null ? "" : String(step.loop_max_iterations),
+	);
+	const initialPredicate = readPredicate(step.loop_until);
+	const [pointer, setPointer] = useState(initialPredicate?.pointer ?? "");
+	const [mode, setMode] = useState<"equals" | "any_of" | "present">(
+		initialPredicate?.mode ?? "equals",
+	);
+	const [expected, setExpected] = useState(() =>
+		initialPredicate?.mode === "equals"
+			? JSON.stringify(initialPredicate.value)
+			: initialPredicate?.mode === "any_of"
+				? JSON.stringify(initialPredicate.values)
+				: "true",
+	);
+
 	// A step saved elsewhere (or reordered by a sibling's save) must not leave
 	// stale text in these boxes. Keyed remount handles switching steps; this
 	// handles the same step coming back changed.
@@ -175,7 +217,52 @@ function StepFields({
 		setAgentId(step.assigned_agent_id ?? "");
 		setInputSchema(format(step.input_schema));
 		setOutputSchema(format(step.output_schema));
+		setLoopGroup(step.loop_group ?? "");
+		setMaxIterations(
+			step.loop_max_iterations == null ? "" : String(step.loop_max_iterations),
+		);
+		const predicate = readPredicate(step.loop_until);
+		setPointer(predicate?.pointer ?? "");
+		setMode(predicate?.mode ?? "equals");
+		setExpected(
+			predicate?.mode === "equals"
+				? JSON.stringify(predicate.value)
+				: predicate?.mode === "any_of"
+					? JSON.stringify(predicate.values)
+					: "true",
+		);
 	}, [step]);
+
+	/**
+	 * The body this step would be in if the typed group were saved.
+	 *
+	 * Computed against the group as *typed*, not as stored, so the panel can say
+	 * "this is the exit step" while the name is still being entered rather than
+	 * after a save-and-look. The exit is whichever body step nothing else in the
+	 * body waits on, which is a fact about the edges and therefore knowable here.
+	 */
+	const prospective = useMemo(() => {
+		const group = loopGroup.trim();
+		if (group === "") return null;
+		const patched = steps.map((candidate) =>
+			candidate.step_key === step.step_key
+				? {...candidate, loop_group: group}
+				: candidate,
+		);
+		return loopBodies(patched, edges).get(group) ?? null;
+	}, [loopGroup, steps, edges, step.step_key]);
+	const isExit = prospective?.exit?.step_key === step.step_key;
+	const existingGroups = useMemo(
+		() =>
+			[
+				...new Set(
+					steps
+						.map((candidate) => candidate.loop_group)
+						.filter((group): group is string => !!group),
+				),
+			].sort(),
+		[steps],
+	);
 
 	const submit = () => {
 		const trimmed = title.trim();
@@ -193,6 +280,67 @@ function StepFields({
 			setLocalError(`Output schema: ${output.error}`);
 			return;
 		}
+
+		// Loop settings are read from the exit step and nowhere else — the server
+		// refuses a launch that finds them elsewhere rather than leaving a number
+		// that does nothing. So they are sent only from the step that owns them.
+		const group = loopGroup.trim() || null;
+		let until: unknown = null;
+		let iterations: number | null = null;
+		if (group && isExit) {
+			const trimmedPointer = pointer.trim();
+			if (trimmedPointer === "") {
+				setLocalError(
+					"A loop needs a pointer saying what to read in this step's output — without one it always runs its whole budget, which is a retry, not a loop.",
+				);
+				return;
+			}
+			if (mode === "equals") {
+				const parsed = parseJson(expected);
+				if ("error" in parsed) {
+					setLocalError(`Exit condition: ${parsed.error}`);
+					return;
+				}
+				if (parsed.value === undefined || parsed.value === null) {
+					setLocalError(
+						"The exit condition needs a value to compare against. A bare string still needs its quotes.",
+					);
+					return;
+				}
+				until = {pointer: trimmedPointer, equals: parsed.value};
+			} else if (mode === "any_of") {
+				const parsed = parseJson(expected);
+				if ("error" in parsed) {
+					setLocalError(`Exit condition: ${parsed.error}`);
+					return;
+				}
+				if (!Array.isArray(parsed.value) || parsed.value.length === 0) {
+					setLocalError(
+						'"One of" takes a JSON array of the values that count as done, e.g. ["green", "clean"].',
+					);
+					return;
+				}
+				until = {pointer: trimmedPointer, any_of: parsed.value};
+			} else {
+				until = {pointer: trimmedPointer};
+			}
+
+			if (maxIterations.trim() !== "") {
+				const parsed = Number(maxIterations.trim());
+				if (!Number.isInteger(parsed)) {
+					setLocalError("Passes must be a whole number.");
+					return;
+				}
+				if (parsed < 1 || parsed > MAX_LOOP_ITERATIONS) {
+					setLocalError(
+						`Passes must be between 1 and ${MAX_LOOP_ITERATIONS} — every pass is a live model call, so the ceiling is enforced rather than trusted.`,
+					);
+					return;
+				}
+				iterations = parsed;
+			}
+		}
+
 		setLocalError(null);
 		onSave({
 			title: trimmed,
@@ -203,6 +351,20 @@ function StepFields({
 			input_schema: input.value,
 			output_schema: output.value,
 			position: step.position,
+			// Sent on every save because `PUT /steps/{key}` replaces the step
+			// wholesale: omitting these would quietly un-loop a body the moment
+			// somebody fixed a typo in its title.
+			loop_group: group,
+			loop_until: until,
+			loop_max_iterations: iterations,
+			// Same hazard, and nothing here edits them. There is no fan-out
+			// control in this panel yet, so these are carried through untouched
+			// rather than dropped — otherwise renaming a step would silently
+			// un-fan-out it, and the run would go from N branches to one with
+			// nothing on screen having said so.
+			for_each_step_key: step.for_each_step_key,
+			for_each_pointer: step.for_each_pointer,
+			for_each_key: step.for_each_key,
 		});
 	};
 
@@ -318,6 +480,144 @@ function StepFields({
 				/>
 			</Field>
 
+			<div className="mb-2 mt-3 border-t border-app-line/40 pt-2">
+				<div className="mb-1 flex items-center gap-1.5">
+					<FontAwesomeIcon icon={faRotate} className="text-[9px] text-accent" />
+					<span className="text-[11px] font-medium text-ink-dull">Loop</span>
+				</div>
+
+				<Field
+					label="Loop body"
+					hint="Every step sharing this name is one body, and the whole body runs again until it converges or runs out. Blank for an ordinary step."
+				>
+					<input
+						value={loopGroup}
+						onChange={(event) => setLoopGroup(event.target.value)}
+						spellCheck={false}
+						list={`loop-groups-${step.step_key}`}
+						placeholder="revise"
+						className="w-full rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+					/>
+					<datalist id={`loop-groups-${step.step_key}`}>
+						{existingGroups.map((group) => (
+							<option key={group} value={group} />
+						))}
+					</datalist>
+				</Field>
+
+				{loopGroup.trim() !== "" &&
+					(isExit ? (
+						<>
+							<p className="mb-2 rounded border border-accent/30 bg-accent/5 px-2 py-1 text-[10px] text-ink-dull">
+								Nothing else in{" "}
+								<span className="font-mono text-accent">
+									{loopGroup.trim()}
+								</span>{" "}
+								waits for this step, so this is the body's{" "}
+								<strong className="font-medium text-ink">exit step</strong>: its
+								output decides whether the body goes round again, and both ways
+								out of the loop leave from here.
+							</p>
+
+							<Field
+								label="Stop when"
+								hint="Read from this step's output after each pass. The same shape a task_output gate takes."
+							>
+								<div className="flex items-center gap-1.5">
+									<input
+										value={pointer}
+										onChange={(event) => setPointer(event.target.value)}
+										spellCheck={false}
+										placeholder="/converged"
+										title="An RFC 6901 pointer into this step's outputs."
+										className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+									/>
+									<select
+										value={mode}
+										onChange={(event) =>
+											setMode(
+												event.target.value as "equals" | "any_of" | "present",
+											)
+										}
+										className="shrink-0 rounded border border-app-line bg-app px-1.5 py-1 text-[11px] text-ink outline-none focus:border-accent"
+									>
+										<option value="equals">is</option>
+										<option value="any_of">is one of</option>
+										<option value="present">is present</option>
+									</select>
+									{mode !== "present" && (
+										<input
+											value={expected}
+											onChange={(event) => setExpected(event.target.value)}
+											spellCheck={false}
+											placeholder={mode === "equals" ? "true" : '["green"]'}
+											title={
+												mode === "equals"
+													? "JSON. A bare string still needs its quotes."
+													: "A JSON array of the values that count as done."
+											}
+											className="w-24 shrink-0 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+										/>
+									)}
+								</div>
+							</Field>
+
+							<Field
+								label="Passes"
+								hint={`How many times the body may run before the loop gives up. Blank means ${DEFAULT_LOOP_MAX_ITERATIONS}. Ceiling is ${MAX_LOOP_ITERATIONS} — every pass is a live model call.`}
+							>
+								<div className="flex items-center gap-2">
+									<input
+										value={maxIterations}
+										onChange={(event) => setMaxIterations(event.target.value)}
+										inputMode="numeric"
+										spellCheck={false}
+										placeholder={String(DEFAULT_LOOP_MAX_ITERATIONS)}
+										className="w-20 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+									/>
+									<span className="text-[10px] text-ink-faint">
+										{maxIterations.trim() === ""
+											? `defaults to ${DEFAULT_LOOP_MAX_ITERATIONS} passes`
+											: `at most ${maxIterations.trim()} pass${
+													maxIterations.trim() === "1" ? "" : "es"
+												}`}
+									</span>
+								</div>
+							</Field>
+
+							<p className="mb-2 text-[10px] text-ink-faint">
+								Converging and giving up leave by different edges. Draw them from
+								this step's two handles on the canvas — the upper one for
+								converged, the lower for gave up.
+							</p>
+						</>
+					) : prospective && prospective.exit ? (
+						<p className="mb-2 rounded border border-app-line bg-app-box/40 px-2 py-1 text-[10px] text-ink-faint">
+							Something else in this body waits for this step, so the exit
+							condition lives on{" "}
+							<span className="font-mono text-ink-dull">
+								{prospective.exit.step_key}
+							</span>{" "}
+							— the one step in{" "}
+							<span className="font-mono">{loopGroup.trim()}</span> with nothing
+							after it inside the body. Set anywhere else it would be a number
+							nothing reads, so launch refuses that.
+						</p>
+					) : (
+						<p className="mb-2 flex items-start gap-1.5 rounded border border-status-warning/30 bg-status-warning/5 px-2 py-1 text-[10px] text-status-warning">
+							<FontAwesomeIcon
+								icon={faTriangleExclamation}
+								className="mt-0.5 shrink-0 text-[9px]"
+							/>
+							<span>
+								{prospective && prospective.exitCandidates.length === 0
+									? `Every step in \`${loopGroup.trim()}\` waits for another one in it, so nothing decides whether to go round again. Launch will refuse this body.`
+									: `\`${loopGroup.trim()}\` has more than one step with nothing after it (${prospective?.exitCandidates.join(", ")}), so it has no single exit. Wire the body into a line, or launch will refuse it.`}
+							</span>
+						</p>
+					))}
+			</div>
+
 			{(localError || error) && (
 				<p className="mb-2 break-words rounded border border-status-error/30 bg-status-error/5 px-2 py-1 font-mono text-[11px] text-status-error">
 					{localError ?? error}
@@ -406,6 +706,7 @@ function Dependencies({
 	steps,
 	edges,
 	parents,
+	bodies,
 	busy,
 	error,
 	onAdd,
@@ -415,12 +716,23 @@ function Dependencies({
 	steps: WorkflowStep[];
 	edges: WorkflowEdge[];
 	parents: string[];
+	bodies: Map<string, LoopBody>;
 	busy?: boolean;
 	error: string | null;
-	onAdd: (parentStepKey: string) => void;
+	onAdd: (parentStepKey: string, kind: "normal" | "on_exhausted") => void;
 	onRemove: (parentStepKey: string) => void;
 }) {
 	const [choice, setChoice] = useState("");
+	const [arm, setArm] = useState<"normal" | "on_exhausted">("normal");
+
+	/** Exit step key → the loop it ends, so a prerequisite can be armed. */
+	const exits = useMemo(() => {
+		const map = new Map<string, LoopBody>();
+		for (const body of bodies.values()) {
+			if (body.exit) map.set(body.exit.step_key, body);
+		}
+		return map;
+	}, [bodies]);
 
 	const candidates = useMemo(
 		() =>
@@ -435,6 +747,19 @@ function Dependencies({
 		[steps, step.step_key, parents, edges],
 	);
 
+	/** parent key → the kind of the edge that already exists. */
+	const kindOf = useMemo(() => {
+		const map = new Map<string, string>();
+		for (const edge of edges) {
+			if (edge.child_step_key === step.step_key) {
+				map.set(edge.parent_step_key, edge.kind);
+			}
+		}
+		return map;
+	}, [edges, step.step_key]);
+
+	const chosenLoop = choice === "" ? null : (exits.get(choice) ?? null);
+
 	return (
 		<Section
 			title="Waits for"
@@ -446,54 +771,120 @@ function Dependencies({
 				</p>
 			) : (
 				<div className="mb-2 flex flex-wrap gap-1.5">
-					{parents.map((parent) => (
-						<span
-							key={parent}
-							className="group inline-flex items-center gap-1.5 rounded border border-app-line bg-app-box/50 px-1.5 py-0.5 font-mono text-[11px] text-ink-dull"
-						>
-							{parent}
-							<button
-								type="button"
-								onClick={() => onRemove(parent)}
-								disabled={busy}
-								title={`Stop waiting for \`${parent}\``}
-								className="text-ink-faint hover:text-status-error disabled:opacity-50"
+					{parents.map((parent) => {
+						const exhausted = kindOf.get(parent) === "on_exhausted";
+						const loop = exits.get(parent);
+						return (
+							<span
+								key={parent}
+								className={`group inline-flex items-center gap-1.5 rounded border px-1.5 py-0.5 font-mono text-[11px] ${
+									exhausted
+										? "border-dashed border-status-warning/60 bg-status-warning/10 text-status-warning"
+										: loop
+											? "border-status-success/50 bg-status-success/10 text-status-success"
+											: "border-app-line bg-app-box/50 text-ink-dull"
+								}`}
+								title={
+									exhausted
+										? `Runs only if loop \`${loop?.group ?? "?"}\` runs out of passes. If it converges, this step never runs.`
+										: loop
+											? `Runs only if loop \`${loop.group}\` converges. If it runs out of passes, this step never runs.`
+											: undefined
+								}
 							>
-								<FontAwesomeIcon icon={faXmark} className="text-[9px]" />
-							</button>
-						</span>
-					))}
+								{parent}
+								{(exhausted || loop) && (
+									<span className="not-italic">
+										· {exhausted ? "gave up" : "converged"}
+									</span>
+								)}
+								<button
+									type="button"
+									onClick={() => onRemove(parent)}
+									disabled={busy}
+									title={`Stop waiting for \`${parent}\``}
+									className="opacity-70 hover:text-status-error hover:opacity-100 disabled:opacity-50"
+								>
+									<FontAwesomeIcon icon={faXmark} className="text-[9px]" />
+								</button>
+							</span>
+						);
+					})}
 				</div>
 			)}
 
 			{candidates.length > 0 && (
-				<div className="flex items-center gap-2">
-					<select
-						value={choice}
-						onChange={(event) => setChoice(event.target.value)}
-						className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
-					>
-						<option value="">Add a prerequisite…</option>
-						{candidates.map((key) => (
-							<option key={key} value={key}>
-								{key}
-							</option>
-						))}
-					</select>
-					<Button
-						size="sm"
-						variant="gray"
-						title="Add prerequisite"
-						disabled={busy || choice === ""}
-						onClick={() => {
-							if (choice === "") return;
-							onAdd(choice);
-							setChoice("");
-						}}
-					>
-						{busy ? "Saving…" : "Add"}
-					</Button>
-				</div>
+				<>
+					<div className="flex items-center gap-2">
+						<select
+							value={choice}
+							onChange={(event) => {
+								setChoice(event.target.value);
+								setArm("normal");
+							}}
+							className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						>
+							<option value="">Add a prerequisite…</option>
+							{candidates.map((key) => (
+								<option key={key} value={key}>
+									{key}
+									{exits.has(key) ? " (loop exit)" : ""}
+								</option>
+							))}
+						</select>
+						<Button
+							size="sm"
+							variant="gray"
+							title="Add prerequisite"
+							disabled={busy || choice === ""}
+							onClick={() => {
+								if (choice === "") return;
+								onAdd(choice, arm);
+								setChoice("");
+								setArm("normal");
+							}}
+						>
+							{busy ? "Saving…" : "Add"}
+						</Button>
+					</div>
+
+					{/* Two ways out of a loop, asked for as two, because a step wired
+					    downstream of a loop the ordinary way runs after three failed
+					    passes exactly as it does after three successful ones. */}
+					{chosenLoop && (
+						<div className="mt-1.5 rounded border border-app-line bg-app-box/30 p-2">
+							<p className="mb-1.5 text-[10px] text-ink-faint">
+								<span className="font-mono text-ink-dull">{choice}</span> ends
+								loop <span className="font-mono">{chosenLoop.group}</span>, so
+								this edge has to say which way out it is on.
+							</p>
+							<div className="flex overflow-hidden rounded border border-app-line text-[10px]">
+								<button
+									type="button"
+									onClick={() => setArm("normal")}
+									className={`flex-1 px-2 py-1 ${
+										arm === "normal"
+											? "bg-status-success/20 text-status-success"
+											: "text-ink-faint hover:text-ink-dull"
+									}`}
+								>
+									When it converges
+								</button>
+								<button
+									type="button"
+									onClick={() => setArm("on_exhausted")}
+									className={`flex-1 px-2 py-1 ${
+										arm === "on_exhausted"
+											? "bg-status-warning/20 text-status-warning"
+											: "text-ink-faint hover:text-ink-dull"
+									}`}
+								>
+									When it gives up
+								</button>
+							</div>
+						</div>
+					)}
+				</>
 			)}
 
 			{error && (
@@ -519,6 +910,7 @@ function Bindings({
 	steps,
 	parents,
 	ancestors,
+	body,
 	bindings,
 	hasRunInput,
 	busy,
@@ -531,6 +923,8 @@ function Bindings({
 	parents: string[];
 	/** Every step upstream at any depth — see `ancestorsOf`. */
 	ancestors: Set<string>;
+	/** The loop body this step is in, if any. `previous_iteration` needs it. */
+	body: LoopBody | null;
 	bindings: StepBinding[];
 	hasRunInput: boolean;
 	busy?: boolean;
@@ -568,6 +962,7 @@ function Bindings({
 							steps={steps}
 							parents={parents}
 							ancestors={ancestors}
+							body={body}
 							hasRunInput={hasRunInput}
 							takenKeys={bindings.map((b) => b.input_key)}
 							busy={busy}
@@ -603,6 +998,7 @@ function Bindings({
 						steps={steps}
 						parents={parents}
 						ancestors={ancestors}
+						body={body}
 						hasRunInput={hasRunInput}
 						takenKeys={bindings.map((b) => b.input_key)}
 						suggestions={unbound}
@@ -674,19 +1070,33 @@ function BindingRow({
 					</>
 				) : (
 					<>
+						{binding.source === "previous_iteration" && (
+							<FontAwesomeIcon
+								icon={faRotate}
+								className="shrink-0 text-[8px] text-accent"
+								title="Reads the previous pass of this loop body, not this one."
+							/>
+						)}
 						<span
 							className={`shrink-0 font-mono ${
-								warnUnordered ? "text-status-warning" : "text-ink-dull"
+								warnUnordered
+									? "text-status-warning"
+									: binding.source === "previous_iteration"
+										? "text-accent"
+										: "text-ink-dull"
 							}`}
 							title={
 								warnUnordered
 									? "This step does not wait for that one, so the value may not exist yet."
-									: undefined
+									: binding.source === "previous_iteration"
+										? `The previous pass's \`${binding.source_step_key ?? "?"}\`. On pass 1 it falls back to the step the loop was entered from.`
+										: undefined
 							}
 						>
 							{binding.source === "run_input"
 								? "run input"
 								: (binding.source_step_key ?? "?")}
+							{binding.source === "previous_iteration" ? " (last pass)" : ""}
 						</span>
 						<FontAwesomeIcon
 							icon={faArrowRightLong}
@@ -737,6 +1147,7 @@ function BindingForm({
 	steps,
 	parents,
 	ancestors,
+	body,
 	hasRunInput,
 	takenKeys,
 	suggestions = [],
@@ -749,6 +1160,7 @@ function BindingForm({
 	steps: WorkflowStep[];
 	parents: string[];
 	ancestors: Set<string>;
+	body: LoopBody | null;
 	hasRunInput: boolean;
 	takenKeys: string[];
 	suggestions?: string[];
@@ -776,6 +1188,15 @@ function BindingForm({
 	const [error, setError] = useState<string | null>(null);
 
 	const otherSteps = steps.filter((s) => s.step_key !== stepKey);
+	// A previous-iteration binding names a step in the *same body*: it reads what
+	// that step produced last time round. Naming one outside the body would be
+	// reading a pass that step never had, and launch refuses it.
+	const bodySteps = body?.members ?? [];
+	const [previousStep, setPreviousStep] = useState(
+		binding?.source === "previous_iteration"
+			? (binding.source_step_key ?? "")
+			: (body?.exit?.step_key ?? ""),
+	);
 
 	const submit = () => {
 		const inputKey = key.trim();
@@ -796,6 +1217,19 @@ function BindingForm({
 			onSave(inputKey, {
 				source: "step",
 				source_step_key: sourceStep,
+				source_pointer: pointer.trim() || null,
+			});
+			return;
+		}
+
+		if (source === "previous_iteration") {
+			if (previousStep === "") {
+				setError("Name the step in this body whose last pass this reads.");
+				return;
+			}
+			onSave(inputKey, {
+				source: "previous_iteration",
+				source_step_key: previousStep,
 				source_pointer: pointer.trim() || null,
 			});
 			return;
@@ -851,6 +1285,7 @@ function BindingForm({
 					value={source}
 					onChange={setSource}
 					stepDisabled={otherSteps.length === 0}
+					previousDisabled={bodySteps.length === 0}
 				/>
 			</div>
 
@@ -883,6 +1318,34 @@ function BindingForm({
 				</div>
 			)}
 
+			{source === "previous_iteration" && (
+				<div className="mb-2 flex items-center gap-1.5">
+					<select
+						value={previousStep}
+						onChange={(event) => setPreviousStep(event.target.value)}
+						className="w-32 shrink-0 rounded border border-app-line bg-app px-1.5 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+					>
+						<option value="">step…</option>
+						{bodySteps.map((candidate) => (
+							<option key={candidate.step_key} value={candidate.step_key}>
+								{candidate.step_key}
+							</option>
+						))}
+					</select>
+					<FontAwesomeIcon
+						icon={faArrowRightLong}
+						className="shrink-0 text-[8px] text-ink-faint"
+					/>
+					<input
+						value={pointer}
+						onChange={(event) => setPointer(event.target.value)}
+						spellCheck={false}
+						placeholder="/attempt"
+						className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+					/>
+				</div>
+			)}
+
 			{source === "run_input" && (
 				<input
 					value={pointer}
@@ -907,9 +1370,15 @@ function BindingForm({
 			<p className="mb-2 text-[10px] text-ink-faint">
 				{source === "step"
 					? "An RFC 6901 pointer into that step's outputs. Blank reads the whole object."
-					: source === "run_input"
-						? "An RFC 6901 pointer into the payload the run was launched with."
-						: "JSON. A bare string still needs its quotes."}
+					: source === "previous_iteration"
+						? `What that step produced on the previous pass. On pass 1 there is no previous pass, so it reads ${
+								body?.entries.length === 1
+									? `\`${body.entries[0]}\` — the step this loop is entered from`
+									: "the step the loop is entered from"
+							} instead, automatically.`
+						: source === "run_input"
+							? "An RFC 6901 pointer into the payload the run was launched with."
+							: "JSON. A bare string still needs its quotes."}
 			</p>
 
 			{error && <p className="mb-2 text-[11px] text-status-error">{error}</p>}
@@ -930,17 +1399,32 @@ function SourceToggle({
 	value,
 	onChange,
 	stepDisabled,
+	previousDisabled,
 }: {
 	value: StepBinding["source"];
 	onChange: (next: StepBinding["source"]) => void;
 	stepDisabled: boolean;
+	previousDisabled: boolean;
 }) {
-	const options: {label: string; value: StepBinding["source"]; off?: boolean}[] =
-		[
-			{label: "From a step", value: "step", off: stepDisabled},
-			{label: "Run input", value: "run_input"},
-			{label: "Literal", value: "literal"},
-		];
+	const options: {
+		label: string;
+		value: StepBinding["source"];
+		off?: boolean;
+		offHint?: string;
+		hint?: string;
+	}[] = [
+		{label: "From a step", value: "step", off: stepDisabled},
+		{
+			label: "Last pass",
+			value: "previous_iteration",
+			off: previousDisabled,
+			offHint:
+				"Only a step inside a loop body has a previous pass to read. Give this step a loop body first.",
+			hint: "What a step in this loop body produced the last time round. This is how a body improves on itself instead of starting over.",
+		},
+		{label: "Run input", value: "run_input"},
+		{label: "Literal", value: "literal"},
+	];
 
 	return (
 		<div className="flex overflow-hidden rounded border border-app-line text-[10px]">
@@ -950,7 +1434,10 @@ function SourceToggle({
 					type="button"
 					disabled={option.off}
 					title={
-						option.off ? "There is no other step to read from yet." : undefined
+						option.off
+							? (option.offHint ??
+								"There is no other step to read from yet.")
+							: option.hint
 					}
 					onClick={() => onChange(option.value)}
 					className={`px-2 py-1 disabled:opacity-40 ${

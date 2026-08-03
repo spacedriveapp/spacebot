@@ -2,13 +2,23 @@ import {useEffect, useMemo, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
 import {useQuery, useQueryClient} from "@tanstack/react-query";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
-import {faArrowLeft} from "@fortawesome/free-solid-svg-icons";
+import {
+	faArrowLeft,
+	faHandPaper,
+	faRotate,
+} from "@fortawesome/free-solid-svg-icons";
 import {api, type TaskItem} from "@/api/client";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {TaskStatusPill} from "@/components/workflows/TaskStatusPill";
 import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
 import {useWorkflowView, ViewToggle} from "@/components/workflows/ViewToggle";
 import {orderSteps, runNodes} from "@/components/workflows/graph";
+import {
+	RESOLUTION_HINT,
+	RESOLUTION_LABEL,
+	finalResolution,
+	sortPasses,
+} from "@/components/workflows/loops";
 
 /**
  * One launch, and the tasks it became.
@@ -125,10 +135,22 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	 * indexed last. The node ids come from the same helper the canvas uses, which
 	 * is what keeps the two in agreement.
 	 */
-	const nodes = useMemo(
-		() => runNodes(workflow?.steps ?? [], tasksByStep),
-		[workflow, tasksByStep],
-	);
+	/**
+	 * Both shapes, because the canvas can be in either.
+	 *
+	 * A loop draws collapsed by default and can be expanded into one box per
+	 * pass, and the two use different node ids. The panel does not need to know
+	 * which mode the canvas is in — it needs to resolve whichever id it was
+	 * handed — so it looks the selection up in both rather than tracking a
+	 * setting it has no other use for.
+	 */
+	const nodes = useMemo(() => {
+		const steps = workflow?.steps ?? [];
+		return [
+			...runNodes(steps, tasksByStep),
+			...runNodes(steps, tasksByStep, {expandLoops: true}),
+		];
+	}, [workflow, tasksByStep]);
 	const selectedNode = selectedKey
 		? (nodes.find((node) => node.id === selectedKey) ?? null)
 		: null;
@@ -202,7 +224,14 @@ export function WorkflowRunView({runId}: {runId: string}) {
 						<LaunchInput inputs={run.inputs} />
 						{selectedTask ? (
 							<div className="px-4 py-3">
-								<RunTaskBody task={selectedTask} />
+								{selectedNode && selectedNode.passes.length > 1 ? (
+									<LoopPasses
+										stepKey={selectedNode.stepKey}
+										passes={selectedNode.passes}
+									/>
+								) : (
+									<RunTaskBody task={selectedTask} />
+								)}
 							</div>
 						) : (
 							<p className="px-4 py-6 text-center text-xs text-ink-faint">
@@ -247,6 +276,136 @@ function LaunchInput({inputs}: {inputs: unknown}) {
 	);
 }
 
+/**
+ * Every pass a loop body step took, oldest first.
+ *
+ * The canvas collapses them into one box on purpose — three passes are one step
+ * run three times, not three steps — but "which pass failed and what did it
+ * say" is then a question the canvas has stopped answering, and it is the main
+ * question anybody has about a loop. So the whole history lands here, in order,
+ * with each pass's inputs and outputs: pass 2's input is visibly pass 1's
+ * output, which is the entire mechanism of a loop shown rather than described.
+ */
+function LoopPasses({stepKey, passes}: {stepKey: string; passes: TaskItem[]}) {
+	const ordered = sortPasses(passes);
+	const resolution = finalResolution(ordered);
+	const group = ordered[0]?.loop_group;
+
+	return (
+		<>
+			<div className="mb-2 flex flex-wrap items-center gap-1.5">
+				<FontAwesomeIcon icon={faRotate} className="text-[10px] text-accent" />
+				<span className="font-mono text-xs text-ink">{stepKey}</span>
+				{group && (
+					<span
+						className="rounded-full border border-accent/40 bg-accent/10 px-1.5 font-mono text-[10px] text-accent"
+						title="The loop body this step belongs to."
+					>
+						loop {group}
+					</span>
+				)}
+				<span className="text-[11px] text-ink-dull">
+					{ordered.length} pass{ordered.length === 1 ? "" : "es"}, one after
+					another
+				</span>
+				{resolution && (
+					<span
+						className={`rounded-full border px-1.5 text-[10px] ${
+							resolution === "converged"
+								? "border-status-success/50 bg-status-success/10 text-status-success"
+								: resolution === "iterated"
+									? "border-app-line bg-app-box/60 text-ink-dull"
+									: "border-status-warning/50 bg-status-warning/10 text-status-warning"
+						}`}
+						title={RESOLUTION_HINT[resolution]}
+					>
+						{RESOLUTION_LABEL[resolution]}
+					</span>
+				)}
+			</div>
+			<p className="mb-3 text-[10px] text-ink-faint">
+				Pass {ordered.length} exists because the passes before it did not meet
+				the loop's exit condition. Only the last one feeds anything downstream.
+			</p>
+
+			<ol className="space-y-3">
+				{ordered.map((task, index) => (
+					<li
+						key={task.id}
+						className="border-t border-app-line/40 pt-2 first:border-t-0 first:pt-0"
+					>
+						<div className="mb-1 flex items-center gap-1.5">
+							<span
+								className={`rounded-full border px-1.5 font-mono text-[10px] ${
+									index === ordered.length - 1
+										? "border-accent/50 bg-accent/10 text-accent"
+										: "border-app-line bg-app-box/50 text-ink-faint"
+								}`}
+							>
+								pass {task.loop_iteration ?? index + 1}
+							</span>
+							{task.loop_resolution && (
+								<span
+									className="text-[10px] text-ink-faint"
+									title={RESOLUTION_HINT[task.loop_resolution]}
+								>
+									{RESOLUTION_LABEL[task.loop_resolution]}
+								</span>
+							)}
+						</div>
+						<RunTaskBody task={task} hideStepKey />
+					</li>
+				))}
+			</ol>
+		</>
+	);
+}
+
+/**
+ * A task held on one arm of a loop.
+ *
+ * Not backlog, and it must not read as backlog: it may never run at all. Which
+ * arm it is on is the whole story — the loop converging and the loop giving up
+ * release different tasks, and this one is waiting to find out which happened.
+ */
+function LoopHoldNotice({task}: {task: TaskItem}) {
+	const group = task.awaiting_loop_group;
+	const arm = task.awaiting_loop_arm;
+	if (!group || !arm) return null;
+	const gaveUp = arm === "on_exhausted";
+	// Once the verdict is in, the reason on the task says which way it went, and
+	// that is a decision rather than a wait.
+	const decided = task.block_reason?.includes("will not run") ?? false;
+
+	return (
+		<div
+			className={`mt-1 rounded border px-2 py-1.5 text-[11px] ${
+				decided
+					? "border-status-warning/40 bg-status-warning/5 text-status-warning"
+					: "border-app-line bg-app-box/40 text-ink-dull"
+			}`}
+		>
+			<div className="mb-0.5 flex items-center gap-1.5">
+				<FontAwesomeIcon icon={faHandPaper} className="text-[9px]" />
+				<span className="font-medium">
+					{decided ? "Never ran" : "Held"} — {gaveUp ? "give-up" : "ordinary"}{" "}
+					arm of loop <span className="font-mono">{group}</span>
+				</span>
+			</div>
+			<p className="text-[10px] opacity-90">
+				{gaveUp
+					? `This step runs only if \`${group}\` runs out of passes. If the loop converges, it never runs.`
+					: `This step runs only if \`${group}\` converges. If the loop runs out of passes, it never runs.`}
+			</p>
+			{task.block_reason && (
+				<p className="mt-1 break-words font-mono text-[10px] opacity-90">
+					{task.block_reason}
+				</p>
+			)}
+		</div>
+	);
+}
+
 function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 	return (
 		<li className="border-b border-app-line/40 px-4 py-3">
@@ -263,16 +422,28 @@ function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 }
 
 /** One task's title, status and payloads — the same either side of the toggle. */
-function RunTaskBody({task}: {task: TaskItem}) {
+function RunTaskBody({
+	task,
+	hideStepKey,
+}: {
+	task: TaskItem;
+	/** The pass list already names the step once, at the top. */
+	hideStepKey?: boolean;
+}) {
 	// The compiler appends the branch to the title so a task is identifiable on
 	// the board. Here the branch is a badge of its own, so showing both would
-	// print `[sigil]` twice on one line.
+	// print `[sigil]` twice on one line. A later pass is suffixed `(iteration 2)`
+	// for the same reason and stripped for the same one.
 	const branch = task.fan_out_branch_key;
 	const suffix = branch ? ` [${branch}]` : "";
-	const title =
+	let title =
 		suffix && task.title.endsWith(suffix)
 			? task.title.slice(0, -suffix.length)
 			: task.title;
+	if (hideStepKey && task.loop_iteration != null) {
+		title = title.replace(/\s*\(iteration \d+\)$/, "");
+	}
+	const held = task.awaiting_loop_group != null && task.awaiting_loop_arm != null;
 
 	return (
 		<>
@@ -288,7 +459,7 @@ function RunTaskBody({task}: {task: TaskItem}) {
 				<span className="shrink-0 font-mono text-[10px] text-ink-faint">
 					#{task.task_number}
 				</span>
-				{task.workflow_step_key && (
+				{task.workflow_step_key && !hideStepKey && (
 					<span
 						className="shrink-0 rounded border border-app-line px-1 font-mono text-[10px] text-ink-faint"
 						title="The step this task was compiled from"
@@ -302,6 +473,15 @@ function RunTaskBody({task}: {task: TaskItem}) {
 						title="Which branch of the step's fan-out this task is. A fan-in downstream collects the branches by this key."
 					>
 						{branch}
+					</span>
+				)}
+				{task.loop_group && !hideStepKey && (
+					<span
+						className="inline-flex shrink-0 items-center gap-1 rounded border border-accent/40 bg-accent/10 px-1 font-mono text-[10px] text-accent"
+						title={`Pass ${task.loop_iteration ?? "?"} of loop body \`${task.loop_group}\`. Passes are sequential — this one exists because the one before it did not converge.`}
+					>
+						<FontAwesomeIcon icon={faRotate} className="text-[7px]" />
+						{task.loop_group} · pass {task.loop_iteration ?? "?"}
 					</span>
 				)}
 				{/* Never @spacedrive/ai's TaskStatusIcon: it throws on `blocked`,
@@ -318,11 +498,17 @@ function RunTaskBody({task}: {task: TaskItem}) {
 				</p>
 			)}
 
-			{task.block_reason && (
-				<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">
-					{task.block_kind ? `${task.block_kind}: ` : ""}
-					{task.block_reason}
-				</p>
+			{/* A held arm explains itself; the generic block box would report it as
+			    an ordinary upstream wait, which is the one thing it is not. */}
+			{held ? (
+				<LoopHoldNotice task={task} />
+			) : (
+				task.block_reason && (
+					<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">
+						{task.block_kind ? `${task.block_kind}: ` : ""}
+						{task.block_reason}
+					</p>
+				)
 			)}
 			{!task.block_reason && task.last_error && (
 				<p className="mt-1 break-words font-mono text-[10px] text-status-warning">

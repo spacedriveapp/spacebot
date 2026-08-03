@@ -27,6 +27,7 @@ import type {
 	TaskStatus,
 } from "@/api/client";
 import {BlockKindChip} from "./BlockKindChip";
+import {LoopChips} from "./LoopChips";
 import {DependencyBadges} from "./DependencyBadges";
 import {RepoChip, type BindingNames} from "./RepoChip";
 import {columnsFor, type BoardColumn} from "./boardColumns";
@@ -427,6 +428,7 @@ function CardBody({
 					<div className="mt-1.5 flex flex-wrap items-center gap-1">
 						<RepoChip task={task} names={bindingNames} />
 						<BlockKindChip kind={task.block_kind} reason={task.block_reason} />
+						<LoopChips task={task} />
 						<DependencyBadges summary={edge} />
 						{task.consecutive_failures > 0 && (
 							<Badge variant="error" size="sm" className="shrink-0">

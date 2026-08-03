@@ -21,13 +21,27 @@ import type {
 	WorkflowStep,
 } from "@/api/client";
 import {pathBetween, runNodes, wouldCycle} from "./graph";
-import {layoutSteps, type NodePosition} from "./layout";
-import {StepNode, type StepFlowNode} from "./StepNode";
+import {layoutSteps, loopRegions, type NodePosition} from "./layout";
+import {
+	bodyByStepKey,
+	describePredicate,
+	finalResolution,
+	loopBodies,
+	sortPasses,
+} from "./loops";
+import {
+	EXHAUSTED_HANDLE,
+	StepNode,
+	type StepFlowNode,
+} from "./StepNode";
+import {LoopGroupNode, type LoopGroupFlowNode} from "./LoopGroupNode";
 import {DependencyEdge, type DependencyFlowEdge} from "./DependencyEdge";
 
-const NODE_TYPES: NodeTypes = {step: StepNode};
+const NODE_TYPES: NodeTypes = {step: StepNode, loopGroup: LoopGroupNode};
 const EDGE_TYPES: EdgeTypes = {dependency: DependencyEdge};
 const FIT_VIEW = {padding: 0.22, maxZoom: 1, minZoom: 0.2};
+
+type CanvasNode = StepFlowNode | LoopGroupFlowNode;
 
 export interface WorkflowCanvasProps {
 	steps: WorkflowStep[];
@@ -44,8 +58,17 @@ export interface WorkflowCanvasProps {
 	 */
 	selectedKey: string | null;
 	onSelect: (nodeId: string) => void;
-	/** Omitted on a run, which is a record of what happened and not editable. */
-	onAddEdge?: (parentStepKey: string, childStepKey: string) => void;
+	/**
+	 * Omitted on a run, which is a record of what happened and not editable.
+	 *
+	 * `kind` is which arm out of a loop the author dragged from — see
+	 * `onConnect`. Anything other than a loop exit only ever sends `normal`.
+	 */
+	onAddEdge?: (
+		parentStepKey: string,
+		childStepKey: string,
+		kind: "normal" | "on_exhausted",
+	) => void;
 	onRemoveEdge?: (parentStepKey: string, childStepKey: string) => void;
 	edgeBusy?: boolean;
 	/** The server's refusal, verbatim. */
@@ -106,12 +129,20 @@ function CanvasInner({
 	// A connection the client already knows will be refused. Kept separate from
 	// `edgeError` so a local diagnosis is not overwritten by a stale server one.
 	const [localError, setLocalError] = useState<string | null>(null);
+	// Off by default: passes are sequential, and drawing them side by side is a
+	// picture of a fan-out. On when someone wants each pass as its own box.
+	const [expandLoops, setExpandLoops] = useState(false);
+
+	const bodies = useMemo(() => loopBodies(steps, edges), [steps, edges]);
+	const bodyOf = useMemo(() => bodyByStepKey(bodies), [bodies]);
+	const hasLoops = bodies.size > 0;
 
 	// One entry per box on screen. On the editor that is one per step; on a run
-	// it is one per task, so an expanded fan-out is as wide as it really was.
+	// it is one per task, except a loop body step, whose passes collapse into one
+	// — they happened one after another, not at once.
 	const graphNodes = useMemo(
-		() => runNodes(steps, tasksByStep),
-		[steps, tasksByStep],
+		() => runNodes(steps, tasksByStep, {expandLoops}),
+		[steps, tasksByStep, expandLoops],
 	);
 
 	/** step key → the node ids it expanded into, in the order they stack. */
@@ -153,11 +184,68 @@ function CanvasInner({
 		[steps],
 	);
 
-	const nodes = useMemo<StepFlowNode[]>(
+	/** Steps with an `on_exhausted` edge leaving them that is not a loop's exit. */
+	const strayExhausted = useMemo(() => {
+		const stray = new Set<string>();
+		for (const edge of edges) {
+			if (edge.kind !== "on_exhausted") continue;
+			const body = bodyOf.get(edge.parent_step_key);
+			if (body?.exit?.step_key !== edge.parent_step_key) {
+				stray.add(edge.parent_step_key);
+			}
+		}
+		return stray;
+	}, [edges, bodyOf]);
+
+	/** step key → which arms already leave it, so a wired handle stops shouting. */
+	const armsWired = useMemo(() => {
+		const map = new Map<string, {normal: boolean; exhausted: boolean}>();
+		for (const edge of edges) {
+			const entry = map.get(edge.parent_step_key) ?? {
+				normal: false,
+				exhausted: false,
+			};
+			if (edge.kind === "on_exhausted") entry.exhausted = true;
+			else entry.normal = true;
+			map.set(edge.parent_step_key, entry);
+		}
+		return map;
+	}, [edges]);
+
+	/** step key → how many passes it ran, however the canvas is drawing them. */
+	const passTotals = useMemo(() => {
+		const map = new Map<string, number>();
+		if (!tasksByStep) return map;
+		for (const [key, tasks] of tasksByStep) {
+			const passes = tasks.filter((task) => task.loop_iteration != null).length;
+			if (passes > 0) map.set(key, passes);
+		}
+		return map;
+	}, [tasksByStep]);
+
+	/** step key → how its loop came out on this run, once it has. */
+	const resolutionByStep = useMemo(() => {
+		const map = new Map<string, ReturnType<typeof finalResolution>>();
+		if (!tasksByStep) return map;
+		for (const [key, tasks] of tasksByStep) {
+			// Sorted, because `finalResolution` reads the last pass and map order is
+			// insertion order, not iteration order.
+			const resolution = finalResolution(sortPasses(tasks));
+			if (resolution) map.set(key, resolution);
+		}
+		return map;
+	}, [tasksByStep]);
+
+	const stepNodes = useMemo<StepFlowNode[]>(
 		() =>
-			graphNodes.flatMap(({id, stepKey, task}) => {
+			graphNodes.flatMap(({id, stepKey, task, passes, collapsedLoop}) => {
 				const step = stepsByKey.get(stepKey);
 				if (!step) return [];
+				const body = bodyOf.get(stepKey);
+				const held =
+					task?.awaiting_loop_group && task.awaiting_loop_arm
+						? {group: task.awaiting_loop_group, arm: task.awaiting_loop_arm}
+						: null;
 				return [
 					{
 						id,
@@ -166,6 +254,7 @@ function CanvasInner({
 						selected: id === selectedKey,
 						draggable: true,
 						connectable: editable,
+						zIndex: 1,
 						data: {
 							step,
 							bindingCount: bindingCounts.get(stepKey) ?? 0,
@@ -178,6 +267,33 @@ function CanvasInner({
 							title: task ? withoutBranchSuffix(task) : undefined,
 							branchKey: task?.fan_out_branch_key ?? null,
 							placeholder: task?.fan_out_placeholder ?? false,
+							loopGroup: step.loop_group ?? null,
+							isLoopExit: body?.exit?.step_key === stepKey,
+							editable,
+							armWired: armsWired.get(stepKey),
+							strayExhausted: strayExhausted.has(stepKey),
+							// Only the collapsed box speaks for the whole history. An
+							// expanded pass is one task and says which iteration it is
+							// via its own loop_iteration.
+							pass: collapsedLoop
+								? {
+										index: task?.loop_iteration ?? passes.length,
+										total: passes.length,
+									}
+								: task?.loop_iteration != null
+									? {
+											index: task.loop_iteration,
+											// The step's own pass count, not this box's — expanded,
+											// each box is one pass, and "pass 2 of 2" on the middle
+											// of three would be a lie the collapsed view does not
+											// tell.
+											total: passTotals.get(stepKey) ?? task.loop_iteration,
+										}
+									: null,
+							resolution: collapsedLoop
+								? finalResolution(passes)
+								: (task?.loop_resolution ?? null),
+							heldArm: held,
 						},
 					},
 				];
@@ -185,13 +301,89 @@ function CanvasInner({
 		[
 			graphNodes,
 			stepsByKey,
+			bodyOf,
 			dragged,
 			computed,
 			selectedKey,
 			bindingCounts,
 			cycleKeys,
+			strayExhausted,
+			armsWired,
+			passTotals,
 			editable,
 		],
+	);
+
+	/**
+	 * The box drawn behind each loop body.
+	 *
+	 * Derived from where the step nodes actually are, so a drag takes the region
+	 * with it rather than leaving a rectangle asserting a grouping that is no
+	 * longer on screen.
+	 */
+	const groupNodes = useMemo<LoopGroupFlowNode[]>(() => {
+		if (bodies.size === 0) return [];
+		const placed = new Map<string, NodePosition>();
+		for (const node of stepNodes) placed.set(node.id, node.position);
+		const idsByGroup = new Map<string, string[]>();
+		for (const body of bodies.values()) {
+			idsByGroup.set(
+				body.group,
+				body.members.flatMap(
+					(member) => nodesByStep.get(member.step_key) ?? [member.step_key],
+				),
+			);
+		}
+		return loopRegions(placed, idsByGroup).flatMap((region) => {
+			const body = bodies.get(region.group);
+			if (!body) return [];
+			const exitKey = body.exit?.step_key;
+			const passes = exitKey ? (tasksByStep?.get(exitKey) ?? []) : [];
+			const latest = passes.reduce(
+				(best, task) => Math.max(best, task.loop_iteration ?? 0),
+				0,
+			);
+			return [
+				{
+					id: `loop:${region.group}`,
+					type: "loopGroup" as const,
+					position: {x: region.x, y: region.y},
+					draggable: false,
+					selectable: false,
+					connectable: false,
+					focusable: false,
+					// Behind the steps and behind the edges. A translucent panel over
+					// the arrows would dim exactly the wiring it is meant to explain.
+					zIndex: -1,
+					style: {pointerEvents: "none" as const},
+					data: {
+						group: region.group,
+						maxIterations: body.maxIterations,
+						condition: describePredicate(body.until),
+						problem:
+							body.exitCandidates.length === 1
+								? null
+								: body.exitCandidates.length === 0
+									? `no exit step — every step in this body waits on another one in it, so nothing decides whether to go round again`
+									: `no single exit step — ${body.exitCandidates.join(", ")} all qualify, so nothing decides whether to go round again`,
+						pass:
+							latest > 0 ? {index: latest, total: body.maxIterations} : null,
+						resolution: exitKey
+							? (resolutionByStep.get(exitKey) ?? null)
+							: null,
+						width: region.width,
+						height: region.height,
+					},
+				},
+			];
+		});
+	}, [bodies, stepNodes, nodesByStep, tasksByStep, resolutionByStep]);
+
+	// Regions first so React Flow mounts them under everything, `zIndex` doing
+	// the rest.
+	const nodes = useMemo<CanvasNode[]>(
+		() => [...groupNodes, ...stepNodes],
+		[groupNodes, stepNodes],
 	);
 
 	/**
@@ -210,19 +402,51 @@ function CanvasInner({
 			edges.flatMap((edge) => {
 				const sources = nodesByStep.get(edge.parent_step_key) ?? [];
 				const targets = nodesByStep.get(edge.child_step_key) ?? [];
+				const exhausted = edge.kind === "on_exhausted";
+				const parentBody = bodyOf.get(edge.parent_step_key);
+				const fromExit =
+					parentBody?.exit?.step_key === edge.parent_step_key;
+				const resolution = resolutionByStep.get(edge.parent_step_key) ?? null;
+				// Which arm the run actually took. `iterated` is not a verdict on the
+				// loop as a whole, so it leaves both arms alone.
+				const notTaken =
+					resolution === "converged"
+						? exhausted
+						: resolution === "exhausted_routed" ||
+							  resolution === "exhausted_blocked"
+							? !exhausted
+							: false;
 				return sources.flatMap((source) =>
-					targets.map((target) => {
+					targets.flatMap((target) => {
+						// Expanded, one pass of a body only ever feeds the same pass of
+						// the next step in it. The cross product is right for a fan-out,
+						// where every branch really does feed the fan-in, and wrong here:
+						// it would draw pass 1's draft handing work to pass 3's review.
+						const from = tasksByNode.get(source);
+						const to = tasksByNode.get(target);
+						if (
+							from?.loop_iteration != null &&
+							to?.loop_iteration != null &&
+							from.loop_group === to.loop_group &&
+							from.loop_iteration !== to.loop_iteration
+						) {
+							return [];
+						}
 						const id = `${source}→${target}`;
 						// The arrow is drawn satisfied when *this* end of it is done, so a
 						// fan-out mid-flight shows finished branches feeding the fan-in in
 						// solid and the unfinished ones still faint.
 						const done = tasksByNode.get(source)?.status === "done";
-						return {
+						return [{
 							id,
 							type: "dependency" as const,
 							source,
 							target,
+							// Every step node names its source handles, so an edge that
+							// left this off would have nowhere to start from.
+							sourceHandle: exhausted ? EXHAUSTED_HANDLE : "normal",
 							selected: id === selectedEdgeId,
+							zIndex: 0,
 							markerEnd: {
 								type: MarkerType.ArrowClosed,
 								width: 13,
@@ -230,9 +454,11 @@ function CanvasInner({
 								color:
 									id === selectedEdgeId
 										? "var(--color-accent)"
-										: done
-											? "var(--color-status-success)"
-											: "var(--color-ink-faint)",
+										: exhausted
+											? "var(--color-status-warning)"
+											: done
+												? "var(--color-status-success)"
+												: "var(--color-ink-faint)",
 							},
 							data: {
 								onRemove: onRemoveEdge,
@@ -240,18 +466,30 @@ function CanvasInner({
 								childStepKey: edge.child_step_key,
 								busy: edgeBusy,
 								satisfied: done,
+								exhausted,
+								convergedArm: fromExit && !exhausted,
+								notTaken,
 							},
-						};
+						}];
 					}),
 				);
 			}),
-		[edges, nodesByStep, tasksByNode, selectedEdgeId, onRemoveEdge, edgeBusy],
+		[
+			edges,
+			nodesByStep,
+			tasksByNode,
+			bodyOf,
+			resolutionByStep,
+			selectedEdgeId,
+			onRemoveEdge,
+			edgeBusy,
+		],
 	);
 
 	// Only positions are absorbed. Selection is owned by the page — the step
 	// panel on the right has to agree with the highlighted box — and deletion of
 	// a step is a confirmed action in that panel, not a keystroke on the canvas.
-	const onNodesChange = useCallback((changes: NodeChange<StepFlowNode>[]) => {
+	const onNodesChange = useCallback((changes: NodeChange<CanvasNode>[]) => {
 		setDragged((previous) => {
 			let next = previous;
 			for (const change of changes) {
@@ -266,6 +504,11 @@ function CanvasInner({
 	/**
 	 * A dropped connection.
 	 *
+	 * The handle it came from decides the kind. A loop's exit step has two, one
+	 * for converging and one for giving up, so the author has already said which
+	 * path they mean by the time the line lands — there is no dropdown afterwards
+	 * and no default to get wrong.
+	 *
 	 * The client refuses what it can already prove wrong, and says why in the
 	 * same words the server would — the path that would close the loop. That is
 	 * not a substitute for the server's 409: a second author rewiring the same
@@ -279,18 +522,29 @@ function CanvasInner({
 			const parent = connection.source;
 			const child = connection.target;
 			if (!parent || !child) return;
+			const kind =
+				connection.sourceHandle === EXHAUSTED_HANDLE
+					? "on_exhausted"
+					: "normal";
 
 			if (parent === child) {
 				setLocalError(`\`${parent}\` cannot wait for itself.`);
 				return;
 			}
-			if (
-				edges.some(
-					(edge) =>
-						edge.parent_step_key === parent && edge.child_step_key === child,
-				)
-			) {
-				setLocalError(`\`${child}\` already waits for \`${parent}\`.`);
+			const existing = edges.find(
+				(edge) =>
+					edge.parent_step_key === parent && edge.child_step_key === child,
+			);
+			if (existing) {
+				setLocalError(
+					existing.kind === kind
+						? `\`${child}\` already waits for \`${parent}\`${
+								kind === "on_exhausted" ? " on the give-up arm" : ""
+							}.`
+						: `\`${child}\` already leaves \`${parent}\` on the ${
+								existing.kind === "on_exhausted" ? "give-up" : "ordinary"
+							} arm. Remove that edge before drawing the other one — one pair of steps is one edge, and the two arms have to lead somewhere different to mean anything.`,
+				);
 				return;
 			}
 			if (wouldCycle(edges, parent, child)) {
@@ -303,11 +557,23 @@ function CanvasInner({
 				);
 				return;
 			}
+			// The server only refuses this at launch, by which point the template
+			// has been saved and looks fine. Saying so at the moment the line lands
+			// is the difference between a typo and a trap.
+			if (kind === "on_exhausted") {
+				const body = bodyOf.get(parent);
+				if (body?.exit?.step_key !== parent) {
+					setLocalError(
+						`\`${parent}\` is not the exit step of a loop, so it can never run out of attempts — only a loop's exit step can have a give-up edge.`,
+					);
+					return;
+				}
+			}
 
 			setLocalError(null);
-			onAddEdge?.(parent, child);
+			onAddEdge?.(parent, child, kind);
 		},
-		[edges, onAddEdge],
+		[edges, bodyOf, onAddEdge],
 	);
 
 	// A refusal is about the connection just attempted, so it goes stale the
@@ -329,7 +595,7 @@ function CanvasInner({
 
 	return (
 		<div className="workflow-canvas relative h-full min-h-0 w-full">
-			<ReactFlow<StepFlowNode, DependencyFlowEdge>
+			<ReactFlow<CanvasNode, DependencyFlowEdge>
 				nodes={nodes}
 				edges={flowEdges}
 				nodeTypes={NODE_TYPES}
@@ -337,6 +603,7 @@ function CanvasInner({
 				onNodesChange={onNodesChange}
 				onConnect={onConnect}
 				onNodeClick={(_event, node) => {
+					if (node.type === "loopGroup") return;
 					setSelectedEdgeId(null);
 					onSelect(node.id);
 				}}
@@ -373,6 +640,20 @@ function CanvasInner({
 				    to land outside the viewport. */}
 				<AutoFit signature={graphNodes.map((node) => node.id).join(",")} />
 				<Panel position="top-right" className="!m-2 flex items-center gap-2">
+					{!editable && hasLoops && (
+						<button
+							type="button"
+							onClick={() => setExpandLoops((open) => !open)}
+							title={
+								expandLoops
+									? "Collapse each loop back to one box per step. Passes ran one after another, so one box is the honest shape."
+									: "Draw every pass as its own box. They ran in sequence, not at once — this is a history laid out sideways."
+							}
+							className="rounded border border-app-line bg-app-dark-box px-1.5 py-0.5 text-[10px] text-ink-faint hover:text-ink-dull"
+						>
+							{expandLoops ? "Collapse passes" : "Expand passes"}
+						</button>
+					)}
 					{Object.keys(dragged).length > 0 && (
 						<button
 							type="button"
@@ -385,7 +666,9 @@ function CanvasInner({
 					)}
 					<span className="rounded border border-app-line bg-app-dark-box px-1.5 py-0.5 text-[10px] text-ink-faint">
 						{editable
-							? "Drag a handle onto another step to make it wait. Click a line to remove it."
+							? hasLoops
+								? "Drag a handle onto another step to make it wait. A loop's exit step has two: converged, and gave up. Click a line to remove it."
+								: "Drag a handle onto another step to make it wait. Click a line to remove it."
 							: "Read-only — this run already happened."}
 					</span>
 				</Panel>
@@ -408,14 +691,21 @@ function CanvasInner({
  * against. On the canvas there is, and the branch key is already a badge, so
  * repeating it in the title spends the one line of headroom a node has on a
  * word the reader has just read.
+ *
+ * A loop's later passes are titled `… (iteration 2)` for the same reason and
+ * stripped here for the same one: the pass counter already says it.
  */
 function withoutBranchSuffix(task: TaskItem): string {
+	let title = task.title;
 	const branch = task.fan_out_branch_key;
-	if (!branch) return task.title;
-	const suffix = ` [${branch}]`;
-	return task.title.endsWith(suffix)
-		? task.title.slice(0, -suffix.length)
-		: task.title;
+	if (branch) {
+		const suffix = ` [${branch}]`;
+		if (title.endsWith(suffix)) title = title.slice(0, -suffix.length);
+	}
+	if (task.loop_iteration != null) {
+		title = title.replace(/\s*\(iteration \d+\)$/, "");
+	}
+	return title;
 }
 
 /**

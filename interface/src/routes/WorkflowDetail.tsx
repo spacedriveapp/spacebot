@@ -10,6 +10,7 @@ import {
 	type SaveBindingRequest,
 	type SaveStepRequest,
 	type SaveWorkflowRequest,
+	type StepEdgeRequest,
 	type WorkflowDetailResponse,
 	type WorkflowStep,
 } from "@/api/client";
@@ -86,12 +87,11 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 		},
 	});
 	const addEdge = useMutation({
-		mutationFn: (body: {parent_step_key: string; child_step_key: string}) =>
-			api.addWorkflowEdge(workflowId, body),
+		mutationFn: (body: StepEdgeRequest) => api.addWorkflowEdge(workflowId, body),
 		onSuccess: absorb,
 	});
 	const removeEdge = useMutation({
-		mutationFn: (body: {parent_step_key: string; child_step_key: string}) =>
+		mutationFn: (body: StepEdgeRequest) =>
 			api.removeWorkflowEdge(workflowId, body),
 		onSuccess: absorb,
 	});
@@ -144,11 +144,24 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 	// Wiring is reachable two ways — dragged on the canvas, or picked in the
 	// panel — and both are the same call. Hoisting them here is what keeps a
 	// refusal readable in whichever half of the screen the author was using.
+	// `kind` is which way out of a loop the edge is: `normal` for converging,
+	// `on_exhausted` for giving up. Defaulted rather than optional at the call
+	// sites, because an edge sent with no kind is a `normal` one — and a give-up
+	// edge that silently arrived as normal would be the exact merge the two arms
+	// exist to prevent.
 	const onAddEdge = useCallback(
-		(parentKey: string, childKey: string) => {
+		(
+			parentKey: string,
+			childKey: string,
+			kind: "normal" | "on_exhausted" = "normal",
+		) => {
 			addEdge.reset();
 			removeEdge.reset();
-			addEdge.mutate({parent_step_key: parentKey, child_step_key: childKey});
+			addEdge.mutate({
+				parent_step_key: parentKey,
+				child_step_key: childKey,
+				kind,
+			});
 		},
 		[addEdge, removeEdge],
 	);

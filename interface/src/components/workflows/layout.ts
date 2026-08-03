@@ -22,7 +22,15 @@ import {orderSteps, parentsByStep} from "./graph";
 
 /** Node box, in flow units. Shared with the node component's CSS. */
 export const NODE_WIDTH = 232;
-export const NODE_HEIGHT = 92;
+/**
+ * Tall enough for a fourth line.
+ *
+ * A step in a loop body has something to say that an ordinary step does not —
+ * which body it is in on the editor, which pass it is on and how the loop came
+ * out on a run — and squeezing that into the badge row meant the status pill
+ * and the pass counter fighting for the same 210 pixels.
+ */
+export const NODE_HEIGHT = 106;
 
 /**
  * Exported so a second canvas laying out a different kind of node still lands
@@ -44,6 +52,60 @@ const BRANCH_GAP = 14;
 export interface NodePosition {
 	x: number;
 	y: number;
+}
+
+/**
+ * Breathing room between a loop body's outermost node and the region drawn
+ * around it, and the strip at the top the region's caption sits in.
+ */
+export const LOOP_PADDING_X = 22;
+export const LOOP_PADDING_Y = 16;
+export const LOOP_HEADER = 26;
+
+export interface LoopRegion {
+	group: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/**
+ * A box behind each loop body, big enough to hold every node in it.
+ *
+ * The body is the unit that repeats, and nothing else on the canvas says so: a
+ * two-step body wired in a line is drawn exactly like two ordinary steps wired
+ * in a line, so a template that loops and one that does not are the same
+ * picture. The region is what makes the difference visible before anything has
+ * run.
+ *
+ * Derived from the laid-out positions rather than from the graph again, so it
+ * cannot disagree with where the nodes actually ended up — including after a
+ * drag, which is precisely when a stale box would be most obviously wrong.
+ */
+export function loopRegions(
+	positions: Map<string, NodePosition>,
+	nodeIdsByGroup: Map<string, string[]>,
+): LoopRegion[] {
+	const regions: LoopRegion[] = [];
+	for (const [group, ids] of nodeIdsByGroup) {
+		const placed = ids
+			.map((id) => positions.get(id))
+			.filter((position): position is NodePosition => position != null);
+		if (placed.length === 0) continue;
+		const left = Math.min(...placed.map((p) => p.x));
+		const top = Math.min(...placed.map((p) => p.y));
+		const right = Math.max(...placed.map((p) => p.x)) + NODE_WIDTH;
+		const bottom = Math.max(...placed.map((p) => p.y)) + NODE_HEIGHT;
+		regions.push({
+			group,
+			x: left - LOOP_PADDING_X,
+			y: top - LOOP_PADDING_Y - LOOP_HEADER,
+			width: right - left + LOOP_PADDING_X * 2,
+			height: bottom - top + LOOP_PADDING_Y * 2 + LOOP_HEADER,
+		});
+	}
+	return regions;
 }
 
 /**

@@ -2,15 +2,25 @@ import {memo} from "react";
 import {Handle, Position, type NodeProps, type Node} from "@xyflow/react";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
+	faCheck,
 	faCircleNodes,
 	faCodeBranch,
+	faHandPaper,
 	faQuoteLeft,
 	faRightToBracket,
+	faRotate,
+	faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
-import type {TaskStatus, WorkflowStep} from "@/api/client";
+import type {
+	LoopArm,
+	LoopResolution,
+	TaskStatus,
+	WorkflowStep,
+} from "@/api/client";
 import {styleFor} from "@/components/tasks/boardColumns";
 import {STATUS_LABEL} from "@/components/tasks/taskTransitions";
 import {NODE_HEIGHT, NODE_WIDTH} from "./layout";
+import {RESOLUTION_HINT, RESOLUTION_SHORT} from "./loops";
 
 /**
  * One step, as a box on the canvas.
@@ -29,6 +39,10 @@ import {NODE_HEIGHT, NODE_WIDTH} from "./layout";
  * stable across renders or React Flow remounts every node, and selection is
  * handled by the canvas's `onNodeClick` instead.
  */
+/** The handle ids the two arms out of a loop are dragged from. */
+export const NORMAL_HANDLE = "normal";
+export const EXHAUSTED_HANDLE = "on_exhausted";
+
 export type StepNodeData = {
 	step: WorkflowStep;
 	bindingCount: number;
@@ -57,6 +71,45 @@ export type StepNodeData = {
 	 * claiming a certainty the run does not have.
 	 */
 	placeholder?: boolean;
+	/**
+	 * Which loop body this step is in, if any, and whether it is the body's exit.
+	 *
+	 * Only the exit step can carry a give-up edge, so only the exit step gets a
+	 * second source handle. Offering one everywhere would make it as easy to
+	 * author an edge launch refuses as one it accepts.
+	 */
+	loopGroup?: string | null;
+	isLoopExit?: boolean;
+	/**
+	 * Whether the canvas takes edits.
+	 *
+	 * The handle captions are an affordance — "drag from here for the give-up
+	 * path" — so on a run, where nothing can be dragged, they are two words of
+	 * clutter sitting on top of the edge labels that say the same thing.
+	 */
+	editable?: boolean;
+	/** Which arms already leave this step, so a wired handle stops advertising itself. */
+	armWired?: {normal: boolean; exhausted: boolean};
+	/**
+	 * An `on_exhausted` edge already leaves this step although it is not a loop
+	 * exit.
+	 *
+	 * The edge endpoint is still drawn — hiding it would leave a template with an
+	 * invisible reason for refusing to launch — and the handle is drawn in error
+	 * so the wrong one is the one that looks wrong.
+	 */
+	strayExhausted?: boolean;
+	/** Run only: which pass of its body this box is showing, and of how many. */
+	pass?: {index: number; total: number} | null;
+	/** Run only: how the loop came out, once it has. */
+	resolution?: LoopResolution | null;
+	/**
+	 * Run only: this task is downstream of a loop and held pending its verdict.
+	 *
+	 * Not backlog. It may never run at all, and which arm it sits on is the whole
+	 * story — see `LoopHoldNotice`.
+	 */
+	heldArm?: {group: string; arm: LoopArm} | null;
 };
 
 export type StepFlowNode = Node<StepNodeData, "step">;
@@ -72,8 +125,30 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 		title,
 		branchKey,
 		placeholder,
+		loopGroup,
+		isLoopExit,
+		editable,
+		armWired,
+		strayExhausted,
+		pass,
+		resolution,
+		heldArm,
 	} = data;
+	// Captioned while it is still an invitation, and not once it has been taken
+	// up: the edge that leaves a wired handle carries its own label, and two
+	// copies of the word "converged" a few pixels apart read as one thing said
+	// twice rather than two things.
+	const showNormalCaption = editable && !armWired?.normal;
+	const showExhaustedCaption = editable && !armWired?.exhausted;
+	// A give-up handle is offered while it can be dragged from, and afterwards
+	// only if something actually leaves by it. On a finished run an empty second
+	// handle is a dot advertising a path this loop never had.
+	const twoHandles = strayExhausted
+		? true
+		: (isLoopExit ?? false) && (editable === true || armWired?.exhausted === true);
 	const style = status && !placeholder ? styleFor(status) : null;
+	const gaveUp =
+		resolution === "exhausted_routed" || resolution === "exhausted_blocked";
 
 	// The border carries the one fact that matters most on that canvas: on the
 	// editor, whether this is the step being edited; on a run, how its task is
@@ -81,17 +156,19 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 	// attributable to a box on the left.
 	const border = selected
 		? "border-accent"
-		: inCycle
+		: inCycle || strayExhausted
 			? "border-status-error"
 			: placeholder
 				? "border-dashed border-ink-faint/50"
-				: status === "blocked"
-					? "border-status-error/60"
-					: status === "done"
-						? "border-status-success/50"
-						: status === "in_progress"
-							? "border-accent/60"
-							: "border-app-line";
+				: heldArm
+					? "border-status-warning/50"
+					: status === "blocked"
+						? "border-status-error/60"
+						: status === "done"
+							? "border-status-success/50"
+							: status === "in_progress"
+								? "border-accent/60"
+								: "border-app-line";
 
 	return (
 		<div
@@ -139,6 +216,67 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 				</div>
 			</div>
 
+			{/* The loop line. Present only for a body step, because for anything else
+			    it would be a blank row of reserved space. */}
+			{(loopGroup || heldArm) && (
+				<div className="flex min-w-0 items-center gap-1">
+					{/* The region drawn behind the body already names the loop, so the
+					    node says only what the region cannot: which of its steps is
+					    the exit, and therefore where both ways out leave from. */}
+					{loopGroup && isLoopExit && (
+						<span
+							className="inline-flex shrink-0 items-center gap-1 rounded-full border border-accent/35 bg-accent/10 px-1.5 py-px text-[9px] text-accent"
+							title={`Loop \`${loopGroup}\` ends here — this step's output decides whether the body goes round again.`}
+						>
+							<FontAwesomeIcon icon={faRotate} className="shrink-0 text-[7px]" />
+							loop exit
+						</span>
+					)}
+					{pass && (
+						<span
+							className="shrink-0 rounded-full border border-app-line bg-app-box/60 px-1.5 py-px text-[9px] text-ink-dull"
+							title={`${pass.total} pass${pass.total === 1 ? "" : "es"} ran, one after another. Pass ${pass.index} is the last. Select this step to read every pass.`}
+						>
+							pass {pass.index} of {pass.total}
+						</span>
+					)}
+					{resolution && (
+						<span
+							className={`inline-flex min-w-0 shrink items-center gap-1 rounded-full border px-1.5 py-px text-[9px] ${
+								resolution === "converged"
+									? "border-status-success/50 bg-status-success/10 text-status-success"
+									: gaveUp
+										? "border-status-warning/50 bg-status-warning/10 text-status-warning"
+										: "border-app-line bg-app-box/60 text-ink-dull"
+							}`}
+							title={RESOLUTION_HINT[resolution]}
+						>
+							<FontAwesomeIcon
+								icon={resolution === "converged" ? faCheck : faTriangleExclamation}
+								className="shrink-0 text-[7px]"
+							/>
+							<span className="truncate">{RESOLUTION_SHORT[resolution]}</span>
+						</span>
+					)}
+					{heldArm && (
+						<span
+							className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-status-warning/50 bg-status-warning/10 px-1.5 py-px text-[9px] text-status-warning"
+							title={
+								heldArm.arm === "on_exhausted"
+									? `Held. This is the give-up arm of loop \`${heldArm.group}\` — it runs only if that loop runs out of passes.`
+									: `Held. This is the ordinary arm of loop \`${heldArm.group}\` — it runs only if that loop converges.`
+							}
+						>
+							<FontAwesomeIcon icon={faHandPaper} className="shrink-0 text-[7px]" />
+							<span className="truncate">
+								held ·{" "}
+								{heldArm.arm === "on_exhausted" ? "gave-up arm" : "converged arm"}
+							</span>
+						</span>
+					)}
+				</div>
+			)}
+
 			<div className="flex min-w-0 items-center gap-1">
 				{placeholder ? (
 					<span
@@ -170,7 +308,9 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 
 				{trouble ? (
 					<span
-						className="min-w-0 flex-1 truncate text-[10px] text-status-error"
+						className={`min-w-0 flex-1 truncate text-[10px] ${
+							heldArm ? "text-status-warning" : "text-status-error"
+						}`}
 						title={trouble}
 					>
 						{trouble}
@@ -194,12 +334,72 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 				)}
 			</div>
 
-			<Handle
-				type="source"
-				position={Position.Right}
-				className="!size-2.5 !border !border-ink-faint !bg-app-box"
-				title="Drag from here onto another step to make it wait for this one"
-			/>
+			{/*
+			 * Leaving a loop.
+			 *
+			 * Converging and running out are opposite results and they leave by
+			 * different edges, so the exit step gets one handle for each and the
+			 * choice is made by which one you drag from — before the edge exists,
+			 * rather than in a dropdown after it. A single handle plus a kind
+			 * picker would make the two paths identical to author and identical to
+			 * mis-author; two labelled handles make them impossible to confuse.
+			 */}
+			{twoHandles ? (
+				<>
+					<Handle
+						id={NORMAL_HANDLE}
+						type="source"
+						position={Position.Right}
+						style={{top: "34%"}}
+						className="!size-3 !border-2 !border-status-success !bg-app-box"
+						title="Drag from here for the path taken when the loop converges."
+					/>
+					{showNormalCaption && (
+						<span
+							className="pointer-events-none absolute left-full top-[34%] ml-1.5 -translate-y-[135%] whitespace-nowrap rounded-full border border-status-success/50 bg-app-dark-box px-1.5 text-[9px] text-status-success"
+							aria-hidden
+						>
+							converged
+						</span>
+					)}
+					<Handle
+						id={EXHAUSTED_HANDLE}
+						type="source"
+						position={Position.Right}
+						style={{top: "74%"}}
+						className={`!size-3 !border-2 !bg-app-box ${
+							strayExhausted
+								? "!border-status-error"
+								: "!border-status-warning"
+						}`}
+						title={
+							strayExhausted
+								? "This step is not a loop exit, so a give-up edge from it cannot be honoured. Launch will refuse it."
+								: "Drag from here for the path taken when the loop runs out of passes."
+						}
+					/>
+					{(showExhaustedCaption || strayExhausted) && (
+						<span
+							className={`pointer-events-none absolute left-full top-[74%] ml-1.5 -translate-y-[135%] whitespace-nowrap rounded-full border bg-app-dark-box px-1.5 text-[9px] ${
+								strayExhausted
+									? "border-status-error/60 text-status-error"
+									: "border-status-warning/60 text-status-warning"
+							}`}
+							aria-hidden
+						>
+							{strayExhausted ? "not a loop exit" : "gave up"}
+						</span>
+					)}
+				</>
+			) : (
+				<Handle
+					id={NORMAL_HANDLE}
+					type="source"
+					position={Position.Right}
+					className="!size-2.5 !border !border-ink-faint !bg-app-box"
+					title="Drag from here onto another step to make it wait for this one"
+				/>
+			)}
 		</div>
 	);
 }

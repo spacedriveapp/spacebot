@@ -722,6 +722,9 @@ export type WorkflowStep = Types.WorkflowStep;
 export type WorkflowEdge = Types.WorkflowEdge;
 export type StepBinding = Types.StepBinding;
 export type BindingSource = Types.BindingSource;
+/** Which way out of a loop an edge — and the task behind it — is on. */
+export type LoopArm = Types.LoopArm;
+export type LoopResolution = Types.LoopResolution;
 export type WorkflowListResponse = Types.WorkflowListResponse;
 export type WorkflowResponse = Types.WorkflowResponse;
 export type WorkflowDetailResponse = Types.WorkflowDetailResponse;

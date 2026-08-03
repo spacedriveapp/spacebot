@@ -1,4 +1,5 @@
 import type {TaskItem, WorkflowEdge, WorkflowStep} from "@/api/client";
+import {sortPasses} from "./loops";
 
 /**
  * Put the steps in the order they will actually run.
@@ -96,8 +97,22 @@ export function orderSteps(
 export interface RunNode {
 	id: string;
 	stepKey: string;
-	/** `null` only when the run has produced no task for the step. */
+	/**
+	 * The task this box stands for. `null` only when the run has produced none.
+	 *
+	 * For a collapsed loop it is the *latest* pass — the one whose status and
+	 * resolution describe where the loop currently stands.
+	 */
 	task: TaskItem | null;
+	/**
+	 * Every pass behind this box, oldest first.
+	 *
+	 * One entry for an ordinary step or one fan-out branch. Several only for a
+	 * loop body step, where they are the same step run again, not siblings.
+	 */
+	passes: TaskItem[];
+	/** Whether this box is a loop body step drawn collapsed. */
+	collapsedLoop: boolean;
 }
 
 /** Node id for one task of a step. Unique per run; the step key is not. */
@@ -105,23 +120,83 @@ export function runNodeId(stepKey: string, taskNumber: number): string {
 	return `${stepKey}#${taskNumber}`;
 }
 
+export interface RunNodeOptions {
+	/**
+	 * Draw a loop's passes as separate boxes instead of one.
+	 *
+	 * Off by default, and that default is the point — see `runNodes`.
+	 */
+	expandLoops?: boolean;
+}
+
 /**
  * Expand the template's steps into the nodes a run actually has.
  *
  * With no tasks — the editor — every step yields exactly one node whose id is
  * its step key, so nothing about the template canvas changes.
+ *
+ * Two things grow a run's graph after launch and they are drawn differently on
+ * purpose, because they mean opposite things:
+ *
+ *   - `fan_out_branch_key` is a *parallel* branch. Three audits ran at once and
+ *     all three are part of the answer, so they are three boxes.
+ *   - `loop_iteration` is a *sequential* pass. Pass 2 exists only because pass 1
+ *     did not converge, and only the last one feeds anything downstream. Drawn
+ *     as three boxes side by side it is indistinguishable from a fan-out — a
+ *     picture of three things happening together, when what happened was one
+ *     thing three times. So the passes collapse into one box that says which
+ *     pass it is on, and the panel carries the history.
+ *
+ * Confusing the two is the whole bug this exists to avoid, hence the split on
+ * `loop_iteration` and nothing else.
  */
 export function runNodes(
 	steps: WorkflowStep[],
 	tasksByStep?: Map<string, TaskItem[]>,
+	options?: RunNodeOptions,
 ): RunNode[] {
 	const nodes: RunNode[] = [];
 	for (const step of steps) {
 		const tasks = tasksByStep?.get(step.step_key) ?? [];
 		if (tasks.length === 0) {
-			nodes.push({id: step.step_key, stepKey: step.step_key, task: null});
+			nodes.push({
+				id: step.step_key,
+				stepKey: step.step_key,
+				task: null,
+				passes: [],
+				collapsedLoop: false,
+			});
 			continue;
 		}
+
+		const looping =
+			!options?.expandLoops &&
+			tasks.some((task) => task.loop_iteration != null);
+
+		if (looping) {
+			// A step cannot be both a loop body and a fan-out — the server refuses
+			// it — so in practice this is one bucket. Keying by branch anyway keeps
+			// the collapse from ever merging two genuinely parallel things.
+			const byBranch = new Map<string, TaskItem[]>();
+			for (const task of tasks) {
+				const branch = task.fan_out_branch_key ?? "";
+				const list = byBranch.get(branch);
+				if (list) list.push(task);
+				else byBranch.set(branch, [task]);
+			}
+			for (const [branch, group] of byBranch) {
+				const passes = sortPasses(group);
+				nodes.push({
+					id: branch ? `${step.step_key}@${branch}` : step.step_key,
+					stepKey: step.step_key,
+					task: passes[passes.length - 1],
+					passes,
+					collapsedLoop: true,
+				});
+			}
+			continue;
+		}
+
 		// Task number is creation order, which for a fan-out is item order — the
 		// branches read top to bottom in the order the upstream array listed them.
 		for (const task of [...tasks].sort((a, b) => a.task_number - b.task_number)) {
@@ -129,6 +204,8 @@ export function runNodes(
 				id: runNodeId(step.step_key, task.task_number),
 				stepKey: step.step_key,
 				task,
+				passes: [task],
+				collapsedLoop: false,
 			});
 		}
 	}
