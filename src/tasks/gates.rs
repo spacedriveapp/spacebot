@@ -119,6 +119,37 @@ impl GateResult {
     }
 }
 
+/// What a *false* answer from a gate means.
+///
+/// The entire difference between "is CI green yet?" and "should this branch
+/// run?". The two ask the same predicate with opposite failure modes: waiting
+/// forever is correct for the first and a deadlock for the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GateDisposition {
+    /// Not yet. Poll again — the behaviour every gate had before this existed.
+    Wait,
+    /// No. This step does not apply; it is settled and will never run.
+    Route,
+}
+
+impl GateDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateDisposition::Wait => "wait",
+            GateDisposition::Route => "route",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "wait" => Some(GateDisposition::Wait),
+            "route" => Some(GateDisposition::Route),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskGate {
     pub id: String,
@@ -133,6 +164,11 @@ pub struct TaskGate {
     pub last_result: GateResult,
     pub last_detail: Option<String>,
     pub consecutive_errors: i64,
+    /// What a false answer means, or `None` to derive it — see
+    /// [`TaskGate::disposition_for`]. Nullable on purpose: a field the author
+    /// has to set correctly for the graph not to deadlock is a field that will
+    /// eventually be set wrong.
+    pub disposition: Option<GateDisposition>,
     pub created_at: String,
 }
 
@@ -252,6 +288,7 @@ impl GateStore {
         &self.pool
     }
 
+    /// Store a gate. `disposition` of `None` means derive it at poll time.
     pub async fn create(
         &self,
         task_number: i64,
@@ -259,12 +296,13 @@ impl GateStore {
         config: &Value,
         label: Option<&str>,
         poll_interval_secs: i64,
+        disposition: Option<GateDisposition>,
     ) -> Result<TaskGate> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO task_gates \
-                 (id, task_number, kind, config, label, poll_interval_secs) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+                 (id, task_number, kind, config, label, poll_interval_secs, disposition) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(task_number)
@@ -272,6 +310,7 @@ impl GateStore {
         .bind(config.to_string())
         .bind(label)
         .bind(poll_interval_secs)
+        .bind(disposition.map(GateDisposition::as_str))
         .execute(&self.pool)
         .await
         .context("failed to create task gate")?;
@@ -302,6 +341,20 @@ impl GateStore {
         rows.into_iter().map(gate_from_row).collect()
     }
 
+    /// Drop every gate on one task. Returns how many were removed.
+    ///
+    /// For the paths that destroy the task itself — a rolled-back launch, in
+    /// particular. A gate whose task is gone is a stored, repeating, outbound
+    /// request nobody can see or cancel.
+    pub async fn delete_for_task(&self, task_number: i64) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM task_gates WHERE task_number = ?")
+            .bind(task_number)
+            .execute(&self.pool)
+            .await
+            .context("failed to delete the gates of a task")?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM task_gates WHERE id = ?")
             .bind(id)
@@ -316,11 +369,22 @@ impl GateStore {
     /// Filters on `last_result` in SQL rather than fetching everything and
     /// deciding in Rust, because the whole point of latching `satisfied` and
     /// parking `failed` is that they cost nothing afterwards.
+    ///
+    /// Gates on a settled task are excluded for the same reason. A gate governs
+    /// *promotion*, and a task that is done or skipped will not be promoted
+    /// again, so asking its endpoint once a minute forever is pure waste. It is
+    /// also what stops a `route` gate from re-deciding a branch it has already
+    /// settled: the poll that skipped the task is the last one it gets.
     pub async fn due_for_poll(&self, now_unix: i64) -> Result<Vec<TaskGate>> {
         let rows = sqlx::query(&format!(
-            "{SELECT_COLUMNS} FROM task_gates \
-             WHERE last_result IN ('pending', 'erroring') \
-             ORDER BY last_checked_at IS NOT NULL, last_checked_at ASC"
+            "{SELECT_COLUMNS} FROM task_gates g \
+             WHERE g.last_result IN ('pending', 'erroring') \
+               AND EXISTS (\
+                 SELECT 1 FROM tasks t \
+                  WHERE t.task_number = g.task_number \
+                    AND t.status NOT IN {settled}) \
+             ORDER BY g.last_checked_at IS NOT NULL, g.last_checked_at ASC",
+            settled = crate::tasks::store::SETTLED_STATUSES
         ))
         .fetch_all(&self.pool)
         .await
@@ -412,6 +476,56 @@ impl TaskGate {
         now_unix - checked >= interval
     }
 
+    /// What a false answer from this gate means, given the source's status.
+    ///
+    /// `source_status` is the status of the task a `task_output` gate reads,
+    /// and is `None` for an `http` gate or a source that has vanished.
+    ///
+    /// The derivation is a fact rather than a heuristic: it asks whether the
+    /// input can still change, which is precisely what separates "not yet"
+    /// from "no". A settled source cannot produce a different answer later, so
+    /// a false predicate against it is final. An http endpoint, or a source
+    /// still running, can — so it waits.
+    ///
+    /// "Settled" here is [`TaskStatus::is_terminal`], which includes `skipped`
+    /// as well as `done`. A source that will never run has answered just as
+    /// definitively as one that finished, and treating it as "still might
+    /// change" would leave the gated step waiting on a task nothing will ever
+    /// touch — the exact deadlock this feature exists to remove.
+    pub fn disposition_for(
+        &self,
+        source_status: Option<crate::tasks::TaskStatus>,
+    ) -> GateDisposition {
+        // The override wins outright. It exists for what the derivation cannot
+        // see: an http gate polling a decision endpoint that really is final,
+        // or a task_output condition that should hold the whole pipeline rather
+        // than skip past it.
+        if let Some(explicit) = self.disposition {
+            return explicit;
+        }
+
+        match self.kind {
+            GateKind::TaskOutput
+                if source_status.is_some_and(crate::tasks::TaskStatus::is_terminal) =>
+            {
+                GateDisposition::Route
+            }
+            _ => GateDisposition::Wait,
+        }
+    }
+
+    /// Whether this result settles the gated task as "does not apply".
+    ///
+    /// The disposition and the result answer different halves of one question,
+    /// and this is the only place they are combined.
+    pub fn routes_away(
+        &self,
+        source_status: Option<crate::tasks::TaskStatus>,
+        result: GateResult,
+    ) -> bool {
+        should_route(self.disposition_for(source_status), result)
+    }
+
     /// One line explaining why this gate is holding the task.
     pub fn explain(&self) -> String {
         let name = self
@@ -437,6 +551,130 @@ impl TaskGate {
             }
         }
     }
+}
+
+/// What one polled gate turned out to be, for whoever is logging.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatePoll {
+    pub gate_id: String,
+    pub task_number: i64,
+    /// What it said last time, so only changes need reporting.
+    pub previous: GateResult,
+    pub result: GateResult,
+    pub detail: String,
+    /// The task was settled by this poll: the condition does not hold and the
+    /// gate's disposition says that means "does not apply" rather than
+    /// "not yet". Carries the reason written to `skip_reason`.
+    pub skipped: Option<String>,
+}
+
+/// Evaluate every gate that is due and act on what it found.
+///
+/// Lives here rather than in the cortex loop so the decision — evaluate,
+/// record, and possibly settle the task — can be tested without standing up an
+/// agent. The caller's job is reduced to logging and emitting events, which is
+/// the part that genuinely needs the process around it.
+pub async fn poll_gates_once(
+    tasks: &crate::tasks::TaskStore,
+    gates: &GateStore,
+    now_unix: i64,
+) -> Result<Vec<GatePoll>> {
+    let due = gates.due_for_poll(now_unix).await?;
+    let mut polled = Vec::with_capacity(due.len());
+
+    for gate in due {
+        // The source is read once and kept, because two questions are asked of
+        // it: what does the pointer say, and can it still change? Reading it
+        // twice would let the answers come from different moments.
+        let source = match gate.kind {
+            GateKind::Http => None,
+            GateKind::TaskOutput => {
+                // Fresh rather than cached: the whole point of the gate is that
+                // it is waiting for that value to change.
+                match gate.config.get("task_number").and_then(Value::as_i64) {
+                    Some(number) => tasks.get_by_number(number).await.ok().flatten(),
+                    None => None,
+                }
+            }
+        };
+
+        let evaluation = match gate.kind {
+            GateKind::Http => evaluate_http(&gate.config).await,
+            GateKind::TaskOutput => evaluate_task_output(
+                &gate.config,
+                source.as_ref().and_then(|task| task.outputs.as_ref()),
+            ),
+        };
+
+        let previous = gate.last_result;
+        let result = evaluation.result;
+        if let Err(error) = gates.record_evaluation(&gate.id, &evaluation).await {
+            tracing::warn!(%error, gate_id = %gate.id, "failed to record gate evaluation");
+            continue;
+        }
+
+        // The one thing this pass does that it did not do before.
+        //
+        // A gate whose disposition resolves to `route` is not asking "has it
+        // happened yet" — it is asking "does this step apply", and the answer
+        // is no. So the task is settled rather than polled again. Everything
+        // else is unchanged: the backoff, the error limit, and all four result
+        // states mean exactly what they meant.
+        let mut skipped = None;
+        if gate.routes_away(source.as_ref().map(|task| task.status), result) {
+            let name = gate
+                .label
+                .clone()
+                .unwrap_or_else(|| gate.kind.as_str().to_string());
+            let reason = format!("condition `{name}` does not hold: {}", evaluation.detail);
+            match tasks.skip_task(gate.task_number, &reason).await {
+                Ok(true) => skipped = Some(reason),
+                // Already settled, or already done. The sweep and this pass
+                // racing over one branch is the ordinary case, not a fault.
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_number = gate.task_number,
+                    gate_id = %gate.id,
+                    "failed to settle a task whose condition does not hold"
+                ),
+            }
+        }
+
+        polled.push(GatePoll {
+            gate_id: gate.id,
+            task_number: gate.task_number,
+            previous,
+            result,
+            detail: evaluation.detail,
+            skipped,
+        });
+    }
+
+    Ok(polled)
+}
+
+/// Whether this evaluation settles the gated task as "does not apply".
+///
+/// The single place the routing rule is written, and the single place
+/// `erroring` is kept out of it.
+///
+/// Under `route`, the source cannot change its mind — that is what derived the
+/// disposition, or what the author asserted by overriding it — so `pending` is
+/// not "not yet", it is "we asked and the answer was not yes". `failed` is the
+/// same answer stated more firmly. Both settle the branch.
+///
+/// `erroring` never does, and this is the most important line in the feature.
+/// It means *we could not tell*: DNS failed, the endpoint 404s, the config is
+/// wrong. Being unable to reach CI is not CI saying no, and skipping a branch
+/// because a lookup failed would silently drop work nobody asked to drop. An
+/// unreachable gate backs off and eventually stops polling for a person to
+/// look at, exactly as it did before.
+///
+/// `satisfied` is not a false answer at all — the gate opened and the step runs.
+pub fn should_route(disposition: GateDisposition, result: GateResult) -> bool {
+    disposition == GateDisposition::Route
+        && matches!(result, GateResult::Pending | GateResult::Failed)
 }
 
 /// Evaluate an HTTP gate.
@@ -599,7 +837,7 @@ fn failed_or_pending(config: &Value) -> GateResult {
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, task_number, kind, config, label, poll_interval_secs, \
-     last_checked_at, last_result, last_detail, consecutive_errors, created_at";
+     last_checked_at, last_result, last_detail, consecutive_errors, disposition, created_at";
 
 /// Row → gate, for callers outside this module.
 ///
@@ -632,6 +870,12 @@ fn gate_from_row(row: sqlx::sqlite::SqliteRow) -> Result<TaskGate> {
         last_result: GateResult::parse(&last_result).unwrap_or(GateResult::Pending),
         last_detail: row.try_get("last_detail").ok().flatten(),
         consecutive_errors: row.try_get("consecutive_errors").unwrap_or(0),
+        disposition: row
+            .try_get::<Option<String>, _>("disposition")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(GateDisposition::parse),
         created_at: row
             .try_get("created_at")
             .context("failed to read gate created_at")?,
@@ -674,6 +918,7 @@ mod tests {
             last_result: result,
             last_detail: None,
             consecutive_errors: errors,
+            disposition: None,
             created_at: "2026-08-03T00:00:00Z".into(),
         }
     }
@@ -834,6 +1079,253 @@ mod tests {
         assert!(
             !text.contains("will not open"),
             "unreachable must not read as a negative answer: {text}"
+        );
+    }
+
+    // -- Disposition --------------------------------------------------------
+
+    /// The derivation, which is the reason this field can be left unset.
+    ///
+    /// It is a fact rather than a heuristic: it asks whether the input can
+    /// still change, which is exactly what separates "not yet" from "no". A
+    /// source still running can produce a different answer later, so a false
+    /// predicate against it waits. A source that has settled cannot, so a false
+    /// predicate against it is final and routes the branch away.
+    ///
+    /// If this regresses in the `wait` direction, a decided branch deadlocks.
+    /// If it regresses in the `route` direction, a step is skipped while the
+    /// task it reads is still working.
+    #[test]
+    fn a_condition_waits_while_its_source_can_still_change_and_routes_once_it_cannot() {
+        let mut gate = gate(GateResult::Pending, 0, None);
+        gate.kind = GateKind::TaskOutput;
+
+        for still_going in [
+            crate::tasks::TaskStatus::Backlog,
+            crate::tasks::TaskStatus::Ready,
+            crate::tasks::TaskStatus::InProgress,
+            crate::tasks::TaskStatus::Blocked,
+            crate::tasks::TaskStatus::PendingApproval,
+        ] {
+            assert_eq!(
+                gate.disposition_for(Some(still_going)),
+                GateDisposition::Wait,
+                "{still_going} can still produce the value"
+            );
+        }
+
+        assert_eq!(
+            gate.disposition_for(Some(crate::tasks::TaskStatus::Done)),
+            GateDisposition::Route,
+            "a finished source will not change its mind"
+        );
+        assert_eq!(
+            gate.disposition_for(Some(crate::tasks::TaskStatus::Skipped)),
+            GateDisposition::Route,
+            "a source that will never run has answered just as definitively as \
+             one that finished — treating it as 'might still change' is the \
+             deadlock this feature removes"
+        );
+
+        // An http gate has no source task at all, so nothing here can say the
+        // answer is final. It waits, which is what every gate did before.
+        let mut external = gate.clone();
+        external.kind = GateKind::Http;
+        assert_eq!(external.disposition_for(None), GateDisposition::Wait);
+        assert_eq!(
+            gate.disposition_for(None),
+            GateDisposition::Wait,
+            "a task_output gate whose source has vanished must not route on a guess"
+        );
+    }
+
+    /// The override beats the derivation, in both directions.
+    ///
+    /// It exists for what the derivation cannot see: an http endpoint whose
+    /// answer really is final, and a condition on a finished task that should
+    /// hold the whole pipeline for a person rather than skip past it.
+    #[test]
+    fn an_explicit_disposition_beats_the_derivation() {
+        let mut external = gate(GateResult::Pending, 0, None);
+        external.kind = GateKind::Http;
+        external.disposition = Some(GateDisposition::Route);
+        assert_eq!(
+            external.disposition_for(None),
+            GateDisposition::Route,
+            "an author may declare an external answer final"
+        );
+
+        let mut settled_source = gate(GateResult::Pending, 0, None);
+        settled_source.kind = GateKind::TaskOutput;
+        settled_source.disposition = Some(GateDisposition::Wait);
+        assert_eq!(
+            settled_source.disposition_for(Some(crate::tasks::TaskStatus::Done)),
+            GateDisposition::Wait,
+            "an author may hold the pipeline instead of skipping past it"
+        );
+    }
+
+    /// The most load-bearing line in the feature.
+    ///
+    /// `erroring` means *we could not tell*: DNS failed, the endpoint 404s, the
+    /// config is wrong. It is our problem, not an answer. Routing on it would
+    /// skip branches because a lookup failed — silently dropping work nobody
+    /// asked to drop, with no record of the decision beyond "condition did not
+    /// hold". No disposition, explicit or derived, may make that happen.
+    #[test]
+    fn an_unreachable_condition_never_routes_however_it_is_configured() {
+        for disposition in [GateDisposition::Wait, GateDisposition::Route] {
+            assert!(
+                !should_route(disposition, GateResult::Erroring),
+                "being unable to reach the endpoint is not the endpoint saying no"
+            );
+            assert!(
+                !should_route(disposition, GateResult::Satisfied),
+                "a satisfied condition is not a false answer at all"
+            );
+        }
+
+        assert!(should_route(GateDisposition::Route, GateResult::Pending));
+        assert!(should_route(GateDisposition::Route, GateResult::Failed));
+        for result in [GateResult::Pending, GateResult::Failed] {
+            assert!(
+                !should_route(GateDisposition::Wait, result),
+                "a waiting gate holds the task; it never settles it"
+            );
+        }
+
+        let mut erroring = gate(GateResult::Erroring, 2, None);
+        erroring.kind = GateKind::TaskOutput;
+        assert!(
+            !erroring.routes_away(Some(crate::tasks::TaskStatus::Done), GateResult::Erroring),
+            "a settled source derives `route`, and it still must not route on an error"
+        );
+    }
+
+    /// The poller's one new behaviour, end to end over a real store.
+    ///
+    /// A `route` condition whose predicate is decidedly false settles its task
+    /// with a reason naming the pointer and what was found there — and the same
+    /// predicate under `wait` leaves the task exactly where it was.
+    #[tokio::test]
+    async fn a_route_condition_that_does_not_hold_settles_its_task_and_a_waiting_one_does_not() {
+        let tasks = crate::tasks::store::setup_test_store().await;
+        let gates = GateStore::new(tasks.pool().clone());
+
+        let decider = tasks
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".into(),
+                assigned_agent_id: "agent-test".into(),
+                title: "did the deploy go red?".into(),
+                status: crate::tasks::TaskStatus::InProgress,
+                created_by: "branch".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+        let mut branch = Vec::new();
+        for title in ["rollback", "hold for a person"] {
+            branch.push(
+                tasks
+                    .create(crate::tasks::CreateTaskInput {
+                        owner_agent_id: "agent-test".into(),
+                        assigned_agent_id: "agent-test".into(),
+                        title: title.into(),
+                        status: crate::tasks::TaskStatus::Backlog,
+                        created_by: "branch".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        tasks
+            .submit_outputs(decider.task_number, &serde_json::json!({"state": "green"}))
+            .await
+            .expect("outputs");
+        tasks
+            .update(
+                decider.task_number,
+                crate::tasks::UpdateTaskInput {
+                    status: Some(crate::tasks::TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("finish")
+            .expect("exists");
+
+        let config = json!({
+            "task_number": decider.task_number,
+            "pointer": "/state",
+            "equals": "red",
+        });
+        gates
+            .create(
+                branch[0].task_number,
+                GateKind::TaskOutput,
+                &config,
+                Some("deploy went red"),
+                60,
+                None,
+            )
+            .await
+            .expect("routing gate");
+        gates
+            .create(
+                branch[1].task_number,
+                GateKind::TaskOutput,
+                &config,
+                Some("deploy went red"),
+                60,
+                Some(GateDisposition::Wait),
+            )
+            .await
+            .expect("waiting gate");
+
+        // A real clock: `last_checked_at` is written by SQLite's `now`, so a
+        // synthetic epoch would make every gate look checked in the future.
+        let now = chrono::Utc::now().timestamp();
+        let polled = poll_gates_once(&tasks, &gates, now).await.expect("poll");
+        assert_eq!(polled.len(), 2);
+
+        let settled = tasks
+            .get_by_number(branch[0].task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            settled.status,
+            crate::tasks::TaskStatus::Skipped,
+            "a derived-route condition on a finished source settles the branch"
+        );
+        let reason = settled.skip_reason.expect("a settled card says why");
+        assert!(
+            reason.contains("/state") && reason.contains("green"),
+            "the reason has to name the pointer and what was found: {reason}"
+        );
+
+        let held = tasks
+            .get_by_number(branch[1].task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            held.status,
+            crate::tasks::TaskStatus::Backlog,
+            "the same predicate under `wait` holds the task instead of settling it"
+        );
+
+        // And the settled task's gate is not asked again: a decided branch does
+        // not get re-decided, and polling a card nothing will promote is waste.
+        let again = poll_gates_once(&tasks, &gates, now + 3_600)
+            .await
+            .expect("poll");
+        assert_eq!(
+            again.len(),
+            1,
+            "only the still-waiting gate is due; the settled task's is not"
         );
     }
 }

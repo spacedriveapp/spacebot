@@ -29,6 +29,14 @@ pub enum TaskStatus {
     /// question it exists to answer: what needs me?
     Blocked,
     Done,
+    /// Settled without running, and never will. `skip_reason` says why.
+    ///
+    /// A branch that was not taken is part of what happened, so the card stays
+    /// rather than being deleted. Terminal, and deliberately with no un-skip:
+    /// a task that could come back would make "settled" mean nothing to the
+    /// dependency rule below it, and would put the ready sweep back into the
+    /// promote/re-block loop it already escaped once.
+    Skipped,
 }
 
 /// Why a task is parked.
@@ -138,13 +146,14 @@ pub fn parse_filer_task_number(created_by: &str) -> Option<i64> {
 pub const BLOCK_RECURRENCE_LIMIT: i64 = 2;
 
 impl TaskStatus {
-    pub const ALL: [TaskStatus; 6] = [
+    pub const ALL: [TaskStatus; 7] = [
         TaskStatus::PendingApproval,
         TaskStatus::Backlog,
         TaskStatus::Ready,
         TaskStatus::InProgress,
         TaskStatus::Blocked,
         TaskStatus::Done,
+        TaskStatus::Skipped,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -155,6 +164,7 @@ impl TaskStatus {
             TaskStatus::InProgress => "in_progress",
             TaskStatus::Blocked => "blocked",
             TaskStatus::Done => "done",
+            TaskStatus::Skipped => "skipped",
         }
     }
 
@@ -166,17 +176,38 @@ impl TaskStatus {
             "in_progress" => Some(TaskStatus::InProgress),
             "blocked" => Some(TaskStatus::Blocked),
             "done" => Some(TaskStatus::Done),
+            "skipped" => Some(TaskStatus::Skipped),
             _ => None,
         }
     }
 
     /// Whether this status is an end state — nothing further will move the
     /// task on its own. Used as the gate predicate for dependency edges: a
-    /// child is eligible only once every parent is terminal.
+    /// child is eligible only once every parent is *settled*, which is not the
+    /// same as every parent having succeeded.
+    ///
+    /// The SQL half of exactly this rule is [`SETTLED_STATUSES`], and the two
+    /// must agree. A parent that will never run holds nothing back: it has
+    /// answered the only question a dependency edge asks.
     pub fn is_terminal(self) -> bool {
-        matches!(self, TaskStatus::Done)
+        matches!(self, TaskStatus::Done | TaskStatus::Skipped)
     }
 }
+
+/// The SQL list of statuses that satisfy a dependency edge — the *one* place
+/// "settled" is written down for the database.
+///
+/// This predicate governs whether a child may be promoted, whether it may be
+/// claimed, whether a fan-out may expand, and whether a loop iteration has
+/// finished. It appeared nine times as a hand-copied `<> 'done'` literal, and
+/// nine copies is how one of them gets missed — which would produce a task
+/// waiting forever on a parent that will never run, i.e. exactly the deadlock
+/// this feature removes, reintroduced somewhere much harder to find.
+///
+/// Interpolated with an alias, e.g. `format!("p.status NOT IN {SETTLED_STATUSES}")`.
+/// Kept in step with [`TaskStatus::is_terminal`], which is the same rule for
+/// callers that already have the row in hand.
+pub const SETTLED_STATUSES: &str = "('done', 'skipped')";
 
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -339,6 +370,13 @@ pub struct Task {
     pub awaiting_loop_group: Option<String>,
     /// Which arm of that branch this task is on.
     pub awaiting_loop_arm: Option<LoopArm>,
+    /// Why this task will never run, when its status is `skipped`.
+    ///
+    /// Its own field rather than a second meaning for `block_reason`: a block
+    /// is a stop that recovers, and it drags in `block_kind`, the sticky kinds,
+    /// the recurrence limiter, and the unblock path — none of which applies to
+    /// a branch that was simply not taken.
+    pub skip_reason: Option<String>,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -1133,13 +1171,14 @@ impl TaskStore {
     /// puts it there directly, and "never claimed" has to hold however it
     /// arrived rather than only on the path we remembered to guard.
     pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
              AND fan_out_placeholder = 0 \
              AND NOT EXISTS (\
                SELECT 1 FROM task_dependencies d \
                  JOIN tasks p ON p.task_number = d.parent_task_number \
-                WHERE d.child_task_number = tasks.task_number AND p.status <> 'done') \
+                WHERE d.child_task_number = tasks.task_number \
+                  AND p.status NOT IN {SETTLED_STATUSES}) \
              ORDER BY CASE priority \
                WHEN 'critical' THEN 0 \
                WHEN 'high' THEN 1 \
@@ -1147,8 +1186,8 @@ impl TaskStore {
                WHEN 'low' THEN 3 \
                ELSE 4 END ASC, \
              task_number ASC \
-             LIMIT 1",
-        )
+             LIMIT 1"
+        ))
         .bind(assigned_agent_id)
         .fetch_optional(&self.pool)
         .await
@@ -1161,7 +1200,7 @@ impl TaskStore {
         let task_number: i64 = row
             .try_get("task_number")
             .context("failed to read task_number from ready task row")?;
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE tasks SET status = 'in_progress', \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE task_number = ? AND status = 'ready' \
@@ -1169,8 +1208,9 @@ impl TaskStore {
              AND NOT EXISTS (\
                SELECT 1 FROM task_dependencies d \
                  JOIN tasks p ON p.task_number = d.parent_task_number \
-                WHERE d.child_task_number = tasks.task_number AND p.status <> 'done')",
-        )
+                WHERE d.child_task_number = tasks.task_number \
+                  AND p.status NOT IN {SETTLED_STATUSES})"
+        ))
         .bind(task_number)
         .execute(&self.pool)
         .await
@@ -1431,7 +1471,7 @@ impl TaskStore {
     /// so this returns the entire adjacency summary and lets the caller index
     /// into it. Tasks with no edges are absent rather than present with zeroes.
     pub async fn dependency_summaries(&self) -> Result<Vec<TaskEdgeSummary>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             "SELECT task_number, \
                     SUM(is_parent_side) AS children, \
                     SUM(1 - is_parent_side) AS parents, \
@@ -1441,12 +1481,12 @@ impl TaskStore {
                    FROM task_dependencies d \
                  UNION ALL \
                  SELECT d.child_task_number AS task_number, 0 AS is_parent_side, \
-                        CASE WHEN p.status <> 'done' THEN 1 ELSE 0 END AS blocking \
+                        CASE WHEN p.status NOT IN {SETTLED_STATUSES} THEN 1 ELSE 0 END AS blocking \
                    FROM task_dependencies d \
                    JOIN tasks p ON p.task_number = d.parent_task_number \
                ) \
-              GROUP BY task_number",
-        )
+              GROUP BY task_number"
+        ))
         .fetch_all(&self.pool)
         .await
         .context("failed to summarize task dependencies")?;
@@ -1465,14 +1505,17 @@ impl TaskStore {
             .collect()
     }
 
-    /// Parents of `child` that have not reached a terminal status.
+    /// Parents of `child` that have not settled.
+    ///
+    /// "Settled", not "succeeded": a parent that will never run has answered
+    /// the only question this asks, so it is not holding the child back.
     pub async fn unfinished_parents(&self, child: i64) -> Result<Vec<i64>> {
-        sqlx::query_scalar(
+        sqlx::query_scalar(&format!(
             "SELECT d.parent_task_number FROM task_dependencies d \
              JOIN tasks p ON p.task_number = d.parent_task_number \
-             WHERE d.child_task_number = ? AND p.status <> 'done' \
-             ORDER BY d.parent_task_number ASC",
-        )
+             WHERE d.child_task_number = ? AND p.status NOT IN {SETTLED_STATUSES} \
+             ORDER BY d.parent_task_number ASC"
+        ))
         .bind(child)
         .fetch_all(&self.pool)
         .await
@@ -1606,6 +1649,43 @@ impl TaskStore {
         self.get_by_number(task_number).await
     }
 
+    /// Settle a task that will never run, with the reason on the card.
+    ///
+    /// The one way into `skipped`, and the only place `skip_reason` is written.
+    /// Returns `false` when the task had already reached a state this cannot
+    /// leave — done, or skipped by whoever got there first — which is the
+    /// ordinary outcome of the poller and the sweep racing over one branch.
+    ///
+    /// Deliberately narrow. It does not touch `block_kind`, `block_reason`, or
+    /// the recurrence counter: a skipped task is not a parked one, and reusing
+    /// the block fields here would make the recurrence limiter fire on a
+    /// pipeline that is behaving exactly as designed.
+    ///
+    /// `worker_id` is cleared for the same reason `block_task` clears it — a
+    /// settled card must not still look bound to a process.
+    pub async fn skip_task(&self, task_number: i64, reason: &str) -> Result<bool> {
+        // Phrased as a conditional UPDATE rather than read-then-write: two
+        // callers reach this path (the gate poller and the ready sweep) and the
+        // loser has to lose without overwriting a status it never saw.
+        // The excluded statuses are exactly the ones `can_transition` refuses:
+        // `done`, because the work happened, and `skipped`, because it is
+        // terminal and the reason already on the card is the first one, which
+        // is the one that caused everything downstream.
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'skipped', skip_reason = ?, worker_id = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? \
+               AND status NOT IN ('done', 'skipped')",
+        )
+        .bind(reason)
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to skip task")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     // -- Ready sweep --------------------------------------------------------
 
     /// Reconcile which of an agent's tasks are eligible for pickup.
@@ -1635,7 +1715,8 @@ impl TaskStore {
             .join(",");
         let sql = format!(
             "SELECT id, task_number, kind, config, label, poll_interval_secs, \
-                    last_checked_at, last_result, last_detail, consecutive_errors, created_at \
+                    last_checked_at, last_result, last_detail, consecutive_errors, \
+                    disposition, created_at \
              FROM task_gates \
              WHERE last_result <> 'satisfied' AND task_number IN ({placeholders}) \
              ORDER BY task_number, created_at"
@@ -1742,7 +1823,7 @@ impl TaskStore {
         // promotable the moment the body finishes, and the body finishes
         // whether the loop converged or gave up. Only the boundary can tell
         // those apart, and it clears this column when it does.
-        let promoted: Vec<i64> = sqlx::query_scalar(
+        let promoted: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.status = 'backlog' \
@@ -1752,15 +1833,16 @@ impl TaskStore {
                AND NOT EXISTS (\
                  SELECT 1 FROM task_dependencies d \
                    JOIN tasks p ON p.task_number = d.parent_task_number \
-                  WHERE d.child_task_number = t.task_number AND p.status <> 'done') \
+                  WHERE d.child_task_number = t.task_number \
+                    AND p.status NOT IN {SETTLED_STATUSES}) \
                AND (\
                  EXISTS (\
                    SELECT 1 FROM task_dependencies d \
                     WHERE d.child_task_number = t.task_number) \
                  OR t.workflow_run_id IS NOT NULL \
                  OR t.created_by LIKE 'task:%' \
-                 OR t.block_kind = 'dependency')",
-        )
+                 OR t.block_kind = 'dependency')"
+        ))
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
         .await
@@ -1809,6 +1891,31 @@ impl TaskStore {
                     });
                     continue;
                 }
+                // Skip propagation, and the only place it happens.
+                //
+                // A required input whose source was skipped means this step
+                // cannot run either, and it is settled here — lazily, at the
+                // moment the task is considered — rather than by cascading
+                // downwards when the parent was skipped. The cascade would
+                // need its own traversal order and would have to be re-run
+                // whenever an edge or binding changed; this is asked once, by
+                // the pass that was going to promote the task anyway.
+                Ok(ContractResolution::Unreachable { reason }) => {
+                    match self.skip_task(task_number, &reason).await {
+                        Ok(true) => sweep.skipped.push(SkippedTask {
+                            task_number,
+                            reason,
+                        }),
+                        // Somebody settled it first. Nothing to report.
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            %error,
+                            task_number,
+                            "failed to settle a task whose required input will never arrive"
+                        ),
+                    }
+                    continue;
+                }
                 Ok(_) => {}
                 Err(error) => {
                     // Our failure, not the graph's. Let the claim path decide
@@ -1836,15 +1943,16 @@ impl TaskStore {
         }
 
         // Demote: promoted too early, or a parent came back.
-        let demoted: Vec<i64> = sqlx::query_scalar(
+        let demoted: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.status = 'ready' \
                AND EXISTS (\
                  SELECT 1 FROM task_dependencies d \
                    JOIN tasks p ON p.task_number = d.parent_task_number \
-                  WHERE d.child_task_number = t.task_number AND p.status <> 'done')",
-        )
+                  WHERE d.child_task_number = t.task_number \
+                    AND p.status NOT IN {SETTLED_STATUSES})"
+        ))
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
         .await
@@ -1882,17 +1990,18 @@ impl TaskStore {
         // the next tick either — the source is done and its outputs are frozen
         // — so the placeholder is parked once and left alone until a person
         // unblocks it, which is the signal that something changed.
-        let ready: Vec<i64> = sqlx::query_scalar(
+        let ready: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.fan_out_placeholder = 1 \
-               AND t.status <> 'done' \
+               AND t.status NOT IN {SETTLED_STATUSES} \
                AND t.block_kind IS NULL \
                AND NOT EXISTS (\
                  SELECT 1 FROM task_dependencies d \
                    JOIN tasks p ON p.task_number = d.parent_task_number \
-                  WHERE d.child_task_number = t.task_number AND p.status <> 'done')",
-        )
+                  WHERE d.child_task_number = t.task_number \
+                    AND p.status NOT IN {SETTLED_STATUSES})"
+        ))
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
         .await
@@ -1914,14 +2023,14 @@ impl TaskStore {
     /// deliberately, because this is an optimisation and the sweep is the
     /// guarantee.
     pub async fn expand_fan_outs_for(&self, source_task_number: i64) -> Result<Vec<FanOutOutcome>> {
-        let waiting: Vec<i64> = sqlx::query_scalar(
+        let waiting: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT t.task_number FROM tasks t \
                JOIN task_dependencies d ON d.child_task_number = t.task_number \
               WHERE d.parent_task_number = ? \
                 AND t.fan_out_placeholder = 1 \
-                AND t.status <> 'done' \
-                AND t.block_kind IS NULL",
-        )
+                AND t.status NOT IN {SETTLED_STATUSES} \
+                AND t.block_kind IS NULL"
+        ))
         .bind(source_task_number)
         .fetch_all(&self.pool)
         .await
@@ -2246,7 +2355,7 @@ impl TaskStore {
     /// other task of the same pass. "All done" read loosely is how a body emits
     /// its successor while half of it is still running.
     pub async fn advance_loops(&self, assigned_agent_id: &str) -> Result<Vec<LoopOutcome>> {
-        let ready: Vec<i64> = sqlx::query_scalar(
+        let ready: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT t.task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.loop_terminal = 1 \
@@ -2259,9 +2368,9 @@ impl TaskStore {
                   WHERE b.workflow_run_id = t.workflow_run_id \
                     AND b.loop_group = t.loop_group \
                     AND b.loop_iteration = t.loop_iteration \
-                    AND b.status <> 'done') \
-             ORDER BY t.task_number ASC",
-        )
+                    AND b.status NOT IN {SETTLED_STATUSES}) \
+             ORDER BY t.task_number ASC"
+        ))
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
         .await
@@ -2286,7 +2395,7 @@ impl TaskStore {
     /// The sweep covers the same ground deliberately: this is the optimisation
     /// and the sweep is the guarantee.
     pub async fn advance_loops_for(&self, task_number: i64) -> Result<Vec<LoopOutcome>> {
-        let ready: Vec<i64> = sqlx::query_scalar(
+        let ready: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT terminal.task_number FROM tasks finished \
                JOIN tasks terminal \
                  ON terminal.workflow_run_id = finished.workflow_run_id \
@@ -2304,8 +2413,8 @@ impl TaskStore {
                    WHERE b.workflow_run_id = terminal.workflow_run_id \
                      AND b.loop_group = terminal.loop_group \
                      AND b.loop_iteration = terminal.loop_iteration \
-                     AND b.status <> 'done')",
-        )
+                     AND b.status NOT IN {SETTLED_STATUSES})"
+        ))
         .bind(task_number)
         .fetch_all(&self.pool)
         .await
@@ -3096,6 +3205,7 @@ impl TaskStore {
         let mut resolved = serde_json::Map::new();
         let mut problems = Vec::new();
         let mut waiting_on = Vec::new();
+        let mut absent: Vec<(&str, String)> = Vec::new();
 
         for binding in &bindings {
             match self.resolve_one_binding(&task, binding).await {
@@ -3103,7 +3213,49 @@ impl TaskStore {
                     resolved.insert(binding.input_key.clone(), value);
                 }
                 BindingResolution::Pending(reason) => waiting_on.push(reason),
+                BindingResolution::Absent(reason) => {
+                    absent.push((binding.input_key.as_str(), reason));
+                }
                 BindingResolution::Problem(problem) => problems.push(problem),
+            }
+        }
+
+        // An absent input the schema says is required settles the whole task,
+        // and it is checked first because it outranks every other answer here.
+        //
+        // Not "before we report a problem" out of tidiness: a task that will
+        // never run cannot have its contract repaired into one that does, so
+        // parking it for a person would be asking for work that changes
+        // nothing. And it outranks `Pending` because waiting on a sibling
+        // branch is moot once this step is settled.
+        //
+        // This is the whole of skip propagation. It happens here, at the moment
+        // a task is considered, rather than as a cascade when something is
+        // skipped: no separate pass, no ordering bugs, and each task is asked
+        // exactly once, when the answer matters.
+        if !absent.is_empty()
+            && let Some(schema) = &task.input_schema
+        {
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<HashSet<&str>>()
+                })
+                .unwrap_or_default();
+
+            let mut blocking: Vec<&str> = absent
+                .iter()
+                .filter(|(key, _)| required.contains(key))
+                .map(|(_, reason)| reason.as_str())
+                .collect();
+            if !blocking.is_empty() {
+                blocking.sort_unstable();
+                return Ok(ContractResolution::Unreachable {
+                    reason: blocking.join("; "),
+                });
             }
         }
 
@@ -3142,10 +3294,7 @@ impl TaskStore {
             return self.resolve_fan_in(child, binding, step_key).await;
         }
 
-        match self.resolve_direct_binding(binding).await {
-            Ok(value) => BindingResolution::Resolved(value),
-            Err(problem) => BindingResolution::Problem(problem),
-        }
+        self.resolve_direct_binding(binding).await
     }
 
     /// Collect every branch of a fan-out step into one object.
@@ -3215,6 +3364,13 @@ impl TaskStore {
             let placeholder = row.try_get::<i64, _>("fan_out_placeholder").unwrap_or(0) != 0;
             let done = status == Some(TaskStatus::Done);
 
+            // A branch that will never run contributes nothing and holds
+            // nothing up. Counting it as unfinished would park the aggregator
+            // on a wait that can never clear — the same deadlock, one level in.
+            if status == Some(TaskStatus::Skipped) {
+                continue;
+            }
+
             if placeholder {
                 // A placeholder that is done is the empty-collection case: the
                 // fan-out ran and produced no branches, which is an answer.
@@ -3254,36 +3410,54 @@ impl TaskStore {
         BindingResolution::Resolved(Value::Object(collected))
     }
 
-    async fn resolve_direct_binding(
-        &self,
-        binding: &TaskInputBinding,
-    ) -> std::result::Result<Value, ContractProblem> {
+    async fn resolve_direct_binding(&self, binding: &TaskInputBinding) -> BindingResolution {
         // A literal needs no upstream task at all.
         let Some(source) = binding.source_task_number else {
-            return binding
-                .literal_value
-                .clone()
-                .ok_or_else(|| ContractProblem::EmptyLiteral {
+            return match binding.literal_value.clone() {
+                Some(value) => BindingResolution::Resolved(value),
+                None => BindingResolution::Problem(ContractProblem::EmptyLiteral {
                     input_key: binding.input_key.clone(),
-                });
+                }),
+            };
         };
 
-        let task = self
-            .get_by_number(source)
-            .await
-            .map_err(|error| ContractProblem::Storage {
-                input_key: binding.input_key.clone(),
-                message: error.to_string(),
-            })?
-            .ok_or(ContractProblem::SourceMissing {
+        let task = match self.get_by_number(source).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                return BindingResolution::Problem(ContractProblem::SourceMissing {
+                    input_key: binding.input_key.clone(),
+                    source_task_number: source,
+                });
+            }
+            Err(error) => {
+                return BindingResolution::Problem(ContractProblem::Storage {
+                    input_key: binding.input_key.clone(),
+                    message: error.to_string(),
+                });
+            }
+        };
+
+        // The source will never produce anything, so this input is *absent*
+        // rather than missing. Distinct from `SourceHasNoOutputs`, which says a
+        // task that is still expected to produce one has not yet — the two read
+        // the same at a glance and recover in opposite directions.
+        if task.status == TaskStatus::Skipped {
+            let why = task
+                .skip_reason
+                .as_deref()
+                .unwrap_or("that branch did not run");
+            return BindingResolution::Absent(format!(
+                "input `{}` comes from task #{source}, which was skipped: {why}",
+                binding.input_key
+            ));
+        }
+
+        let Some(outputs) = task.outputs else {
+            return BindingResolution::Problem(ContractProblem::SourceHasNoOutputs {
                 input_key: binding.input_key.clone(),
                 source_task_number: source,
-            })?;
-
-        let outputs = task.outputs.ok_or(ContractProblem::SourceHasNoOutputs {
-            input_key: binding.input_key.clone(),
-            source_task_number: source,
-        })?;
+            });
+        };
 
         let pointer = binding.source_pointer.as_deref().unwrap_or("");
         // RFC 6901: the empty pointer selects the whole document.
@@ -3293,13 +3467,14 @@ impl TaskStore {
             outputs.pointer(pointer)
         };
 
-        value
-            .cloned()
-            .ok_or_else(|| ContractProblem::PointerMissed {
+        match value {
+            Some(value) => BindingResolution::Resolved(value.clone()),
+            None => BindingResolution::Problem(ContractProblem::PointerMissed {
                 input_key: binding.input_key.clone(),
                 source_task_number: source,
                 pointer: pointer.to_string(),
-            })
+            }),
+        }
     }
 
     /// Persist a task's resolved inputs.
@@ -3781,13 +3956,34 @@ pub enum ContractResolution {
     Pending { waiting_on: Vec<String> },
     /// The graph cannot supply what this task was promised.
     Unresolved { problems: Vec<ContractProblem> },
+    /// A *required* input's source has settled and produced nothing, so this
+    /// task can never satisfy its own contract and will never run.
+    ///
+    /// The third thing "false" can mean here, and the reason it is not folded
+    /// into `Unresolved`: nothing is broken and nobody has to do anything. A
+    /// branch upstream was not taken, so this step does not apply either. The
+    /// caller settles the task rather than parking it for a person.
+    ///
+    /// Only `required` decides this. An optional input whose source was skipped
+    /// is simply absent and the step runs without it — which is why there is no
+    /// `all`/`any` join vocabulary anywhere in this feature: the schema the
+    /// author already had to write says which it is.
+    Unreachable { reason: String },
 }
 
-/// What one binding produced, before the three outcomes are combined.
+/// What one binding produced, before the outcomes are combined.
 enum BindingResolution {
     Resolved(Value),
     /// Not yet — already phrased for a human.
     Pending(String),
+    /// Never, and that is fine: the source settled without producing this.
+    ///
+    /// The key is left *out* of the assembled inputs rather than set to null.
+    /// `null` is a value a model will reason about — "the review returned
+    /// null…" — whereas absent means the review never happened, which is the
+    /// truth. It is also what makes the JSON Schema `required` check the join
+    /// rule, since a null would satisfy `required` and an absent key does not.
+    Absent(String),
     /// Never, without someone repairing the graph.
     Problem(ContractProblem),
 }
@@ -4275,6 +4471,23 @@ pub struct ReadySweep {
     /// stalled task needs its graph fixed, a gated one needs the outside world
     /// to change — or, if the gate has failed or cannot be reached, a person.
     pub gated: Vec<GatedTask>,
+    /// Tasks settled during this pass because a required input's source was
+    /// skipped, so they will never run either.
+    ///
+    /// A fourth kind of "did not move", and separate from the other three for
+    /// the usual reason: `stalled` wants a repair, `pending` wants nothing yet,
+    /// `gated` wants the world to change, and this wants nothing ever. One list
+    /// covering any two of them would tell whoever reads the board the wrong
+    /// thing about what to do next.
+    pub skipped: Vec<SkippedTask>,
+}
+
+/// A task settled by the sweep because a branch it needed did not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedTask {
+    pub task_number: i64,
+    /// Already phrased for a human, and the same text stored as `skip_reason`.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -4291,6 +4504,7 @@ impl ReadySweep {
             && self.stalled.is_empty()
             && self.pending.is_empty()
             && self.gated.is_empty()
+            && self.skipped.is_empty()
     }
 }
 
@@ -4362,7 +4576,7 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      workflow_run_id, workflow_step_key, system_prompt, \
      fan_out_branch_key, fan_out_placeholder, \
      loop_group, loop_iteration, loop_terminal, loop_resolution, \
-     awaiting_loop_group, awaiting_loop_arm";
+     awaiting_loop_group, awaiting_loop_arm, skip_reason";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -4372,6 +4586,20 @@ const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, ou
 pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
     if current == next {
         return true;
+    }
+
+    // Skip is terminal, and this is the check that makes it so.
+    //
+    // It has to come before the blanket `-> Backlog` rule below, which would
+    // otherwise quietly re-open every skipped task. "Settled" is the word the
+    // dependency rule is built on: a child was promoted, or claimed, or its
+    // whole branch was skipped, on the strength of this parent never running.
+    // Un-skipping would invalidate all of that after the fact, and there is no
+    // pass anywhere that would go back and reconsider it — the propagation is
+    // lazy by design. So there is no un-skip in v1. Delete the task, or launch
+    // the workflow again.
+    if current == TaskStatus::Skipped {
+        return false;
     }
 
     if next == TaskStatus::Backlog {
@@ -4390,6 +4618,25 @@ pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
             // Unblocking is always operator- or sweep-initiated.
             | (TaskStatus::Blocked, TaskStatus::Ready)
             | (TaskStatus::Blocked, TaskStatus::Done)
+            // Into `skipped`: from anywhere the work has not already happened.
+            //
+            // `done` is the one exclusion. The work was done; calling it
+            // skipped afterwards would be a lie about what happened, and
+            // anything reading the history — a downstream binding especially —
+            // would then find outputs on a task that supposedly never ran.
+            //
+            // `in_progress` is allowed, which is not obvious. The condition is
+            // normally answered long before pickup, but the claim path resolves
+            // a task's inputs *after* claiming it and before spending anything
+            // on a worker, so it can be the first to discover that a required
+            // branch was skipped. Refusing here would leave that card in
+            // progress with nothing running on it, which is strictly worse than
+            // settling it.
+            | (TaskStatus::Backlog, TaskStatus::Skipped)
+            | (TaskStatus::Ready, TaskStatus::Skipped)
+            | (TaskStatus::InProgress, TaskStatus::Skipped)
+            | (TaskStatus::Blocked, TaskStatus::Skipped)
+            | (TaskStatus::PendingApproval, TaskStatus::Skipped)
     )
 }
 
@@ -4560,6 +4807,11 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .flatten()
             .as_deref()
             .and_then(LoopArm::parse),
+        skip_reason: row
+            .try_get::<Option<String>, _>("skip_reason")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -4694,7 +4946,8 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             loop_terminal INTEGER NOT NULL DEFAULT 0,
             loop_resolution TEXT,
             awaiting_loop_group TEXT,
-            awaiting_loop_arm TEXT
+            awaiting_loop_arm TEXT,
+            skip_reason TEXT
         )
         "#,
     )
@@ -4779,6 +5032,7 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             last_result TEXT NOT NULL DEFAULT 'pending',
             last_detail TEXT,
             consecutive_errors INTEGER NOT NULL DEFAULT 0,
+            disposition TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )
         "#,
@@ -5866,6 +6120,7 @@ mod tests {
                 &serde_json::json!({"url": "https://ci.example/status", "expect_status": 200}),
                 Some("CI on main"),
                 60,
+                None,
             )
             .await
             .expect("create gate");
@@ -5924,6 +6179,7 @@ mod tests {
                 &serde_json::json!({"task_number": parent.task_number, "pointer": "/state"}),
                 None,
                 60,
+                None,
             )
             .await
             .expect("create gate");
@@ -7529,5 +7785,431 @@ mod tests {
         };
         assert_eq!(LoopSpec::from_metadata(&spec.to_metadata()), Some(spec));
         assert_eq!(LoopSpec::from_metadata(&serde_json::json!({})), None);
+    }
+
+    // -- Branching ----------------------------------------------------------
+
+    /// The deadlock this whole feature exists to remove.
+    ///
+    /// Before `skipped` was a status, every promotion path asked whether each
+    /// parent was `done`. A branch that was decided *against* therefore never
+    /// satisfied anything below it, so a merge step under two exclusive
+    /// branches waited forever on the one that was never going to run — and did
+    /// so silently, looking exactly like a pipeline still making progress.
+    ///
+    /// If this regresses, conditional pipelines stop finishing.
+    #[tokio::test]
+    async fn a_skipped_parent_settles_its_childs_dependency_instead_of_deadlocking_it() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "rollback", TaskStatus::Backlog).await;
+        let child = task_at(&store, "announce", TaskStatus::Backlog).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            !sweep.promoted.contains(&child.task_number),
+            "an unsettled parent still holds the child"
+        );
+
+        assert!(
+            store
+                .skip_task(parent.task_number, "the deploy went green")
+                .await
+                .expect("skip"),
+            "a backlog task can be settled as skipped"
+        );
+
+        assert!(
+            store
+                .unfinished_parents(child.task_number)
+                .await
+                .expect("parents")
+                .is_empty(),
+            "a parent that will never run is not holding anything up"
+        );
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&child.task_number),
+            "the child is promotable once every parent has settled"
+        );
+
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("something to claim");
+        assert_eq!(
+            claimed.task_number, child.task_number,
+            "the claim path re-checks the same rule and must agree with the sweep"
+        );
+    }
+
+    /// Skip propagation, and the fact that the input schema is the join rule.
+    ///
+    /// A step whose *required* input came from a branch that did not run cannot
+    /// satisfy its own contract, so it does not run either — and it is settled
+    /// rather than parked, because there is nothing for a person to repair.
+    ///
+    /// If this regresses, the step is parked as a broken graph instead, putting
+    /// a triage card on a pipeline that behaved exactly as designed.
+    #[tokio::test]
+    async fn a_required_input_from_a_skipped_branch_settles_the_step_that_needed_it() {
+        let store = setup_store().await;
+        let branch = task_at(&store, "rollback", TaskStatus::Backlog).await;
+        let merge = task_at(&store, "write the incident note", TaskStatus::Backlog).await;
+        store
+            .link_tasks(branch.task_number, merge.task_number)
+            .await
+            .expect("link");
+
+        store
+            .set_contract(
+                merge.task_number,
+                Some(&serde_json::json!({
+                    "type": "object",
+                    "properties": {"report": {"type": "string"}},
+                    "required": ["report"],
+                })),
+                None,
+            )
+            .await
+            .expect("contract");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: merge.task_number,
+                input_key: "report".into(),
+                source_task_number: Some(branch.task_number),
+                source_pointer: Some("/report".into()),
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("bind");
+
+        store
+            .skip_task(branch.task_number, "deploy reported green")
+            .await
+            .expect("skip");
+
+        match store
+            .resolve_inputs(merge.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Unreachable { reason } => {
+                assert!(
+                    reason.contains("skipped") && reason.contains("green"),
+                    "the reason has to carry why the branch did not run: {reason}"
+                );
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(
+            sweep.skipped.len(),
+            1,
+            "the sweep settles it rather than promoting it"
+        );
+        assert!(sweep.promoted.is_empty());
+        assert!(
+            sweep.stalled.is_empty(),
+            "a branch that was not taken is not a broken graph"
+        );
+
+        let settled = store
+            .get_by_number(merge.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(settled.status, TaskStatus::Skipped);
+        assert!(
+            settled.skip_reason.is_some(),
+            "the card has to say why it will never run"
+        );
+        assert!(
+            settled.block_reason.is_none() && settled.block_kind.is_none(),
+            "skip must not borrow the block fields — they carry recovery machinery \
+             that has nothing to do with a branch not taken"
+        );
+    }
+
+    /// The other half of the join rule. An *optional* input from a branch that
+    /// did not run is simply absent, and the step runs without it.
+    ///
+    /// Absent, not null: null is a value a model will reason about ("the review
+    /// returned null…"), and absent is the truth — the review never happened.
+    /// It is also what makes `required` decide anything at all, since a null
+    /// would satisfy `required` and an absent key does not.
+    #[tokio::test]
+    async fn an_optional_input_from_a_skipped_branch_is_absent_and_the_step_still_runs() {
+        let store = setup_store().await;
+        let branch = task_at(&store, "legal review", TaskStatus::Backlog).await;
+        let merge = task_at(&store, "publish", TaskStatus::Backlog).await;
+        store
+            .link_tasks(branch.task_number, merge.task_number)
+            .await
+            .expect("link");
+
+        store
+            .set_contract(
+                merge.task_number,
+                Some(&serde_json::json!({
+                    "type": "object",
+                    "properties": {"review": {"type": "string"}},
+                })),
+                None,
+            )
+            .await
+            .expect("contract");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: merge.task_number,
+                input_key: "review".into(),
+                source_task_number: Some(branch.task_number),
+                source_pointer: Some("/verdict".into()),
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("bind");
+
+        store
+            .skip_task(branch.task_number, "no legal review needed")
+            .await
+            .expect("skip");
+
+        let resolution = store
+            .resolve_inputs(merge.task_number)
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolution,
+            ContractResolution::Resolved {
+                inputs: serde_json::json!({})
+            },
+            "the key is omitted rather than set to null"
+        );
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(sweep.promoted.contains(&merge.task_number));
+        assert!(sweep.skipped.is_empty());
+    }
+
+    /// A step that binds *nothing* from a skipped parent still runs.
+    ///
+    /// It declared a dependency on that parent's *ordering*, not on its output,
+    /// and honouring exactly what was declared is the right behaviour. Skipping
+    /// it too would make every edge an implicit data dependency, which would
+    /// turn one conditional step into a silently pruned subtree.
+    #[tokio::test]
+    async fn a_step_binding_nothing_from_a_skipped_parent_still_runs() {
+        let store = setup_store().await;
+        let skipped = task_at(&store, "rollback", TaskStatus::Backlog).await;
+        let built = task_at(&store, "build", TaskStatus::InProgress).await;
+        let after = task_at(&store, "notify the channel", TaskStatus::Backlog).await;
+        for parent in [skipped.task_number, built.task_number] {
+            store
+                .link_tasks(parent, after.task_number)
+                .await
+                .expect("link");
+        }
+
+        store
+            .submit_outputs(built.task_number, &serde_json::json!({"tag": "v1.4.2"}))
+            .await
+            .expect("outputs");
+        finish(&store, built.task_number).await;
+
+        store
+            .set_contract(
+                after.task_number,
+                Some(&serde_json::json!({
+                    "type": "object",
+                    "properties": {"tag": {"type": "string"}},
+                    "required": ["tag"],
+                })),
+                None,
+            )
+            .await
+            .expect("contract");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: after.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(built.task_number),
+                source_pointer: Some("/tag".into()),
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("bind");
+
+        store
+            .skip_task(skipped.task_number, "deploy reported green")
+            .await
+            .expect("skip");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&after.task_number),
+            "an ordering-only edge to a skipped parent does not settle the child"
+        );
+        assert!(sweep.skipped.is_empty());
+    }
+
+    /// Skip is terminal, and nothing leaves it.
+    ///
+    /// A task that could un-skip would make "settled" meaningless: children
+    /// were promoted, claimed, or settled themselves on the strength of this
+    /// task never running, and nothing anywhere goes back to reconsider that —
+    /// propagation is lazy by design. The blanket "anything may return to
+    /// backlog" rule is the one this has to survive.
+    #[tokio::test]
+    async fn skip_is_terminal_and_no_transition_leaves_it() {
+        for next in TaskStatus::ALL {
+            assert_eq!(
+                can_transition(TaskStatus::Skipped, next),
+                next == TaskStatus::Skipped,
+                "skipped -> {next} must be refused"
+            );
+        }
+
+        let store = setup_store().await;
+        let task = task_at(&store, "rollback", TaskStatus::Backlog).await;
+        store
+            .skip_task(task.task_number, "deploy reported green")
+            .await
+            .expect("skip");
+
+        let error = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Ready),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a settled branch must not come back");
+        assert!(
+            error.to_string().contains("skipped"),
+            "the refusal should name the status it refused to leave: {error}"
+        );
+
+        assert!(
+            !store
+                .skip_task(task.task_number, "a second reason")
+                .await
+                .expect("skip"),
+            "the first reason is the one that caused everything downstream"
+        );
+        assert_eq!(
+            store
+                .get_by_number(task.task_number)
+                .await
+                .expect("read")
+                .expect("exists")
+                .skip_reason
+                .as_deref(),
+            Some("deploy reported green")
+        );
+    }
+
+    /// Work that actually happened must not be rewritten as work that never
+    /// did. A downstream binding reading a `skipped` task with outputs on it
+    /// would be looking at a contradiction.
+    #[tokio::test]
+    async fn a_finished_task_cannot_be_recast_as_skipped() {
+        let store = setup_store().await;
+        let task = task_at(&store, "build", TaskStatus::InProgress).await;
+        finish(&store, task.task_number).await;
+
+        assert!(!can_transition(TaskStatus::Done, TaskStatus::Skipped));
+        assert!(
+            !store
+                .skip_task(task.task_number, "too late")
+                .await
+                .expect("skip"),
+            "a done task is already settled, and settled the other way"
+        );
+        assert_eq!(
+            store
+                .get_by_number(task.task_number)
+                .await
+                .expect("read")
+                .expect("exists")
+                .status,
+            TaskStatus::Done
+        );
+    }
+
+    /// A fan-in collects the branches that ran. One that was skipped
+    /// contributes nothing and holds nothing up.
+    ///
+    /// Counting it as "not finished yet" would park the aggregator on a wait
+    /// that can never clear — the same deadlock as the dependency rule, one
+    /// level in and much harder to see.
+    #[tokio::test]
+    async fn a_skipped_branch_does_not_hold_a_fan_in_open_forever() {
+        let store = setup_store().await;
+        let ran = task_at(&store, "branch a", TaskStatus::InProgress).await;
+        let skipped = task_at(&store, "branch b", TaskStatus::Backlog).await;
+        let report = task_at(&store, "report", TaskStatus::Backlog).await;
+
+        for (task, key) in [(&ran, "a"), (&skipped, "b")] {
+            sqlx::query(
+                "UPDATE tasks SET workflow_run_id = 'run-1', workflow_step_key = 'branch', \
+                 fan_out_branch_key = ? WHERE task_number = ?",
+            )
+            .bind(key)
+            .bind(task.task_number)
+            .execute(store.pool())
+            .await
+            .expect("mark branch");
+        }
+        sqlx::query("UPDATE tasks SET workflow_run_id = 'run-1' WHERE task_number = ?")
+            .bind(report.task_number)
+            .execute(store.pool())
+            .await
+            .expect("mark report");
+
+        store
+            .submit_outputs(ran.task_number, &serde_json::json!({"ok": true}))
+            .await
+            .expect("outputs");
+        finish(&store, ran.task_number).await;
+        store
+            .skip_task(skipped.task_number, "nothing to do for that repo")
+            .await
+            .expect("skip");
+
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: report.task_number,
+                input_key: "results".into(),
+                source_task_number: None,
+                source_pointer: None,
+                literal_value: None,
+                fan_in_step_key: Some("branch".into()),
+            })
+            .await
+            .expect("bind");
+
+        let resolution = store
+            .resolve_inputs(report.task_number)
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolution,
+            ContractResolution::Resolved {
+                inputs: serde_json::json!({"results": {"a": {"ok": true}}})
+            },
+            "only the branches that ran are collected, and the skipped one does not wait"
+        );
     }
 }

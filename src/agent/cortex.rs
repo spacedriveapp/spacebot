@@ -4339,70 +4339,57 @@ const ORPHANED_TASK_GRACE_SECS: i64 = 300;
 async fn poll_due_gates(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<usize> {
     let gates = crate::tasks::GateStore::new(deps.task_store.pool().clone());
     let now = chrono::Utc::now().timestamp();
-    let due = gates.due_for_poll(now).await?;
-    if due.is_empty() {
-        return Ok(0);
-    }
+    let polled = crate::tasks::poll_gates_once(deps.task_store.as_ref(), &gates, now).await?;
 
-    let mut checked = 0usize;
-    for gate in due {
-        let previous = gate.last_result;
-        let evaluation = match gate.kind {
-            crate::tasks::GateKind::Http => crate::tasks::evaluate_http(&gate.config).await,
-            crate::tasks::GateKind::TaskOutput => {
-                // Read the upstream task's outputs fresh rather than trusting
-                // anything cached: the whole point of the gate is that it is
-                // waiting for that value to change.
-                let source = gate
-                    .config
-                    .get("task_number")
-                    .and_then(serde_json::Value::as_i64);
-                let outputs = match source {
-                    Some(number) => deps
-                        .task_store
-                        .get_by_number(number)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|task| task.outputs),
-                    None => None,
-                };
-                crate::tasks::evaluate_task_output(&gate.config, outputs.as_ref())
-            }
-        };
-
-        checked += 1;
-        let result = evaluation.result;
-        if let Err(error) = gates.record_evaluation(&gate.id, &evaluation).await {
-            tracing::warn!(%error, gate_id = %gate.id, "failed to record gate evaluation");
+    for poll in &polled {
+        // A condition that does not hold, on a gate whose disposition says that
+        // means "does not apply" rather than "not yet". The branch is settled,
+        // and this is the only record of why the graph took the path it did.
+        if let Some(reason) = &poll.skipped {
+            logger.log(
+                "task_skipped_by_condition",
+                &format!("Task #{} will not run — {reason}", poll.task_number),
+                Some(serde_json::json!({
+                    "task_number": poll.task_number,
+                    "gate_id": poll.gate_id,
+                    "result": poll.result.as_str(),
+                    "detail": poll.detail,
+                })),
+            );
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: poll.task_number,
+                status: TaskStatus::Skipped.as_str().to_string(),
+                action: "updated".to_string(),
+            });
             continue;
         }
 
         // Only transitions are logged. A gate polled every minute for an hour
         // while CI runs has nothing to say until something changes, and a log
         // that repeats itself is a log nobody reads.
-        if result != previous {
+        if poll.result != poll.previous {
             logger.log(
                 "task_gate_changed",
                 &format!(
                     "Gate on task #{} moved from {} to {} — {}",
-                    gate.task_number,
-                    previous.as_str(),
-                    result.as_str(),
-                    evaluation.detail
+                    poll.task_number,
+                    poll.previous.as_str(),
+                    poll.result.as_str(),
+                    poll.detail
                 ),
                 Some(serde_json::json!({
-                    "task_number": gate.task_number,
-                    "gate_id": gate.id,
-                    "from": previous.as_str(),
-                    "to": result.as_str(),
-                    "detail": evaluation.detail,
+                    "task_number": poll.task_number,
+                    "gate_id": poll.gate_id,
+                    "from": poll.previous.as_str(),
+                    "to": poll.result.as_str(),
+                    "detail": poll.detail,
                 })),
             );
         }
     }
 
-    Ok(checked)
+    Ok(polled.len())
 }
 
 async fn reap_orphaned_task_pickups(
@@ -4654,12 +4641,13 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {}, skipped {} task(s)",
                         sweep.promoted.len(),
                         sweep.demoted.len(),
                         sweep.stalled.len(),
                         sweep.pending.len(),
-                        sweep.gated.len()
+                        sweep.gated.len(),
+                        sweep.skipped.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
@@ -4667,6 +4655,7 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                         "stalled": sweep.stalled.iter().map(|s| s.task_number).collect::<Vec<_>>(),
                         "pending": sweep.pending.iter().map(|p| p.task_number).collect::<Vec<_>>(),
                         "gated": sweep.gated.iter().map(|g| g.task_number).collect::<Vec<_>>(),
+                        "skipped": sweep.skipped.iter().map(|s| s.task_number).collect::<Vec<_>>(),
                     })),
                 );
 
@@ -4731,11 +4720,35 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                         })),
                     );
                 }
+                // A branch that was not taken. Logged like the others because a
+                // card that quietly changes to a terminal status nobody asked
+                // for is exactly as opaque as one that sits still — and this is
+                // the only record of *why* the graph took the path it did.
+                for skipped in &sweep.skipped {
+                    logger.log(
+                        "task_skipped_by_condition",
+                        &format!(
+                            "Task #{} will not run — {}",
+                            skipped.task_number, skipped.reason
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": skipped.task_number,
+                            "reason": skipped.reason,
+                        })),
+                    );
+                }
+
                 let moves = sweep
                     .promoted
                     .iter()
                     .map(|number| (*number, TaskStatus::Ready))
-                    .chain(sweep.demoted.iter().map(|n| (*n, TaskStatus::Backlog)));
+                    .chain(sweep.demoted.iter().map(|n| (*n, TaskStatus::Backlog)))
+                    .chain(
+                        sweep
+                            .skipped
+                            .iter()
+                            .map(|skipped| (skipped.task_number, TaskStatus::Skipped)),
+                    );
                 for (task_number, status) in moves {
                     let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
                         agent_id: deps.agent_id.clone(),
@@ -4907,6 +4920,41 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                 agent_id: deps.agent_id.clone(),
                 task_number: task.task_number,
                 status: TaskStatus::Backlog.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            return Ok(());
+        }
+        // A required input's source was skipped, so this step will never be
+        // able to satisfy its own contract either. Settled, not parked: there
+        // is nothing for a person to repair, and blocking it would put a card
+        // in the triage column for a branch that simply was not taken.
+        //
+        // The sweep normally gets here first. This is the same check on the
+        // claim path, for a task that reached `ready` by another route — an
+        // operator unblocking it, or an edge added after promotion.
+        Ok(crate::tasks::ContractResolution::Unreachable { reason }) => {
+            logger.log(
+                "task_skipped_by_condition",
+                &format!("Task #{} will not run — {reason}", task.task_number),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "reason": reason,
+                })),
+            );
+
+            match deps.task_store.skip_task(task.task_number, &reason).await {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_number = task.task_number,
+                    "failed to settle a task whose required input will never arrive"
+                ),
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Skipped.as_str().to_string(),
                 action: "updated".to_string(),
             });
             return Ok(());

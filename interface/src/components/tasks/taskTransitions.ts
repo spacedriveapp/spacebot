@@ -21,6 +21,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
 	in_progress: "In progress",
 	blocked: "Blocked",
 	done: "Done",
+	skipped: "Skipped",
 };
 
 export interface TransitionTable {

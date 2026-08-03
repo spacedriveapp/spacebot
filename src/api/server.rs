@@ -172,6 +172,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(workflows::put_step, workflows::delete_step))
         .routes(routes!(workflows::add_edge, workflows::remove_edge))
         .routes(routes!(workflows::put_binding, workflows::delete_binding))
+        .routes(routes!(
+            workflows::put_step_gate,
+            workflows::delete_step_gate
+        ))
         .routes(routes!(workflows::launch_workflow))
         .routes(routes!(workflows::list_runs))
         .routes(routes!(workflows::get_run))

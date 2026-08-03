@@ -2,8 +2,8 @@
 
 use crate::error::Result;
 use crate::tasks::{
-    ContractProblem, ContractSide, CreateTaskInput, TaskInputBinding, TaskPriority,
-    TaskProjectBinding, TaskStatus, TaskStore,
+    ContractProblem, ContractSide, CreateTaskInput, GateConfigError, GateDisposition, GateKind,
+    TaskInputBinding, TaskPriority, TaskProjectBinding, TaskStatus, TaskStore,
 };
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -183,6 +183,72 @@ pub struct StepBinding {
     /// RFC 6901 JSON Pointer. Empty selects the whole document.
     pub source_pointer: Option<String>,
     pub literal_value: Option<Value>,
+}
+
+/// A gate declared by a *template*, addressed by step key.
+///
+/// The template-level mirror of `task_gates`, exactly as [`StepBinding`] is the
+/// template-level mirror of `task_input_bindings`, and for the same reason:
+/// `task_gates` is keyed by task number and a template has only step keys. The
+/// translation at launch is the same one bindings already do.
+///
+/// This is where a *condition* on a step lives. Whether the condition holds the
+/// step or settles it is [`StepGate::disposition`], and that one field is the
+/// whole of branching.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct StepGate {
+    pub workflow_id: String,
+    /// The step this gate holds back.
+    pub step_key: String,
+    /// Author-named, so saving the same gate twice is an edit rather than a
+    /// second gate holding the step behind a duplicate of one condition.
+    pub gate_key: String,
+    pub kind: GateKind,
+    /// For `task_output`: whose output to read, by name. Becomes
+    /// `config.task_number` at launch — the entire translation.
+    pub source_step_key: Option<String>,
+    /// The predicate, in the shape `task_gates.config` takes: an RFC 6901
+    /// pointer plus `equals` / `any_of`. No second predicate language.
+    pub config: Value,
+    /// What the board should call this. "needs legal review" beats a pointer.
+    pub label: Option<String>,
+    pub poll_interval_secs: i64,
+    /// `None` means derive it when the gate is polled. See
+    /// [`crate::tasks::TaskGate::disposition_for`].
+    pub disposition: Option<GateDisposition>,
+}
+
+/// Validate a template gate — a task gate with its source still named rather
+/// than numbered.
+///
+/// Deliberately the same validator the task level uses, with the one field a
+/// template cannot have filled in. A second set of rules here would drift, and
+/// the failure mode of drift is a template that saves and then refuses to
+/// launch.
+pub fn validate_step_gate(gate: &StepGate) -> std::result::Result<(), GateConfigError> {
+    match gate.kind {
+        GateKind::Http => {
+            crate::tasks::validate_config(GateKind::Http, &gate.config, gate.poll_interval_secs)
+        }
+        GateKind::TaskOutput => {
+            let Some(object) = gate.config.as_object() else {
+                return Err(GateConfigError::MissingField {
+                    kind: "task_output",
+                    field: "pointer",
+                });
+            };
+            let mut config = object.clone();
+            // The source is `source_step_key` here and is checked separately;
+            // standing a number in its place lets the shared validator run
+            // over everything else unchanged.
+            config.insert("task_number".to_string(), Value::from(0));
+            crate::tasks::validate_config(
+                GateKind::TaskOutput,
+                &Value::Object(config),
+                gate.poll_interval_secs,
+            )
+        }
+    }
 }
 
 /// One launch of a workflow.
@@ -369,6 +435,31 @@ pub enum LaunchError {
     LoopEntryAmbiguous {
         loop_group: String,
         entries: Vec<String>,
+    },
+    #[error(
+        "gate `{gate_key}` is declared on step `{step_key}`, which is not in this workflow — \
+         delete the gate, or add the step back"
+    )]
+    UnknownGateStep { step_key: String, gate_key: String },
+    #[error(
+        "gate `{gate_key}` on step `{step_key}` reads the output of step `{missing}`, which is \
+         not in this workflow"
+    )]
+    UnknownGateSource {
+        step_key: String,
+        gate_key: String,
+        missing: String,
+    },
+    #[error(
+        "gate `{gate_key}` on step `{step_key}` reads that step's own output — a step cannot be \
+         the condition for whether it runs"
+    )]
+    GateReadsItsOwnStep { step_key: String, gate_key: String },
+    #[error("gate `{gate_key}` on step `{step_key}` is not usable: {details}")]
+    GateConfigInvalid {
+        step_key: String,
+        gate_key: String,
+        details: String,
     },
     #[error("workflow storage error: {0}")]
     Storage(String),
@@ -575,6 +666,21 @@ impl WorkflowStore {
         .execute(&self.pool)
         .await
         .context("failed to delete bindings of a removed step")?;
+
+        // Gates cascade the same way and for the same reason, both directions
+        // included: a gate reading the output of a step that no longer exists
+        // is a condition nothing can ever answer, and launch would refuse the
+        // whole template over a row the step editor cannot show.
+        sqlx::query(
+            "DELETE FROM workflow_step_gates WHERE workflow_id = ? \
+             AND (step_key = ? OR source_step_key = ?)",
+        )
+        .bind(workflow_id)
+        .bind(step_key)
+        .bind(step_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete gates of a removed step")?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -784,6 +890,71 @@ impl WorkflowStore {
         rows.into_iter().map(binding_from_row).collect()
     }
 
+    /// Add or replace a gate on a step.
+    ///
+    /// Keyed by `gate_key` rather than a generated id, so an editor saving the
+    /// same condition twice edits it. The alternative is a step held behind two
+    /// copies of one gate, which reads as the condition being unsatisfiable.
+    pub async fn put_gate(&self, gate: &StepGate) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO workflow_step_gates \
+                 (workflow_id, step_key, gate_key, kind, source_step_key, config, label, \
+                  poll_interval_secs, disposition) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (workflow_id, step_key, gate_key) DO UPDATE SET \
+                 kind = excluded.kind, source_step_key = excluded.source_step_key, \
+                 config = excluded.config, label = excluded.label, \
+                 poll_interval_secs = excluded.poll_interval_secs, \
+                 disposition = excluded.disposition",
+        )
+        .bind(&gate.workflow_id)
+        .bind(&gate.step_key)
+        .bind(&gate.gate_key)
+        .bind(gate.kind.as_str())
+        .bind(&gate.source_step_key)
+        .bind(gate.config.to_string())
+        .bind(&gate.label)
+        .bind(gate.poll_interval_secs)
+        .bind(gate.disposition.map(GateDisposition::as_str))
+        .execute(&self.pool)
+        .await
+        .context("failed to write workflow gate")?;
+        Ok(())
+    }
+
+    pub async fn delete_gate(
+        &self,
+        workflow_id: &str,
+        step_key: &str,
+        gate_key: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM workflow_step_gates WHERE workflow_id = ? \
+             AND step_key = ? AND gate_key = ?",
+        )
+        .bind(workflow_id)
+        .bind(step_key)
+        .bind(gate_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete workflow gate")?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_gates(&self, workflow_id: &str) -> Result<Vec<StepGate>> {
+        let rows = sqlx::query(
+            "SELECT workflow_id, step_key, gate_key, kind, source_step_key, config, label, \
+                    poll_interval_secs, disposition \
+             FROM workflow_step_gates WHERE workflow_id = ? ORDER BY step_key, gate_key",
+        )
+        .bind(workflow_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list workflow gates")?;
+
+        rows.into_iter().map(gate_from_row).collect()
+    }
+
     // -- Launch -------------------------------------------------------------
 
     /// Compile a workflow into tasks, edges, and bindings, and record the run.
@@ -832,6 +1003,10 @@ impl WorkflowStore {
             .list_bindings(workflow_id)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        let gates = self
+            .list_gates(workflow_id)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
         // 1. The launch input, checked once, here — where a person is still
         //    watching. Deferring it means the failure surfaces as an
@@ -870,6 +1045,45 @@ impl WorkflowStore {
                         missing: target.to_string(),
                     });
                 }
+            }
+        }
+
+        // 2a. Gates. Same shape of check as bindings, and for the same reason:
+        //     a gate naming a step that is not here can never be answered, and
+        //     a gate whose config will not evaluate would error once a minute
+        //     forever with nobody reading the log. Both are knowable now.
+        for gate in &gates {
+            if !known.contains(gate.step_key.as_str()) {
+                return Err(LaunchError::UnknownGateStep {
+                    step_key: gate.step_key.clone(),
+                    gate_key: gate.gate_key.clone(),
+                });
+            }
+            if gate.kind == GateKind::TaskOutput {
+                let target = gate.source_step_key.as_deref().unwrap_or("");
+                if !known.contains(target) {
+                    return Err(LaunchError::UnknownGateSource {
+                        step_key: gate.step_key.clone(),
+                        gate_key: gate.gate_key.clone(),
+                        missing: target.to_string(),
+                    });
+                }
+                // A step gated on its own output can never run, so it can never
+                // produce the output — a deadlock that reads like a typo
+                // because it is one.
+                if target == gate.step_key {
+                    return Err(LaunchError::GateReadsItsOwnStep {
+                        step_key: gate.step_key.clone(),
+                        gate_key: gate.gate_key.clone(),
+                    });
+                }
+            }
+            if let Err(error) = validate_step_gate(gate) {
+                return Err(LaunchError::GateConfigInvalid {
+                    step_key: gate.step_key.clone(),
+                    gate_key: gate.gate_key.clone(),
+                    details: error.to_string(),
+                });
             }
         }
 
@@ -1037,6 +1251,7 @@ impl WorkflowStore {
                 &steps,
                 &edges,
                 &bindings,
+                &gates,
                 &frozen,
                 &loops,
                 launched_by,
@@ -1069,6 +1284,7 @@ impl WorkflowStore {
         steps: &[WorkflowStep],
         edges: &[(String, String)],
         bindings: &[StepBinding],
+        gates: &[StepGate],
         frozen: &HashMap<(String, String), Value>,
         loops: &LoopWiring,
         launched_by: &str,
@@ -1312,6 +1528,62 @@ impl WorkflowStore {
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
+        // Gates compile last, once every step has a number to point at.
+        //
+        // The translation is the same one bindings do: `source_step_key`
+        // becomes `config.task_number`. That is the whole mechanism — the
+        // evaluator, the poller, the backoff, and the four result states are
+        // the ones `task_gates` already had, and a compiled gate is
+        // indistinguishable from one added by hand against a live run.
+        //
+        // `disposition` is copied through unchanged, `None` included. `None`
+        // means "derive at poll time", and it has to stay `None` here rather
+        // than being resolved now: at launch every source step is still in the
+        // backlog, so deriving it here would freeze every gate as `wait` and
+        // no branch would ever route.
+        let gate_store = crate::tasks::GateStore::new(task_store.pool().clone());
+        for gate in gates {
+            let Some(task_number) = task_numbers.get(&gate.step_key) else {
+                continue;
+            };
+
+            let config = match gate.kind {
+                GateKind::Http => gate.config.clone(),
+                GateKind::TaskOutput => {
+                    let Some(source_number) = gate
+                        .source_step_key
+                        .as_ref()
+                        .and_then(|key| task_numbers.get(key))
+                        .copied()
+                    else {
+                        // Validation already refused this, so reaching it means
+                        // a step failed to emit — the launch is unwinding
+                        // anyway and a gate pointing nowhere must not be left
+                        // behind.
+                        continue;
+                    };
+                    let mut object = match gate.config.as_object() {
+                        Some(object) => object.clone(),
+                        None => serde_json::Map::new(),
+                    };
+                    object.insert("task_number".to_string(), Value::from(source_number));
+                    Value::Object(object)
+                }
+            };
+
+            gate_store
+                .create(
+                    *task_number,
+                    gate.kind,
+                    &config,
+                    gate.label.as_deref(),
+                    gate.poll_interval_secs,
+                    gate.disposition,
+                )
+                .await
+                .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        }
+
         Ok(())
     }
 
@@ -1331,6 +1603,20 @@ impl WorkflowStore {
         run_id: &str,
         task_numbers: &HashMap<String, i64>,
     ) {
+        // Gates first, then the tasks they hang off. A gate outliving its task
+        // is a stored, repeating, outbound request against a card that no
+        // longer exists — the one piece of a rolled-back launch that would keep
+        // costing something.
+        let gate_store = crate::tasks::GateStore::new(task_store.pool().clone());
+        for (step_key, number) in task_numbers {
+            if let Err(error) = gate_store.delete_for_task(*number).await {
+                tracing::error!(
+                    %error, run_id, step_key, task_number = number,
+                    "failed to remove the gates of a rolled-back workflow launch"
+                );
+            }
+        }
+
         for (step_key, number) in task_numbers {
             if let Err(error) = task_store.delete(*number).await {
                 tracing::error!(
@@ -1814,6 +2100,35 @@ fn binding_from_row(row: sqlx::sqlite::SqliteRow) -> Result<StepBinding> {
     })
 }
 
+fn gate_from_row(row: sqlx::sqlite::SqliteRow) -> Result<StepGate> {
+    let kind: String = row.try_get("kind").context("failed to read gate kind")?;
+    Ok(StepGate {
+        workflow_id: row
+            .try_get("workflow_id")
+            .context("failed to read gate workflow_id")?,
+        step_key: row
+            .try_get("step_key")
+            .context("failed to read gate step_key")?,
+        gate_key: row
+            .try_get("gate_key")
+            .context("failed to read gate gate_key")?,
+        // An unreadable kind falls back to `http`, which cannot silently route
+        // anything: `http` never derives `route`, so the worst case is a gate
+        // that waits and is visible on the board.
+        kind: GateKind::parse(&kind).unwrap_or(GateKind::Http),
+        source_step_key: row.try_get("source_step_key").ok().flatten(),
+        config: read_json(&row, "config").unwrap_or(Value::Null),
+        label: row.try_get("label").ok().flatten(),
+        poll_interval_secs: row.try_get("poll_interval_secs").unwrap_or(60),
+        disposition: row
+            .try_get::<Option<String>, _>("disposition")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(GateDisposition::parse),
+    })
+}
+
 fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     Ok(WorkflowRun {
         id: row.try_get("id").context("failed to read run id")?,
@@ -2282,6 +2597,7 @@ mod tests {
                 &run_id,
                 &workflows.list_steps(&id).await.expect("steps"),
                 &workflows.list_edges(&id).await.expect("edges"),
+                &[],
                 &[],
                 &HashMap::new(),
                 &LoopWiring::default(),
@@ -3619,6 +3935,11 @@ mod tests {
              step_key TEXT NOT NULL, input_key TEXT NOT NULL, source TEXT NOT NULL, \
              source_step_key TEXT, source_pointer TEXT, literal_value TEXT, \
              PRIMARY KEY (workflow_id, step_key, input_key))",
+            "CREATE TABLE workflow_step_gates (workflow_id TEXT NOT NULL, \
+             step_key TEXT NOT NULL, gate_key TEXT NOT NULL, kind TEXT NOT NULL, \
+             source_step_key TEXT, config TEXT NOT NULL, label TEXT, \
+             poll_interval_secs INTEGER NOT NULL DEFAULT 60, disposition TEXT, \
+             PRIMARY KEY (workflow_id, step_key, gate_key))",
             "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY NOT NULL, workflow_id TEXT NOT NULL, \
              inputs TEXT NOT NULL, launched_by TEXT NOT NULL, \
              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
@@ -3628,5 +3949,294 @@ mod tests {
                 .await
                 .expect("workflow schema should be created");
         }
+    }
+
+    // -- Conditions ---------------------------------------------------------
+
+    fn condition(id: &str, step_key: &str, source: &str, equals: &str) -> StepGate {
+        StepGate {
+            workflow_id: id.to_string(),
+            step_key: step_key.to_string(),
+            gate_key: "runs-when".to_string(),
+            kind: GateKind::TaskOutput,
+            source_step_key: Some(source.to_string()),
+            config: serde_json::json!({"pointer": "/state", "equals": equals}),
+            label: Some(format!("deploy went {equals}")),
+            poll_interval_secs: 60,
+            disposition: None,
+        }
+    }
+
+    /// The translation, and the only genuinely new mechanism in template-level
+    /// gates: a step key becomes the task number that step compiled into.
+    ///
+    /// Without it a template cannot declare a condition at all — `task_gates`
+    /// is keyed by task number, and a template has only names — so branching
+    /// would remain a property of one run assembled by a script after launch,
+    /// which is how it had to be done before this existed.
+    #[tokio::test]
+    async fn a_condition_on_a_template_compiles_to_the_task_number_its_source_step_became() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["check", "rollback"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("put step");
+        }
+        workflows
+            .link_steps(&id, "check", "rollback")
+            .await
+            .expect("link");
+        workflows
+            .put_gate(&condition(&id, "rollback", "check", "red"))
+            .await
+            .expect("put gate");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+
+        let gates = crate::tasks::GateStore::new(tasks.pool().clone());
+        let compiled = gates
+            .list_for_task(launched.task_numbers["rollback"])
+            .await
+            .expect("gates");
+        assert_eq!(compiled.len(), 1, "one declared condition, one real gate");
+
+        let gate = &compiled[0];
+        assert_eq!(gate.kind, crate::tasks::GateKind::TaskOutput);
+        assert_eq!(
+            gate.config.get("task_number").and_then(|v| v.as_i64()),
+            Some(launched.task_numbers["check"]),
+            "the source step key has to resolve to the task that step became"
+        );
+        assert_eq!(
+            gate.config.get("pointer").and_then(|v| v.as_str()),
+            Some("/state"),
+            "the predicate is carried through untouched"
+        );
+        assert_eq!(
+            gate.disposition, None,
+            "`None` has to survive the compile: deriving it now would freeze \
+             every condition as `wait`, because at launch no source has run"
+        );
+
+        // Launching again produces a second, independent set — the condition
+        // belongs to the template, not to one run.
+        let again = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v2"}), "agent-1")
+            .await
+            .expect("relaunch");
+        let second = gates
+            .list_for_task(again.task_numbers["rollback"])
+            .await
+            .expect("gates");
+        assert_eq!(
+            second[0].config.get("task_number").and_then(|v| v.as_i64()),
+            Some(again.task_numbers["check"]),
+            "the second run's condition points at the second run's task"
+        );
+    }
+
+    /// The shape this whole feature exists to make possible, end to end.
+    ///
+    /// Two mutually exclusive conditions off one decision step: one branch
+    /// runs, the other is settled as skipped, and the step below *both* still
+    /// merges. Before this, the branch that was not taken sat in the backlog
+    /// forever and the merge waited on it — the pipeline deadlocked outright
+    /// while looking like it was still working.
+    #[tokio::test]
+    async fn two_exclusive_conditions_run_one_branch_settle_the_other_and_still_merge_below() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["check", "rollback", "announce", "notify"]
+            .iter()
+            .enumerate()
+        {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("put step");
+        }
+        for (parent, child) in [
+            ("check", "rollback"),
+            ("check", "announce"),
+            ("rollback", "notify"),
+            ("announce", "notify"),
+        ] {
+            workflows
+                .link_steps(&id, parent, child)
+                .await
+                .expect("link");
+        }
+        workflows
+            .put_gate(&condition(&id, "rollback", "check", "red"))
+            .await
+            .expect("put gate");
+        workflows
+            .put_gate(&condition(&id, "announce", "check", "green"))
+            .await
+            .expect("put gate");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let number = |key: &str| launched.task_numbers[key];
+
+        // The decision is a task, and a model answered it. The routing
+        // predicate only ever reads a value something smarter computed.
+        complete(
+            &tasks,
+            number("check"),
+            serde_json::json!({"state": "green"}),
+        )
+        .await;
+
+        let gates = crate::tasks::GateStore::new(tasks.pool().clone());
+        let now = chrono::Utc::now().timestamp();
+        let polled = crate::tasks::poll_gates_once(&tasks, &gates, now)
+            .await
+            .expect("poll");
+        assert_eq!(polled.len(), 2, "both conditions are asked");
+
+        let rollback = tasks
+            .get_by_number(number("rollback"))
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            rollback.status,
+            TaskStatus::Skipped,
+            "the branch whose condition does not hold is settled, not left waiting"
+        );
+        assert!(
+            rollback
+                .skip_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("/state") && reason.contains("green")),
+            "the card says which pointer decided it and what was there: {:?}",
+            rollback.skip_reason
+        );
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&number("announce")),
+            "the branch whose condition holds runs"
+        );
+        assert!(
+            !sweep.promoted.contains(&number("notify")),
+            "the merge still waits for the branch that is actually running"
+        );
+
+        complete(
+            &tasks,
+            number("announce"),
+            serde_json::json!({"sent": true}),
+        )
+        .await;
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&number("notify")),
+            "the merge runs with one parent done and one skipped — this is the \
+             deadlock the feature removes, and it must stay removed"
+        );
+    }
+
+    /// A condition reading a step that is not in the workflow can never be
+    /// answered, so it is refused at launch by name.
+    ///
+    /// The alternative is a step held forever by a gate whose source does not
+    /// exist, which on the board is indistinguishable from one still waiting.
+    #[tokio::test]
+    async fn a_condition_naming_an_unknown_step_is_refused_with_the_name() {
+        let (workflows, tasks, id) = fixture().await;
+        workflows
+            .put_step(&step(&id, "rollback", 0))
+            .await
+            .expect("put step");
+        workflows
+            .put_gate(&condition(&id, "rollback", "check", "red"))
+            .await
+            .expect("put gate");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a condition nothing can answer is not launchable");
+        match &error {
+            LaunchError::UnknownGateSource {
+                step_key,
+                gate_key,
+                missing,
+            } => {
+                assert_eq!(step_key, "rollback");
+                assert_eq!(gate_key, "runs-when");
+                assert_eq!(missing, "check");
+            }
+            other => panic!("expected UnknownGateSource, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("rollback") && error.to_string().contains("check"),
+            "the refusal names both steps: {error}"
+        );
+    }
+
+    /// A condition whose config will not evaluate would error once a minute
+    /// forever with nobody reading the log. Refused while the author is still
+    /// looking at it, by the same validator the task level uses.
+    #[test]
+    fn a_condition_with_no_predicate_is_refused_by_the_shared_validator() {
+        let mut gate = condition("w", "rollback", "check", "red");
+        gate.config = serde_json::json!({"equals": "red"});
+        let error = validate_step_gate(&gate).expect_err("a task_output condition needs a pointer");
+        assert!(
+            matches!(
+                error,
+                crate::tasks::GateConfigError::MissingField {
+                    field: "pointer",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        // And the source is *not* what the task-level validator asks for here:
+        // a template has a step key, not a number, so demanding `task_number`
+        // would make every template gate unsavable.
+        let mut usable = condition("w", "rollback", "check", "red");
+        usable.config = serde_json::json!({"pointer": "/state", "equals": "red"});
+        assert!(validate_step_gate(&usable).is_ok());
+    }
+
+    /// Deleting a step takes its conditions with it, in both directions.
+    ///
+    /// A gate on a step that is gone, or reading one that is gone, makes every
+    /// future launch fail validation over a row a step-oriented editor cannot
+    /// show.
+    #[tokio::test]
+    async fn deleting_a_step_takes_the_conditions_that_mention_it() {
+        let (workflows, _tasks, id) = fixture().await;
+        for (index, key) in ["check", "rollback"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("put step");
+        }
+        workflows
+            .put_gate(&condition(&id, "rollback", "check", "red"))
+            .await
+            .expect("put gate");
+
+        assert_eq!(workflows.list_gates(&id).await.expect("gates").len(), 1);
+        workflows
+            .delete_step(&id, "check")
+            .await
+            .expect("delete step");
+        assert!(
+            workflows.list_gates(&id).await.expect("gates").is_empty(),
+            "a condition reading a deleted step goes with it"
+        );
     }
 }

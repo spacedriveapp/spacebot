@@ -70,6 +70,14 @@ const COLUMN_STYLE: Record<TaskStatus, ColumnStyle> = {
 		dot: "bg-status-success",
 		hint: "Terminal",
 	},
+	// Terminal like `done`, and deliberately not styled like it. A skipped task
+	// is settled — nothing downstream is waiting on it — but it never ran, and a
+	// board that congratulates you for work that did not happen is lying.
+	skipped: {
+		accent: "border-t-app-line",
+		dot: "bg-ink-faint",
+		hint: "A condition ruled this out — it will never run",
+	},
 };
 
 /** Every styled status, in lifecycle order. */

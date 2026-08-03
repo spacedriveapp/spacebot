@@ -2808,6 +2808,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workflows/{id}/steps/{step_key}/gates/{gate_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /workflows/{id}/steps/{step_key}/gates/{gate_key}` — declare the
+         *     condition under which a step runs.
+         * @description Idempotent on `gate_key`, so an editor saving the same condition twice edits
+         *     it. A generated id would leave the step held behind two copies of one gate,
+         *     which on the board reads as a condition that cannot be satisfied.
+         */
+        put: operations["put_step_gate"];
+        post?: never;
+        /**
+         * `DELETE /workflows/{id}/steps/{step_key}/gates/{gate_key}` — the step runs
+         *     unconditionally again.
+         */
+        delete: operations["delete_step_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3408,6 +3435,16 @@ export interface components {
         CreateGateRequest: {
             /** @description Shape depends on `kind`. See `crate::tasks::gates`. */
             config: unknown;
+            /**
+             * @description `wait` | `route`, or omit to derive it.
+             *
+             *     What a *false* answer means. `wait` is a gate in the original sense —
+             *     poll again. `route` says the step does not apply and settles it as
+             *     `skipped`. Omitted is the right answer nearly always: a `task_output`
+             *     gate whose source has finished routes, everything else waits, and that
+             *     is a fact about whether the input can still change rather than a guess.
+             */
+            disposition?: string | null;
             /** @description `http` | `task_output` */
             kind: string;
             /**
@@ -3694,6 +3731,15 @@ export interface components {
             updated_at: string;
             value: string;
         };
+        /**
+         * @description What a *false* answer from a gate means.
+         *
+         *     The entire difference between "is CI green yet?" and "should this branch
+         *     run?". The two ask the same predicate with opposite failure modes: waiting
+         *     forever is correct for the first and a deadlock for the second.
+         * @enum {string}
+         */
+        GateDisposition: "wait" | "route";
         /**
          * @description What kind of fact a gate waits on.
          *
@@ -4458,6 +4504,32 @@ export interface components {
         RunListResponse: {
             runs: components["schemas"]["WorkflowRun"][];
         };
+        /**
+         * @description Sandbox reporting for one agent, as three separate facts.
+         *
+         *     `mode` is what the operator asked for and `containment_active` is what the
+         *     host is actually doing; they are not the same question, and reporting only
+         *     the first is how an instance ends up running unconfined while its config
+         *     says `mode = "enabled"`. `backend` names the mechanism so the answer is
+         *     checkable rather than trusted.
+         */
+        SandboxContainmentStatus: {
+            agent_id: string;
+            /** @description Backend enforcing containment, or null when none was detected. */
+            backend?: string | null;
+            /** @description Whether OS-level containment is in force right now. */
+            containment_active: boolean;
+            /** @description Configured `sandbox.mode`: "enabled" or "disabled". */
+            mode: string;
+            /**
+             * @description Mode is enabled but no backend exists — the config claims containment
+             *     this host is not providing. Reported explicitly rather than left to be
+             *     derived, because deriving it wrong is the failure being fixed.
+             */
+            requested_but_inert: boolean;
+            /** @description Whether `sandbox.require_containment` is set for this agent. */
+            require_containment: boolean;
+        };
         SandboxSection: {
             mode: string;
             passthrough_env: string[];
@@ -4476,6 +4548,41 @@ export interface components {
             /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
             source_pointer?: string | null;
             /** @description Required when `source` is `step`. */
+            source_step_key?: string | null;
+        };
+        /** @description A condition on a step: the predicate, and what a false answer means. */
+        SaveStepGateRequest: {
+            /**
+             * @description The predicate — an RFC 6901 `pointer` plus `equals` or `any_of`, in the
+             *     same shape a task gate takes. For `task_output`, `task_number` is filled
+             *     in by the launch and must not be set here.
+             */
+            config: unknown;
+            /**
+             * @description `wait` | `route`, or omit to derive it.
+             *
+             *     `wait` holds the step until the condition becomes true — a gate in the
+             *     original sense. `route` says a false answer means the step does not
+             *     apply, and settles it as skipped.
+             *
+             *     Omitting it is right nearly always: a `task_output` condition whose
+             *     source has settled routes, and everything else waits. That is a fact
+             *     about whether the answer can still change, not a guess. Set it for what
+             *     the derivation cannot see — an http endpoint whose answer really is
+             *     final, or a condition that should hold the pipeline rather than skip
+             *     past it.
+             */
+            disposition?: string | null;
+            /** @description `http` | `task_output` */
+            kind: string;
+            /** @description What the board should call this. "needs legal review" beats a pointer. */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs?: number | null;
+            /**
+             * @description Required when `kind` is `task_output`: whose output to read, by name.
+             *     Becomes a task number at launch.
+             */
             source_step_key?: string | null;
         };
         SaveStepRequest: {
@@ -4645,6 +4752,8 @@ export interface components {
         StatusResponse: {
             /** Format: int32 */
             pid: number;
+            /** @description Per-agent process containment. One entry per agent with a live sandbox. */
+            sandbox: components["schemas"]["SandboxContainmentStatus"][];
             status: string;
             /** Format: int64 */
             uptime_seconds: number;
@@ -4671,6 +4780,44 @@ export interface components {
              */
             kind?: string | null;
             parent_step_key: string;
+        };
+        /**
+         * @description A gate declared by a *template*, addressed by step key.
+         *
+         *     The template-level mirror of `task_gates`, exactly as [`StepBinding`] is the
+         *     template-level mirror of `task_input_bindings`, and for the same reason:
+         *     `task_gates` is keyed by task number and a template has only step keys. The
+         *     translation at launch is the same one bindings already do.
+         *
+         *     This is where a *condition* on a step lives. Whether the condition holds the
+         *     step or settles it is [`StepGate::disposition`], and that one field is the
+         *     whole of branching.
+         */
+        StepGate: {
+            /**
+             * @description The predicate, in the shape `task_gates.config` takes: an RFC 6901
+             *     pointer plus `equals` / `any_of`. No second predicate language.
+             */
+            config: unknown;
+            disposition?: null | components["schemas"]["GateDisposition"];
+            /**
+             * @description Author-named, so saving the same gate twice is an edit rather than a
+             *     second gate holding the step behind a duplicate of one condition.
+             */
+            gate_key: string;
+            kind: components["schemas"]["GateKind"];
+            /** @description What the board should call this. "needs legal review" beats a pointer. */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs: number;
+            /**
+             * @description For `task_output`: whose output to read, by name. Becomes
+             *     `config.task_number` at launch — the entire translation.
+             */
+            source_step_key?: string | null;
+            /** @description The step this gate holds back. */
+            step_key: string;
+            workflow_id: string;
         };
         StorageStatus: {
             /** Format: int64 */
@@ -4781,6 +4928,15 @@ export interface components {
              *     `web` in the same project.
              */
             repo_id?: string | null;
+            /**
+             * @description Why this task will never run, when its status is `skipped`.
+             *
+             *     Its own field rather than a second meaning for `block_reason`: a block
+             *     is a stop that recovers, and it drags in `block_kind`, the sticky kinds,
+             *     the recurrence limiter, and the unblock path — none of which applies to
+             *     a branch that was simply not taken.
+             */
+            skip_reason?: string | null;
             source_memory_id?: string | null;
             status: components["schemas"]["TaskStatus"];
             subtasks: components["schemas"]["TaskSubtask"][];
@@ -4865,6 +5021,7 @@ export interface components {
             /** Format: int64 */
             consecutive_errors: number;
             created_at: string;
+            disposition?: null | components["schemas"]["GateDisposition"];
             id: string;
             kind: components["schemas"]["GateKind"];
             /**
@@ -5006,7 +5163,7 @@ export interface components {
             runs: components["schemas"]["TaskRun"][];
         };
         /** @enum {string} */
-        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "blocked" | "done";
+        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "blocked" | "done" | "skipped";
         TaskSubtask: {
             completed: boolean;
             title: string;
@@ -5576,6 +5733,12 @@ export interface components {
         WorkflowDetailResponse: {
             bindings: components["schemas"]["StepBinding"][];
             edges: components["schemas"]["WorkflowEdge"][];
+            /**
+             * @description Conditions on steps. Part of the same response for the same reason the
+             *     edges are: a canvas that draws a step without its condition draws a
+             *     pipeline that is not the one that runs.
+             */
+            gates: components["schemas"]["StepGate"][];
             steps: components["schemas"]["WorkflowStep"][];
             workflow: components["schemas"]["Workflow"];
         };
@@ -12521,6 +12684,83 @@ export interface operations {
                 };
             };
             /** @description No such binding */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_step_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being gated */
+                step_key: string;
+                /** @description Author-chosen name for this condition */
+                gate_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveStepGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown kind or disposition, a step that does not exist, or an unusable config */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_step_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being gated */
+                step_key: string;
+                /** @description Name of the condition */
+                gate_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such condition */
             404: {
                 headers: {
                     [name: string]: unknown;

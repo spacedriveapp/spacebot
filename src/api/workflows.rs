@@ -113,6 +113,40 @@ pub(super) struct SaveBindingRequest {
     literal_value: Option<serde_json::Value>,
 }
 
+/// A condition on a step: the predicate, and what a false answer means.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct SaveStepGateRequest {
+    /// `http` | `task_output`
+    kind: String,
+    /// Required when `kind` is `task_output`: whose output to read, by name.
+    /// Becomes a task number at launch.
+    #[serde(default)]
+    source_step_key: Option<String>,
+    /// The predicate — an RFC 6901 `pointer` plus `equals` or `any_of`, in the
+    /// same shape a task gate takes. For `task_output`, `task_number` is filled
+    /// in by the launch and must not be set here.
+    config: serde_json::Value,
+    /// What the board should call this. "needs legal review" beats a pointer.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    poll_interval_secs: Option<i64>,
+    /// `wait` | `route`, or omit to derive it.
+    ///
+    /// `wait` holds the step until the condition becomes true — a gate in the
+    /// original sense. `route` says a false answer means the step does not
+    /// apply, and settles it as skipped.
+    ///
+    /// Omitting it is right nearly always: a `task_output` condition whose
+    /// source has settled routes, and everything else waits. That is a fact
+    /// about whether the answer can still change, not a guess. Set it for what
+    /// the derivation cannot see — an http endpoint whose answer really is
+    /// final, or a condition that should hold the pipeline rather than skip
+    /// past it.
+    #[serde(default)]
+    disposition: Option<String>,
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct LaunchRequest {
     /// The single payload the whole pipeline is driven from.
@@ -148,6 +182,10 @@ pub(super) struct WorkflowDetailResponse {
     steps: Vec<WorkflowStep>,
     edges: Vec<WorkflowEdge>,
     bindings: Vec<StepBinding>,
+    /// Conditions on steps. Part of the same response for the same reason the
+    /// edges are: a canvas that draws a step without its condition draws a
+    /// pipeline that is not the one that runs.
+    gates: Vec<crate::workflows::StepGate>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -241,7 +279,11 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::StepAwaitsTwoLoops { .. }
         | LaunchError::PreviousIterationOutsideLoop { .. }
         | LaunchError::PreviousIterationOutsideBody { .. }
-        | LaunchError::LoopEntryAmbiguous { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | LaunchError::LoopEntryAmbiguous { .. }
+        | LaunchError::UnknownGateStep { .. }
+        | LaunchError::UnknownGateSource { .. }
+        | LaunchError::GateReadsItsOwnStep { .. }
+        | LaunchError::GateConfigInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -339,6 +381,7 @@ pub(super) async fn get_workflow(
     let steps = store.list_steps(&id).await.map_err(internal)?;
     let edges = store.list_step_edges(&id).await.map_err(internal)?;
     let bindings = store.list_bindings(&id).await.map_err(internal)?;
+    let gates = store.list_gates(&id).await.map_err(internal)?;
 
     Ok(Json(WorkflowDetailResponse {
         workflow,
@@ -352,6 +395,7 @@ pub(super) async fn get_workflow(
             })
             .collect(),
         bindings,
+        gates,
     }))
 }
 
@@ -809,6 +853,158 @@ pub(super) async fn delete_binding(
         return Err((
             StatusCode::NOT_FOUND,
             format!("no binding `{input_key}` on step `{step_key}`"),
+        ));
+    }
+    get_workflow(State(state), Path(id)).await
+}
+
+/// `PUT /workflows/{id}/steps/{step_key}/gates/{gate_key}` — declare the
+/// condition under which a step runs.
+///
+/// Idempotent on `gate_key`, so an editor saving the same condition twice edits
+/// it. A generated id would leave the step held behind two copies of one gate,
+/// which on the board reads as a condition that cannot be satisfied.
+#[utoipa::path(
+    put,
+    path = "/workflows/{id}/steps/{step_key}/gates/{gate_key}",
+    params(
+        ("id" = String, Path, description = "Workflow id"),
+        ("step_key" = String, Path, description = "Step being gated"),
+        ("gate_key" = String, Path, description = "Author-chosen name for this condition"),
+    ),
+    request_body = SaveStepGateRequest,
+    responses(
+        (status = 200, body = WorkflowDetailResponse),
+        (status = 404, description = "No such workflow"),
+        (status = 422, description = "Unknown kind or disposition, a step that does not exist, or an unusable config"),
+    ),
+    tag = "workflows",
+)]
+pub(super) async fn put_step_gate(
+    State(state): State<Arc<ApiState>>,
+    Path((id, step_key, gate_key)): Path<(String, String, String)>,
+    Json(request): Json<SaveStepGateRequest>,
+) -> Result<Json<WorkflowDetailResponse>, (StatusCode, String)> {
+    let store = get_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+
+    let kind = crate::tasks::GateKind::parse(&request.kind).ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        crate::tasks::GateConfigError::UnknownKind {
+            value: request.kind.clone(),
+        }
+        .to_string(),
+    ))?;
+
+    let disposition = match request.disposition.as_deref() {
+        None => None,
+        Some(value) => Some(crate::tasks::GateDisposition::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "`{value}` is not a disposition for the condition on step `{step_key}` — use \
+                 wait or route, or omit it to derive"
+            ),
+        ))?),
+    };
+
+    // Every refusal below names the step. The author is looking at one step in
+    // an editor, and a message that does not say which one sends them reading
+    // rows — the same reason every `LaunchError` variant names one.
+    let steps = store.list_steps(&id).await.map_err(internal)?;
+    if !steps.iter().any(|step| step.step_key == step_key) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("no step `{step_key}` in this workflow"),
+        ));
+    }
+
+    if kind == crate::tasks::GateKind::TaskOutput {
+        let target = request.source_step_key.as_deref().unwrap_or("");
+        if target.is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "the condition `{gate_key}` on step `{step_key}` reads a step's output, so it \
+                     needs source_step_key"
+                ),
+            ));
+        }
+        if !steps.iter().any(|step| step.step_key == target) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("no step `{target}` in this workflow"),
+            ));
+        }
+        // A step gated on its own output can never run, so it can never produce
+        // the output. Caught here rather than at launch, where the author is no
+        // longer looking at the step that says it.
+        if target == step_key {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("step `{step_key}` cannot be the condition for whether it runs"),
+            ));
+        }
+    }
+
+    let gate = crate::workflows::StepGate {
+        workflow_id: id.clone(),
+        step_key: step_key.clone(),
+        gate_key,
+        kind,
+        source_step_key: request.source_step_key,
+        config: request.config,
+        label: request.label,
+        // The floor, not a preference: a gate is server-side, unattended, and
+        // repeating.
+        poll_interval_secs: request
+            .poll_interval_secs
+            .unwrap_or(crate::tasks::MIN_POLL_INTERVAL_SECS.max(60)),
+        disposition,
+    };
+
+    // The same validator the task level uses. A condition that will not
+    // evaluate would error once a minute forever with nobody reading the log,
+    // so it is refused while a person is still looking at the form.
+    crate::workflows::validate_step_gate(&gate).map_err(|error| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the condition on step `{step_key}` is not usable: {error}"),
+        )
+    })?;
+
+    store.put_gate(&gate).await.map_err(internal)?;
+
+    get_workflow(State(state), Path(id)).await
+}
+
+/// `DELETE /workflows/{id}/steps/{step_key}/gates/{gate_key}` — the step runs
+/// unconditionally again.
+#[utoipa::path(
+    delete,
+    path = "/workflows/{id}/steps/{step_key}/gates/{gate_key}",
+    params(
+        ("id" = String, Path, description = "Workflow id"),
+        ("step_key" = String, Path, description = "Step being gated"),
+        ("gate_key" = String, Path, description = "Name of the condition"),
+    ),
+    responses(
+        (status = 200, body = WorkflowDetailResponse),
+        (status = 404, description = "No such condition"),
+    ),
+    tag = "workflows",
+)]
+pub(super) async fn delete_step_gate(
+    State(state): State<Arc<ApiState>>,
+    Path((id, step_key, gate_key)): Path<(String, String, String)>,
+) -> Result<Json<WorkflowDetailResponse>, (StatusCode, String)> {
+    let store = get_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+    if !store
+        .delete_gate(&id, &step_key, &gate_key)
+        .await
+        .map_err(internal)?
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no condition `{gate_key}` on step `{step_key}`"),
         ));
     }
     get_workflow(State(state), Path(id)).await

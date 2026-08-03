@@ -1092,6 +1092,10 @@ pub(super) async fn get_task_contract(
         // Waiting on branches that have not finished is not a contract problem,
         // and listing it as one would put a red mark on a healthy pipeline.
         Ok(crate::tasks::ContractResolution::Pending { .. }) => (None, Vec::new()),
+        // Neither is a branch that was not taken. The task's own `skip_reason`
+        // is where that is reported; listing it here would say the contract is
+        // broken when it is simply moot.
+        Ok(crate::tasks::ContractResolution::Unreachable { .. }) => (None, Vec::new()),
         Err(error) => {
             tracing::warn!(%error, task_number = number, "failed to resolve inputs for contract view");
             (None, Vec::new())
@@ -1291,6 +1295,15 @@ pub(super) struct CreateGateRequest {
     label: Option<String>,
     #[serde(default)]
     poll_interval_secs: Option<i64>,
+    /// `wait` | `route`, or omit to derive it.
+    ///
+    /// What a *false* answer means. `wait` is a gate in the original sense —
+    /// poll again. `route` says the step does not apply and settles it as
+    /// `skipped`. Omitted is the right answer nearly always: a `task_output`
+    /// gate whose source has finished routes, everything else waits, and that
+    /// is a fact about whether the input can still change rather than a guess.
+    #[serde(default)]
+    disposition: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -1382,6 +1395,16 @@ pub(super) async fn create_task_gate(
     crate::tasks::validate_config(kind, &request.config, interval)
         .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
 
+    let disposition = match request.disposition.as_deref() {
+        None => None,
+        Some(value) => Some(crate::tasks::GateDisposition::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "`{value}` is not a gate disposition — use wait or route, or omit it to derive"
+            ),
+        ))?),
+    };
+
     gates
         .create(
             number,
@@ -1389,6 +1412,7 @@ pub(super) async fn create_task_gate(
             &request.config,
             request.label.as_deref(),
             interval,
+            disposition,
         )
         .await
         .map_err(|error| {

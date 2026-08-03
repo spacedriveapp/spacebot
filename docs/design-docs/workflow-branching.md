@@ -70,12 +70,17 @@ Same table, same evaluator, one new field. The disposition is the entire fix.
 
 `disposition` is nullable, and null means *derive*:
 
-- source is a **task output** and that task is `done` → nothing can change the answer
-  → **route**
-- source is **http**, or the source task is unfinished → **wait**
+- source is a **task output** and that task is **terminal** — `done` *or* `skipped` →
+  nothing can change the answer → **route**
+- source is **http**, or the source task is still able to change → **wait**
 
 This is not a heuristic. It is a fact about whether the input can still change, which
-is precisely the thing that distinguishes the two questions. It is right nearly always,
+is precisely the thing that distinguishes the two questions.
+
+`skipped` counts as terminal here, and it has to. A condition reading a branch that
+was itself skipped would otherwise derive `wait` and hold forever — the same deadlock
+this feature exists to remove, one level further down. Terminality is the property
+that matters; `done` was an earlier draft of this sentence naming only half of it. It is right nearly always,
 which is what makes it a good default.
 
 The override exists for what the derivation cannot see: an `http` gate polling a
