@@ -12,6 +12,7 @@ use serde_json::Value;
 #[cfg(test)]
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row as _, SqlitePool};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -391,6 +392,13 @@ impl From<TaskProjectBinding> for TaskBindingPatch {
 
 /// How many consecutive failures a task may accumulate before it is parked in
 /// [`TaskStatus::Blocked`] instead of being requeued.
+/// How many tasks one graph view will walk before it stops.
+///
+/// A cap rather than a limit anybody chose: dependency graphs are user-built
+/// and nothing stops one from growing without bound, and a page load that
+/// scans the whole table is a worse outcome than a partial answer that says so.
+pub const MAX_GRAPH_TASKS: usize = 250;
+
 pub const DEFAULT_FAILURE_LIMIT: i64 = 2;
 
 /// Outcome of a single task execution attempt.
@@ -1243,6 +1251,134 @@ impl TaskStore {
     }
 
     /// Task numbers this task waits on.
+    /// Every task connected to this one by dependency edges, and those edges.
+    ///
+    /// Built from `task_dependencies` rather than from a workflow template,
+    /// which is what makes it work at all in the three cases that matter:
+    ///
+    ///   - the template was deleted. A run outlives its recipe by design —
+    ///     `workflow_run_id` is deliberately not a foreign key — so drawing
+    ///     from the template means the graph of work that actually happened
+    ///     disappears the moment somebody tidies up a workflow.
+    ///   - the step fanned out. One step becomes many tasks, so template edges
+    ///     no longer describe the run one-to-one; these edges are the real ones.
+    ///   - there was never a workflow. A graph built by hand, or by a worker
+    ///     filing cards, has edges and no template at all.
+    ///
+    /// Reachability is undirected: the answer to "what is this task part of" has
+    /// to include siblings, and a sibling is only reachable by going up to the
+    /// shared parent and back down.
+    pub async fn graph_component(&self, seed: i64, limit: usize) -> Result<TaskGraph> {
+        let mut seen: HashSet<i64> = HashSet::from([seed]);
+        let mut frontier: Vec<i64> = vec![seed];
+        let mut truncated = false;
+
+        while !frontier.is_empty() {
+            let placeholders = std::iter::repeat_n("?", frontier.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT parent_task_number, child_task_number FROM task_dependencies \
+                 WHERE parent_task_number IN ({placeholders}) \
+                    OR child_task_number IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&sql);
+            for number in frontier.iter().chain(frontier.iter()) {
+                query = query.bind(number);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to walk the task graph")?;
+
+            let mut next = Vec::new();
+            for row in rows {
+                for column in ["parent_task_number", "child_task_number"] {
+                    let number: i64 = row
+                        .try_get(column)
+                        .context("failed to read a task graph edge")?;
+                    if seen.insert(number) {
+                        // Bounded on purpose. One badly-wired graph should not
+                        // turn a page load into a full table scan, and a cap
+                        // that is reported is honest where a silent one reads
+                        // as "this is the whole picture".
+                        if seen.len() > limit {
+                            truncated = true;
+                        } else {
+                            next.push(number);
+                        }
+                    }
+                }
+            }
+            if truncated {
+                break;
+            }
+            frontier = next;
+        }
+
+        let numbers: Vec<i64> = {
+            let mut collected: Vec<i64> = seen.into_iter().collect();
+            collected.sort_unstable();
+            collected
+        };
+
+        let placeholders = std::iter::repeat_n("?", numbers.len())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let task_sql = format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE task_number IN ({placeholders}) ORDER BY task_number"
+        );
+        let mut task_query = sqlx::query(&task_sql);
+        for number in &numbers {
+            task_query = task_query.bind(number);
+        }
+        let tasks: Vec<Task> = task_query
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to load the tasks in a graph")?
+            .into_iter()
+            .map(task_from_row)
+            .collect::<Result<Vec<_>>>()?;
+
+        // Only edges with both ends inside the component. A truncated walk can
+        // otherwise return an edge pointing at a task that is not in `tasks`,
+        // which every renderer would either drop silently or crash on.
+        let edge_sql = format!(
+            "SELECT parent_task_number, child_task_number FROM task_dependencies \
+             WHERE parent_task_number IN ({placeholders}) \
+               AND child_task_number IN ({placeholders}) \
+             ORDER BY parent_task_number, child_task_number"
+        );
+        let mut edge_query = sqlx::query(&edge_sql);
+        for number in numbers.iter().chain(numbers.iter()) {
+            edge_query = edge_query.bind(number);
+        }
+        let edges = edge_query
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to load the edges in a graph")?
+            .into_iter()
+            .map(|row| {
+                Ok(TaskGraphEdge {
+                    parent_task_number: row
+                        .try_get("parent_task_number")
+                        .context("failed to read edge parent")?,
+                    child_task_number: row
+                        .try_get("child_task_number")
+                        .context("failed to read edge child")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(TaskGraph {
+            seed,
+            tasks,
+            edges,
+            truncated,
+        })
+    }
+
     pub async fn list_parents(&self, child: i64) -> Result<Vec<i64>> {
         sqlx::query_scalar(
             "SELECT parent_task_number FROM task_dependencies \
@@ -3165,6 +3301,29 @@ fn validation_problems(schema: &Value, value: &Value, side: ContractSide) -> Vec
         .collect()
 }
 
+/// One dependency edge, as a pair rather than a count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskGraphEdge {
+    pub parent_task_number: i64,
+    pub child_task_number: i64,
+}
+
+/// The connected graph a task belongs to.
+///
+/// The unit a person actually asks about. "Show me this task" is nearly always
+/// "show me what this task is part of" — what it waits for, what waits on it,
+/// and what runs beside it.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskGraph {
+    /// The task that was asked about, so a renderer can mark it.
+    pub seed: i64,
+    pub tasks: Vec<Task>,
+    pub edges: Vec<TaskGraphEdge>,
+    /// Whether the walk hit its cap. Reported rather than swallowed: a partial
+    /// graph presented as a whole one is worse than no graph.
+    pub truncated: bool,
+}
+
 /// How many edges touch a task, and how many still gate it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskEdgeSummary {
@@ -4859,6 +5018,120 @@ mod tests {
         let sweep = store.recompute_ready("agent-test").await.expect("sweep");
         assert_eq!(sweep.promoted, vec![child.task_number]);
         assert!(sweep.gated.is_empty());
+    }
+
+    /// The whole point: the graph comes from real edges, so it survives the
+    /// template being deleted and works for graphs that never had one.
+    #[tokio::test]
+    async fn a_task_graph_is_reachable_from_any_task_in_it() {
+        let store = setup_store().await;
+        let scan = task_at(&store, "scan", TaskStatus::Backlog).await;
+        let a = task_at(&store, "audit a", TaskStatus::Backlog).await;
+        let b = task_at(&store, "audit b", TaskStatus::Backlog).await;
+        let report = task_at(&store, "report", TaskStatus::Backlog).await;
+        for (parent, child) in [
+            (scan.task_number, a.task_number),
+            (scan.task_number, b.task_number),
+            (a.task_number, report.task_number),
+            (b.task_number, report.task_number),
+        ] {
+            store.link_tasks(parent, child).await.expect("link");
+        }
+
+        // Asked from a *leaf branch*, not the root. A sibling is only
+        // reachable by walking up to the shared parent and back down, which is
+        // why the traversal has to be undirected.
+        let graph = store
+            .graph_component(a.task_number, MAX_GRAPH_TASKS)
+            .await
+            .expect("graph");
+
+        assert_eq!(graph.seed, a.task_number);
+        let mut numbers: Vec<i64> = graph.tasks.iter().map(|t| t.task_number).collect();
+        numbers.sort_unstable();
+        let mut expected = vec![
+            scan.task_number,
+            a.task_number,
+            b.task_number,
+            report.task_number,
+        ];
+        expected.sort_unstable();
+        assert_eq!(numbers, expected, "the sibling branch must be included");
+        assert_eq!(graph.edges.len(), 4);
+        assert!(!graph.truncated);
+    }
+
+    /// A task with no edges is a graph of one, not an error and not empty.
+    #[tokio::test]
+    async fn a_lone_task_is_its_own_graph() {
+        let store = setup_store().await;
+        let lone = task_at(&store, "on its own", TaskStatus::Backlog).await;
+
+        let graph = store
+            .graph_component(lone.task_number, MAX_GRAPH_TASKS)
+            .await
+            .expect("graph");
+        assert_eq!(graph.tasks.len(), 1);
+        assert!(graph.edges.is_empty());
+    }
+
+    /// Two unrelated pipelines must not bleed into each other.
+    #[tokio::test]
+    async fn an_unrelated_graph_is_not_dragged_in() {
+        let store = setup_store().await;
+        let mine = task_at(&store, "mine", TaskStatus::Backlog).await;
+        let also_mine = task_at(&store, "also mine", TaskStatus::Backlog).await;
+        store
+            .link_tasks(mine.task_number, also_mine.task_number)
+            .await
+            .expect("link");
+        let theirs = task_at(&store, "theirs", TaskStatus::Backlog).await;
+
+        let graph = store
+            .graph_component(mine.task_number, MAX_GRAPH_TASKS)
+            .await
+            .expect("graph");
+        assert_eq!(graph.tasks.len(), 2);
+        assert!(
+            !graph
+                .tasks
+                .iter()
+                .any(|t| t.task_number == theirs.task_number)
+        );
+    }
+
+    /// A cap that lies is worse than a cap. Truncation is reported, and every
+    /// edge returned still has both ends present — a renderer handed an edge
+    /// pointing at a missing node either drops it silently or crashes.
+    #[tokio::test]
+    async fn a_truncated_walk_says_so_and_returns_no_dangling_edge() {
+        let store = setup_store().await;
+        let mut chain = Vec::new();
+        for index in 0..8 {
+            chain.push(task_at(&store, &format!("step {index}"), TaskStatus::Backlog).await);
+        }
+        for pair in chain.windows(2) {
+            store
+                .link_tasks(pair[0].task_number, pair[1].task_number)
+                .await
+                .expect("link");
+        }
+
+        let graph = store
+            .graph_component(chain[0].task_number, 3)
+            .await
+            .expect("graph");
+        assert!(graph.truncated, "an 8-task chain cannot fit in 3");
+
+        let present: HashSet<i64> = graph.tasks.iter().map(|t| t.task_number).collect();
+        for edge in &graph.edges {
+            assert!(
+                present.contains(&edge.parent_task_number)
+                    && present.contains(&edge.child_task_number),
+                "edge {:?} points outside the returned tasks",
+                edge
+            );
+        }
     }
 
     /// A dependency wait is ordinary scheduling, not an incident: it rests in

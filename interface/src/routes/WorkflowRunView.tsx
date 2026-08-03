@@ -8,7 +8,7 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 import {TaskStatusPill} from "@/components/workflows/TaskStatusPill";
 import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
 import {useWorkflowView, ViewToggle} from "@/components/workflows/ViewToggle";
-import {orderSteps} from "@/components/workflows/graph";
+import {orderSteps, runNodes} from "@/components/workflows/graph";
 
 /**
  * One launch, and the tasks it became.
@@ -92,11 +92,22 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	const [view, setView] = useWorkflowView();
 	const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
-	/** step key → the task it compiled into, which is what the nodes read. */
+	/**
+	 * step key → every task it compiled into.
+	 *
+	 * A list, not a task. This used to keep the last task it saw for each step,
+	 * which was correct for exactly as long as one step meant one task. A step
+	 * declaring `for_each_step_key` fans out into one task per item an upstream
+	 * step produced, so three audits sharing the key `audit` collapsed into one
+	 * node and two thirds of the run went missing from the canvas.
+	 */
 	const tasksByStep = useMemo(() => {
-		const map = new Map<string, TaskItem>();
+		const map = new Map<string, TaskItem[]>();
 		for (const task of tasks) {
-			if (task.workflow_step_key) map.set(task.workflow_step_key, task);
+			if (!task.workflow_step_key) continue;
+			const list = map.get(task.workflow_step_key);
+			if (list) list.push(task);
+			else map.set(task.workflow_step_key, [task]);
 		}
 		return map;
 	}, [tasks]);
@@ -105,7 +116,23 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	// list is the honest fallback rather than an empty canvas.
 	const canDrawGraph = workflow != null && workflow.steps.length > 0;
 	const showCanvas = view === "canvas" && canDrawGraph;
-	const selectedTask = selectedKey ? (tasksByStep.get(selectedKey) ?? null) : null;
+
+	/**
+	 * The canvas selects a node, and on a run a node is a task.
+	 *
+	 * So the panel is keyed by task too: clicking the `sigil` branch has to show
+	 * sigil's inputs and sigil's finding, not whichever audit happened to be
+	 * indexed last. The node ids come from the same helper the canvas uses, which
+	 * is what keeps the two in agreement.
+	 */
+	const nodes = useMemo(
+		() => runNodes(workflow?.steps ?? [], tasksByStep),
+		[workflow, tasksByStep],
+	);
+	const selectedNode = selectedKey
+		? (nodes.find((node) => node.id === selectedKey) ?? null)
+		: null;
+	const selectedTask = selectedNode?.task ?? null;
 
 	if (isLoading) {
 		return <p className="py-8 text-center text-sm text-ink-faint">Loading run…</p>;
@@ -179,8 +206,8 @@ export function WorkflowRunView({runId}: {runId: string}) {
 							</div>
 						) : (
 							<p className="px-4 py-6 text-center text-xs text-ink-faint">
-								{selectedKey
-									? `\`${selectedKey}\` produced no task in this run.`
+								{selectedNode
+									? `\`${selectedNode.stepKey}\` produced no task in this run.`
 									: "Select a step to see what its task did."}
 							</p>
 						)}
@@ -237,6 +264,16 @@ function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 
 /** One task's title, status and payloads — the same either side of the toggle. */
 function RunTaskBody({task}: {task: TaskItem}) {
+	// The compiler appends the branch to the title so a task is identifiable on
+	// the board. Here the branch is a badge of its own, so showing both would
+	// print `[sigil]` twice on one line.
+	const branch = task.fan_out_branch_key;
+	const suffix = branch ? ` [${branch}]` : "";
+	const title =
+		suffix && task.title.endsWith(suffix)
+			? task.title.slice(0, -suffix.length)
+			: task.title;
+
 	return (
 		<>
 			<div className="flex flex-wrap items-baseline gap-2">
@@ -246,7 +283,7 @@ function RunTaskBody({task}: {task: TaskItem}) {
 					search={{task: task.task_number}}
 					className="truncate text-sm text-ink hover:underline"
 				>
-					{task.title}
+					{title}
 				</Link>
 				<span className="shrink-0 font-mono text-[10px] text-ink-faint">
 					#{task.task_number}
@@ -259,10 +296,27 @@ function RunTaskBody({task}: {task: TaskItem}) {
 						{task.workflow_step_key}
 					</span>
 				)}
+				{branch && (
+					<span
+						className="shrink-0 rounded border border-accent/40 bg-accent/10 px-1 font-mono text-[10px] text-accent"
+						title="Which branch of the step's fan-out this task is. A fan-in downstream collects the branches by this key."
+					>
+						{branch}
+					</span>
+				)}
 				{/* Never @spacedrive/ai's TaskStatusIcon: it throws on `blocked`,
 				    which is exactly the status a stalled pipeline sits in. */}
 				<TaskStatusPill status={task.status} />
 			</div>
+
+			{task.fan_out_placeholder && (
+				<p className="mt-1 rounded border border-dashed border-app-line bg-app-box/30 px-2 py-1 text-[11px] text-ink-faint">
+					Waiting to fan out. This is not work — it holds the edges its
+					branches will inherit, so the steps after it have something to wait
+					on. It is replaced by one task per item once the step it iterates
+					finishes.
+				</p>
+			)}
 
 			{task.block_reason && (
 				<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">

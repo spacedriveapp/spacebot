@@ -1468,3 +1468,53 @@ pub(super) async fn delete_task_gate(
     })?;
     Ok(Json(TaskGatesResponse { gates }))
 }
+
+/// `GET /tasks/{number}/graph` — every task connected to this one, and the
+/// edges between them.
+///
+/// Drawn from real dependency edges rather than from a workflow template,
+/// which is what makes it answer the question in the three cases that matter:
+/// the template has since been deleted, the step fanned out so one step is now
+/// many tasks, or there was never a template at all because the graph was built
+/// by hand or by a worker filing cards.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/graph",
+    params(("number" = i64, Path, description = "Task number to centre on")),
+    responses(
+        (status = 200, body = crate::tasks::TaskGraph),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_graph(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<crate::tasks::TaskGraph>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    // Checked before the walk so a missing task is a 404 rather than a graph of
+    // one task that does not exist.
+    if store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for graph");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let graph = store
+        .graph_component(number, crate::tasks::MAX_GRAPH_TASKS)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to walk task graph");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(graph))
+}

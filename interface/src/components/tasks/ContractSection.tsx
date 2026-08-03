@@ -785,5 +785,9 @@ function describe(problem: ContractProblem): string {
 			return `The declared ${problem.side} schema is not valid JSON Schema: ${problem.message}`;
 		case "storage":
 			return `\`${problem.input_key}\` could not be read: ${problem.message}`;
+		case "fan_in_outside_run":
+			return `\`${problem.input_key}\` collects every branch of step \`${problem.step_key}\`, but this task did not come from a workflow run.`;
+		case "fan_in_no_branches":
+			return `\`${problem.input_key}\` collects every branch of step \`${problem.step_key}\`, which produced no tasks in this run.`;
 	}
 }

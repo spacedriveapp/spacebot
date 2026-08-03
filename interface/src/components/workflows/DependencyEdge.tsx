@@ -23,6 +23,17 @@ const HANDLE_CLEARANCE = 11;
 
 export type DependencyEdgeData = {
 	onRemove?: (parentStepKey: string, childStepKey: string) => void;
+	/**
+	 * The template edge this line came from.
+	 *
+	 * Not the same as `source`/`target` once a run has expanded a fan-out: three
+	 * branches mean three lines whose node ids are `audit#39` and friends, while
+	 * the edge that produced them is still `scan → audit`. Removal is an editor
+	 * action, where the two coincide, but naming the step keys explicitly is what
+	 * keeps that a fact rather than a coincidence.
+	 */
+	parentStepKey?: string;
+	childStepKey?: string;
 	busy?: boolean;
 	/** A run draws finished dependencies solid and pending ones faint. */
 	satisfied?: boolean;
@@ -60,6 +71,8 @@ export function DependencyEdge({
 	});
 
 	const onRemove = data?.onRemove;
+	const parentKey = data?.parentStepKey ?? source;
+	const childKey = data?.childStepKey ?? target;
 
 	return (
 		<>
@@ -91,9 +104,9 @@ export function DependencyEdge({
 						disabled={data?.busy}
 						onClick={(event) => {
 							event.stopPropagation();
-							onRemove(source, target);
+							onRemove(parentKey, childKey);
 						}}
-						title={`Stop \`${target}\` waiting for \`${source}\``}
+						title={`Stop \`${childKey}\` waiting for \`${parentKey}\``}
 						className="pointer-events-auto absolute flex size-4 items-center justify-center rounded-full border border-app-line bg-app-dark-box text-ink-faint hover:border-status-error hover:text-status-error disabled:opacity-50"
 						style={{
 							transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,

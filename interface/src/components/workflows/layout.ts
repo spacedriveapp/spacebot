@@ -26,6 +26,15 @@ export const NODE_HEIGHT = 92;
 
 const COLUMN_GAP = 104;
 const ROW_GAP = 30;
+/**
+ * Gap between two branches of the same fan-out.
+ *
+ * Deliberately tighter than the gap between two different steps. A fan-out's
+ * branches are one step seen three times, not three steps, and the only thing
+ * on the canvas that can say so is the spacing — they share a column with
+ * everything else at that depth, so proximity is what groups them.
+ */
+const BRANCH_GAP = 14;
 
 export interface NodePosition {
 	x: number;
@@ -33,7 +42,17 @@ export interface NodePosition {
 }
 
 /**
- * Positions for every step, keyed by step key.
+ * Positions for every node, keyed by node id.
+ *
+ * On the editor a node *is* a step and the ids are step keys. On a run a step
+ * that fanned out became several tasks, and each one is its own node, so the
+ * caller passes `nodesByStep` — the node ids that step expanded into, in the
+ * order they should stack. Positions come back keyed by those ids.
+ *
+ * Layering is still computed on the template graph, because that is where the
+ * shape lives: the branches of one step are all at the same depth by
+ * definition, so laying out the expanded graph from scratch could only ever
+ * arrive back at the same columns, and would lose the guarantee that they do.
  *
  * Steps caught in a cycle cannot be layered at all — there is no "longest path
  * from a root" when the path re-enters itself — so they are parked in a column
@@ -44,6 +63,7 @@ export interface NodePosition {
 export function layoutSteps(
 	steps: WorkflowStep[],
 	edges: WorkflowEdge[],
+	nodesByStep?: Map<string, string[]>,
 ): Map<string, NodePosition> {
 	const {ordered, cycle} = orderSteps(steps, edges);
 	const cycleKeys = new Set(cycle);
@@ -103,12 +123,27 @@ export function layoutSteps(
 			return (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0);
 		});
 
-		const span = (NODE_HEIGHT + ROW_GAP) * (sorted.length - 1);
-		sorted.forEach((key, index) => {
+		// Each step occupies a block as tall as the number of nodes it expanded
+		// into, so a three-branch fan-out pushes the step under it down instead of
+		// being drawn on top of it. Blocks are stacked first and centred after,
+		// because a column's height is not known until every block is measured.
+		let cursor = 0;
+		const blocks = sorted.map((key) => {
+			const ids = nodesByStep?.get(key) ?? [key];
+			const top = cursor;
+			cursor +=
+				ids.length * NODE_HEIGHT + (ids.length - 1) * BRANCH_GAP + ROW_GAP;
+			return {key, ids, top};
+		});
+		const span = Math.max(0, cursor - ROW_GAP);
+
+		blocks.forEach(({key, ids, top}, index) => {
 			row.set(key, index);
-			positions.set(key, {
-				x: column * (NODE_WIDTH + COLUMN_GAP),
-				y: index * (NODE_HEIGHT + ROW_GAP) - span / 2,
+			ids.forEach((id, branch) => {
+				positions.set(id, {
+					x: column * (NODE_WIDTH + COLUMN_GAP),
+					y: top + branch * (NODE_HEIGHT + BRANCH_GAP) - span / 2,
+				});
 			});
 		});
 	}

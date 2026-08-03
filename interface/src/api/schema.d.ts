@@ -2341,6 +2341,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/graph` — every task connected to this one, and the
+         *     edges between them.
+         * @description Drawn from real dependency edges rather than from a workflow template,
+         *     which is what makes it answer the question in the three cases that matter:
+         *     the template has since been deleted, the step fanned out so one step is now
+         *     many tasks, or there was never a template at all because the graph was built
+         *     by hand or by a worker filing cards.
+         */
+        get: operations["get_task_graph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/provenance": {
         parameters: {
             query?: never;
@@ -3014,7 +3039,7 @@ export interface components {
          *     indistinguishable from a deliberate one.
          * @enum {string}
          */
-        BindingSource: "step" | "literal" | "run_input";
+        BindingSource: "step" | "literal" | "run_input" | "fan_in";
         BindingsListResponse: {
             bindings: components["schemas"]["BindingResponse"][];
         };
@@ -3170,6 +3195,16 @@ export interface components {
             /** @enum {string} */
             kind: "storage";
             message: string;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "fan_in_outside_run";
+            step_key: string;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "fan_in_no_branches";
+            step_key: string;
         };
         /**
          * @description Which half of a contract a problem came from.
@@ -4428,6 +4463,20 @@ export interface components {
             /** @description Omit to run the step as whoever launched the run. */
             assigned_agent_id?: string | null;
             description?: string | null;
+            /** @description Pointer *within each item* naming its branch. Omit to key by index. */
+            for_each_key?: string | null;
+            /** @description RFC 6901 pointer into that step's outputs. Must select an array. */
+            for_each_pointer?: string | null;
+            /**
+             * @description Set to make this a fan-out: one task per item that step produced,
+             *     instead of one task.
+             *
+             *     Each branch receives its own item as the input key **`item`**. That is
+             *     the name to declare in this step's `input_schema` and to bind against —
+             *     there is no way to rename it, and a step that iterates without knowing
+             *     the key would declare a contract it never receives.
+             */
+            for_each_step_key?: string | null;
             input_schema?: unknown;
             output_schema?: unknown;
             /**
@@ -4606,6 +4655,22 @@ export interface components {
             created_at: string;
             created_by: string;
             description?: string | null;
+            /**
+             * @description Which branch of a fan-out this task is, once the fan-out has expanded.
+             *
+             *     `None` on every ordinary task, and on the placeholder that holds the
+             *     shape before expansion. This is the key a fan-in binding collects by.
+             */
+            fan_out_branch_key?: string | null;
+            /**
+             * @description Whether this task is a fan-out placeholder rather than work.
+             *
+             *     A placeholder carries exactly the edges its branches will inherit, so
+             *     the steps downstream have something to wait on between launch and
+             *     expansion. It is never promoted and never claimed — expansion replaces
+             *     it with one task per item.
+             */
+            fan_out_placeholder: boolean;
             id: string;
             /** @description JSON Schema this task's resolved inputs must satisfy before it runs. */
             input_schema?: unknown;
@@ -4747,6 +4812,34 @@ export interface components {
             gates: components["schemas"]["TaskGate"][];
         };
         /**
+         * @description The connected graph a task belongs to.
+         *
+         *     The unit a person actually asks about. "Show me this task" is nearly always
+         *     "show me what this task is part of" — what it waits for, what waits on it,
+         *     and what runs beside it.
+         */
+        TaskGraph: {
+            edges: components["schemas"]["TaskGraphEdge"][];
+            /**
+             * Format: int64
+             * @description The task that was asked about, so a renderer can mark it.
+             */
+            seed: number;
+            tasks: components["schemas"]["Task"][];
+            /**
+             * @description Whether the walk hit its cap. Reported rather than swallowed: a partial
+             *     graph presented as a whole one is worse than no graph.
+             */
+            truncated: boolean;
+        };
+        /** @description One dependency edge, as a pair rather than a count. */
+        TaskGraphEdge: {
+            /** Format: int64 */
+            child_task_number: number;
+            /** Format: int64 */
+            parent_task_number: number;
+        };
+        /**
          * @description Where one of a task's inputs comes from.
          *
          *     Either a pointer into an upstream task's outputs, or a literal baked into
@@ -4755,6 +4848,15 @@ export interface components {
         TaskInputBinding: {
             /** Format: int64 */
             child_task_number: number;
+            /**
+             * @description Collect every branch of this workflow step into one object, keyed by
+             *     branch key.
+             *
+             *     Mutually exclusive with `source_task_number`, and it has to be: that one
+             *     addresses a single upstream task by number, which cannot name a set that
+             *     does not exist until the fan-out expands.
+             */
+            fan_in_step_key?: string | null;
             /** @description Key in the child's input object. */
             input_key: string;
             /** @description JSON literal, used when `source_task_number` is `None`. */
@@ -5428,6 +5530,24 @@ export interface components {
             /** @description `None` means the agent that launched the run. */
             assigned_agent_id?: string | null;
             description?: string | null;
+            /**
+             * @description Pointer *within each item* naming its branch, e.g. `/name` over
+             *     `{"name": "repo-a"}` labels the branch `repo-a`.
+             *
+             *     This is what makes a fan-in keyed rather than positional. Without it the
+             *     index is used and the keys come out `0`, `1`, `2` — honest, but far less
+             *     useful in a report.
+             */
+            for_each_key?: string | null;
+            /** @description RFC 6901 pointer into that step's outputs. Must select an array. */
+            for_each_pointer?: string | null;
+            /**
+             * @description Which upstream step produces the collection this step iterates.
+             *
+             *     Set, and the step is a fan-out: it becomes one task per item rather than
+             *     one task, and the width is not known until that step finishes.
+             */
+            for_each_step_key?: string | null;
             input_schema?: unknown;
             output_schema?: unknown;
             /** Format: int64 */
@@ -11217,6 +11337,42 @@ export interface operations {
             };
             /** @description No such gate */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_graph: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number to centre on */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGraph"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

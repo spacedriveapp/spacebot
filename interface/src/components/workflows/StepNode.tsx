@@ -1,7 +1,12 @@
 import {memo} from "react";
 import {Handle, Position, type NodeProps, type Node} from "@xyflow/react";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
-import {faCircleNodes, faQuoteLeft, faRightToBracket} from "@fortawesome/free-solid-svg-icons";
+import {
+	faCircleNodes,
+	faCodeBranch,
+	faQuoteLeft,
+	faRightToBracket,
+} from "@fortawesome/free-solid-svg-icons";
 import type {TaskStatus, WorkflowStep} from "@/api/client";
 import {styleFor} from "@/components/tasks/boardColumns";
 import {STATUS_LABEL} from "@/components/tasks/taskTransitions";
@@ -33,13 +38,42 @@ export type StepNodeData = {
 	taskNumber?: number;
 	/** A blocked or errored task says so on the node — that is the branch to go look at. */
 	trouble?: string | null;
+	/** The task's own title once there is one, so a renamed task is not hidden. */
+	title?: string;
+	/**
+	 * Which branch of a fan-out this node is.
+	 *
+	 * Three boxes reading `Audit the repository` are three boxes nobody can tell
+	 * apart, and the branch key is the only thing that does — it is what the
+	 * fan-in downstream collects by, so it is also the name the reader will meet
+	 * again in the report's inputs.
+	 */
+	branchKey?: string | null;
+	/**
+	 * A fan-out that has not expanded yet.
+	 *
+	 * Drawn provisionally on purpose. Its width is genuinely unknown until the
+	 * upstream step finishes, so a node that looked like every other one would be
+	 * claiming a certainty the run does not have.
+	 */
+	placeholder?: boolean;
 };
 
 export type StepFlowNode = Node<StepNodeData, "step">;
 
 function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
-	const {step, bindingCount, inCycle, status, taskNumber, trouble} = data;
-	const style = status ? styleFor(status) : null;
+	const {
+		step,
+		bindingCount,
+		inCycle,
+		status,
+		taskNumber,
+		trouble,
+		title,
+		branchKey,
+		placeholder,
+	} = data;
+	const style = status && !placeholder ? styleFor(status) : null;
 
 	// The border carries the one fact that matters most on that canvas: on the
 	// editor, whether this is the step being edited; on a run, how its task is
@@ -49,19 +83,21 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 		? "border-accent"
 		: inCycle
 			? "border-status-error"
-			: status === "blocked"
-				? "border-status-error/60"
-				: status === "done"
-					? "border-status-success/50"
-					: status === "in_progress"
-						? "border-accent/60"
-						: "border-app-line";
+			: placeholder
+				? "border-dashed border-ink-faint/50"
+				: status === "blocked"
+					? "border-status-error/60"
+					: status === "done"
+						? "border-status-success/50"
+						: status === "in_progress"
+							? "border-accent/60"
+							: "border-app-line";
 
 	return (
 		<div
 			className={`flex flex-col justify-between rounded-lg border bg-app-dark-box px-2.5 py-2 text-left transition-colors ${border} ${
-				selected ? "shadow-lg shadow-accent/20" : "hover:border-ink-faint/60"
-			}`}
+				placeholder ? "border-dashed opacity-80" : ""
+			} ${selected ? "shadow-lg shadow-accent/20" : "hover:border-ink-faint/60"}`}
 			style={{width: NODE_WIDTH, height: NODE_HEIGHT}}
 		>
 			<Handle
@@ -74,7 +110,7 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 			<div className="min-w-0">
 				<div className="flex items-baseline gap-1.5">
 					<span className="min-w-0 flex-1 truncate text-[13px] leading-tight text-ink">
-						{step.title}
+						{title ?? step.title}
 					</span>
 					{taskNumber != null && (
 						<span className="shrink-0 font-mono text-[10px] text-ink-faint">
@@ -83,9 +119,18 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 					)}
 				</div>
 				<div className="mt-0.5 flex items-center gap-1.5">
-					<span className="min-w-0 truncate font-mono text-[10px] text-ink-faint">
+					<span className="shrink-0 truncate font-mono text-[10px] text-ink-faint">
 						{step.step_key}
 					</span>
+					{branchKey && (
+						<span
+							className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-1.5 text-[9px] text-accent"
+							title={`Branch \`${branchKey}\` of this step's fan-out`}
+						>
+							<FontAwesomeIcon icon={faCodeBranch} className="shrink-0 text-[7px]" />
+							<span className="truncate font-mono">{branchKey}</span>
+						</span>
+					)}
 					{inCycle && (
 						<span className="shrink-0 rounded border border-status-error/50 px-1 text-[9px] uppercase text-status-error">
 							cycle
@@ -95,7 +140,19 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 			</div>
 
 			<div className="flex min-w-0 items-center gap-1">
-				{style ? (
+				{placeholder ? (
+					<span
+						className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-dashed border-ink-faint/60 bg-app-box/40 px-1.5 py-0.5 text-[10px] text-ink-faint"
+						title={
+							step.for_each_step_key
+								? `Waiting for \`${step.for_each_step_key}\` to finish. It decides how many of these there are.`
+								: "Waiting to fan out. How many branches this becomes is not known yet."
+						}
+					>
+						<FontAwesomeIcon icon={faCodeBranch} className="shrink-0 text-[7px]" />
+						<span className="truncate">waiting to fan out</span>
+					</span>
+				) : style ? (
 					<span
 						className="inline-flex min-w-0 shrink items-center gap-1.5 rounded-full border border-app-line bg-app-box/60 px-1.5 py-0.5 text-[10px] text-ink-dull"
 						title={style.hint}

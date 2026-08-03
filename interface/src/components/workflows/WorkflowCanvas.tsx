@@ -20,7 +20,7 @@ import type {
 	WorkflowEdge,
 	WorkflowStep,
 } from "@/api/client";
-import {pathBetween, wouldCycle} from "./graph";
+import {pathBetween, runNodes, wouldCycle} from "./graph";
 import {layoutSteps, type NodePosition} from "./layout";
 import {StepNode, type StepFlowNode} from "./StepNode";
 import {DependencyEdge, type DependencyFlowEdge} from "./DependencyEdge";
@@ -35,16 +35,29 @@ export interface WorkflowCanvasProps {
 	bindings: StepBinding[];
 	/** Steps that could not be ordered, from `orderSteps`. */
 	cycle: string[];
+	/**
+	 * The selected node's id.
+	 *
+	 * A step key on the editor, where one step is one box. On a run it is a
+	 * node id from `runNodes` — a fan-out's three branches are three boxes and
+	 * selecting one has to mean *that* branch, not the step all three came from.
+	 */
 	selectedKey: string | null;
-	onSelect: (stepKey: string) => void;
+	onSelect: (nodeId: string) => void;
 	/** Omitted on a run, which is a record of what happened and not editable. */
 	onAddEdge?: (parentStepKey: string, childStepKey: string) => void;
 	onRemoveEdge?: (parentStepKey: string, childStepKey: string) => void;
 	edgeBusy?: boolean;
 	/** The server's refusal, verbatim. */
 	edgeError?: string | null;
-	/** Live task per step key. Present only on a run. */
-	tasksByStep?: Map<string, TaskItem>;
+	/**
+	 * Live tasks per step key. Present only on a run.
+	 *
+	 * A list rather than a task, because a step that declares `for_each_step_key`
+	 * compiles into one task *per item* an upstream step produced. Keying by step
+	 * and keeping the last one drew a three-way fan-out as a single node.
+	 */
+	tasksByStep?: Map<string, TaskItem[]>;
 	emptyHint?: string;
 }
 
@@ -94,7 +107,37 @@ function CanvasInner({
 	// `edgeError` so a local diagnosis is not overwritten by a stale server one.
 	const [localError, setLocalError] = useState<string | null>(null);
 
-	const computed = useMemo(() => layoutSteps(steps, edges), [steps, edges]);
+	// One entry per box on screen. On the editor that is one per step; on a run
+	// it is one per task, so an expanded fan-out is as wide as it really was.
+	const graphNodes = useMemo(
+		() => runNodes(steps, tasksByStep),
+		[steps, tasksByStep],
+	);
+
+	/** step key → the node ids it expanded into, in the order they stack. */
+	const nodesByStep = useMemo(() => {
+		const map = new Map<string, string[]>();
+		for (const node of graphNodes) {
+			const list = map.get(node.stepKey);
+			if (list) list.push(node.id);
+			else map.set(node.stepKey, [node.id]);
+		}
+		return map;
+	}, [graphNodes]);
+
+	/** node id → its task, for edges that need to know if their source finished. */
+	const tasksByNode = useMemo(() => {
+		const map = new Map<string, TaskItem>();
+		for (const node of graphNodes) {
+			if (node.task) map.set(node.id, node.task);
+		}
+		return map;
+	}, [graphNodes]);
+
+	const computed = useMemo(
+		() => layoutSteps(steps, edges, nodesByStep),
+		[steps, edges, nodesByStep],
+	);
 	const cycleKeys = useMemo(() => new Set(cycle), [cycle]);
 
 	const bindingCounts = useMemo(() => {
@@ -105,72 +148,104 @@ function CanvasInner({
 		return counts;
 	}, [bindings]);
 
+	const stepsByKey = useMemo(
+		() => new Map(steps.map((step) => [step.step_key, step])),
+		[steps],
+	);
+
 	const nodes = useMemo<StepFlowNode[]>(
 		() =>
-			steps.map((step) => {
-				const task = tasksByStep?.get(step.step_key);
-				return {
-					id: step.step_key,
-					type: "step" as const,
-					position: dragged[step.step_key] ??
-						computed.get(step.step_key) ?? {x: 0, y: 0},
-					selected: step.step_key === selectedKey,
-					draggable: true,
-					connectable: editable,
-					data: {
-						step,
-						bindingCount: bindingCounts.get(step.step_key) ?? 0,
-						inCycle: cycleKeys.has(step.step_key),
-						status: task?.status,
-						taskNumber: task?.task_number,
-						trouble: task
-							? (task.block_reason ?? task.last_error ?? null)
-							: null,
+			graphNodes.flatMap(({id, stepKey, task}) => {
+				const step = stepsByKey.get(stepKey);
+				if (!step) return [];
+				return [
+					{
+						id,
+						type: "step" as const,
+						position: dragged[id] ?? computed.get(id) ?? {x: 0, y: 0},
+						selected: id === selectedKey,
+						draggable: true,
+						connectable: editable,
+						data: {
+							step,
+							bindingCount: bindingCounts.get(stepKey) ?? 0,
+							inCycle: cycleKeys.has(stepKey),
+							status: task?.status,
+							taskNumber: task?.task_number,
+							trouble: task
+								? (task.block_reason ?? task.last_error ?? null)
+								: null,
+							title: task ? withoutBranchSuffix(task) : undefined,
+							branchKey: task?.fan_out_branch_key ?? null,
+							placeholder: task?.fan_out_placeholder ?? false,
+						},
 					},
-				};
+				];
 			}),
 		[
-			steps,
+			graphNodes,
+			stepsByKey,
 			dragged,
 			computed,
 			selectedKey,
 			bindingCounts,
 			cycleKeys,
-			tasksByStep,
 			editable,
 		],
 	);
 
+	/**
+	 * Template edges, fanned across the tasks at each end.
+	 *
+	 * The run response carries no task-level edge list, and it does not need to:
+	 * expansion gave every branch the edges its step declared, so the cross
+	 * product of one template edge over both endpoints' tasks *is* the graph in
+	 * the database. `scan → audit` becomes one arrow into each branch, and
+	 * `audit → report` one out of each, which is the shape of a fan-out drawn
+	 * honestly. Off a run every step has exactly one node and this collapses back
+	 * to one edge each, unchanged.
+	 */
 	const flowEdges = useMemo<DependencyFlowEdge[]>(
 		() =>
-			edges.map((edge) => {
-				const id = `${edge.parent_step_key}→${edge.child_step_key}`;
-				const upstream = tasksByStep?.get(edge.parent_step_key);
-				return {
-					id,
-					type: "dependency" as const,
-					source: edge.parent_step_key,
-					target: edge.child_step_key,
-					selected: id === selectedEdgeId,
-					markerEnd: {
-						type: MarkerType.ArrowClosed,
-						width: 13,
-						height: 13,
-						color:
-							id === selectedEdgeId
-								? "var(--color-accent)"
-								: upstream?.status === "done"
-									? "var(--color-status-success)"
-									: "var(--color-ink-faint)",
-					},
-					data: {
-						onRemove: onRemoveEdge,
-						busy: edgeBusy,
-						satisfied: upstream?.status === "done",
-					},
-				};
+			edges.flatMap((edge) => {
+				const sources = nodesByStep.get(edge.parent_step_key) ?? [];
+				const targets = nodesByStep.get(edge.child_step_key) ?? [];
+				return sources.flatMap((source) =>
+					targets.map((target) => {
+						const id = `${source}→${target}`;
+						// The arrow is drawn satisfied when *this* end of it is done, so a
+						// fan-out mid-flight shows finished branches feeding the fan-in in
+						// solid and the unfinished ones still faint.
+						const done = tasksByNode.get(source)?.status === "done";
+						return {
+							id,
+							type: "dependency" as const,
+							source,
+							target,
+							selected: id === selectedEdgeId,
+							markerEnd: {
+								type: MarkerType.ArrowClosed,
+								width: 13,
+								height: 13,
+								color:
+									id === selectedEdgeId
+										? "var(--color-accent)"
+										: done
+											? "var(--color-status-success)"
+											: "var(--color-ink-faint)",
+							},
+							data: {
+								onRemove: onRemoveEdge,
+								parentStepKey: edge.parent_step_key,
+								childStepKey: edge.child_step_key,
+								busy: edgeBusy,
+								satisfied: done,
+							},
+						};
+					}),
+				);
 			}),
-		[edges, selectedEdgeId, onRemoveEdge, edgeBusy, tasksByStep],
+		[edges, nodesByStep, tasksByNode, selectedEdgeId, onRemoveEdge, edgeBusy],
 	);
 
 	// Only positions are absorbed. Selection is owned by the page — the step
@@ -293,7 +368,10 @@ function CanvasInner({
 					showInteractive={false}
 					className="!bottom-2 !left-2 !shadow-none"
 				/>
-				<AutoFit signature={steps.map((step) => step.step_key).join(",")} />
+				{/* Node ids, not step keys: a fan-out expanding adds boxes without
+				    touching the template, and those are exactly the boxes most likely
+				    to land outside the viewport. */}
+				<AutoFit signature={graphNodes.map((node) => node.id).join(",")} />
 				<Panel position="top-right" className="!m-2 flex items-center gap-2">
 					{Object.keys(dragged).length > 0 && (
 						<button
@@ -320,6 +398,24 @@ function CanvasInner({
 			)}
 		</div>
 	);
+}
+
+/**
+ * The task's title without the branch suffix the compiler appended.
+ *
+ * Expansion names a branch's task `Audit the repository [grimoire]` so it is
+ * identifiable on the board, where there is no column of siblings to compare it
+ * against. On the canvas there is, and the branch key is already a badge, so
+ * repeating it in the title spends the one line of headroom a node has on a
+ * word the reader has just read.
+ */
+function withoutBranchSuffix(task: TaskItem): string {
+	const branch = task.fan_out_branch_key;
+	if (!branch) return task.title;
+	const suffix = ` [${branch}]`;
+	return task.title.endsWith(suffix)
+		? task.title.slice(0, -suffix.length)
+		: task.title;
 }
 
 /**

@@ -63,6 +63,7 @@ function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
 		updated_at: new Date().toISOString(),
 		consecutive_failures: 0,
 		block_recurrences: 0,
+		fan_out_placeholder: false,
 		...overrides,
 	};
 }

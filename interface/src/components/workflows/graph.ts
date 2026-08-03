@@ -1,4 +1,4 @@
-import type {WorkflowEdge, WorkflowStep} from "@/api/client";
+import type {TaskItem, WorkflowEdge, WorkflowStep} from "@/api/client";
 
 /**
  * Put the steps in the order they will actually run.
@@ -75,6 +75,64 @@ export function orderSteps(
 		.sort((a, b) => a.position - b.position || a.step_key.localeCompare(b.step_key));
 
 	return {ordered: [...ordered, ...cycle], cycle: cycle.map((s) => s.step_key)};
+}
+
+/**
+ * A run's nodes, which are tasks and not steps.
+ *
+ * One step used to mean one task, and the canvas was built on that. A step
+ * declaring `for_each_step_key` breaks it: at run time it expands into one task
+ * per item in an upstream step's output array, so `audit` can be three tasks in
+ * one run and the step key no longer identifies anything on screen. Keying
+ * nodes by task is what lets three branches be three boxes, each with its own
+ * status, inputs and outputs.
+ *
+ * A step with no task yet still gets a node, named after the step. That is not
+ * a nicety: between launching a run and the tasks arriving, and again in the
+ * moment a fan-out swaps its placeholder for branches, the honest answer is
+ * "this step is in the template and has nothing to show", and drawing nothing
+ * would blank the graph exactly when someone is watching it happen.
+ */
+export interface RunNode {
+	id: string;
+	stepKey: string;
+	/** `null` only when the run has produced no task for the step. */
+	task: TaskItem | null;
+}
+
+/** Node id for one task of a step. Unique per run; the step key is not. */
+export function runNodeId(stepKey: string, taskNumber: number): string {
+	return `${stepKey}#${taskNumber}`;
+}
+
+/**
+ * Expand the template's steps into the nodes a run actually has.
+ *
+ * With no tasks — the editor — every step yields exactly one node whose id is
+ * its step key, so nothing about the template canvas changes.
+ */
+export function runNodes(
+	steps: WorkflowStep[],
+	tasksByStep?: Map<string, TaskItem[]>,
+): RunNode[] {
+	const nodes: RunNode[] = [];
+	for (const step of steps) {
+		const tasks = tasksByStep?.get(step.step_key) ?? [];
+		if (tasks.length === 0) {
+			nodes.push({id: step.step_key, stepKey: step.step_key, task: null});
+			continue;
+		}
+		// Task number is creation order, which for a fan-out is item order — the
+		// branches read top to bottom in the order the upstream array listed them.
+		for (const task of [...tasks].sort((a, b) => a.task_number - b.task_number)) {
+			nodes.push({
+				id: runNodeId(step.step_key, task.task_number),
+				stepKey: step.step_key,
+				task,
+			});
+		}
+	}
+	return nodes;
 }
 
 /** parent keys for each step, so a card can say what it waits for. */
