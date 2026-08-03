@@ -28,6 +28,15 @@ import {
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {TaskBoard} from "@/components/tasks/TaskBoard";
+import {
+	TaskViewToggle,
+	useTaskViewMode,
+} from "@/components/tasks/TaskViewToggle";
+import {
+	dependencyRefusal,
+	namedDependencyRefusal,
+} from "@/components/tasks/dependencyGate";
 import {ContractSection} from "@/components/tasks/ContractSection";
 import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
 import {BlockedBanner} from "@/components/tasks/BlockedBanner";
@@ -161,12 +170,14 @@ export function GlobalTasks() {
 	);
 
 	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
-	// split out and rendered by BlockedTasksSection instead.
+	// split out and rendered by BlockedTasksSection instead. This split is the
+	// list view's problem only — the board owns its own columns and gives
+	// `blocked` a real one, so it takes the unsplit set below.
 	const blockedTasks = useMemo(
 		() => rawTasks.filter((t) => t.status === "blocked" && matchesRepo(t)),
 		[rawTasks, matchesRepo],
 	);
-	const boardTasks = useMemo(
+	const listViewTasks = useMemo(
 		() =>
 			tasks.filter((t) => {
 				const item = t as unknown as TaskItem;
@@ -174,6 +185,12 @@ export function GlobalTasks() {
 			}),
 		[tasks, matchesRepo],
 	);
+	const boardTasks = useMemo(
+		() => rawTasks.filter(matchesRepo),
+		[rawTasks, matchesRepo],
+	);
+
+	const [viewMode, setViewMode] = useTaskViewMode();
 
 	const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Set<UiTaskStatus>>(
@@ -246,13 +263,94 @@ export function GlobalTasks() {
 	const transitions = useTaskTransitions();
 	const [moveError, setMoveError] = useState<string | null>(null);
 
+	// A late-arriving refusal must not overwrite a newer one. The enrichment
+	// below is a request, so a second move can land while it is in flight.
+	const moveErrorToken = useRef(0);
+
+	/**
+	 * Replace a count-based refusal with one that names the parents.
+	 *
+	 * `edges` only carries `blocked_by` as a number, so the immediate refusal
+	 * can say "waiting on 2". The numbers live one request away, and "#3 Build
+	 * and publish the api-gateway image" is the difference between a refusal
+	 * someone can act on and one they can only be annoyed by. Shared query key
+	 * with `DependencySection`, so opening the drawer afterwards is free.
+	 */
+	const nameOutstandingParents = useCallback(
+		async (task: TaskItem, status: TaskStatus, token: number) => {
+			try {
+				const dependencies = await queryClient.fetchQuery({
+					queryKey: ["task-dependencies", task.task_number],
+					queryFn: () => api.listTaskDependencies(task.task_number),
+				});
+				const detailed = namedDependencyRefusal(
+					task,
+					status,
+					dependencies,
+					(number) =>
+						rawTasks.find((candidate) => candidate.task_number === number)
+							?.title,
+				);
+				if (detailed && moveErrorToken.current === token) {
+					setMoveError(detailed);
+				}
+			} catch {
+				// The count-based refusal is already on screen and is true. A
+				// failed lookup is not worth replacing it with an error.
+			}
+		},
+		[queryClient, rawTasks],
+	);
+
+	/**
+	 * Show why a move was turned down, wherever the refusal was decided.
+	 *
+	 * The board turns some moves down itself — it is the only view where the
+	 * target is a place the user pointed at — so this is shared rather than
+	 * being reached only through `handleMove`. Enrichment is attempted for the
+	 * dependency case alone, because it is the only refusal whose full text
+	 * costs a request.
+	 */
+	const refuseMove = useCallback(
+		(task: TaskItem, status: TaskStatus, reason: string) => {
+			const token = ++moveErrorToken.current;
+			setMoveError(reason);
+			if (dependencyRefusal(task, status, edgesByTask.get(task.task_number))) {
+				void nameOutstandingParents(task, status, token);
+			}
+		},
+		[edgesByTask, nameOutstandingParents],
+	);
+
 	const handleMove = useCallback(
 		(task: TaskItem, status: TaskStatus) => {
 			const move = planStatusChange(task, status, transitions);
 			if (move.action === "refuse") {
-				setMoveError(move.reason);
+				refuseMove(task, status, move.reason);
 				return;
 			}
+
+			// The second check, which nothing in this app made until now: the
+			// transition table says `backlog → ready` is legal and the API
+			// accepts it, but `claim_next_ready` re-checks the dependency
+			// invariant and skips the card, so it sits in Ready forever looking
+			// picked up. Refuse it here instead of letting the board lie.
+			//
+			// Unblock is exempt: it re-runs the same check server-side and lands
+			// the task in `backlog` rather than `ready` when a parent is
+			// outstanding, which is already the honest outcome.
+			if (move.action !== "unblock") {
+				const gated = dependencyRefusal(
+					task,
+					status,
+					edgesByTask.get(task.task_number),
+				);
+				if (gated) {
+					refuseMove(task, status, gated);
+					return;
+				}
+			}
+
 			setMoveError(null);
 			switch (move.action) {
 				// Leaving a blocked state is unblock's job, not a status write —
@@ -276,6 +374,8 @@ export function GlobalTasks() {
 		},
 		[
 			transitions,
+			edgesByTask,
+			refuseMove,
 			updateMutation,
 			approveMutation,
 			executeMutation,
@@ -341,6 +441,7 @@ export function GlobalTasks() {
 				{/* Toolbar */}
 				<div className="flex items-center justify-between border-b border-app-line px-4 py-2">
 					<div className="flex items-center gap-3">
+						<TaskViewToggle value={viewMode} onChange={setViewMode} />
 						<span className="text-sm text-ink-dull">
 							{tasks.length} task{tasks.length !== 1 ? "s" : ""}
 						</span>
@@ -415,6 +516,23 @@ export function GlobalTasks() {
 							</p>
 						</div>
 					</div>
+				) : viewMode === "board" ? (
+					/* The board renders every status itself, so it takes the
+					   unsplit set — no BlockedTasksSection, no adapted statuses.
+					   That workaround layer exists for TaskList alone. */
+					<div className="min-h-0 flex-1">
+						<TaskBoard
+							tasks={boardTasks}
+							edges={edgesByTask}
+							bindingNames={bindingNames}
+							transitions={transitions}
+							activeTaskId={activeTaskId}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							onMove={handleMove}
+							onRefuse={refuseMove}
+							resolveAgentName={resolveAgentName}
+						/>
+					</div>
 				) : (
 					<div className="flex-1 overflow-y-auto">
 						{/* Blocked tasks render separately: TaskList groups by
@@ -439,7 +557,7 @@ export function GlobalTasks() {
 							onUnblock={(task) => unblockMutation.mutate(task.task_number)}
 						/>
 						<TaskList
-							tasks={boardTasks}
+							tasks={listViewTasks}
 							activeTaskId={activeTaskId ?? undefined}
 							collapsedGroups={collapsedGroups}
 							onToggleGroup={handleToggleGroup}
