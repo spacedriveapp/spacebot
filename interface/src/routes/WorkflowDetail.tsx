@@ -15,6 +15,11 @@ import {
 } from "@/api/client";
 import {StepDetail} from "@/components/workflows/StepDetail";
 import {LaunchPanel} from "@/components/workflows/LaunchPanel";
+import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
+import {
+	useWorkflowView,
+	ViewToggle,
+} from "@/components/workflows/ViewToggle";
 import {orderSteps, parentsByStep, suggestStepKey} from "@/components/workflows/graph";
 import {parseJson} from "@/components/workflows/schemaForm";
 
@@ -25,8 +30,13 @@ import {parseJson} from "@/components/workflows/schemaForm";
  * its steps, its edges and its bindings together, and every mutation returns
  * the same shape — so each save is written straight into the cache rather than
  * triggering a refetch. That matters more here than it looks: adding an edge
- * changes the order the step list is drawn in, and a refetch would leave the
- * list one round trip behind the click that reordered it.
+ * changes both the canvas layout and the order the step list is drawn in, and a
+ * refetch would leave the screen one round trip behind the drag that rewired it.
+ *
+ * The graph is the default face of that data and the list is the other one.
+ * They are two renderings of the same query and the same mutations — the panel
+ * on the right is literally the same component either way — so switching views
+ * cannot change what a template means, only how much of it fits on screen.
  */
 export function WorkflowDetail({workflowId}: {workflowId: string}) {
 	const queryClient = useQueryClient();
@@ -50,6 +60,7 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 		queryFn: () => api.listWorkflowRuns(workflowId),
 	});
 
+	const [view, setView] = useWorkflowView();
 	const [selectedKey, setSelectedKey] = useState<string | null>(null);
 	const [addOpen, setAddOpen] = useState(false);
 	const [launchOpen, setLaunchOpen] = useState(false);
@@ -129,6 +140,31 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 	const steps = useMemo(() => data?.steps ?? [], [data]);
 	const edges = useMemo(() => data?.edges ?? [], [data]);
 	const bindings = useMemo(() => data?.bindings ?? [], [data]);
+
+	// Wiring is reachable two ways — dragged on the canvas, or picked in the
+	// panel — and both are the same call. Hoisting them here is what keeps a
+	// refusal readable in whichever half of the screen the author was using.
+	const onAddEdge = useCallback(
+		(parentKey: string, childKey: string) => {
+			addEdge.reset();
+			removeEdge.reset();
+			addEdge.mutate({parent_step_key: parentKey, child_step_key: childKey});
+		},
+		[addEdge, removeEdge],
+	);
+	const onRemoveEdge = useCallback(
+		(parentKey: string, childKey: string) => {
+			addEdge.reset();
+			removeEdge.reset();
+			removeEdge.mutate({parent_step_key: parentKey, child_step_key: childKey});
+		},
+		[addEdge, removeEdge],
+	);
+	const edgeBusy = addEdge.isPending || removeEdge.isPending;
+	const edgeError =
+		(addEdge.error ?? removeEdge.error) instanceof Error
+			? ((addEdge.error ?? removeEdge.error) as Error).message
+			: null;
 
 	const {ordered, cycle} = useMemo(
 		() => orderSteps(steps, edges),
@@ -273,21 +309,26 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 			<div className="flex min-h-0 flex-1">
 				{/* Steps */}
 				<div className="flex min-w-0 flex-1 flex-col">
-					<div className="flex items-center justify-between border-b border-app-line/40 px-4 py-1.5">
-						<span className="text-xs text-ink-dull">
-							{steps.length} step{steps.length === 1 ? "" : "s"}, in the order
-							they run
+					<div className="flex items-center justify-between gap-3 border-b border-app-line/40 px-4 py-1.5">
+						<span className="min-w-0 truncate text-xs text-ink-dull">
+							{steps.length} step{steps.length === 1 ? "" : "s"}
+							{view === "canvas"
+								? ", laid out by what waits for what"
+								: ", in the order they run"}
 						</span>
-						<button
-							type="button"
-							onClick={() => {
-								saveStep.reset();
-								setAddOpen((open) => !open);
-							}}
-							className="text-[11px] text-ink-faint hover:text-ink-dull hover:underline"
-						>
-							{addOpen ? "Cancel" : "Add a step…"}
-						</button>
+						<div className="flex shrink-0 items-center gap-3">
+							<button
+								type="button"
+								onClick={() => {
+									saveStep.reset();
+									setAddOpen((open) => !open);
+								}}
+								className="text-[11px] text-ink-faint hover:text-ink-dull hover:underline"
+							>
+								{addOpen ? "Cancel" : "Add a step…"}
+							</button>
+							<ViewToggle value={view} onChange={setView} />
+						</div>
 					</div>
 
 					{addOpen && (
@@ -314,8 +355,21 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 						/>
 					)}
 
-					<div className="min-h-0 flex-1 overflow-y-auto">
-						{ordered.length === 0 ? (
+					<div className="min-h-0 flex-1 overflow-hidden">
+						{view === "canvas" ? (
+							<WorkflowCanvas
+								steps={steps}
+								edges={edges}
+								bindings={bindings}
+								cycle={cycle}
+								selectedKey={selectedKey}
+								onSelect={setSelectedKey}
+								edgeBusy={edgeBusy}
+								edgeError={edgeError}
+								onAddEdge={onAddEdge}
+								onRemoveEdge={onRemoveEdge}
+							/>
+						) : ordered.length === 0 ? (
 							<div className="flex h-full flex-col items-center justify-center gap-1">
 								<p className="text-sm text-ink-dull">No steps yet.</p>
 								<p className="text-xs text-ink-faint">
@@ -323,20 +377,22 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 								</p>
 							</div>
 						) : (
-							<ol>
-								{ordered.map((step, index) => (
-									<StepRow
-										key={step.step_key}
-										step={step}
-										index={index}
-										parents={parents.get(step.step_key) ?? []}
-										bindingCount={bindingCounts.get(step.step_key) ?? 0}
-										selected={step.step_key === selectedKey}
-										inCycle={cycle.includes(step.step_key)}
-										onSelect={() => setSelectedKey(step.step_key)}
-									/>
-								))}
-							</ol>
+							<div className="h-full overflow-y-auto">
+								<ol>
+									{ordered.map((step, index) => (
+										<StepRow
+											key={step.step_key}
+											step={step}
+											index={index}
+											parents={parents.get(step.step_key) ?? []}
+											bindingCount={bindingCounts.get(step.step_key) ?? 0}
+											selected={step.step_key === selectedKey}
+											inCycle={cycle.includes(step.step_key)}
+											onSelect={() => setSelectedKey(step.step_key)}
+										/>
+									))}
+								</ol>
+							</div>
 						)}
 					</div>
 
@@ -359,12 +415,8 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 									? ((saveStep.error ?? deleteStep.error) as Error).message
 									: null
 							}
-							edgeBusy={addEdge.isPending || removeEdge.isPending}
-							edgeError={
-								(addEdge.error ?? removeEdge.error) instanceof Error
-									? ((addEdge.error ?? removeEdge.error) as Error).message
-									: null
-							}
+							edgeBusy={edgeBusy}
+							edgeError={edgeError}
 							bindingBusy={setBinding.isPending || removeBinding.isPending}
 							bindingError={
 								(setBinding.error ?? removeBinding.error) instanceof Error
@@ -379,22 +431,8 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 								deleteStep.reset();
 								deleteStep.mutate(stepKey);
 							}}
-							onAddEdge={(parentKey, childKey) => {
-								addEdge.reset();
-								removeEdge.reset();
-								addEdge.mutate({
-									parent_step_key: parentKey,
-									child_step_key: childKey,
-								});
-							}}
-							onRemoveEdge={(parentKey, childKey) => {
-								addEdge.reset();
-								removeEdge.reset();
-								removeEdge.mutate({
-									parent_step_key: parentKey,
-									child_step_key: childKey,
-								});
-							}}
+							onAddEdge={onAddEdge}
+							onRemoveEdge={onRemoveEdge}
 							onSetBinding={(stepKey, inputKey, body) => {
 								setBinding.reset();
 								removeBinding.reset();

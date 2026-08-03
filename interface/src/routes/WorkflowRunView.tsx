@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
 import {useQuery, useQueryClient} from "@tanstack/react-query";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
@@ -6,6 +6,8 @@ import {faArrowLeft} from "@fortawesome/free-solid-svg-icons";
 import {api, type TaskItem} from "@/api/client";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {TaskStatusPill} from "@/components/workflows/TaskStatusPill";
+import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
+import {useWorkflowView, ViewToggle} from "@/components/workflows/ViewToggle";
 import {orderSteps} from "@/components/workflows/graph";
 
 /**
@@ -16,6 +18,13 @@ import {orderSteps} from "@/components/workflows/graph";
  * that drives the board drives these. So this screen's job is to show which
  * step became which task, what each one produced, and to hand off to the task
  * drawer for anything deeper. It deliberately does not re-implement the drawer.
+ *
+ * This is where the graph earns its keep. A run of a branching template is a
+ * question about *where* it stopped, and a list answers that badly: eight rows
+ * of "done" and one "blocked" tells you which task is stuck but not what is now
+ * waiting behind it. On the canvas the stalled node is the one with live
+ * branches dead-ending into it, and the branch still running beside it is
+ * visibly still running.
  */
 export function WorkflowRunView({runId}: {runId: string}) {
 	const queryClient = useQueryClient();
@@ -80,6 +89,24 @@ export function WorkflowRunView({runId}: {runId: string}) {
 		);
 	}, [tasks, workflow]);
 
+	const [view, setView] = useWorkflowView();
+	const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+	/** step key → the task it compiled into, which is what the nodes read. */
+	const tasksByStep = useMemo(() => {
+		const map = new Map<string, TaskItem>();
+		for (const task of tasks) {
+			if (task.workflow_step_key) map.set(task.workflow_step_key, task);
+		}
+		return map;
+	}, [tasks]);
+
+	// A run outlives its template, and a deleted one leaves no edges to draw. The
+	// list is the honest fallback rather than an empty canvas.
+	const canDrawGraph = workflow != null && workflow.steps.length > 0;
+	const showCanvas = view === "canvas" && canDrawGraph;
+	const selectedTask = selectedKey ? (tasksByStep.get(selectedKey) ?? null) : null;
+
 	if (isLoading) {
 		return <p className="py-8 text-center text-sm text-ink-faint">Loading run…</p>;
 	}
@@ -127,31 +154,69 @@ export function WorkflowRunView({runId}: {runId: string}) {
 						{new Date(run.created_at).toLocaleString()}
 					</p>
 				</div>
+				{canDrawGraph && <ViewToggle value={view} onChange={setView} />}
 			</div>
 
-			<div className="min-h-0 flex-1 overflow-y-auto">
-				<section className="border-b border-app-line/40 px-4 py-3">
-					<h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-dull">
-						Launch input
-					</h3>
-					<pre className="overflow-x-auto rounded border border-app-line bg-app-box/40 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-ink-dull">
-						{JSON.stringify(run.inputs, null, 2)}
-					</pre>
-				</section>
+			{showCanvas ? (
+				<div className="flex min-h-0 flex-1">
+					<div className="min-w-0 flex-1">
+						<WorkflowCanvas
+							steps={workflow.steps}
+							edges={workflow.edges}
+							bindings={workflow.bindings}
+							cycle={orderSteps(workflow.steps, workflow.edges).cycle}
+							selectedKey={selectedKey}
+							onSelect={setSelectedKey}
+							tasksByStep={tasksByStep}
+							emptyHint="This run produced no tasks."
+						/>
+					</div>
+					<div className="flex w-[420px] shrink-0 flex-col overflow-y-auto border-l border-app-line">
+						<LaunchInput inputs={run.inputs} />
+						{selectedTask ? (
+							<div className="px-4 py-3">
+								<RunTaskBody task={selectedTask} />
+							</div>
+						) : (
+							<p className="px-4 py-6 text-center text-xs text-ink-faint">
+								{selectedKey
+									? `\`${selectedKey}\` produced no task in this run.`
+									: "Select a step to see what its task did."}
+							</p>
+						)}
+					</div>
+				</div>
+			) : (
+				<div className="min-h-0 flex-1 overflow-y-auto">
+					<LaunchInput inputs={run.inputs} />
 
-				{orderedTasks.length === 0 ? (
-					<p className="px-4 py-6 text-center text-xs text-ink-faint">
-						This run produced no tasks.
-					</p>
-				) : (
-					<ol>
-						{orderedTasks.map((task, index) => (
-							<RunTaskRow key={task.id} task={task} index={index} />
-						))}
-					</ol>
-				)}
-			</div>
+					{orderedTasks.length === 0 ? (
+						<p className="px-4 py-6 text-center text-xs text-ink-faint">
+							This run produced no tasks.
+						</p>
+					) : (
+						<ol>
+							{orderedTasks.map((task, index) => (
+								<RunTaskRow key={task.id} task={task} index={index} />
+							))}
+						</ol>
+					)}
+				</div>
+			)}
 		</div>
+	);
+}
+
+function LaunchInput({inputs}: {inputs: unknown}) {
+	return (
+		<section className="border-b border-app-line/40 px-4 py-3">
+			<h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-dull">
+				Launch input
+			</h3>
+			<pre className="overflow-x-auto rounded border border-app-line bg-app-box/40 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-ink-dull">
+				{JSON.stringify(inputs, null, 2)}
+			</pre>
+		</section>
 	);
 }
 
@@ -163,58 +228,67 @@ function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 					{index + 1}
 				</span>
 				<div className="min-w-0 flex-1">
-					<div className="flex flex-wrap items-baseline gap-2">
-						{/* The drawer on /tasks is the task UI; this only opens it. */}
-						<Link
-							to="/tasks"
-							search={{task: task.task_number}}
-							className="truncate text-sm text-ink hover:underline"
-						>
-							{task.title}
-						</Link>
-						<span className="shrink-0 font-mono text-[10px] text-ink-faint">
-							#{task.task_number}
-						</span>
-						{task.workflow_step_key && (
-							<span
-								className="shrink-0 rounded border border-app-line px-1 font-mono text-[10px] text-ink-faint"
-								title="The step this task was compiled from"
-							>
-								{task.workflow_step_key}
-							</span>
-						)}
-						{/* Never @spacedrive/ai's TaskStatusIcon: it throws on `blocked`,
-						    which is exactly the status a stalled pipeline sits in. */}
-						<TaskStatusPill status={task.status} />
-					</div>
-
-					{task.block_reason && (
-						<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">
-							{task.block_kind ? `${task.block_kind}: ` : ""}
-							{task.block_reason}
-						</p>
-					)}
-					{!task.block_reason && task.last_error && (
-						<p className="mt-1 break-words font-mono text-[10px] text-status-warning">
-							{task.last_error}
-						</p>
-					)}
-
-					{task.inputs != null && (
-						<JsonBlock label="Inputs" value={task.inputs} muted />
-					)}
-					{task.outputs != null ? (
-						<JsonBlock label="Outputs" value={task.outputs} />
-					) : (
-						<p className="mt-1 text-[11px] text-ink-faint">
-							No output yet.
-							{task.output_schema != null &&
-								" It must match the step's declared output schema."}
-						</p>
-					)}
+					<RunTaskBody task={task} />
 				</div>
 			</div>
 		</li>
+	);
+}
+
+/** One task's title, status and payloads — the same either side of the toggle. */
+function RunTaskBody({task}: {task: TaskItem}) {
+	return (
+		<>
+			<div className="flex flex-wrap items-baseline gap-2">
+				{/* The drawer on /tasks is the task UI; this only opens it. */}
+				<Link
+					to="/tasks"
+					search={{task: task.task_number}}
+					className="truncate text-sm text-ink hover:underline"
+				>
+					{task.title}
+				</Link>
+				<span className="shrink-0 font-mono text-[10px] text-ink-faint">
+					#{task.task_number}
+				</span>
+				{task.workflow_step_key && (
+					<span
+						className="shrink-0 rounded border border-app-line px-1 font-mono text-[10px] text-ink-faint"
+						title="The step this task was compiled from"
+					>
+						{task.workflow_step_key}
+					</span>
+				)}
+				{/* Never @spacedrive/ai's TaskStatusIcon: it throws on `blocked`,
+				    which is exactly the status a stalled pipeline sits in. */}
+				<TaskStatusPill status={task.status} />
+			</div>
+
+			{task.block_reason && (
+				<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">
+					{task.block_kind ? `${task.block_kind}: ` : ""}
+					{task.block_reason}
+				</p>
+			)}
+			{!task.block_reason && task.last_error && (
+				<p className="mt-1 break-words font-mono text-[10px] text-status-warning">
+					{task.last_error}
+				</p>
+			)}
+
+			{task.inputs != null && (
+				<JsonBlock label="Inputs" value={task.inputs} muted />
+			)}
+			{task.outputs != null ? (
+				<JsonBlock label="Outputs" value={task.outputs} />
+			) : (
+				<p className="mt-1 text-[11px] text-ink-faint">
+					No output yet.
+					{task.output_schema != null &&
+						" It must match the step's declared output schema."}
+				</p>
+			)}
+		</>
 	);
 }
 

@@ -157,6 +157,50 @@ export function wouldCycle(
 }
 
 /**
+ * The chain of steps leading from one to another, or null if there is none.
+ *
+ * `wouldCycle` answers whether a connection is refusable; this answers *why*,
+ * which is the only part the author can act on. The server's 409 names the full
+ * path for the same reason — "the steps form a cycle: draft → review → publish"
+ * says which edge to not draw, where "that would create a cycle" leaves them
+ * guessing at a graph they cannot see the far side of.
+ *
+ * Breadth-first, so the path returned is the shortest one and does not wander
+ * through branches that are beside the point.
+ */
+export function pathBetween(
+	edges: WorkflowEdge[],
+	fromKey: string,
+	toKey: string,
+): string[] | null {
+	if (fromKey === toKey) return [fromKey];
+	const children = childrenByStep(edges);
+	const cameFrom = new Map<string, string>();
+	const seen = new Set<string>([fromKey]);
+	const queue = [fromKey];
+	while (queue.length > 0) {
+		const key = queue.shift() as string;
+		for (const next of children.get(key) ?? []) {
+			if (seen.has(next)) continue;
+			seen.add(next);
+			cameFrom.set(next, key);
+			if (next === toKey) {
+				const path = [next];
+				let cursor = key;
+				while (cursor !== fromKey) {
+					path.unshift(cursor);
+					cursor = cameFrom.get(cursor) as string;
+				}
+				path.unshift(fromKey);
+				return path;
+			}
+			queue.push(next);
+		}
+	}
+	return null;
+}
+
+/**
  * A step key the server will accept, derived from a title.
  *
  * Keys are what edges and bindings reference, so they are typed into pointers
