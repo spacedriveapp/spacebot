@@ -29,6 +29,8 @@ import {
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {ContractSection} from "@/components/tasks/ContractSection";
+import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
+import {BlockedBanner} from "@/components/tasks/BlockedBanner";
 import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
@@ -235,7 +237,17 @@ export function GlobalTasks() {
 
 	const handleStatusChange = useCallback(
 		(task: Task, status: UiTaskStatus) => {
-			const t = task as unknown as TaskItem;
+			// Resolve the real task by id: a blocked task reaches the drawer with
+			// an adapted status, and branching on that would approve a task that
+			// was never awaiting approval.
+			const adapted = task as unknown as TaskItem;
+			const t = rawTasks.find((c) => c.id === adapted.id) ?? adapted;
+			if (t.status === "blocked") {
+				// Leaving a blocked state is unblock's job, not a status write —
+				// it has to clear the reason and re-check dependencies.
+				unblockMutation.mutate(t.task_number);
+				return;
+			}
 			if (t.status === "pending_approval" && status === "ready") {
 				approveMutation.mutate(t.task_number);
 			} else if (t.status === "backlog" && status === "in_progress") {
@@ -244,7 +256,7 @@ export function GlobalTasks() {
 				updateMutation.mutate({taskNumber: t.task_number, status});
 			}
 		},
-		[updateMutation, approveMutation, executeMutation],
+		[updateMutation, approveMutation, executeMutation, unblockMutation, rawTasks],
 	);
 
 	const handleDelete = useCallback(
@@ -390,8 +402,18 @@ export function GlobalTasks() {
 			{/* Detail panel */}
 			{activeTask && (
 				<div className="w-[400px] shrink-0 overflow-y-auto border-l border-app-line">
+					<BlockedBanner
+						task={activeTask as unknown as TaskItem}
+						onUnblock={(t) => unblockMutation.mutate(t.task_number)}
+						onRetry={(t) => retryMutation.mutate(t.task_number)}
+						busy={unblockMutation.isPending || retryMutation.isPending}
+					/>
 					<TaskDetail
-						task={activeTask}
+						task={
+							toDesignSystemTask(
+								activeTask as unknown as TaskItem,
+							) as unknown as Task
+						}
 						resolveAgentName={resolveAgentName}
 						onStatusChange={handleStatusChange}
 						onSubtaskToggle={handleSubtaskToggle}

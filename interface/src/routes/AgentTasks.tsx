@@ -23,6 +23,8 @@ import {
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {ContractSection} from "@/components/tasks/ContractSection";
+import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
+import {BlockedBanner} from "@/components/tasks/BlockedBanner";
 import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
@@ -51,6 +53,7 @@ export function AgentTasks({agentId}: {agentId: string}) {
 	});
 
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
+	const rawTasks = (data?.tasks ?? []) as TaskItem[];
 
 	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
 	// split out and rendered by BlockedTasksSection instead.
@@ -143,7 +146,7 @@ export function AgentTasks({agentId}: {agentId: string}) {
 				updateMutation.mutate({taskNumber: t.task_number, status});
 			}
 		},
-		[updateMutation, approveMutation, executeMutation],
+		[updateMutation, approveMutation, executeMutation, unblockMutation, rawTasks],
 	);
 
 	const handleDelete = useCallback(
@@ -266,8 +269,18 @@ export function AgentTasks({agentId}: {agentId: string}) {
 			{/* Detail panel */}
 			{activeTask && (
 				<div className="w-[400px] shrink-0 overflow-y-auto border-l border-app-line">
+					<BlockedBanner
+						task={activeTask as unknown as TaskItem}
+						onUnblock={(t) => unblockMutation.mutate(t.task_number)}
+						onRetry={(t) => retryMutation.mutate(t.task_number)}
+						busy={unblockMutation.isPending || retryMutation.isPending}
+					/>
 					<TaskDetail
-						task={activeTask}
+						task={
+							toDesignSystemTask(
+								activeTask as unknown as TaskItem,
+							) as unknown as Task
+						}
 						onStatusChange={handleStatusChange}
 						onSubtaskToggle={handleSubtaskToggle}
 						onDelete={handleDelete}

@@ -1,4 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button } from "@spacedrive/primitives";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
 	faCircleExclamation,
@@ -18,22 +20,45 @@ export interface ContractSectionProps {
 }
 
 export function ContractSection({ taskNumber, onSelectTask }: ContractSectionProps) {
+	const queryClient = useQueryClient();
 	const { data } = useQuery({
 		queryKey: ["task-contract", taskNumber],
 		queryFn: () => api.getTaskContract(taskNumber),
 	});
 
+	const save = useMutation({
+		mutationFn: (body: {input_schema?: unknown; output_schema?: unknown}) =>
+			api.setTaskContract(taskNumber, body),
+		onSuccess: () =>
+			void queryClient.invalidateQueries({queryKey: ["task-contract", taskNumber]}),
+	});
+
 	if (!data) return null;
-	return <ContractSectionView data={data} onSelectTask={onSelectTask} />;
+	return (
+		<ContractSectionView
+			data={data}
+			onSelectTask={onSelectTask}
+			onSaveSchemas={(body) => save.mutate(body)}
+			saving={save.isPending}
+			saveError={save.error instanceof Error ? save.error.message : null}
+		/>
+	);
 }
 
 /** Split from the fetching wrapper so it renders against fixtures. */
 export function ContractSectionView({
 	data,
 	onSelectTask,
+	onSaveSchemas,
+	saving,
+	saveError,
 }: {
 	data: TaskContractResponse;
 	onSelectTask?: (taskNumber: number) => void;
+	/** Omitted in read-only contexts such as the fixture harness. */
+	onSaveSchemas?: (body: {input_schema?: unknown; output_schema?: unknown}) => void;
+	saving?: boolean;
+	saveError?: string | null;
 }) {
 	const hasContract =
 		data.input_schema != null ||
@@ -41,9 +66,10 @@ export function ContractSectionView({
 		data.bindings.length > 0 ||
 		data.outputs != null;
 
-	// Most tasks declare nothing. An empty "Contract" heading on every one of
-	// them would be noise that teaches people to skip the section.
-	if (!hasContract) return null;
+	// Most tasks declare nothing, and an empty "Contract" heading on every one
+	// of them would be noise. But a task with no contract is exactly the one
+	// somebody needs to give a contract to, so the editor still gets a way in.
+	if (!hasContract && !onSaveSchemas) return null;
 
 	// Which keys the graph currently cannot supply, so each row can say so
 	// rather than making the reader match a list of problems to a list of rows.
@@ -119,8 +145,161 @@ export function ContractSectionView({
 			{data.output_schema != null && (
 				<JsonBlock label="Required output shape" value={data.output_schema} muted />
 			)}
+
+			{onSaveSchemas && (
+				<SchemaEditor
+					inputSchema={data.input_schema}
+					outputSchema={data.output_schema}
+					onSave={onSaveSchemas}
+					saving={saving}
+					saveError={saveError}
+				/>
+			)}
 		</div>
 	);
+}
+
+/**
+ * Declare the shape a task must produce.
+ *
+ * Humans define the contract; only a worker writes values into it. Setting an
+ * output schema here is what turns `task_complete` from "record whatever the
+ * model said" into a checked submission that is rejected when it does not fit.
+ *
+ * The JSON is validated locally before being sent, because the server stores a
+ * schema it cannot compile and only surfaces the problem later, at the moment
+ * a task tries to run.
+ */
+function SchemaEditor({
+	inputSchema,
+	outputSchema,
+	onSave,
+	saving,
+	saveError,
+}: {
+	inputSchema: unknown;
+	outputSchema: unknown;
+	onSave: (body: {input_schema?: unknown; output_schema?: unknown}) => void;
+	saving?: boolean;
+	saveError?: string | null;
+}) {
+	const [open, setOpen] = useState(false);
+	const [inputText, setInputText] = useState(() => format(inputSchema));
+	const [outputText, setOutputText] = useState(() => format(outputSchema));
+	const [localError, setLocalError] = useState<string | null>(null);
+
+	if (!open) {
+		return (
+			<button
+				type="button"
+				onClick={() => {
+					setInputText(format(inputSchema));
+					setOutputText(format(outputSchema));
+					setLocalError(null);
+					setOpen(true);
+				}}
+				className="mt-2 text-[11px] text-ink-faint hover:text-ink-dull hover:underline"
+			>
+				{outputSchema == null && inputSchema == null
+					? "Define a contract…"
+					: "Edit contract…"}
+			</button>
+		);
+	}
+
+	const submit = () => {
+		const input = parse(inputText);
+		const output = parse(outputText);
+		if (input.error || output.error) {
+			setLocalError(
+				input.error
+					? `Input schema: ${input.error}`
+					: `Output schema: ${output.error}`,
+			);
+			return;
+		}
+		setLocalError(null);
+		onSave({input_schema: input.value, output_schema: output.value});
+		setOpen(false);
+	};
+
+	return (
+		<div className="mt-3 rounded border border-app-line bg-app-box/30 p-2">
+			<SchemaField
+				label="Input schema"
+				hint="What this task needs before it can run. Leave blank for none."
+				value={inputText}
+				onChange={setInputText}
+			/>
+			<SchemaField
+				label="Output schema"
+				hint="What it must produce. Enforced when the worker calls task_complete."
+				value={outputText}
+				onChange={setOutputText}
+			/>
+
+			{(localError || saveError) && (
+				<p className="mb-2 text-[11px] text-status-error">
+					{localError ?? saveError}
+				</p>
+			)}
+
+			<div className="flex gap-2">
+				<Button size="sm" variant="accent" disabled={saving} onClick={submit}>
+					{saving ? "Saving…" : "Save contract"}
+				</Button>
+				<Button size="sm" variant="gray" onClick={() => setOpen(false)}>
+					Cancel
+				</Button>
+			</div>
+		</div>
+	);
+}
+
+function SchemaField({
+	label,
+	hint,
+	value,
+	onChange,
+}: {
+	label: string;
+	hint: string;
+	value: string;
+	onChange: (next: string) => void;
+}) {
+	return (
+		<div className="mb-2">
+			<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
+				{label}
+			</label>
+			<p className="mb-1 text-[10px] text-ink-faint">{hint}</p>
+			<textarea
+				value={value}
+				onChange={(event) => onChange(event.target.value)}
+				spellCheck={false}
+				rows={6}
+				className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+				placeholder={'{\n  "type": "object",\n  "required": ["result"]\n}'}
+			/>
+		</div>
+	);
+}
+
+function format(schema: unknown): string {
+	return schema == null ? "" : JSON.stringify(schema, null, 2);
+}
+
+/** Blank clears the schema; anything else must parse. */
+function parse(text: string): {value: unknown; error?: string} {
+	if (text.trim() === "") return {value: null};
+	try {
+		return {value: JSON.parse(text)};
+	} catch (error) {
+		return {
+			value: null,
+			error: error instanceof Error ? error.message : "invalid JSON",
+		};
+	}
 }
 
 /**

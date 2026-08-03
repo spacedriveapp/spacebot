@@ -1739,6 +1739,28 @@ export const api = {
 	/** Where this card came from, and what it filed. */
 	getTaskProvenance: (taskNumber: number) =>
 		fetchJson<TaskProvenanceResponse>(`/tasks/${taskNumber}/provenance`),
+	/**
+	 * Declare what a task must produce (and may require).
+	 *
+	 * A human defines the *shape*; only a worker ever writes the *values*, via
+	 * `task_complete`. Setting an output schema is what makes that submission
+	 * checked rather than taken on trust.
+	 */
+	setTaskContract: async (
+		taskNumber: number,
+		body: {input_schema?: unknown; output_schema?: unknown},
+	) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/contract`,
+			{
+				method: "PUT",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify(body),
+			},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskContractResponse;
+	},
 	listTaskDependencies: (taskNumber: number) =>
 		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
 	/** The legal status moves, so the board never offers one the API rejects. */
