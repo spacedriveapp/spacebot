@@ -4091,6 +4091,27 @@ async fn handle_detached_completion(
         return;
     }
 
+    // Grow the graph before anything else reads it.
+    //
+    // A finished task may be the one a fan-out was iterating, and until it is
+    // expanded the branches do not exist while the step downstream is already
+    // free of the only parent holding it. The sweep does this too — this is the
+    // difference between fanning out now and fanning out on the next tick.
+    if new_status == TaskStatus::Done {
+        match task_store.expand_fan_outs_for(task.task_number).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    log_fan_out_outcome(logger, &outcome);
+                }
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                "failed to expand fan-outs after a completion; the next sweep will retry"
+            ),
+        }
+    }
+
     run_logger.log_worker_completed(worker_id, result_text, success);
     let _ = event_tx.send(ProcessEvent::TaskUpdated {
         agent_id: Arc::from(agent_id),
@@ -4149,6 +4170,53 @@ async fn handle_detached_completion(
         notify: true,
         success,
     });
+}
+
+/// Say what an expansion did, on the one log a person reads to find out why the
+/// board suddenly has five more cards on it — or why it has none.
+fn log_fan_out_outcome(logger: &CortexLogger, outcome: &crate::tasks::FanOutOutcome) {
+    match outcome {
+        crate::tasks::FanOutOutcome::Expanded {
+            placeholder_task_number,
+            branches,
+        } => logger.log(
+            "task_fan_out_expanded",
+            &format!(
+                "Fan-out #{placeholder_task_number} expanded into {} branch task(s)",
+                branches.len()
+            ),
+            Some(serde_json::json!({
+                "placeholder_task_number": placeholder_task_number,
+                "branches": branches,
+            })),
+        ),
+        // Said out loud rather than passed over in silence. Zero branches is a
+        // success, but a pipeline that produced nothing and explained nothing
+        // is indistinguishable from one that broke.
+        crate::tasks::FanOutOutcome::Empty {
+            placeholder_task_number,
+        } => logger.log(
+            "task_fan_out_empty",
+            &format!(
+                "Fan-out #{placeholder_task_number} had nothing to iterate — completed with no \
+                 branches, and the steps downstream run against an empty collection"
+            ),
+            Some(serde_json::json!({
+                "placeholder_task_number": placeholder_task_number,
+            })),
+        ),
+        crate::tasks::FanOutOutcome::Blocked {
+            placeholder_task_number,
+            reason,
+        } => logger.log(
+            "task_fan_out_blocked",
+            &format!("Fan-out #{placeholder_task_number} cannot expand: {reason}"),
+            Some(serde_json::json!({
+                "placeholder_task_number": placeholder_task_number,
+                "reason": reason,
+            })),
+        ),
+    }
 }
 
 /// How long a task must sit untouched in `in_progress` before the reaper will
@@ -4496,19 +4564,40 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {}, demoted {}, held {}, gated {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {} task(s)",
                         sweep.promoted.len(),
                         sweep.demoted.len(),
                         sweep.stalled.len(),
+                        sweep.pending.len(),
                         sweep.gated.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
                         "demoted": sweep.demoted,
                         "stalled": sweep.stalled.iter().map(|s| s.task_number).collect::<Vec<_>>(),
+                        "pending": sweep.pending.iter().map(|p| p.task_number).collect::<Vec<_>>(),
                         "gated": sweep.gated.iter().map(|g| g.task_number).collect::<Vec<_>>(),
                     })),
                 );
+
+                // Waiting, not broken — a fan-in whose branches are still
+                // running. Named anyway, because a card that sits still with
+                // nothing on screen explaining it is the failure mode every
+                // wait-shaped feature invites.
+                for pending in &sweep.pending {
+                    logger.log(
+                        "task_inputs_pending",
+                        &format!(
+                            "Task #{} is waiting on upstream work: {}",
+                            pending.task_number,
+                            pending.waiting_on.join("; ")
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": pending.task_number,
+                            "waiting_on": pending.waiting_on,
+                        })),
+                    );
+                }
 
                 // A gated task is ready in every other respect and is waiting
                 // on the world. Named with its reason, because "nothing is
@@ -4691,6 +4780,46 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                 tracing::warn!(%error, task_number = task.task_number, "failed to persist resolved inputs");
             }
             Some(inputs)
+        }
+        // Upstream work this task reads from has not finished. Nothing is
+        // wrong: it goes back to the backlog as a `dependency` wait, which
+        // costs no failure budget and which the sweep clears on its own.
+        // Reporting it as an unresolvable contract would put a broken-graph
+        // notice on a pipeline that is working exactly as designed.
+        Ok(crate::tasks::ContractResolution::Pending { waiting_on }) => {
+            let reason = waiting_on.join("; ");
+
+            logger.log(
+                "task_pickup_inputs_pending",
+                &format!(
+                    "Task #{} is waiting on upstream work before it can start: {reason}",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "waiting_on": waiting_on,
+                })),
+            );
+
+            if let Err(error) = deps
+                .task_store
+                .block_task(
+                    task.task_number,
+                    crate::tasks::BlockKind::Dependency,
+                    &reason,
+                )
+                .await
+            {
+                tracing::warn!(%error, task_number = task.task_number, "failed to park task waiting on upstream work");
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Backlog.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            return Ok(());
         }
         Ok(crate::tasks::ContractResolution::Unresolved { problems }) => {
             let reason = problems

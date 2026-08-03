@@ -306,6 +306,18 @@ pub struct Task {
     /// Extra instructions appended to the worker prompt at pickup. Appended,
     /// never substituted — this is task guidance, not an identity override.
     pub system_prompt: Option<String>,
+    /// Which branch of a fan-out this task is, once the fan-out has expanded.
+    ///
+    /// `None` on every ordinary task, and on the placeholder that holds the
+    /// shape before expansion. This is the key a fan-in binding collects by.
+    pub fan_out_branch_key: Option<String>,
+    /// Whether this task is a fan-out placeholder rather than work.
+    ///
+    /// A placeholder carries exactly the edges its branches will inherit, so
+    /// the steps downstream have something to wait on between launch and
+    /// expansion. It is never promoted and never claimed — expansion replaces
+    /// it with one task per item.
+    pub fan_out_placeholder: bool,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -1087,9 +1099,15 @@ impl TaskStore {
 
     /// Atomically claim the highest-priority ready task assigned to the given
     /// agent. Moves it to `in_progress` and returns it.
+    ///
+    /// Placeholders are excluded here as well as in the sweep, because the
+    /// sweep is not the only way into `ready`: unblocking a parked placeholder
+    /// puts it there directly, and "never claimed" has to hold however it
+    /// arrived rather than only on the path we remembered to guard.
     pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
         let row = sqlx::query(
             "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
+             AND fan_out_placeholder = 0 \
              AND NOT EXISTS (\
                SELECT 1 FROM task_dependencies d \
                  JOIN tasks p ON p.task_number = d.parent_task_number \
@@ -1119,6 +1137,7 @@ impl TaskStore {
             "UPDATE tasks SET status = 'in_progress', \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE task_number = ? AND status = 'ready' \
+             AND fan_out_placeholder = 0 \
              AND NOT EXISTS (\
                SELECT 1 FROM task_dependencies d \
                  JOIN tasks p ON p.task_number = d.parent_task_number \
@@ -1495,6 +1514,25 @@ impl TaskStore {
     pub async fn recompute_ready(&self, assigned_agent_id: &str) -> Result<ReadySweep> {
         let mut sweep = ReadySweep::default();
 
+        // Grow the graph before reconciling it.
+        //
+        // A fan-out placeholder holds the edges its branches will inherit, so
+        // the promote query below is looking at a graph that is still a
+        // placeholder short of the truth until this runs. Doing it here rather
+        // than only on the completion path makes the ordering structural: there
+        // is no way to promote a downstream step before the branches it waits
+        // on exist, because the same call that would promote it expands first.
+        if let Err(error) = self.expand_fan_outs(assigned_agent_id).await {
+            // Our failure, not the graph's. The placeholders are still there
+            // and the next sweep tries again; refusing to reconcile anything
+            // else would turn one broken expansion into a stalled agent.
+            tracing::warn!(
+                %error,
+                assigned_agent_id,
+                "failed to expand fan-outs while sweeping — continuing with the graph as it is"
+            );
+        }
+
         // Promote: eligible and waiting.
         //
         // The last clause decides what "waiting" means, and it turns on who put
@@ -1525,10 +1563,16 @@ impl TaskStore {
         // the first two signals it would then have no parents, no run id, and
         // no way back out: stranded in the backlog permanently by the very
         // mechanism meant to reconsider it.
+        //
+        // A fan-out placeholder is excluded outright. It looks exactly like a
+        // promotable task — backlog, parents done, run id set — but it is a
+        // shape, not work, and promoting it hands a worker a card whose whole
+        // job is to be replaced by the branches expansion emits.
         let promoted: Vec<i64> = sqlx::query_scalar(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.status = 'backlog' \
+               AND t.fan_out_placeholder = 0 \
                AND (t.block_kind IS NULL OR t.block_kind = 'dependency') \
                AND NOT EXISTS (\
                  SELECT 1 FROM task_dependencies d \
@@ -1575,6 +1619,18 @@ impl TaskStore {
                     sweep.stalled.push(StalledTask {
                         task_number,
                         problems,
+                    });
+                    continue;
+                }
+                // Held, not broken. A fan-in step whose branches are still
+                // running has every parent it declared finished — the branches
+                // are not its parents until expansion wires them up — so
+                // without this it would be promoted and then blocked on the
+                // very first sweep of a healthy pipeline.
+                Ok(ContractResolution::Pending { waiting_on }) => {
+                    sweep.pending.push(PendingTask {
+                        task_number,
+                        waiting_on,
                     });
                     continue;
                 }
@@ -1636,6 +1692,366 @@ impl TaskStore {
         }
 
         Ok(sweep)
+    }
+
+    // -- Fan-out ------------------------------------------------------------
+
+    /// Expand every placeholder of this agent whose upstream work has landed.
+    ///
+    /// Ordinary scheduling, run at the top of every sweep. Placeholders that
+    /// are not ready cost one indexed query and nothing else, which is what
+    /// lets this sit on the hot path of graphs that never fan out.
+    pub async fn expand_fan_outs(&self, assigned_agent_id: &str) -> Result<Vec<FanOutOutcome>> {
+        // `block_kind IS NULL` is what stops a template mistake from becoming a
+        // loop. A pointer that does not select an array will not select one on
+        // the next tick either — the source is done and its outputs are frozen
+        // — so the placeholder is parked once and left alone until a person
+        // unblocks it, which is the signal that something changed.
+        let ready: Vec<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks t \
+             WHERE t.assigned_agent_id = ? \
+               AND t.fan_out_placeholder = 1 \
+               AND t.status <> 'done' \
+               AND t.block_kind IS NULL \
+               AND NOT EXISTS (\
+                 SELECT 1 FROM task_dependencies d \
+                   JOIN tasks p ON p.task_number = d.parent_task_number \
+                  WHERE d.child_task_number = t.task_number AND p.status <> 'done')",
+        )
+        .bind(assigned_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find expandable fan-outs")?;
+
+        let mut outcomes = Vec::new();
+        for task_number in ready {
+            if let Some(outcome) = self.expand_placeholder(task_number).await? {
+                outcomes.push(outcome);
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Expand the placeholders waiting on a task that just finished.
+    ///
+    /// The completion path calls this so a fan-out widens the moment its source
+    /// lands rather than on the next tick. The sweep covers the same ground —
+    /// deliberately, because this is an optimisation and the sweep is the
+    /// guarantee.
+    pub async fn expand_fan_outs_for(&self, source_task_number: i64) -> Result<Vec<FanOutOutcome>> {
+        let waiting: Vec<i64> = sqlx::query_scalar(
+            "SELECT t.task_number FROM tasks t \
+               JOIN task_dependencies d ON d.child_task_number = t.task_number \
+              WHERE d.parent_task_number = ? \
+                AND t.fan_out_placeholder = 1 \
+                AND t.status <> 'done' \
+                AND t.block_kind IS NULL",
+        )
+        .bind(source_task_number)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find fan-outs waiting on a finished task")?;
+
+        let mut outcomes = Vec::new();
+        for task_number in waiting {
+            // A placeholder can wait on more than the step it iterates. The
+            // one that just finished being done says nothing about the others.
+            if !self.unfinished_parents(task_number).await?.is_empty() {
+                continue;
+            }
+            if let Some(outcome) = self.expand_placeholder(task_number).await? {
+                outcomes.push(outcome);
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Turn one placeholder into the branches it stands for.
+    ///
+    /// `None` means "not yet" — the source is not finished, or the placeholder
+    /// vanished under us — and is not an outcome worth reporting.
+    async fn expand_placeholder(
+        &self,
+        placeholder_task_number: i64,
+    ) -> Result<Option<FanOutOutcome>> {
+        let Some(placeholder) = self.get_by_number(placeholder_task_number).await? else {
+            return Ok(None);
+        };
+
+        let Some(spec) = FanOutSpec::from_metadata(&placeholder.metadata) else {
+            // Only launch writes this, so its absence is our bug rather than
+            // the author's. Parked anyway: a placeholder nothing will ever
+            // expand is a deadlock, and a deadlock that says why beats one that
+            // sits in the backlog looking like ordinary waiting.
+            return Ok(Some(
+                self.block_placeholder(
+                    &placeholder,
+                    "this fan-out placeholder carries no fan-out spec, so nothing can \
+                     expand it — relaunch the workflow",
+                )
+                .await?,
+            ));
+        };
+
+        let Some(source) = self.get_by_number(spec.source_task_number).await? else {
+            return Ok(Some(
+                self.block_placeholder(
+                    &placeholder,
+                    &format!(
+                        "task #{} was supposed to produce the collection to iterate, and no \
+                         longer exists",
+                        spec.source_task_number
+                    ),
+                )
+                .await?,
+            ));
+        };
+        if source.status != TaskStatus::Done {
+            return Ok(None);
+        }
+
+        let Some(outputs) = source.outputs else {
+            return Ok(Some(
+                self.block_placeholder(
+                    &placeholder,
+                    &format!(
+                        "`{}` cannot be read: task #{} finished without producing any outputs",
+                        spec.pointer, spec.source_task_number
+                    ),
+                )
+                .await?,
+            ));
+        };
+
+        let items = match fan_out_items(&spec, &outputs) {
+            Ok(items) => items,
+            Err(reason) => {
+                return Ok(Some(self.block_placeholder(&placeholder, &reason).await?));
+            }
+        };
+
+        // Zero branches is an answer, not a failure. A scan that found nothing
+        // succeeded, and the step downstream should run and report exactly
+        // that. The placeholder stays in the graph rather than being deleted:
+        // it is the only thing holding the edges the downstream steps wait on,
+        // and marking it done is what releases them.
+        if items.is_empty() {
+            sqlx::query(
+                "UPDATE tasks SET status = 'done', \
+                 completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                 WHERE task_number = ?",
+            )
+            .bind(placeholder.task_number)
+            .execute(&self.pool)
+            .await
+            .context("failed to complete an empty fan-out")?;
+
+            return Ok(Some(FanOutOutcome::Empty {
+                placeholder_task_number: placeholder.task_number,
+            }));
+        }
+
+        let branches = self.emit_fan_out_branches(&placeholder, &items).await?;
+        Ok(Some(FanOutOutcome::Expanded {
+            placeholder_task_number: placeholder.task_number,
+            branches,
+        }))
+    }
+
+    /// Park a placeholder that cannot be expanded, and say why on the card.
+    ///
+    /// `Dependency` rather than a sticky kind: this is the graph failing to
+    /// supply what a step was promised, which is the same shape as an input
+    /// binding that will not resolve, and it rests in the backlog rather than
+    /// raising an incident.
+    async fn block_placeholder(&self, placeholder: &Task, reason: &str) -> Result<FanOutOutcome> {
+        self.block_task(placeholder.task_number, BlockKind::Dependency, reason)
+            .await?;
+        Ok(FanOutOutcome::Blocked {
+            placeholder_task_number: placeholder.task_number,
+            reason: reason.to_string(),
+        })
+    }
+
+    /// Emit one task per item and remove the placeholder, in one transaction.
+    ///
+    /// The atomicity is the whole point. The instant the placeholder is gone
+    /// its downstream steps have nothing left to wait on, so a run that emitted
+    /// two of five branches and then died would have the next sweep promote the
+    /// report over three branches that were never created — the same class of
+    /// failure the launch rollback exists to prevent, except here the graph
+    /// looks complete afterwards.
+    ///
+    /// Branch edges need no cycle check: each branch takes exactly the
+    /// placeholder's parents and children, in a graph that was already acyclic
+    /// with the placeholder in that position.
+    async fn emit_fan_out_branches(
+        &self,
+        placeholder: &Task,
+        items: &[(String, Value)],
+    ) -> Result<Vec<i64>> {
+        let parents = self.list_parents(placeholder.task_number).await?;
+        let children = self.list_children(placeholder.task_number).await?;
+        let bindings = self.list_input_bindings(placeholder.task_number).await?;
+
+        // The branches are work, not shape — they must not look like
+        // placeholders to the next pass.
+        let mut metadata = placeholder.metadata.clone();
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove(FAN_OUT_METADATA_KEY);
+        }
+        let metadata = metadata.to_string();
+        let subtasks =
+            serde_json::to_string(&placeholder.subtasks).context("failed to serialize subtasks")?;
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open fan-out expansion transaction")?;
+
+        let mut branches = Vec::with_capacity(items.len());
+        for (branch_key, item) in items {
+            let task_number: i64 = sqlx::query_scalar(
+                "UPDATE task_number_seq SET next_number = next_number + 1 \
+                 WHERE id = 1 RETURNING next_number - 1",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to allocate a fan-out branch task number")?;
+
+            sqlx::query(
+                "INSERT INTO tasks (\
+                     id, task_number, title, description, status, priority, \
+                     owner_agent_id, assigned_agent_id, subtasks, metadata, created_by, \
+                     project_id, repo_id, worktree_id, input_schema, output_schema, \
+                     system_prompt, workflow_run_id, workflow_step_key, fan_out_branch_key) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(task_number)
+            // The key in the title is the only thing that tells five otherwise
+            // identical cards apart on a board.
+            .bind(format!("{} [{branch_key}]", placeholder.title))
+            .bind(&placeholder.description)
+            // Backlog like every other emitted task: the sweep decides what is
+            // eligible, and a branch whose item will not validate should stall
+            // visibly rather than be claimed and immediately blocked.
+            .bind(TaskStatus::Backlog.as_str())
+            .bind(placeholder.priority.as_str())
+            .bind(&placeholder.owner_agent_id)
+            .bind(&placeholder.assigned_agent_id)
+            .bind(&subtasks)
+            .bind(&metadata)
+            .bind(&placeholder.created_by)
+            .bind(&placeholder.project_id)
+            .bind(&placeholder.repo_id)
+            .bind(&placeholder.worktree_id)
+            .bind(placeholder.input_schema.as_ref().map(|v| v.to_string()))
+            .bind(placeholder.output_schema.as_ref().map(|v| v.to_string()))
+            .bind(&placeholder.system_prompt)
+            .bind(&placeholder.workflow_run_id)
+            .bind(&placeholder.workflow_step_key)
+            .bind(branch_key)
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert a fan-out branch")?;
+
+            for parent in &parents {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO task_dependencies \
+                         (parent_task_number, child_task_number) VALUES (?, ?)",
+                )
+                .bind(parent)
+                .bind(task_number)
+                .execute(&mut *tx)
+                .await
+                .context("failed to link a fan-out branch to its source")?;
+            }
+            for child in &children {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO task_dependencies \
+                         (parent_task_number, child_task_number) VALUES (?, ?)",
+                )
+                .bind(task_number)
+                .bind(child)
+                .execute(&mut *tx)
+                .await
+                .context("failed to link a fan-out branch to its downstream step")?;
+            }
+
+            // Everything the step declared, plus the one thing that makes this
+            // branch different from its siblings.
+            for binding in &bindings {
+                sqlx::query(
+                    "INSERT INTO task_input_bindings \
+                         (child_task_number, input_key, source_task_number, source_pointer, \
+                          literal_value, fan_in_step_key) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(task_number)
+                .bind(&binding.input_key)
+                .bind(binding.source_task_number)
+                .bind(&binding.source_pointer)
+                .bind(binding.literal_value.as_ref().map(|v| v.to_string()))
+                .bind(&binding.fan_in_step_key)
+                .execute(&mut *tx)
+                .await
+                .context("failed to copy an input binding onto a fan-out branch")?;
+            }
+
+            // Frozen as a literal rather than a pointer back into the source's
+            // outputs, so a branch retried an hour later still runs on the item
+            // it was created for.
+            sqlx::query(
+                "INSERT INTO task_input_bindings \
+                     (child_task_number, input_key, literal_value) VALUES (?, ?, ?) \
+                 ON CONFLICT (child_task_number, input_key) DO UPDATE SET \
+                     literal_value = excluded.literal_value, source_task_number = NULL, \
+                     source_pointer = NULL, fan_in_step_key = NULL",
+            )
+            .bind(task_number)
+            .bind(FAN_OUT_ITEM_INPUT_KEY)
+            .bind(item.to_string())
+            .execute(&mut *tx)
+            .await
+            .context("failed to bind a fan-out item onto its branch")?;
+
+            branches.push(task_number);
+        }
+
+        // The placeholder's own rows go with it. `delete` only touches `tasks`,
+        // and an edge whose parent no longer exists is invisible to every join
+        // the scheduler makes — present in the table, absent from the graph,
+        // which is the worst of both.
+        sqlx::query(
+            "DELETE FROM task_dependencies \
+             WHERE parent_task_number = ? OR child_task_number = ?",
+        )
+        .bind(placeholder.task_number)
+        .bind(placeholder.task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to remove a fan-out placeholder's edges")?;
+
+        sqlx::query("DELETE FROM task_input_bindings WHERE child_task_number = ?")
+            .bind(placeholder.task_number)
+            .execute(&mut *tx)
+            .await
+            .context("failed to remove a fan-out placeholder's bindings")?;
+
+        sqlx::query("DELETE FROM tasks WHERE task_number = ?")
+            .bind(placeholder.task_number)
+            .execute(&mut *tx)
+            .await
+            .context("failed to remove a fan-out placeholder")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit fan-out expansion")?;
+
+        Ok(branches)
     }
 
     // -- Worker-filed cards -------------------------------------------------
@@ -1748,18 +2164,21 @@ impl TaskStore {
     pub async fn set_input_binding(&self, binding: &TaskInputBinding) -> Result<()> {
         sqlx::query(
             "INSERT INTO task_input_bindings \
-                 (child_task_number, input_key, source_task_number, source_pointer, literal_value) \
-             VALUES (?, ?, ?, ?, ?) \
+                 (child_task_number, input_key, source_task_number, source_pointer, literal_value, \
+                  fan_in_step_key) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT (child_task_number, input_key) DO UPDATE SET \
                  source_task_number = excluded.source_task_number, \
                  source_pointer = excluded.source_pointer, \
-                 literal_value = excluded.literal_value",
+                 literal_value = excluded.literal_value, \
+                 fan_in_step_key = excluded.fan_in_step_key",
         )
         .bind(binding.child_task_number)
         .bind(&binding.input_key)
         .bind(binding.source_task_number)
         .bind(&binding.source_pointer)
         .bind(binding.literal_value.as_ref().map(|v| v.to_string()))
+        .bind(&binding.fan_in_step_key)
         .execute(&self.pool)
         .await
         .context("failed to set task input binding")?;
@@ -1789,7 +2208,8 @@ impl TaskStore {
         child_task_number: i64,
     ) -> Result<Vec<TaskInputBinding>> {
         let rows = sqlx::query(
-            "SELECT child_task_number, input_key, source_task_number, source_pointer, literal_value \
+            "SELECT child_task_number, input_key, source_task_number, source_pointer, \
+                    literal_value, fan_in_step_key \
              FROM task_input_bindings WHERE child_task_number = ? ORDER BY input_key ASC",
         )
         .bind(child_task_number)
@@ -1813,6 +2233,7 @@ impl TaskStore {
                         .ok()
                         .flatten()
                         .and_then(|raw| serde_json::from_str(&raw).ok()),
+                    fan_in_step_key: row.try_get("fan_in_step_key").ok().flatten(),
                 })
             })
             .collect()
@@ -1842,14 +2263,29 @@ impl TaskStore {
 
         let mut resolved = serde_json::Map::new();
         let mut problems = Vec::new();
+        let mut waiting_on = Vec::new();
 
         for binding in &bindings {
-            match self.resolve_one_binding(binding).await {
-                Ok(value) => {
+            match self.resolve_one_binding(&task, binding).await {
+                BindingResolution::Resolved(value) => {
                     resolved.insert(binding.input_key.clone(), value);
                 }
-                Err(problem) => problems.push(problem),
+                BindingResolution::Pending(reason) => waiting_on.push(reason),
+                BindingResolution::Problem(problem) => problems.push(problem),
             }
+        }
+
+        // A binding that is merely waiting leaves the input object incomplete
+        // *by construction*, so validating it here would report every unfilled
+        // key as a schema violation — noise that reads as a broken contract and
+        // parks a fan-in step the moment its pipeline starts. Real problems
+        // still win: waiting does not fix a binding that will never resolve.
+        if !waiting_on.is_empty() {
+            return Ok(if problems.is_empty() {
+                ContractResolution::Pending { waiting_on }
+            } else {
+                ContractResolution::Unresolved { problems }
+            });
         }
 
         let inputs = Value::Object(resolved);
@@ -1866,6 +2302,127 @@ impl TaskStore {
     }
 
     async fn resolve_one_binding(
+        &self,
+        child: &Task,
+        binding: &TaskInputBinding,
+    ) -> BindingResolution {
+        if let Some(step_key) = &binding.fan_in_step_key {
+            return self.resolve_fan_in(child, binding, step_key).await;
+        }
+
+        match self.resolve_direct_binding(binding).await {
+            Ok(value) => BindingResolution::Resolved(value),
+            Err(problem) => BindingResolution::Problem(problem),
+        }
+    }
+
+    /// Collect every branch of a fan-out step into one object.
+    ///
+    /// Keyed by branch key rather than positional: a branch should not have to
+    /// echo its own identity into its output for the aggregator to tell results
+    /// apart, and a positional list silently mismatches the moment one branch is
+    /// retried or the upstream reorders.
+    ///
+    /// The two ways this does not produce a value are kept apart on purpose. A
+    /// branch that has not finished is `Pending` — the ordinary state on every
+    /// sweep before the branches land, and reporting it as an unresolvable
+    /// contract would park the aggregator permanently over a wait that clears
+    /// itself. A step key that names nothing is a `Problem`: no amount of
+    /// waiting produces branches for a step that is not in the run.
+    async fn resolve_fan_in(
+        &self,
+        child: &Task,
+        binding: &TaskInputBinding,
+        step_key: &str,
+    ) -> BindingResolution {
+        let Some(run_id) = &child.workflow_run_id else {
+            return BindingResolution::Problem(ContractProblem::FanInOutsideRun {
+                input_key: binding.input_key.clone(),
+                step_key: step_key.to_string(),
+            });
+        };
+
+        let rows = sqlx::query(
+            "SELECT task_number, status, fan_out_branch_key, fan_out_placeholder, outputs \
+             FROM tasks WHERE workflow_run_id = ? AND workflow_step_key = ? \
+             ORDER BY task_number ASC",
+        )
+        .bind(run_id)
+        .bind(step_key)
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                return BindingResolution::Problem(ContractProblem::Storage {
+                    input_key: binding.input_key.clone(),
+                    message: error.to_string(),
+                });
+            }
+        };
+
+        if rows.is_empty() {
+            return BindingResolution::Problem(ContractProblem::FanInNoBranches {
+                input_key: binding.input_key.clone(),
+                step_key: step_key.to_string(),
+            });
+        }
+
+        let mut collected = serde_json::Map::new();
+        let mut unfinished = 0usize;
+        let mut unexpanded = false;
+
+        for row in &rows {
+            let task_number: i64 = row.try_get("task_number").unwrap_or_default();
+            let status = row
+                .try_get::<String, _>("status")
+                .ok()
+                .as_deref()
+                .and_then(TaskStatus::parse);
+            let placeholder = row.try_get::<i64, _>("fan_out_placeholder").unwrap_or(0) != 0;
+            let done = status == Some(TaskStatus::Done);
+
+            if placeholder {
+                // A placeholder that is done is the empty-collection case: the
+                // fan-out ran and produced no branches, which is an answer.
+                // One that is not done has simply not expanded yet.
+                if !done {
+                    unexpanded = true;
+                }
+                continue;
+            }
+            if !done {
+                unfinished += 1;
+                continue;
+            }
+
+            let key = read_optional_id(row, "fan_out_branch_key")
+                .unwrap_or_else(|| task_number.to_string());
+            collected.insert(
+                key,
+                read_optional_json(row, "outputs").unwrap_or(Value::Null),
+            );
+        }
+
+        if unexpanded {
+            return BindingResolution::Pending(format!(
+                "input `{}`: step `{step_key}` has not fanned out yet",
+                binding.input_key
+            ));
+        }
+        if unfinished > 0 {
+            return BindingResolution::Pending(format!(
+                "input `{}`: {unfinished} of {} branches of step `{step_key}` have not finished",
+                binding.input_key,
+                collected.len() + unfinished
+            ));
+        }
+
+        BindingResolution::Resolved(Value::Object(collected))
+    }
+
+    async fn resolve_direct_binding(
         &self,
         binding: &TaskInputBinding,
     ) -> std::result::Result<Value, ContractProblem> {
@@ -2308,6 +2865,13 @@ pub struct TaskInputBinding {
     pub source_pointer: Option<String>,
     /// JSON literal, used when `source_task_number` is `None`.
     pub literal_value: Option<Value>,
+    /// Collect every branch of this workflow step into one object, keyed by
+    /// branch key.
+    ///
+    /// Mutually exclusive with `source_task_number`, and it has to be: that one
+    /// addresses a single upstream task by number, which cannot name a set that
+    /// does not exist until the fan-out expands.
+    pub fan_in_step_key: Option<String>,
 }
 
 /// Which half of a contract a problem came from.
@@ -2359,6 +2923,14 @@ pub enum ContractProblem {
     InvalidSchema { side: ContractSide, message: String },
     #[error("input `{input_key}` could not be read: {message}")]
     Storage { input_key: String, message: String },
+    #[error(
+        "input `{input_key}` collects every branch of step `{step_key}`, but this task did not come from a workflow run"
+    )]
+    FanInOutsideRun { input_key: String, step_key: String },
+    #[error(
+        "input `{input_key}` collects every branch of step `{step_key}`, which produced no tasks in this run"
+    )]
+    FanInNoBranches { input_key: String, step_key: String },
 }
 
 /// The result of assembling a task's inputs.
@@ -2368,8 +2940,179 @@ pub enum ContractResolution {
     NotRequired,
     /// Inputs assembled and validated.
     Resolved { inputs: Value },
+    /// The graph will supply this, but has not yet.
+    ///
+    /// Distinct from `Unresolved` because the recovery is the opposite: this
+    /// clears itself when an upstream task finishes, and nobody has to do
+    /// anything. Collapsing the two is how a fan-in step parks itself on the
+    /// first sweep of a pipeline that is working perfectly well.
+    Pending { waiting_on: Vec<String> },
     /// The graph cannot supply what this task was promised.
     Unresolved { problems: Vec<ContractProblem> },
+}
+
+/// What one binding produced, before the three outcomes are combined.
+enum BindingResolution {
+    Resolved(Value),
+    /// Not yet — already phrased for a human.
+    Pending(String),
+    /// Never, without someone repairing the graph.
+    Problem(ContractProblem),
+}
+
+/// Metadata key under which a placeholder carries its frozen fan-out spec.
+pub const FAN_OUT_METADATA_KEY: &str = "fan_out";
+
+/// The input key each branch's item is bound to.
+///
+/// Fixed rather than configurable, because a fan-out step's input schema has to
+/// name it and a name nobody can predict is a name nobody can declare.
+pub const FAN_OUT_ITEM_INPUT_KEY: &str = "item";
+
+/// Everything a placeholder needs to expand itself.
+///
+/// Frozen onto the placeholder at launch instead of being read back from
+/// `workflow_steps` when the source finishes, for the same reason run inputs
+/// are frozen to literals: a template edited mid-run must not change what a run
+/// already in flight does, and a run whose template was deleted still has to
+/// finish. Deleting a workflow deliberately leaves its runs alone, and a
+/// placeholder that could no longer find its own pointer would make that a lie.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FanOutSpec {
+    /// The task whose outputs hold the collection.
+    pub source_task_number: i64,
+    /// RFC 6901 pointer into those outputs. Must select an array.
+    pub pointer: String,
+    /// Pointer *within each item* naming its branch. `None` uses the index.
+    pub key: Option<String>,
+}
+
+impl FanOutSpec {
+    /// The metadata object a placeholder is created with.
+    pub fn to_metadata(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            FAN_OUT_METADATA_KEY.to_string(),
+            serde_json::to_value(self).unwrap_or(Value::Null),
+        );
+        Value::Object(object)
+    }
+
+    pub fn from_metadata(metadata: &Value) -> Option<Self> {
+        serde_json::from_value(metadata.get(FAN_OUT_METADATA_KEY)?.clone()).ok()
+    }
+}
+
+/// What expanding one placeholder did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FanOutOutcome {
+    /// One task per item, and the placeholder is gone.
+    Expanded {
+        placeholder_task_number: i64,
+        branches: Vec<i64>,
+    },
+    /// The collection was empty. Not a failure: zero branches, and the steps
+    /// downstream run against nothing, which is what actually happened.
+    Empty { placeholder_task_number: i64 },
+    /// The collection could not be read. The placeholder is parked with the
+    /// reason on the card.
+    Blocked {
+        placeholder_task_number: i64,
+        reason: String,
+    },
+}
+
+/// Read the collection a placeholder iterates, and give every item a name.
+///
+/// `Err` is a reason already phrased for the card. Every one of them names the
+/// pointer and what was actually found there: "it did nothing" and "it iterated
+/// an empty list" must not look alike from the outside, and neither must "the
+/// step produced the wrong shape".
+fn fan_out_items(
+    spec: &FanOutSpec,
+    outputs: &Value,
+) -> std::result::Result<Vec<(String, Value)>, String> {
+    // RFC 6901: the empty pointer selects the whole document.
+    let selected = if spec.pointer.is_empty() {
+        Some(outputs)
+    } else {
+        outputs.pointer(&spec.pointer)
+    };
+
+    let Some(selected) = selected else {
+        return Err(format!(
+            "`{}` selects nothing in task #{}'s outputs, so there is no collection to iterate",
+            spec.pointer, spec.source_task_number
+        ));
+    };
+    let Some(items) = selected.as_array() else {
+        return Err(format!(
+            "`{}` is {} in task #{}'s outputs, and only an array can be iterated",
+            spec.pointer,
+            json_type_name(selected),
+            spec.source_task_number
+        ));
+    };
+
+    let mut labelled = Vec::with_capacity(items.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let key = match &spec.key {
+            None => index.to_string(),
+            Some(pointer) => {
+                let selected = if pointer.is_empty() {
+                    Some(item)
+                } else {
+                    item.pointer(pointer)
+                };
+                let Some(value) = selected else {
+                    return Err(format!(
+                        "`{pointer}` selects nothing in item {index}, so that branch has no name \
+                         — point for_each_key at a field every item has, or drop it to key by \
+                         index"
+                    ));
+                };
+                match value {
+                    Value::String(text) => text.clone(),
+                    Value::Number(_) | Value::Bool(_) => value.to_string(),
+                    other => {
+                        return Err(format!(
+                            "`{pointer}` is {} in item {index}, which cannot name a branch",
+                            json_type_name(other)
+                        ));
+                    }
+                }
+            }
+        };
+
+        // Two branches under one key would silently collapse to one entry in
+        // every fan-in that reads them, and the run would look like it built
+        // four repos instead of five with nothing anywhere saying otherwise.
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "items {index} and an earlier one share the branch key `{key}` — a fan-in keyed \
+                 by branch would keep only one of them; point for_each_key at a unique field, or \
+                 drop it to key by index"
+            ));
+        }
+
+        labelled.push((key, item.clone()));
+    }
+
+    Ok(labelled)
+}
+
+/// A JSON value's type, phrased to drop into the middle of a sentence.
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 /// The result of a worker submitting outputs for its own task.
@@ -2444,6 +3187,18 @@ pub struct StalledTask {
     pub problems: Vec<ContractProblem>,
 }
 
+/// A task held back by a wait that will clear itself.
+///
+/// The other half of [`StalledTask`], and separate from it because the two ask
+/// opposite things of whoever reads the board: one wants the graph fixed, the
+/// other wants nothing at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingTask {
+    pub task_number: i64,
+    /// One line per binding still waiting, already phrased for a human.
+    pub waiting_on: Vec<String>,
+}
+
 /// What a [`TaskStore::recompute_ready`] pass changed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReadySweep {
@@ -2454,6 +3209,10 @@ pub struct ReadySweep {
     /// Tasks held back because their inputs do not resolve. Reported rather
     /// than promoted-and-rejected, so the loop never starts.
     pub stalled: Vec<StalledTask>,
+    /// Tasks held back by a wait that clears itself — a fan-out that has not
+    /// expanded, branches still running. Nothing is wrong with these; they are
+    /// reported only so a graph that appears to be doing nothing can say why.
+    pub pending: Vec<PendingTask>,
     /// Tasks otherwise ready but held by an external gate, with the reason.
     ///
     /// Reported separately from `stalled` because the recovery differs: a
@@ -2474,6 +3233,7 @@ impl ReadySweep {
         self.promoted.is_empty()
             && self.demoted.is_empty()
             && self.stalled.is_empty()
+            && self.pending.is_empty()
             && self.gated.is_empty()
     }
 }
@@ -2543,7 +3303,8 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
      block_kind, block_reason, block_recurrences, last_block_kind, \
      input_schema, output_schema, inputs, outputs, \
-     workflow_run_id, workflow_step_key, system_prompt";
+     workflow_run_id, workflow_step_key, system_prompt, \
+     fan_out_branch_key, fan_out_placeholder";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -2723,6 +3484,8 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .ok()
             .flatten()
             .filter(|value| !value.is_empty()),
+        fan_out_branch_key: read_optional_id(&row, "fan_out_branch_key"),
+        fan_out_placeholder: row.try_get::<i64, _>("fan_out_placeholder").unwrap_or(0) != 0,
     })
 }
 
@@ -2849,7 +3612,9 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             outputs TEXT,
             workflow_run_id TEXT,
             workflow_step_key TEXT,
-            system_prompt TEXT
+            system_prompt TEXT,
+            fan_out_branch_key TEXT,
+            fan_out_placeholder INTEGER NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -2899,6 +3664,7 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             source_task_number INTEGER,
             source_pointer TEXT,
             literal_value TEXT,
+            fan_in_step_key TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             PRIMARY KEY (child_task_number, input_key)
         )
@@ -4438,6 +5204,7 @@ mod tests {
                 source_task_number: Some(parent.task_number),
                 source_pointer: Some("/image/tag".into()),
                 literal_value: None,
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4466,6 +5233,7 @@ mod tests {
                 source_task_number: None,
                 source_pointer: None,
                 literal_value: Some(serde_json::json!("staging")),
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4506,6 +5274,7 @@ mod tests {
                 source_task_number: Some(parent.task_number),
                 source_pointer: Some("/image/tag".into()),
                 literal_value: None,
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4542,6 +5311,7 @@ mod tests {
                 source_task_number: Some(parent.task_number),
                 source_pointer: Some("/tag".into()),
                 literal_value: None,
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4578,6 +5348,7 @@ mod tests {
                 source_task_number: None,
                 source_pointer: None,
                 literal_value: Some(serde_json::json!(42)),
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4734,6 +5505,7 @@ mod tests {
                     source_task_number: None,
                     source_pointer: None,
                     literal_value: Some(serde_json::json!(value)),
+                    fan_in_step_key: None,
                 })
                 .await
                 .expect("bind");
@@ -4845,6 +5617,7 @@ mod tests {
                 source_task_number: Some(parent.task_number),
                 source_pointer: Some("/image/tag".into()),
                 literal_value: None,
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -4890,6 +5663,7 @@ mod tests {
                 source_task_number: Some(parent.task_number),
                 source_pointer: Some("/image/tag".into()),
                 literal_value: None,
+                fan_in_step_key: None,
             })
             .await
             .expect("bind");
@@ -5078,6 +5852,396 @@ mod tests {
         assert!(
             sweep.is_empty(),
             "a backlog nobody automated must survive a sweep: {sweep:?}"
+        );
+    }
+
+    // -- Fan-out -----------------------------------------------------------
+
+    /// A finished task carrying the collection a fan-out will iterate.
+    async fn finished_source(store: &TaskStore, outputs: serde_json::Value) -> Task {
+        let task = task_at(store, "scan", TaskStatus::InProgress).await;
+        store
+            .submit_outputs(task.task_number, &outputs)
+            .await
+            .expect("submit outputs");
+        finish(store, task.task_number).await;
+        store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists")
+    }
+
+    /// A placeholder wired the way a launch wires one.
+    async fn placeholder_for(store: &TaskStore, spec: &FanOutSpec) -> Task {
+        let task = task_at(store, "build", TaskStatus::Backlog).await;
+        sqlx::query(
+            "UPDATE tasks SET fan_out_placeholder = 1, metadata = ?, \
+             workflow_run_id = 'run-1', workflow_step_key = 'build' WHERE task_number = ?",
+        )
+        .bind(spec.to_metadata().to_string())
+        .bind(task.task_number)
+        .execute(store.pool())
+        .await
+        .expect("mark placeholder");
+
+        store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists")
+    }
+
+    /// The headline case. Every branch has to inherit the placeholder's whole
+    /// position in the graph — the source above it and every downstream step
+    /// below — or the report either runs early or never runs at all.
+    #[tokio::test]
+    async fn a_fan_out_expands_to_one_task_per_item_wired_to_the_source_and_every_downstream_step()
+    {
+        let store = setup_store().await;
+        let source = finished_source(
+            &store,
+            serde_json::json!({"repos": [{"name": "alpha"}, {"name": "beta"}, {"name": "gamma"}]}),
+        )
+        .await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: Some("/name".into()),
+            },
+        )
+        .await;
+        let report = task_at(&store, "report", TaskStatus::Backlog).await;
+        let audit = task_at(&store, "audit", TaskStatus::Backlog).await;
+
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+        for downstream in [report.task_number, audit.task_number] {
+            store
+                .link_tasks(placeholder.task_number, downstream)
+                .await
+                .expect("link downstream");
+        }
+        // A binding the step declared, which every branch must carry.
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: placeholder.task_number,
+                input_key: "tag".into(),
+                source_task_number: None,
+                source_pointer: None,
+                literal_value: Some(serde_json::json!("v1")),
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("bind");
+
+        let outcomes = store.expand_fan_outs("agent-test").await.expect("expand");
+        let [FanOutOutcome::Expanded { branches, .. }] = outcomes.as_slice() else {
+            panic!("expected one expansion, got {outcomes:?}");
+        };
+        assert_eq!(branches.len(), 3, "one task per item");
+
+        assert!(
+            store
+                .get_by_number(placeholder.task_number)
+                .await
+                .expect("fetch")
+                .is_none(),
+            "the placeholder is replaced, not left alongside its branches"
+        );
+
+        for (branch, key) in branches.iter().zip(["alpha", "beta", "gamma"]) {
+            let task = store
+                .get_by_number(*branch)
+                .await
+                .expect("fetch")
+                .expect("exists");
+            assert_eq!(task.fan_out_branch_key.as_deref(), Some(key));
+            assert!(!task.fan_out_placeholder, "a branch is work, not a shape");
+            assert_eq!(task.workflow_step_key.as_deref(), Some("build"));
+
+            assert_eq!(
+                store.list_parents(*branch).await.expect("parents"),
+                vec![source.task_number],
+                "every branch waits on the step it was derived from"
+            );
+            assert_eq!(
+                store.list_children(*branch).await.expect("children"),
+                vec![report.task_number, audit.task_number],
+                "every downstream step waits on every branch"
+            );
+
+            let bindings = store.list_input_bindings(*branch).await.expect("bindings");
+            let item = bindings
+                .iter()
+                .find(|binding| binding.input_key == FAN_OUT_ITEM_INPUT_KEY)
+                .expect("the branch carries its item");
+            assert_eq!(item.literal_value, Some(serde_json::json!({"name": key})));
+            assert!(
+                bindings.iter().any(|binding| binding.input_key == "tag"),
+                "the step's own bindings come along too"
+            );
+        }
+
+        assert_eq!(
+            store
+                .list_parents(report.task_number)
+                .await
+                .expect("parents"),
+            *branches,
+            "the report waits on all three, not on the placeholder that is gone"
+        );
+    }
+
+    /// Zero branches is an answer, not a failure. A scan that found nothing
+    /// succeeded, and the step after it has to run and say so — treating this
+    /// as an error would make "nothing to do" indistinguishable from a break.
+    #[tokio::test]
+    async fn an_empty_collection_completes_the_fan_out_and_still_releases_downstream() {
+        let store = setup_store().await;
+        let source = finished_source(&store, serde_json::json!({"repos": []})).await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: None,
+            },
+        )
+        .await;
+        let report = task_at(&store, "report", TaskStatus::Backlog).await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+        store
+            .link_tasks(placeholder.task_number, report.task_number)
+            .await
+            .expect("link downstream");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+
+        let placeholder = store
+            .get_by_number(placeholder.task_number)
+            .await
+            .expect("fetch")
+            .expect("the placeholder stays — it holds the edge the report waits on");
+        assert_eq!(placeholder.status, TaskStatus::Done);
+        assert!(
+            placeholder.block_kind.is_none(),
+            "an empty collection is not a block"
+        );
+
+        assert_eq!(
+            sweep.promoted,
+            vec![report.task_number],
+            "the report runs against an empty collection rather than waiting forever"
+        );
+    }
+
+    /// The other half of the empty case, and the reason they must not be
+    /// confused: a pointer that resolves to the wrong shape is a template
+    /// mistake, and silently producing zero branches would hide it behind a
+    /// pipeline that looks like it succeeded.
+    #[tokio::test]
+    async fn a_fan_out_pointer_that_is_not_an_array_blocks_with_a_reason_naming_the_pointer() {
+        let store = setup_store().await;
+        let source = finished_source(&store, serde_json::json!({"repos": "spacebot"})).await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: None,
+            },
+        )
+        .await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+
+        let outcomes = store.expand_fan_outs("agent-test").await.expect("expand");
+        let [FanOutOutcome::Blocked { reason, .. }] = outcomes.as_slice() else {
+            panic!("expected a block, got {outcomes:?}");
+        };
+        assert!(reason.contains("/repos"), "must name the pointer: {reason}");
+        assert!(
+            reason.contains("a string"),
+            "must say what was actually found there: {reason}"
+        );
+
+        let parked = store
+            .get_by_number(placeholder.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(parked.block_kind, Some(BlockKind::Dependency));
+        assert_eq!(parked.block_reason.as_deref(), Some(reason.as_str()));
+
+        // And it is asked once. The source is done and its outputs are frozen,
+        // so re-reading them every tick is a loop that cannot end differently.
+        assert!(
+            store
+                .expand_fan_outs("agent-test")
+                .await
+                .expect("expand")
+                .is_empty(),
+            "a parked placeholder must not be retried on every sweep"
+        );
+    }
+
+    /// A placeholder looks exactly like a promotable task — backlog, parents
+    /// done, run id set — and it is not work. Promoting one hands a worker a
+    /// card whose only job is to be replaced.
+    #[tokio::test]
+    async fn the_sweep_never_promotes_a_fan_out_placeholder() {
+        let store = setup_store().await;
+        // A collection that cannot be iterated, so the placeholder survives the
+        // expansion pass and is still sitting there when the promote query runs.
+        let source = finished_source(&store, serde_json::json!({"repos": 7})).await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: None,
+            },
+        )
+        .await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            !sweep.promoted.contains(&placeholder.task_number),
+            "the sweep promoted a placeholder: {sweep:?}"
+        );
+
+        let parked = store
+            .get_by_number(placeholder.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            parked.status,
+            TaskStatus::Backlog,
+            "a placeholder is never claimable"
+        );
+    }
+
+    /// The failure this guards against looks like success afterwards. Emit two
+    /// of five branches, delete the placeholder, and the report has nothing
+    /// left to wait on — the next sweep runs it over work that was never
+    /// created, and the graph shows no sign anything went wrong.
+    #[tokio::test]
+    async fn an_expansion_that_fails_part_way_leaves_no_branch_and_no_promotable_downstream() {
+        let store = setup_store().await;
+        let source = finished_source(
+            &store,
+            serde_json::json!({"repos": [{"name": "a"}, {"name": "b"}, {"name": "c"}]}),
+        )
+        .await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: Some("/name".into()),
+            },
+        )
+        .await;
+        let report = task_at(&store, "report", TaskStatus::Backlog).await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+        store
+            .link_tasks(placeholder.task_number, report.task_number)
+            .await
+            .expect("link downstream");
+
+        // Squat on the number the second branch will be allocated, so the
+        // insert fails on the UNIQUE constraint half way through the emission.
+        let next: i64 = sqlx::query_scalar("SELECT next_number FROM task_number_seq WHERE id = 1")
+            .fetch_one(store.pool())
+            .await
+            .expect("read sequence");
+        sqlx::query(
+            "INSERT INTO tasks (id, task_number, title, status, priority, owner_agent_id, \
+             assigned_agent_id, created_by) \
+             VALUES ('squatter', ?, 'squatter', 'backlog', 'medium', 'other', 'other', 'human')",
+        )
+        .bind(next + 1)
+        .execute(store.pool())
+        .await
+        .expect("squat on a task number");
+
+        store
+            .expand_fan_outs("agent-test")
+            .await
+            .expect_err("the second branch must fail to insert");
+
+        let all = store.list(TaskListFilter::default()).await.expect("list");
+        assert!(
+            all.iter().all(|task| task.fan_out_branch_key.is_none()),
+            "a failed expansion must leave no branch behind: {:?}",
+            all.iter().map(|task| &task.title).collect::<Vec<_>>()
+        );
+        assert!(
+            store
+                .get_by_number(placeholder.task_number)
+                .await
+                .expect("fetch")
+                .is_some(),
+            "the placeholder must survive, or the report has nothing left to wait on"
+        );
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            !sweep.promoted.contains(&report.task_number),
+            "the report must not run over branches that were never created: {sweep:?}"
+        );
+    }
+
+    /// Two branches under one key would collapse to one entry in every fan-in
+    /// that reads them, and the run would look like it built two things
+    /// instead of three with nothing anywhere saying otherwise.
+    #[tokio::test]
+    async fn two_items_sharing_a_branch_key_are_refused_rather_than_silently_collapsed() {
+        let store = setup_store().await;
+        let source = finished_source(
+            &store,
+            serde_json::json!({"repos": [{"name": "api"}, {"name": "api"}]}),
+        )
+        .await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: Some("/name".into()),
+            },
+        )
+        .await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+
+        let outcomes = store.expand_fan_outs("agent-test").await.expect("expand");
+        let [FanOutOutcome::Blocked { reason, .. }] = outcomes.as_slice() else {
+            panic!("expected a block, got {outcomes:?}");
+        };
+        assert!(
+            reason.contains("`api`"),
+            "must name the colliding key: {reason}"
         );
     }
 }

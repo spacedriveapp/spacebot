@@ -52,6 +52,21 @@ pub(super) struct SaveStepRequest {
     /// Display order only — execution order comes from the edges.
     #[serde(default)]
     position: Option<i64>,
+    /// Set to make this a fan-out: one task per item that step produced,
+    /// instead of one task.
+    ///
+    /// Each branch receives its own item as the input key **`item`**. That is
+    /// the name to declare in this step's `input_schema` and to bind against —
+    /// there is no way to rename it, and a step that iterates without knowing
+    /// the key would declare a contract it never receives.
+    #[serde(default)]
+    for_each_step_key: Option<String>,
+    /// RFC 6901 pointer into that step's outputs. Must select an array.
+    #[serde(default)]
+    for_each_pointer: Option<String>,
+    /// Pointer *within each item* naming its branch. Omit to key by index.
+    #[serde(default)]
+    for_each_key: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -184,7 +199,12 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::UnknownEdgeReference { .. }
         | LaunchError::InvalidInput { .. }
         | LaunchError::UnboundRequiredInput { .. }
-        | LaunchError::MissingRunInput { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | LaunchError::MissingRunInput { .. }
+        | LaunchError::UnknownForEachStep { .. }
+        | LaunchError::ForEachNotWaiting { .. }
+        | LaunchError::FanInNotFanOut { .. }
+        | LaunchError::FanInNotWaiting { .. }
+        | LaunchError::StepBindingOnFanOut { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -408,6 +428,23 @@ pub(super) async fn put_step(
         ))?,
     };
 
+    // Checked here rather than left to launch, on the same argument as edges: a
+    // step key that does not exist is a typo the author can still see on screen.
+    if let Some(source) = request.for_each_step_key.as_deref() {
+        if source == step_key {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("step `{step_key}` cannot iterate over its own output"),
+            ));
+        }
+        if !existing.iter().any(|step| step.step_key == source) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("no step `{source}` in this workflow"),
+            ));
+        }
+    }
+
     store
         .put_step(&WorkflowStep {
             workflow_id: id.clone(),
@@ -421,6 +458,9 @@ pub(super) async fn put_step(
             system_prompt: request.system_prompt,
             repo_id: request.repo_id,
             position,
+            for_each_step_key: request.for_each_step_key,
+            for_each_pointer: request.for_each_pointer,
+            for_each_key: request.for_each_key,
         })
         .await
         .map_err(internal)?;
@@ -579,7 +619,7 @@ pub(super) async fn put_binding(
     let source = BindingSource::parse(&request.source).ok_or((
         StatusCode::UNPROCESSABLE_ENTITY,
         format!(
-            "`{}` is not a binding source — use step, literal, or run_input",
+            "`{}` is not a binding source — use step, literal, run_input, or fan_in",
             request.source
         ),
     ))?;
@@ -613,6 +653,24 @@ pub(super) async fn put_binding(
                 return Err((
                     StatusCode::UNPROCESSABLE_ENTITY,
                     format!("step `{step_key}` cannot read its own output"),
+                ));
+            }
+        }
+        BindingSource::FanIn => {
+            let target = request.source_step_key.as_deref().unwrap_or("");
+            let Some(fan_out) = steps.iter().find(|step| step.step_key == target) else {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("no step `{target}` in this workflow"),
+                ));
+            };
+            // A fan-in over an ordinary step collects exactly one thing, keyed
+            // by nothing anybody chose. Refused rather than allowed to resolve
+            // to plausible-looking nonsense.
+            if fan_out.for_each_step_key.is_none() {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("step `{target}` is not a fan-out, so it has no branches to collect"),
                 ));
             }
         }

@@ -1089,6 +1089,9 @@ pub(super) async fn get_task_contract(
         Ok(crate::tasks::ContractResolution::Resolved { inputs }) => (Some(inputs), Vec::new()),
         Ok(crate::tasks::ContractResolution::Unresolved { problems }) => (None, problems),
         Ok(crate::tasks::ContractResolution::NotRequired) => (None, Vec::new()),
+        // Waiting on branches that have not finished is not a contract problem,
+        // and listing it as one would put a red mark on a healthy pipeline.
+        Ok(crate::tasks::ContractResolution::Pending { .. }) => (None, Vec::new()),
         Err(error) => {
             tracing::warn!(%error, task_number = number, "failed to resolve inputs for contract view");
             (None, Vec::new())
@@ -1178,6 +1181,9 @@ pub(super) async fn set_task_binding(
             source_task_number: request.source_task_number,
             source_pointer: request.source_pointer,
             literal_value: request.literal_value,
+            // Fan-in bindings are written by a workflow launch, which knows the
+            // step key. Hand-editing one task's binding cannot name a set.
+            fan_in_step_key: None,
         })
         .await
         .map_err(|error| {

@@ -40,6 +40,20 @@ pub struct WorkflowStep {
     pub system_prompt: Option<String>,
     pub repo_id: Option<String>,
     pub position: i64,
+    /// Which upstream step produces the collection this step iterates.
+    ///
+    /// Set, and the step is a fan-out: it becomes one task per item rather than
+    /// one task, and the width is not known until that step finishes.
+    pub for_each_step_key: Option<String>,
+    /// RFC 6901 pointer into that step's outputs. Must select an array.
+    pub for_each_pointer: Option<String>,
+    /// Pointer *within each item* naming its branch, e.g. `/name` over
+    /// `{"name": "repo-a"}` labels the branch `repo-a`.
+    ///
+    /// This is what makes a fan-in keyed rather than positional. Without it the
+    /// index is used and the keys come out `0`, `1`, `2` — honest, but far less
+    /// useful in a report.
+    pub for_each_key: Option<String>,
 }
 
 /// Where a step's input comes from.
@@ -61,6 +75,11 @@ pub enum BindingSource {
     /// straight into the launch payload, so the entry point is declarative and
     /// there is no special-cased first step.
     RunInput,
+    /// Collect every branch of a fan-out step, keyed by branch key.
+    ///
+    /// `Step` cannot express this: it addresses one upstream task, and a
+    /// fan-out produces a number of them that does not exist until it expands.
+    FanIn,
 }
 
 impl BindingSource {
@@ -69,6 +88,7 @@ impl BindingSource {
             BindingSource::Step => "step",
             BindingSource::Literal => "literal",
             BindingSource::RunInput => "run_input",
+            BindingSource::FanIn => "fan_in",
         }
     }
 
@@ -77,6 +97,7 @@ impl BindingSource {
             "step" => Some(BindingSource::Step),
             "literal" => Some(BindingSource::Literal),
             "run_input" => Some(BindingSource::RunInput),
+            "fan_in" => Some(BindingSource::FanIn),
             _ => None,
         }
     }
@@ -153,6 +174,45 @@ pub enum LaunchError {
          add a binding, or drop it from the step's input schema"
     )]
     UnboundRequiredInput { step_key: String, input_key: String },
+    #[error("step `{step_key}` iterates over step `{missing}`, which is not in this workflow")]
+    UnknownForEachStep { step_key: String, missing: String },
+    #[error(
+        "step `{step_key}` iterates over step `{source_step_key}` but does not wait for it — \
+         add an edge {source_step_key} -> {step_key}"
+    )]
+    ForEachNotWaiting {
+        step_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to every branch of step `{source_step_key}`, which \
+         is not a fan-out — give `{source_step_key}` a for_each_step_key, or bind with source \
+         `step` instead"
+    )]
+    FanInNotFanOut {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to every branch of step `{source_step_key}` but \
+         does not wait for it — add an edge {source_step_key} -> {step_key}"
+    )]
+    FanInNotWaiting {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to step `{source_step_key}`'s output, but \
+         `{source_step_key}` is a fan-out and produces one output per branch — bind with source \
+         `fan_in` instead"
+    )]
+    StepBindingOnFanOut {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
     #[error("workflow storage error: {0}")]
     Storage(String),
 }
@@ -263,14 +323,18 @@ impl WorkflowStore {
         sqlx::query(
             "INSERT INTO workflow_steps \
                  (workflow_id, step_key, title, description, assigned_agent_id, priority, \
-                  input_schema, output_schema, system_prompt, repo_id, position) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  input_schema, output_schema, system_prompt, repo_id, position, \
+                  for_each_step_key, for_each_pointer, for_each_key) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workflow_id, step_key) DO UPDATE SET \
                  title = excluded.title, description = excluded.description, \
                  assigned_agent_id = excluded.assigned_agent_id, priority = excluded.priority, \
                  input_schema = excluded.input_schema, output_schema = excluded.output_schema, \
                  system_prompt = excluded.system_prompt, repo_id = excluded.repo_id, \
-                 position = excluded.position",
+                 position = excluded.position, \
+                 for_each_step_key = excluded.for_each_step_key, \
+                 for_each_pointer = excluded.for_each_pointer, \
+                 for_each_key = excluded.for_each_key",
         )
         .bind(&step.workflow_id)
         .bind(&step.step_key)
@@ -283,6 +347,9 @@ impl WorkflowStore {
         .bind(&step.system_prompt)
         .bind(&step.repo_id)
         .bind(step.position)
+        .bind(&step.for_each_step_key)
+        .bind(&step.for_each_pointer)
+        .bind(&step.for_each_key)
         .execute(&self.pool)
         .await
         .context("failed to write workflow step")?;
@@ -292,7 +359,8 @@ impl WorkflowStore {
     pub async fn list_steps(&self, workflow_id: &str) -> Result<Vec<WorkflowStep>> {
         let rows = sqlx::query(
             "SELECT workflow_id, step_key, title, description, assigned_agent_id, priority, \
-                    input_schema, output_schema, system_prompt, repo_id, position \
+                    input_schema, output_schema, system_prompt, repo_id, position, \
+                    for_each_step_key, for_each_pointer, for_each_key \
              FROM workflow_steps WHERE workflow_id = ? ORDER BY position ASC, step_key ASC",
         )
         .bind(workflow_id)
@@ -580,7 +648,7 @@ impl WorkflowStore {
             }
         }
         for binding in &bindings {
-            if binding.source == BindingSource::Step {
+            if matches!(binding.source, BindingSource::Step | BindingSource::FanIn) {
                 let target = binding.source_step_key.as_deref().unwrap_or("");
                 if !known.contains(target) {
                     return Err(LaunchError::UnknownStepReference {
@@ -589,6 +657,80 @@ impl WorkflowStore {
                         missing: target.to_string(),
                     });
                 }
+            }
+        }
+
+        // 2b. Fan-out and fan-in wiring.
+        //
+        //     A missing edge is *refused* rather than quietly created. The edge
+        //     could be synthesized here — iterating a step's output does imply
+        //     waiting for it — but then the run graph would carry an edge the
+        //     template does not, and the canvas would draw a pipeline that is
+        //     not the one that ran. A refusal naming the edge to add keeps the
+        //     picture and the run the same object.
+        //
+        //     Reachability rather than a direct edge: a fan-out that waits on
+        //     its source through an intervening step is wired correctly, and
+        //     demanding the shortcut edge would reject a legitimate template.
+        let fan_outs: HashSet<&str> = steps
+            .iter()
+            .filter(|step| step.for_each_step_key.is_some())
+            .map(|step| step.step_key.as_str())
+            .collect();
+
+        for step in &steps {
+            let Some(source) = step.for_each_step_key.as_deref() else {
+                continue;
+            };
+            if !known.contains(source) {
+                return Err(LaunchError::UnknownForEachStep {
+                    step_key: step.step_key.clone(),
+                    missing: source.to_string(),
+                });
+            }
+            if !precedes(&edges, source, &step.step_key) {
+                return Err(LaunchError::ForEachNotWaiting {
+                    step_key: step.step_key.clone(),
+                    source_step_key: source.to_string(),
+                });
+            }
+        }
+
+        for binding in &bindings {
+            let target = binding.source_step_key.as_deref().unwrap_or("");
+            match binding.source {
+                // A fan-in over an ordinary step would resolve to a single
+                // entry keyed by a task number — plausible-looking nonsense
+                // rather than an error, which is the worst kind of default.
+                BindingSource::FanIn => {
+                    if !fan_outs.contains(target) {
+                        return Err(LaunchError::FanInNotFanOut {
+                            step_key: binding.step_key.clone(),
+                            input_key: binding.input_key.clone(),
+                            source_step_key: target.to_string(),
+                        });
+                    }
+                    if !precedes(&edges, target, &binding.step_key) {
+                        return Err(LaunchError::FanInNotWaiting {
+                            step_key: binding.step_key.clone(),
+                            input_key: binding.input_key.clone(),
+                            source_step_key: target.to_string(),
+                        });
+                    }
+                }
+                // The mirror image: a plain step binding onto a fan-out points
+                // at the placeholder, which expansion deletes. It would resolve
+                // at launch and dangle the moment the fan-out widened.
+                BindingSource::Step => {
+                    if fan_outs.contains(target) {
+                        return Err(LaunchError::StepBindingOnFanOut {
+                            step_key: binding.step_key.clone(),
+                            input_key: binding.input_key.clone(),
+                            source_step_key: target.to_string(),
+                        });
+                    }
+                }
+                BindingSource::Literal | BindingSource::RunInput => {}
             }
         }
 
@@ -751,6 +893,42 @@ impl WorkflowStore {
             task_numbers.insert(step.step_key.clone(), task.task_number);
         }
 
+        // A fan-out step becomes exactly one task, marked as a placeholder.
+        //
+        // Its width is unknown until the step it iterates finishes, but the
+        // steps downstream still need something to wait on right now: emitted
+        // with no parent they would be promoted on the first sweep and run the
+        // report before anything was built. So the placeholder carries exactly
+        // the edges the branches will inherit and is never claimed.
+        //
+        // Done as a second pass because a step may iterate one that comes after
+        // it in display order, and the source's task number has to exist first.
+        for step in steps {
+            let Some(source_key) = step.for_each_step_key.as_deref() else {
+                continue;
+            };
+            let Some(source_task_number) = task_numbers.get(source_key).copied() else {
+                continue;
+            };
+            let spec = crate::tasks::FanOutSpec {
+                source_task_number,
+                pointer: step.for_each_pointer.clone().unwrap_or_default(),
+                key: step.for_each_key.clone(),
+            };
+            let Some(task_number) = task_numbers.get(&step.step_key) else {
+                continue;
+            };
+
+            sqlx::query(
+                "UPDATE tasks SET fan_out_placeholder = 1, metadata = ? WHERE task_number = ?",
+            )
+            .bind(spec.to_metadata().to_string())
+            .bind(task_number)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        }
+
         for (parent, child) in edges {
             let (Some(parent_number), Some(child_number)) =
                 (task_numbers.get(parent), task_numbers.get(child))
@@ -781,6 +959,7 @@ impl WorkflowStore {
                         .copied(),
                     source_pointer: binding.source_pointer.clone(),
                     literal_value: None,
+                    fan_in_step_key: None,
                 },
                 BindingSource::Literal => TaskInputBinding {
                     child_task_number: *child_number,
@@ -788,6 +967,7 @@ impl WorkflowStore {
                     source_task_number: None,
                     source_pointer: None,
                     literal_value: binding.literal_value.clone(),
+                    fan_in_step_key: None,
                 },
                 BindingSource::RunInput => TaskInputBinding {
                     child_task_number: *child_number,
@@ -797,6 +977,18 @@ impl WorkflowStore {
                     literal_value: frozen
                         .get(&(binding.step_key.clone(), binding.input_key.clone()))
                         .cloned(),
+                    fan_in_step_key: None,
+                },
+                // Kept as a step key rather than translated to task numbers:
+                // the tasks it names do not exist yet, and the whole point is
+                // that how many of them there will be is not yet known.
+                BindingSource::FanIn => TaskInputBinding {
+                    child_task_number: *child_number,
+                    input_key: binding.input_key.clone(),
+                    source_task_number: None,
+                    source_pointer: None,
+                    literal_value: None,
+                    fan_in_step_key: binding.source_step_key.clone(),
                 },
             };
 
@@ -927,6 +1119,34 @@ fn topologically_ordered(
     Ok(ordered)
 }
 
+/// Does `parent` run before `child`, directly or through other steps?
+///
+/// Reachability rather than "is there an edge", because a step that waits on
+/// its source through an intermediate step waits on it just as surely, and a
+/// check that demanded the shortcut edge would refuse templates that are wired
+/// correctly. Iterative: the graph is hand-built and a deep chain must not blow
+/// the stack.
+fn precedes(edges: &[(String, String)], parent: &str, child: &str) -> bool {
+    let mut frontier = vec![parent];
+    let mut seen: HashSet<&str> = HashSet::from([parent]);
+
+    while let Some(node) = frontier.pop() {
+        for (from, to) in edges {
+            if from != node {
+                continue;
+            }
+            if to == child {
+                return true;
+            }
+            if seen.insert(to.as_str()) {
+                frontier.push(to.as_str());
+            }
+        }
+    }
+
+    false
+}
+
 fn validate(schema: &Value, value: &Value) -> Vec<String> {
     match jsonschema::validator_for(schema) {
         Ok(validator) => validator
@@ -985,6 +1205,9 @@ fn step_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowStep> {
         system_prompt: row.try_get("system_prompt").ok().flatten(),
         repo_id: row.try_get("repo_id").ok().flatten(),
         position: row.try_get("position").unwrap_or(0),
+        for_each_step_key: row.try_get("for_each_step_key").ok().flatten(),
+        for_each_pointer: row.try_get("for_each_pointer").ok().flatten(),
+        for_each_key: row.try_get("for_each_key").ok().flatten(),
     })
 }
 
@@ -1028,6 +1251,7 @@ fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::ContractResolution;
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn fixture() -> (WorkflowStore, TaskStore, String) {
@@ -1074,6 +1298,9 @@ mod tests {
             system_prompt: None,
             repo_id: None,
             position,
+            for_each_step_key: None,
+            for_each_pointer: None,
+            for_each_key: None,
         }
     }
 
@@ -1616,6 +1843,389 @@ mod tests {
         assert_ne!(first.task_numbers["build"], second.task_numbers["build"]);
     }
 
+    // -- Fan-out -----------------------------------------------------------
+
+    /// scan -> build (one task per repo scan found) -> report.
+    async fn fan_out_template(workflows: &WorkflowStore, id: &str) {
+        workflows
+            .put_step(&step(id, "scan", 0))
+            .await
+            .expect("step");
+        let mut build = step(id, "build", 1);
+        build.for_each_step_key = Some("scan".into());
+        build.for_each_pointer = Some("/repos".into());
+        build.for_each_key = Some("/name".into());
+        workflows.put_step(&build).await.expect("step");
+        workflows
+            .put_step(&step(id, "report", 2))
+            .await
+            .expect("step");
+        workflows
+            .link_steps(id, "scan", "build")
+            .await
+            .expect("link");
+        workflows
+            .link_steps(id, "build", "report")
+            .await
+            .expect("link");
+    }
+
+    /// Walk a task through to `done` with the outputs it produced.
+    async fn complete(tasks: &TaskStore, task_number: i64, outputs: serde_json::Value) {
+        for status in [TaskStatus::Ready, TaskStatus::InProgress] {
+            tasks
+                .update(
+                    task_number,
+                    crate::tasks::UpdateTaskInput {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("advance")
+                .expect("exists");
+        }
+        tasks
+            .submit_outputs(task_number, &outputs)
+            .await
+            .expect("submit outputs");
+        tasks
+            .update(
+                task_number,
+                crate::tasks::UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("finish")
+            .expect("exists");
+    }
+
+    /// At launch the width is unknown, but the steps downstream still need
+    /// something to wait on. Emitted with no parent they would be promoted on
+    /// the first sweep and run the report before anything was built.
+    #[tokio::test]
+    async fn a_fan_out_step_launches_as_one_placeholder_carrying_the_edges_its_branches_inherit() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        assert_eq!(
+            launched.task_numbers.len(),
+            3,
+            "a fan-out step is one task at launch, however wide it becomes"
+        );
+
+        let build = tasks
+            .get_by_number(launched.task_numbers["build"])
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert!(build.fan_out_placeholder);
+
+        // Frozen at launch: the template can be edited or deleted while this
+        // run is in flight, and the run still has to finish the way it started.
+        let spec = crate::tasks::FanOutSpec::from_metadata(&build.metadata)
+            .expect("the placeholder carries its own fan-out spec");
+        assert_eq!(spec.source_task_number, launched.task_numbers["scan"]);
+        assert_eq!(spec.pointer, "/repos");
+        assert_eq!(spec.key.as_deref(), Some("/name"));
+
+        assert_eq!(
+            tasks
+                .list_parents(build.task_number)
+                .await
+                .expect("parents"),
+            vec![launched.task_numbers["scan"]]
+        );
+        assert_eq!(
+            tasks
+                .list_children(build.task_number)
+                .await
+                .expect("children"),
+            vec![launched.task_numbers["report"]]
+        );
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(
+            sweep.promoted,
+            vec![launched.task_numbers["scan"]],
+            "only the entry step is eligible; the placeholder is not work"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_for_each_naming_an_unknown_step_is_refused_with_the_name() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut build = step(&id, "build", 0);
+        build.for_each_step_key = Some("scn".into()); // typo on purpose
+        build.for_each_pointer = Some("/repos".into());
+        workflows.put_step(&build).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("iterating a step that does not exist must be refused");
+        match error {
+            LaunchError::UnknownForEachStep { step_key, missing } => {
+                assert_eq!(step_key, "build");
+                assert_eq!(missing, "scn");
+            }
+            other => panic!("expected UnknownForEachStep, got {other:?}"),
+        }
+    }
+
+    /// A step cannot iterate output it does not wait for: the collection would
+    /// be read before it exists. Refused rather than silently wired up, so the
+    /// graph that runs is the graph the canvas draws.
+    #[tokio::test]
+    async fn a_fan_out_that_does_not_wait_for_the_step_it_iterates_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        assert!(
+            workflows
+                .unlink_steps(&id, "scan", "build")
+                .await
+                .expect("unlink")
+        );
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a fan-out with no edge from its source must be refused");
+        match error {
+            LaunchError::ForEachNotWaiting {
+                step_key,
+                source_step_key,
+            } => {
+                assert_eq!(step_key, "build");
+                assert_eq!(source_step_key, "scan");
+            }
+            other => panic!("expected ForEachNotWaiting, got {other:?}"),
+        }
+
+        // An indirect wait is still a wait — demanding the shortcut edge would
+        // refuse templates that are wired correctly.
+        workflows
+            .put_step(&step(&id, "prepare", 3))
+            .await
+            .expect("step");
+        workflows
+            .link_steps(&id, "scan", "prepare")
+            .await
+            .expect("link");
+        workflows
+            .link_steps(&id, "prepare", "build")
+            .await
+            .expect("link");
+        workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("waiting through an intermediate step is waiting");
+    }
+
+    /// The whole pipeline, and the distinction the fan-in turns on: a branch
+    /// that has not finished is a *wait*, and reporting it as an unresolvable
+    /// contract parks the report on the first sweep of a healthy run.
+    #[tokio::test]
+    async fn a_fan_in_waits_for_its_branches_and_then_resolves_keyed_by_branch_key() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "report".into(),
+                input_key: "results".into(),
+                source: BindingSource::FanIn,
+                source_step_key: Some("build".into()),
+                source_pointer: None,
+                literal_value: None,
+            })
+            .await
+            .expect("bind fan-in");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let report = launched.task_numbers["report"];
+
+        // Before anything has run at all. This is the case that must not be an
+        // unresolvable contract — nothing is wrong, the run just started.
+        match tasks.resolve_inputs(report).await.expect("resolve") {
+            ContractResolution::Pending { waiting_on } => assert!(
+                waiting_on.iter().any(|reason| reason.contains("build")),
+                "the wait should name the step it is waiting on: {waiting_on:?}"
+            ),
+            other => panic!("a fan-in before its fan-out expanded must be pending, got {other:?}"),
+        }
+
+        complete(
+            &tasks,
+            launched.task_numbers["scan"],
+            serde_json::json!({"repos": [{"name": "api"}, {"name": "web"}]}),
+        )
+        .await;
+
+        // The sweep expands before it promotes, so the branches exist and are
+        // eligible in the same pass that the fan-out widened.
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(sweep.promoted.len(), 2, "both branches: {sweep:?}");
+        // Held by the edges the branches inherited, and not reported as a
+        // problem: nothing about a report waiting on running branches is wrong.
+        assert!(!sweep.promoted.contains(&report), "{sweep:?}");
+        assert!(sweep.stalled.is_empty(), "{sweep:?}");
+
+        // One branch done is still not enough.
+        complete(&tasks, sweep.promoted[0], serde_json::json!({"ok": true})).await;
+        assert!(
+            matches!(
+                tasks.resolve_inputs(report).await.expect("resolve"),
+                ContractResolution::Pending { .. }
+            ),
+            "one branch left unfinished is still a wait"
+        );
+
+        complete(&tasks, sweep.promoted[1], serde_json::json!({"ok": false})).await;
+
+        match tasks.resolve_inputs(report).await.expect("resolve") {
+            ContractResolution::Resolved { inputs } => assert_eq!(
+                inputs,
+                serde_json::json!({"results": {"api": {"ok": true}, "web": {"ok": false}}}),
+                "keyed by branch, not positional"
+            ),
+            other => panic!("expected the fan-in to resolve, got {other:?}"),
+        }
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![report]);
+    }
+
+    /// A pipeline that scanned and found nothing has succeeded. The report
+    /// still runs, and the fan-in it reads is an empty object rather than an
+    /// error — "it did nothing" and "it iterated an empty list" must not look
+    /// alike from the outside.
+    #[tokio::test]
+    async fn an_empty_fan_out_lets_the_report_run_with_an_empty_collection() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "report".into(),
+                input_key: "results".into(),
+                source: BindingSource::FanIn,
+                source_step_key: Some("build".into()),
+                source_pointer: None,
+                literal_value: None,
+            })
+            .await
+            .expect("bind fan-in");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["scan"],
+            serde_json::json!({"repos": []}),
+        )
+        .await;
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(
+            sweep.promoted,
+            vec![launched.task_numbers["report"]],
+            "the report runs: {sweep:?}"
+        );
+
+        match tasks
+            .resolve_inputs(launched.task_numbers["report"])
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Resolved { inputs } => {
+                assert_eq!(inputs, serde_json::json!({"results": {}}));
+            }
+            other => panic!("an empty fan-in resolves to nothing, not to a problem: {other:?}"),
+        }
+    }
+
+    /// A fan-in over an ordinary step would resolve to a single entry keyed by
+    /// a task number — plausible-looking nonsense rather than an error.
+    #[tokio::test]
+    async fn a_fan_in_over_a_step_that_is_not_a_fan_out_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        workflows
+            .put_step(&step(&id, "build", 0))
+            .await
+            .expect("step");
+        workflows
+            .put_step(&step(&id, "report", 1))
+            .await
+            .expect("step");
+        workflows
+            .link_steps(&id, "build", "report")
+            .await
+            .expect("link");
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "report".into(),
+                input_key: "results".into(),
+                source: BindingSource::FanIn,
+                source_step_key: Some("build".into()),
+                source_pointer: None,
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("collecting branches from a step that has none must be refused");
+        assert!(
+            matches!(error, LaunchError::FanInNotFanOut { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// The mirror image: a plain step binding onto a fan-out points at the
+    /// placeholder, which expansion deletes. It would resolve at launch and
+    /// dangle the moment the fan-out widened.
+    #[tokio::test]
+    async fn a_plain_step_binding_onto_a_fan_out_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "report".into(),
+                input_key: "artifact".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("build".into()),
+                source_pointer: Some("/artifact".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("one output cannot be selected from a step that has many");
+        assert!(
+            matches!(error, LaunchError::StepBindingOnFanOut { .. }),
+            "{error:?}"
+        );
+    }
+
     #[cfg(test)]
     async fn create_workflow_schema(pool: &SqlitePool) {
         for statement in [
@@ -1627,6 +2237,7 @@ mod tests {
              title TEXT NOT NULL, description TEXT, assigned_agent_id TEXT, \
              priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
              system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
+             for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
              PRIMARY KEY (workflow_id, step_key))",
             "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
              parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \

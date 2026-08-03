@@ -346,6 +346,9 @@ impl Tool for TaskCreateTool {
                     source_task_number: binding.source_task_number,
                     source_pointer: binding.source_pointer,
                     literal_value: binding.literal_value,
+                    // Fan-in is a workflow-template construct: it names a step
+                    // key, and a hand-filed card is not part of a run.
+                    fan_in_step_key: None,
                 })
                 .await
             {
