@@ -3692,26 +3692,57 @@ pub fn spawn_association_loop(
 }
 
 /// How to route a completed detached worker against the task store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DetachedRouting {
     /// Worker produced a usable result — mark `Done` and notify success.
     Success,
     /// Terminal failure that won't fix itself (cancelled, wall-clock
-    /// timeout, captcha / login wall). Mark `Done` so the loop doesn't
-    /// pick the task up again; emit a failure event so callers can react
-    /// (escalate to a human, raise a follow-up task, etc.).
+    /// timeout). Mark `Done` so the loop doesn't pick the task up again;
+    /// emit a failure event so callers can react (escalate to a human,
+    /// raise a follow-up task, etc.).
     Terminal,
+    /// An external defense stopped the worker — captcha, login wall, rate
+    /// limit, WAF. Park the task as a [`BlockKind::Capability`] block.
+    ///
+    /// This is deliberately neither `Terminal` nor `Requeue`. `Done` would
+    /// claim work that never happened, and requeueing would spend failure
+    /// budget on an obstacle the agent has no way to clear — the next
+    /// attempt hits the same wall with the same credentials. A capability
+    /// block is sticky, so the task waits for someone to supply the access
+    /// instead of being retried or silently closed.
+    Blocked { reason: String },
     /// Transient failure (LLM error, panic, generic Failed). Requeue to
     /// `Ready` so the next pickup pass can retry.
     Requeue,
 }
 
+/// Decide how a finished detached worker settles against the task store.
+fn route_detached_outcome(
+    outcome: &std::result::Result<WorkerOutcome, WorkerCompletionError>,
+) -> DetachedRouting {
+    match outcome {
+        Ok(WorkerOutcome::Success { .. }) | Ok(WorkerOutcome::Partial { .. }) => {
+            DetachedRouting::Success
+        }
+        Ok(WorkerOutcome::Cancelled { .. }) | Ok(WorkerOutcome::Timeout { .. }) => {
+            DetachedRouting::Terminal
+        }
+        Ok(WorkerOutcome::Blocked { reason, url, .. }) => DetachedRouting::Blocked {
+            reason: match url {
+                Some(url) => format!("{} at {url}", reason.describe()),
+                None => reason.describe(),
+            },
+        },
+        Ok(WorkerOutcome::Failed { .. }) | Err(_) => DetachedRouting::Requeue,
+    }
+}
+
 /// Emit the logging + events for a failed attempt whose status was already
-/// persisted by [`TaskStore::record_failure`].
+/// persisted outside the normal `task_store.update` call — by
+/// [`TaskStore::record_failure`] or [`TaskStore::block_task`].
 ///
-/// `record_failure` writes the status inside its own transaction so the
-/// increment and the transition are atomic, which means this path deliberately
-/// skips the normal `task_store.update` call.
+/// Both of those write the status inside their own transaction so the counter
+/// bump and the transition stay atomic, which is why this path only emits.
 #[allow(clippy::too_many_arguments)]
 fn emit_requeue_outcome(
     task: &crate::tasks::Task,
@@ -3793,6 +3824,93 @@ async fn handle_detached_completion(
         {
             tracing::warn!(%error, task_number = task.task_number, "failed to close task run row");
         }
+    }
+
+    // A wall the agent cannot climb is not an outcome the task board should
+    // absorb as either success or failure. `block_task` parks it with the
+    // reason attached and leaves the failure budget untouched, so the card
+    // reads as "waiting on access" rather than "finished" or "flaky".
+    if let DetachedRouting::Blocked { reason } = &routing {
+        match task_store
+            .block_task(
+                task.task_number,
+                crate::tasks::BlockKind::Capability,
+                reason,
+            )
+            .await
+        {
+            Ok(Some(outcome)) => {
+                emit_requeue_outcome(
+                    task,
+                    worker_id,
+                    result_text,
+                    outcome.status,
+                    logger,
+                    run_logger,
+                    event_tx,
+                    agent_id,
+                    &format!(
+                        "Picked-up task #{} was blocked by an external defense ({reason}) and parked as {}: {result_text}",
+                        task.task_number,
+                        outcome.status.as_str()
+                    ),
+                    "task_pickup_blocked",
+                    Some(serde_json::json!({
+                        "block_kind": crate::tasks::BlockKind::Capability.as_str(),
+                        "block_reason": reason,
+                        "recurrences": outcome.recurrences,
+                        "escalated": outcome.escalated,
+                    })),
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    task_number = task.task_number,
+                    "task row missing while parking a blocked worker — task may have been deleted"
+                );
+                run_logger.log_worker_completed(worker_id, result_text, false);
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id),
+                    worker_id,
+                    channel_id: None,
+                    result: result_text.to_string(),
+                    notify: true,
+                    success: false,
+                });
+            }
+            Err(error) => {
+                // Leaving the task in `in_progress` is the safe failure: the
+                // reaper will notice the dead worker and requeue it, which is
+                // better than closing work that never happened.
+                tracing::warn!(
+                    %error,
+                    task_number = task.task_number,
+                    "failed to park a blocked task — leaving it for the reaper"
+                );
+                run_logger.log_worker_completed(worker_id, result_text, false);
+                logger.log(
+                    "task_pickup_block_persist_failure",
+                    &format!(
+                        "Picked-up task #{} hit an external block but could not be parked: {error}",
+                        task.task_number
+                    ),
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "worker_id": worker_id.to_string(),
+                        "block_reason": reason,
+                    })),
+                );
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id),
+                    worker_id,
+                    channel_id: None,
+                    result: result_text.to_string(),
+                    notify: true,
+                    success: false,
+                });
+            }
+        }
+        return;
     }
 
     // Requeue no longer means "straight back to ready". The failure budget
@@ -3878,16 +3996,18 @@ async fn handle_detached_completion(
         }
     }
 
+    // `Blocked` returned above. It groups with `Requeue` here only so that the
+    // fallback if that ever changes is "still claimable", never "done".
     let new_status = match routing {
         DetachedRouting::Success | DetachedRouting::Terminal => TaskStatus::Done,
-        DetachedRouting::Requeue => TaskStatus::Ready,
+        DetachedRouting::Blocked { .. } | DetachedRouting::Requeue => TaskStatus::Ready,
     };
     let update_input = match routing {
         DetachedRouting::Success | DetachedRouting::Terminal => UpdateTaskInput {
             status: Some(new_status),
             ..Default::default()
         },
-        DetachedRouting::Requeue => UpdateTaskInput {
+        DetachedRouting::Blocked { .. } | DetachedRouting::Requeue => UpdateTaskInput {
             status: Some(new_status),
             clear_worker_id: true,
             ..Default::default()
@@ -3982,12 +4102,17 @@ async fn handle_detached_completion(
     let log_event = match routing {
         DetachedRouting::Success => "task_pickup_completed",
         DetachedRouting::Terminal => "task_pickup_terminal_failure",
+        DetachedRouting::Blocked { .. } => "task_pickup_blocked",
         DetachedRouting::Requeue => "task_pickup_failed",
     };
-    let log_message = match routing {
+    let log_message = match &routing {
         DetachedRouting::Success => format!("Completed picked-up task #{}", task.task_number),
         DetachedRouting::Terminal => format!(
             "Terminal failure on picked-up task #{}: {result_text}",
+            task.task_number
+        ),
+        DetachedRouting::Blocked { reason } => format!(
+            "Picked-up task #{} was blocked ({reason}): {result_text}",
             task.task_number
         ),
         DetachedRouting::Requeue => {
@@ -4286,15 +4411,41 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {} and demoted {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {} task(s)",
                         sweep.promoted.len(),
-                        sweep.demoted.len()
+                        sweep.demoted.len(),
+                        sweep.stalled.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
                         "demoted": sweep.demoted,
+                        "stalled": sweep.stalled.iter().map(|s| s.task_number).collect::<Vec<_>>(),
                     })),
                 );
+
+                // A task whose parents are done but whose inputs still will not
+                // resolve is not waiting on anything — the graph is wrong and
+                // only a person can fix it. Said once per sweep, with the
+                // reasons, because otherwise it is silent forever.
+                for stalled in &sweep.stalled {
+                    let reason = stalled
+                        .problems
+                        .iter()
+                        .map(|problem| problem.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    logger.log(
+                        "task_inputs_stalled",
+                        &format!(
+                            "Task #{} is held back — every upstream task finished but its inputs still do not resolve: {reason}",
+                            stalled.task_number
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": stalled.task_number,
+                            "problems": stalled.problems,
+                        })),
+                    );
+                }
                 let moves = sweep
                     .promoted
                     .iter()
@@ -4730,21 +4881,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                         }
                     };
 
-                    // Routing: Success/Partial → mark Done.
-                    // Cancelled/Timeout/Blocked → terminal (mark Done, do not
-                    // retry — these need human / explicit re-creation, not a
-                    // pickup loop racing the same dead end again).
-                    // Failed/error/panic → requeue Ready (true transient errors
-                    // that might succeed on a future tick).
-                    let routing = match &outcome_or_error {
-                        Ok(WorkerOutcome::Success { .. }) | Ok(WorkerOutcome::Partial { .. }) => {
-                            DetachedRouting::Success
-                        }
-                        Ok(WorkerOutcome::Cancelled { .. })
-                        | Ok(WorkerOutcome::Timeout { .. })
-                        | Ok(WorkerOutcome::Blocked { .. }) => DetachedRouting::Terminal,
-                        Ok(WorkerOutcome::Failed { .. }) | Err(_) => DetachedRouting::Requeue,
-                    };
+                    let routing = route_detached_outcome(&outcome_or_error);
                     // Classify for the attempt log. A rate-limited failure is
                     // recorded but deliberately excluded from the failure
                     // budget — a provider quota outage is not the task's fault.
@@ -5267,19 +5404,19 @@ async fn fetch_memories_for_association(
 mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
-        BulletinRefreshOutcome, CortexReceiverOutcome, GatheredSections, HealthRuntimeState,
-        MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction, ReceiverClosedBehavior,
-        Signal, SynthesisTaskBackoff, WorkerTracker, apply_cancelled_warmup_status,
-        build_kill_targets, claim_detached_completion, collect_synthesis_task,
-        detached_timeout_transition, generate_if_dirty_under_lock, handle_cortex_receiver_result,
-        has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
-        maintenance_task_timeout, maintenance_timeout_action,
+        BulletinRefreshOutcome, CortexReceiverOutcome, DetachedRouting, GatheredSections,
+        HealthRuntimeState, MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction,
+        ReceiverClosedBehavior, Signal, SynthesisTaskBackoff, WorkerOutcome, WorkerTracker,
+        apply_cancelled_warmup_status, build_kill_targets, claim_detached_completion,
+        collect_synthesis_task, detached_timeout_transition, generate_if_dirty_under_lock,
+        handle_cortex_receiver_result, has_completed_initial_warmup, is_cancelled_control_result,
+        is_terminal_control_result, maintenance_task_timeout, maintenance_timeout_action,
         mark_knowledge_synthesis_version_complete, maybe_close_bulletin_refresh_circuit,
         maybe_generate_bulletin_under_lock, maybe_spawn_synthesis_task,
         parse_structured_success_flag, push_signal_into_buffer, reap_orphaned_task_pickups_in,
         record_bulletin_refresh_failure, register_detached_worker_for_pickup,
-        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
-        summarize_signal_text, take_lagged_control_flag,
+        route_detached_outcome, should_execute_warmup, should_generate_bulletin_from_bulletin_loop,
+        signal_from_event, summarize_signal_text, take_lagged_control_flag,
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
@@ -6718,6 +6855,194 @@ mod tests {
                 .expect("claim")
                 .is_none(),
             "a parked task must stay out of the pickup loop"
+        );
+    }
+
+    // -- Blocked worker routing ---------------------------------------------
+
+    #[test]
+    fn a_blocked_worker_routes_to_a_block_not_a_completion() {
+        let routing = route_detached_outcome(&Ok(WorkerOutcome::Blocked {
+            reason: crate::agent::worker::BlockReason::Captcha {
+                provider: "turnstile".to_string(),
+            },
+            url: Some("https://example.test/login".to_string()),
+            evidence: Box::default(),
+        }));
+
+        let DetachedRouting::Blocked { reason } = routing else {
+            panic!("a captcha must not route to {routing:?}");
+        };
+        assert!(
+            reason.contains("captcha (turnstile)") && reason.contains("https://example.test/login"),
+            "the parked reason must name the defense and where it was hit, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_block_without_a_url_still_carries_its_reason() {
+        let routing = route_detached_outcome(&Ok(WorkerOutcome::Blocked {
+            reason: crate::agent::worker::BlockReason::LoginWall,
+            url: None,
+            evidence: Box::default(),
+        }));
+
+        assert_eq!(
+            routing,
+            DetachedRouting::Blocked {
+                reason: "login wall".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn non_block_outcomes_keep_their_existing_routing() {
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Success {
+                result: "done".to_string()
+            })),
+            DetachedRouting::Success
+        );
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Timeout {
+                elapsed_secs: 1,
+                segments_run: 1
+            })),
+            DetachedRouting::Terminal
+        );
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Cancelled {
+                reason: "user".to_string()
+            })),
+            DetachedRouting::Terminal
+        );
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Failed {
+                reason: "llm error".to_string()
+            })),
+            DetachedRouting::Requeue
+        );
+    }
+
+    /// Drives the real completion handler so the store write, the attempt row,
+    /// and the emitted event are all checked together.
+    async fn settle_blocked_pickup(
+        store: &Arc<TaskStore>,
+        task: &crate::tasks::Task,
+        run_id: Option<&str>,
+        reason: &str,
+    ) -> tokio::sync::broadcast::Receiver<ProcessEvent> {
+        let (event_tx, event_rx) = tokio::sync::broadcast::channel(16);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(4);
+        let pool = store.pool().clone();
+
+        super::handle_detached_completion(
+            DetachedRouting::Blocked {
+                reason: reason.to_string(),
+            },
+            task,
+            uuid::Uuid::new_v4(),
+            "worker hit a captcha",
+            run_id,
+            crate::tasks::TaskRunOutcome::Blocked,
+            store,
+            &crate::conversation::history::ProcessRunLogger::new(pool.clone()),
+            &super::CortexLogger::new(pool.clone()),
+            &event_tx,
+            "agent-1",
+            &Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            &Arc::new(std::collections::HashMap::new()),
+            &pool,
+            &injection_tx,
+        )
+        .await;
+
+        event_rx
+    }
+
+    /// The bug this guards: a worker stopped by a captcha used to land in
+    /// `done`, which claims work that never happened.
+    #[tokio::test]
+    async fn a_blocked_worker_parks_its_task_instead_of_completing_it() {
+        let (store, _registry) = reaper_fixture().await;
+        let store = Arc::new(store);
+        let task = running_task(&store, "agent-1", "scrape the portal").await;
+
+        settle_blocked_pickup(&store, &task, None, "captcha (turnstile)").await;
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.status,
+            TaskStatus::Blocked,
+            "a task stopped by an external defense must not read as done"
+        );
+        assert_eq!(after.block_kind, Some(crate::tasks::BlockKind::Capability));
+        assert_eq!(after.block_reason.as_deref(), Some("captcha (turnstile)"));
+    }
+
+    /// A capability block is sticky, so the pickup loop must not hand the
+    /// worker the same wall again on the next tick.
+    #[tokio::test]
+    async fn a_parked_block_is_not_reclaimed_and_costs_no_failure_budget() {
+        let (store, _registry) = reaper_fixture().await;
+        let store = Arc::new(store);
+        let task = running_task(&store, "agent-1", "log in and export").await;
+
+        settle_blocked_pickup(&store, &task, None, "login wall").await;
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.consecutive_failures, 0,
+            "an unclimbable wall is not the task's failure to spend budget on"
+        );
+        assert!(
+            store
+                .claim_next_ready("agent-1")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a capability block must stay out of the pickup loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_worker_closes_its_attempt_row_and_announces_the_park() {
+        let (store, _registry) = reaper_fixture().await;
+        let store = Arc::new(store);
+        let task = running_task(&store, "agent-1", "fetch the report").await;
+        let run = store
+            .start_run(task.task_number, None)
+            .await
+            .expect("open attempt row");
+
+        let mut event_rx = settle_blocked_pickup(&store, &task, Some(&run.id), "rate limit").await;
+
+        let runs = store.list_runs(task.task_number).await.expect("list runs");
+        let closed = runs
+            .iter()
+            .find(|candidate| candidate.id == run.id)
+            .expect("the attempt row survives");
+        assert_eq!(closed.outcome, Some(crate::tasks::TaskRunOutcome::Blocked));
+        assert!(closed.ended_at.is_some());
+
+        let announced = std::iter::from_fn(|| event_rx.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                ProcessEvent::TaskUpdated { task_number, ref status, .. }
+                    if task_number == task.task_number && status == TaskStatus::Blocked.as_str()
+            )
+        });
+        assert!(
+            announced,
+            "the dashboard must be told the task parked, not left showing it in progress"
         );
     }
 }

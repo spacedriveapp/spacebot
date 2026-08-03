@@ -1658,6 +1658,11 @@ async fn run(
     api_state.set_task_store(global_task_store.clone());
     api_state.set_wiki_store(global_wiki_store.clone());
     api_state.set_notification_store(global_notification_store.clone());
+    // Wired here with the other instance-level stores rather than after agent
+    // startup: the project store only needs the instance pool, and the dashboard
+    // queries it on first paint. Deferring it left every load 404ing until
+    // agents finished booting — and forever in setup mode, where they never do.
+    api_state.set_project_store(global_project_store.clone());
     let api_state = Arc::new(api_state);
 
     // Keep the secrets API available in setup mode so encrypted stores can be
@@ -3122,7 +3127,6 @@ async fn initialize_agents(
         api_state.set_agent_configs(agent_configs);
         api_state.set_memory_searches(memory_searches);
         api_state.set_mcp_managers(mcp_managers);
-        api_state.set_project_store(global_project_store.clone());
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_agent_identity_dirs(agent_identity_dirs);

@@ -211,6 +211,9 @@ impl CortexConfig {
             cron_default_timeout_secs: overrides
                 .cron_default_timeout_secs
                 .or(defaults.cron_default_timeout_secs),
+            worker_task_create: overrides
+                .worker_task_create
+                .unwrap_or(defaults.worker_task_create),
             branch_timeout_secs: overrides
                 .branch_timeout_secs
                 .unwrap_or(defaults.branch_timeout_secs),

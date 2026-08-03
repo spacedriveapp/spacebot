@@ -1104,6 +1104,12 @@ pub struct CortexConfig {
     /// system default (`crate::cron::scheduler::DEFAULT_CRON_TIMEOUT_SECS`).
     /// A per-job `timeout_secs` always wins over this default.
     pub cron_default_timeout_secs: Option<u64>,
+    /// Whether task workers get the `task_create` tool.
+    ///
+    /// Filing cards is how a worker decomposes — it has no `spawn_worker`, so
+    /// turning this off leaves it with only the work in front of it. Operators
+    /// who don't want workers generating their own backlog turn it off here.
+    pub worker_task_create: bool,
     pub branch_timeout_secs: u64,
     pub detached_worker_timeout_retry_limit: u8,
     pub supervisor_kill_budget_per_tick: usize,
@@ -1147,6 +1153,7 @@ impl Default for CortexConfig {
             worker_wall_clock_timeout_secs:
                 crate::agent::worker::DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS,
             cron_default_timeout_secs: None,
+            worker_task_create: true,
             branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,

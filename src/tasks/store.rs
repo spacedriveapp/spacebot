@@ -279,6 +279,13 @@ pub struct Task {
     pub block_reason: Option<String>,
     /// Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
     pub block_recurrences: i64,
+    /// What this task was last blocked for, kept across promotion.
+    ///
+    /// `block_kind` answers "why is it parked right now" and goes to NULL when
+    /// it is not. The recurrence counter needs the other question — "what did
+    /// it park for last time" — because the sweep clears `block_kind` every
+    /// time it promotes, which would otherwise reset the counter forever.
+    pub last_block_kind: Option<BlockKind>,
     /// JSON Schema this task's resolved inputs must satisfy before it runs.
     pub input_schema: Option<Value>,
     /// JSON Schema this task's outputs must satisfy to complete.
@@ -1276,12 +1283,16 @@ impl TaskStore {
             .await
             .context("failed to open block transaction")?;
 
-        let row =
-            sqlx::query("SELECT block_kind, block_recurrences FROM tasks WHERE task_number = ?")
-                .bind(task_number)
-                .fetch_optional(&mut *tx)
-                .await
-                .context("failed to read current block state")?;
+        // `last_block_kind`, not `block_kind`: the sweep clears the latter when
+        // it promotes, so comparing against it made every re-block look like a
+        // first offence and the recurrence limiter never fired.
+        let row = sqlx::query(
+            "SELECT last_block_kind, block_recurrences FROM tasks WHERE task_number = ?",
+        )
+        .bind(task_number)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to read current block state")?;
 
         let Some(row) = row else {
             tx.commit()
@@ -1291,7 +1302,7 @@ impl TaskStore {
         };
 
         let previous_kind = row
-            .try_get::<Option<String>, _>("block_kind")
+            .try_get::<Option<String>, _>("last_block_kind")
             .ok()
             .flatten()
             .as_deref()
@@ -1315,12 +1326,13 @@ impl TaskStore {
         };
 
         sqlx::query(
-            "UPDATE tasks SET status = ?, block_kind = ?, block_reason = ?, \
-             block_recurrences = ?, worker_id = NULL, \
+            "UPDATE tasks SET status = ?, block_kind = ?, last_block_kind = ?, \
+             block_reason = ?, block_recurrences = ?, worker_id = NULL, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE task_number = ?",
         )
         .bind(status.as_str())
+        .bind(kind.as_str())
         .bind(kind.as_str())
         .bind(reason)
         .bind(recurrences)
@@ -1409,6 +1421,37 @@ impl TaskStore {
         .context("failed to find promotable tasks")?;
 
         for task_number in promoted {
+            // Parents being done is not the same as the task being runnable.
+            //
+            // `dependency` covers two conditions that recover differently:
+            // waiting on a parent, which this sweep clears, and an input
+            // binding that will not resolve, which it cannot — a missing
+            // pointer is not fixed by an upstream task finishing. Promoting on
+            // parent completion alone put a task with a bad binding into a loop
+            // that promoted and re-blocked it every tick forever.
+            //
+            // So resolution is checked before promotion, not just at claim
+            // time. Only tasks that actually declare a contract pay for it.
+            match self.resolve_inputs(task_number).await {
+                Ok(ContractResolution::Unresolved { problems }) => {
+                    sweep.stalled.push(StalledTask {
+                        task_number,
+                        problems,
+                    });
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Our failure, not the graph's. Let the claim path decide
+                    // rather than pinning the task in the backlog over it.
+                    tracing::warn!(
+                        %error,
+                        task_number,
+                        "failed to check inputs while sweeping — promoting anyway"
+                    );
+                }
+            }
+
             let updated = sqlx::query(
                 "UPDATE tasks SET status = 'ready', block_kind = NULL, block_reason = NULL, \
                  updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
@@ -2253,18 +2296,31 @@ pub struct TaskEdgeSummary {
     pub blocked_by: i64,
 }
 
+/// A task whose parents are all done but whose inputs still cannot be built.
+///
+/// Distinct from "waiting": nothing upstream is going to change on its own, so
+/// this is a graph a person has to repair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StalledTask {
+    pub task_number: i64,
+    pub problems: Vec<ContractProblem>,
+}
+
 /// What a [`TaskStore::recompute_ready`] pass changed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReadySweep {
     /// Tasks whose parents all finished, now eligible for pickup.
     pub promoted: Vec<i64>,
     /// Tasks that were eligible but should not have been.
     pub demoted: Vec<i64>,
+    /// Tasks held back because their inputs do not resolve. Reported rather
+    /// than promoted-and-rejected, so the loop never starts.
+    pub stalled: Vec<StalledTask>,
 }
 
 impl ReadySweep {
     pub fn is_empty(&self) -> bool {
-        self.promoted.is_empty() && self.demoted.is_empty()
+        self.promoted.is_empty() && self.demoted.is_empty() && self.stalled.is_empty()
     }
 }
 
@@ -2331,7 +2387,7 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
      created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
      consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
-     block_kind, block_reason, block_recurrences, \
+     block_kind, block_reason, block_recurrences, last_block_kind, \
      input_schema, output_schema, inputs, outputs";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
@@ -2495,6 +2551,12 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .flatten()
             .filter(|value| !value.is_empty()),
         block_recurrences: row.try_get("block_recurrences").unwrap_or(0),
+        last_block_kind: row
+            .try_get::<Option<String>, _>("last_block_kind")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(BlockKind::parse),
         input_schema: read_optional_json(&row, "input_schema"),
         output_schema: read_optional_json(&row, "output_schema"),
         inputs: read_optional_json(&row, "inputs"),
@@ -2618,6 +2680,7 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             block_kind TEXT,
             block_reason TEXT,
             block_recurrences INTEGER NOT NULL DEFAULT 0,
+            last_block_kind TEXT,
             input_schema TEXT,
             output_schema TEXT,
             inputs TEXT,
@@ -4380,5 +4443,162 @@ mod tests {
             bindings[0].literal_value,
             Some(serde_json::json!("production"))
         );
+    }
+    // -- Promote/re-block loop ---------------------------------------------
+
+    /// The bug this guards against was found by running the system, not by
+    /// reading it: a task whose binding could not resolve cycled
+    /// ready -> claimed -> blocked -> promoted nineteen times before anyone
+    /// noticed, with the recurrence counter pinned at zero the whole way.
+    #[tokio::test]
+    async fn a_promoted_task_still_remembers_what_it_was_blocked_for() {
+        let store = setup_store().await;
+        let task = task_at(&store, "cycler", TaskStatus::InProgress).await;
+
+        store
+            .block_task(task.task_number, BlockKind::Dependency, "waiting")
+            .await
+            .expect("block")
+            .expect("exists");
+
+        // Promotion clears `block_kind` — the task is no longer parked — but
+        // the counter's memory has to survive it or the limiter never fires.
+        store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Ready),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("promote")
+            .expect("exists");
+        sqlx::query("UPDATE tasks SET block_kind = NULL WHERE task_number = ?")
+            .bind(task.task_number)
+            .execute(store.pool())
+            .await
+            .expect("clear block_kind the way the sweep does");
+
+        let second = store
+            .block_task(task.task_number, BlockKind::Dependency, "waiting")
+            .await
+            .expect("block")
+            .expect("exists");
+        assert_eq!(
+            second.recurrences, 1,
+            "a re-block after promotion is a recurrence, not a first offence"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_cycling_through_promotion_eventually_escalates() {
+        let store = setup_store().await;
+        let task = task_at(&store, "cycler", TaskStatus::InProgress).await;
+
+        let mut last = None;
+        for _ in 0..=BLOCK_RECURRENCE_LIMIT {
+            last = store
+                .block_task(task.task_number, BlockKind::Dependency, "still waiting")
+                .await
+                .expect("block");
+            // Simulate the sweep releasing it again.
+            sqlx::query(
+                "UPDATE tasks SET status = 'in_progress', block_kind = NULL WHERE task_number = ?",
+            )
+            .bind(task.task_number)
+            .execute(store.pool())
+            .await
+            .expect("release");
+        }
+
+        let last = last.expect("blocked at least once");
+        assert!(
+            last.escalated,
+            "a task promoted and re-blocked past the limit must stop cycling"
+        );
+        assert_eq!(last.status, TaskStatus::PendingApproval);
+    }
+
+    /// The deeper half: `dependency` covers both "waiting on a parent", which
+    /// the sweep clears, and "this binding will not resolve", which it cannot.
+    /// Promoting the second kind is what started the loop.
+    #[tokio::test]
+    async fn the_sweep_holds_back_a_task_whose_inputs_cannot_resolve() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "producer", TaskStatus::InProgress).await;
+        let child = task_at(&store, "consumer", TaskStatus::Backlog).await;
+
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(parent.task_number),
+                source_pointer: Some("/image/tag".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        // The parent finishes, but produces nothing at the bound pointer.
+        store
+            .submit_outputs(parent.task_number, &serde_json::json!({"digest": "abc"}))
+            .await
+            .expect("submit");
+        finish(&store, parent.task_number).await;
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            sweep.promoted.is_empty(),
+            "a task that cannot build its inputs must not be made claimable"
+        );
+        assert_eq!(sweep.stalled.len(), 1);
+        assert_eq!(sweep.stalled[0].task_number, child.task_number);
+
+        let after = store
+            .get_by_number(child.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Backlog);
+    }
+
+    /// The ordinary case must keep working: parents done, bindings resolve.
+    #[tokio::test]
+    async fn the_sweep_still_promotes_a_task_whose_inputs_do_resolve() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "producer", TaskStatus::InProgress).await;
+        let child = task_at(&store, "consumer", TaskStatus::Backlog).await;
+
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(parent.task_number),
+                source_pointer: Some("/image/tag".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+        store
+            .submit_outputs(
+                parent.task_number,
+                &serde_json::json!({"image": {"tag": "v1"}}),
+            )
+            .await
+            .expect("submit");
+        finish(&store, parent.task_number).await;
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![child.task_number]);
+        assert!(sweep.stalled.is_empty());
     }
 }

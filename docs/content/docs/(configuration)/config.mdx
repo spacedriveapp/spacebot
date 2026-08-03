@@ -538,6 +538,7 @@ Thresholds are fractions of `context_window`.
 | `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
 | `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
+| `worker_task_create` | bool | true | Give task workers the `task_create` tool so they can decompose work by filing new cards. Set to `false` to stop workers generating their own backlog |
 
 ### `[defaults.warmup]`
 

@@ -973,14 +973,6 @@ pub fn create_worker_tool_server(
             worker_id,
         ))
         .tool(TaskCompleteTool::new(task_store.clone(), worker_id))
-        // Workers file cards rather than spawning sub-workers. The pickup loop
-        // already schedules, observes, and recovers those, so decomposition
-        // reuses machinery instead of adding a second execution path.
-        .tool(TaskCreateTool::for_task_worker(
-            task_store,
-            agent_id.to_string(),
-            worker_id,
-        ))
         .tool({
             let mut status_tool =
                 SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx.clone());
@@ -992,6 +984,18 @@ pub fn create_worker_tool_server(
         .tool(ReadSkillTool::new(runtime_config.clone()));
 
     server = register_file_tools(server, workspace, sandbox);
+
+    // Workers file cards rather than spawning sub-workers. The pickup loop
+    // already schedules, observes, and recovers those, so decomposition reuses
+    // machinery instead of adding a second execution path. Gated because it is
+    // the one tool that lets a worker generate work for the whole instance.
+    if runtime_config.cortex.load().worker_task_create {
+        server = server.tool(TaskCreateTool::for_task_worker(
+            task_store,
+            agent_id.to_string(),
+            worker_id,
+        ));
+    }
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
         server = server.tool(SecretSetTool::new(store.clone(), agent_id.clone()));
@@ -1584,6 +1588,45 @@ mod tests {
         assert!(!output.waiting_for_input);
         assert_eq!(output.exit_code, 0);
         assert!(output.stdout.contains("quiet-done"));
+    }
+
+    /// A worker that times out has its whole future dropped mid-command. The
+    /// subprocess must go with it — an orphan keeps burning CPU, keeps writing
+    /// to the workspace, and reports to nobody.
+    #[tokio::test]
+    async fn a_dropped_shell_call_reaps_its_subprocess() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace.clone(), sandbox);
+        let marker = workspace.join("survived");
+
+        let args = shell::ShellArgs {
+            command: format!("sleep 2; touch {}", marker.display()),
+            working_dir: None,
+            env: Vec::new(),
+            timeout_seconds: 30,
+        };
+
+        // Abandon the call the way a worker timeout does: drop the future.
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            rig::tool::Tool::call(&tool, args),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the command should still be running");
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "the subprocess outlived the future that owned it"
+        );
     }
 
     #[test]

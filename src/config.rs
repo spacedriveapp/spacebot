@@ -1065,6 +1065,38 @@ maintenance_decay_rate = 0.33
         assert_eq!(resolved.cortex.association_max_per_pass, 55);
     }
 
+    /// Card filing is on unless an operator says otherwise, and an agent can
+    /// opt out on its own without the whole instance following.
+    #[test]
+    fn test_worker_task_create_defaults_on_and_is_overridable_per_agent() {
+        let toml = r#"
+[[agents]]
+id = "main"
+
+[[agents]]
+id = "locked-down"
+
+[agents.cortex]
+worker_task_create = false
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert!(config.defaults.cortex.worker_task_create);
+        assert!(
+            config.agents[0]
+                .resolve(&config.instance_dir, &config.defaults)
+                .cortex
+                .worker_task_create
+        );
+        assert!(
+            !config.agents[1]
+                .resolve(&config.instance_dir, &config.defaults)
+                .cortex
+                .worker_task_create
+        );
+    }
+
     #[test]
     fn test_cortex_maintenance_config_rejects_invalid_ranges() {
         let invalid_threshold = r#"

@@ -396,7 +396,12 @@ impl Tool for ShellTool {
                 .wrap("sh", &["-c", &args.command], &working_dir, &command_env)
         };
 
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Set once here rather than in each sandbox backend: `wrap` returns the
+        // outermost process (bwrap / sandbox-exec / the shell itself), and that
+        // is the handle whose death takes the sandbox down with it.
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         let timeout = tokio::time::Duration::from_secs(args.timeout_seconds);
 
@@ -675,7 +680,9 @@ pub async fn shell(
         cmd.current_dir(dir);
     }
 
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
         .await
