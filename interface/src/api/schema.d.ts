@@ -3755,7 +3755,7 @@ export interface components {
          *     poll again, should the task run, and whose problem is it?
          * @enum {string}
          */
-        GateResult: "pending" | "satisfied" | "failed" | "erroring";
+        GateResult: "pending" | "satisfied" | "failed" | "erroring" | "routed";
         GlobalSettingsResponse: {
             api_bind: string;
             api_enabled: boolean;

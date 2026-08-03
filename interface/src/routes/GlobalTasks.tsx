@@ -40,6 +40,8 @@ import {
 import {ContractSection} from "@/components/tasks/ContractSection";
 import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
 import {BlockedBanner} from "@/components/tasks/BlockedBanner";
+import {SkippedBanner} from "@/components/tasks/SkippedBanner";
+import {TaskConditionsSection} from "@/components/tasks/TaskConditionsSection";
 import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
 import {DependencySection} from "@/components/tasks/DependencySection";
 import {StatusMoves} from "@/components/tasks/StatusMoves";
@@ -620,6 +622,7 @@ export function GlobalTasks({
 						onRetry={(t) => retryMutation.mutate(t.task_number)}
 						busy={unblockMutation.isPending || retryMutation.isPending}
 					/>
+					<SkippedBanner task={activeTask as unknown as TaskItem} />
 					{/* No onStatusChange: TaskDetail would render a <select> of all
 					    five statuses it knows and offer moves the store refuses.
 					    StatusMoves below shows the legal ones and nothing else. */}
@@ -653,6 +656,13 @@ export function GlobalTasks({
 							const target = rawTasks.find((t) => t.task_number === number);
 							if (target) setActiveTaskId(target.id);
 						}}
+					/>
+					{/* Directly after Dependencies: the two are the reasons a task is
+					    not running, and reading one without the other is how a task
+					    with every parent finished looks stuck for no reason. */}
+					<TaskConditionsSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						task={activeTask as unknown as TaskItem}
 					/>
 					<ContractSection
 						taskNumber={(activeTask as unknown as TaskItem).task_number}

@@ -382,6 +382,14 @@ export type TaskTransitionsResponse =
 export type TaskGraph = components["schemas"]["TaskGraph"];
 export type TaskGraphEdge = components["schemas"]["TaskGraphEdge"];
 
+// A condition on a live task: the predicate, its last verdict, and — via
+// `disposition` — whether a false answer holds the task or rules it out.
+export type TaskGate = components["schemas"]["TaskGate"];
+export type TaskGatesResponse = components["schemas"]["TaskGatesResponse"];
+export type GateKind = components["schemas"]["GateKind"];
+export type GateResult = components["schemas"]["GateResult"];
+export type GateDisposition = components["schemas"]["GateDisposition"];
+
 // Requests
 export type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];
 export type UpdateTaskRequest = components["schemas"]["UpdateTaskRequest"];
@@ -396,6 +404,9 @@ export type Workflow = components["schemas"]["Workflow"];
 export type WorkflowStep = components["schemas"]["WorkflowStep"];
 export type WorkflowEdge = components["schemas"]["WorkflowEdge"];
 export type StepBinding = components["schemas"]["StepBinding"];
+// The template half of a condition. Addressed by `step_key` like a binding,
+// compiled into a real `TaskGate` at launch.
+export type StepGate = components["schemas"]["StepGate"];
 export type BindingSource = components["schemas"]["BindingSource"];
 export type LoopArm = components["schemas"]["LoopArm"];
 export type LoopResolution = components["schemas"]["LoopResolution"];
@@ -413,6 +424,7 @@ export type RunListResponse = components["schemas"]["RunListResponse"];
 export type SaveWorkflowRequest = components["schemas"]["SaveWorkflowRequest"];
 export type SaveStepRequest = components["schemas"]["SaveStepRequest"];
 export type SaveBindingRequest = components["schemas"]["SaveBindingRequest"];
+export type SaveStepGateRequest = components["schemas"]["SaveStepGateRequest"];
 export type StepEdgeRequest = components["schemas"]["StepEdgeRequest"];
 export type LaunchRequest = components["schemas"]["LaunchRequest"];
 export type LaunchResponse = components["schemas"]["LaunchResponse"];

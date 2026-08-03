@@ -701,6 +701,12 @@ export type TaskTransition = Types.TaskTransition;
 export type TaskTransitionsResponse = Types.TaskTransitionsResponse;
 export type TaskGraph = Types.TaskGraph;
 export type TaskGraphEdge = Types.TaskGraphEdge;
+export type TaskGate = Types.TaskGate;
+export type TaskGatesResponse = Types.TaskGatesResponse;
+export type GateKind = Types.GateKind;
+export type GateResult = Types.GateResult;
+/** What a *false* answer means: `wait` holds the task, `route` skips it. */
+export type GateDisposition = Types.GateDisposition;
 export type ContractProblem = Types.ContractProblem;
 export type ContractSide = Types.ContractSide;
 export type TaskInputBinding = Types.TaskInputBinding;
@@ -721,6 +727,8 @@ export type Workflow = Types.Workflow;
 export type WorkflowStep = Types.WorkflowStep;
 export type WorkflowEdge = Types.WorkflowEdge;
 export type StepBinding = Types.StepBinding;
+/** A condition declared on a step, compiled into a `TaskGate` at launch. */
+export type StepGate = Types.StepGate;
 export type BindingSource = Types.BindingSource;
 /** Which way out of a loop an edge — and the task behind it — is on. */
 export type LoopArm = Types.LoopArm;
@@ -736,6 +744,7 @@ export type RunListResponse = Types.RunListResponse;
 export type SaveWorkflowRequest = Types.SaveWorkflowRequest;
 export type SaveStepRequest = Types.SaveStepRequest;
 export type SaveBindingRequest = Types.SaveBindingRequest;
+export type SaveStepGateRequest = Types.SaveStepGateRequest;
 export type StepEdgeRequest = Types.StepEdgeRequest;
 export type LaunchRequest = Types.LaunchRequest;
 export type LaunchResponse = Types.LaunchResponse;
@@ -1913,6 +1922,20 @@ export const api = {
 		return response.json() as Promise<TaskResponse>;
 	},
 
+	// Task gates — the conditions on one live task.
+	//
+	// Separate from the template's `StepGate`s: these are the compiled rows the
+	// poller actually evaluates, and they carry the verdict (`last_result`) the
+	// template cannot have. Deleting one is the escape hatch for a condition
+	// that will never open.
+	listTaskGates: (taskNumber: number) =>
+		fetchJson<TaskGatesResponse>(`/tasks/${taskNumber}/gates`),
+	removeTaskGate: (taskNumber: number, gateId: string) =>
+		mutateJson<TaskGatesResponse>(
+			`/tasks/${taskNumber}/gates/${encodeURIComponent(gateId)}`,
+			"DELETE",
+		),
+
 	// Workflows API
 	//
 	// A workflow is a reusable template; launching one compiles it into real
@@ -1982,6 +2005,30 @@ export const api = {
 	removeWorkflowBinding: (id: string, stepKey: string, inputKey: string) =>
 		mutateJson<WorkflowDetailResponse>(
 			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/bindings/${encodeURIComponent(inputKey)}`,
+			"DELETE",
+		),
+	/**
+	 * Declare the condition under which a step runs.
+	 *
+	 * Keyed by `gate_key` for the same reason steps are keyed by `step_key`:
+	 * saving the same condition twice has to be an edit. A generated id would
+	 * leave the step held behind two copies of one condition, and the second
+	 * would be invisible in the editor that created it.
+	 */
+	setWorkflowStepGate: (
+		id: string,
+		stepKey: string,
+		gateKey: string,
+		body: SaveStepGateRequest,
+	) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/gates/${encodeURIComponent(gateKey)}`,
+			"PUT",
+			body,
+		),
+	removeWorkflowStepGate: (id: string, stepKey: string, gateKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/gates/${encodeURIComponent(gateKey)}`,
 			"DELETE",
 		),
 	/** Compile the template into tasks. Returns the step → task number map. */

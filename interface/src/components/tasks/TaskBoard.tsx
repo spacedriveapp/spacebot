@@ -439,13 +439,18 @@ function CardBody({
 					</div>
 
 					{/* Why a card is parked matters more than anything else on it, but
-					    must not outshout the title — muted, clamped, full on hover. */}
-					{(task.block_reason ?? task.last_error) && (
+					    must not outshout the title — muted, clamped, full on hover.
+					    `skip_reason` leads: it is the only one that explains a settled
+					    card, and a skipped task captioned with a stale `last_error`
+					    from an earlier attempt would name the wrong cause entirely. */}
+					{(task.skip_reason ?? task.block_reason ?? task.last_error) && (
 						<p
 							className="mt-1 line-clamp-2 break-all font-mono text-[10px] leading-relaxed text-ink-dull"
-							title={task.block_reason ?? task.last_error ?? ""}
+							title={
+								task.skip_reason ?? task.block_reason ?? task.last_error ?? ""
+							}
 						>
-							{task.block_reason ?? task.last_error}
+							{task.skip_reason ?? task.block_reason ?? task.last_error}
 						</p>
 					)}
 

@@ -112,9 +112,16 @@ function CanvasInner({
 			.map((edge) => {
 				const source = String(edge.parent_task_number);
 				const target = String(edge.child_task_number);
-				// An arrow is drawn satisfied once its *parent* is done, so a fan-in
-				// mid-flight shows the finished branches solid and the rest faint.
-				const done = statusByNumber.get(edge.parent_task_number) === "done";
+				// An arrow is drawn satisfied once its *parent* is settled, so a
+				// fan-in mid-flight shows the finished branches solid and the rest
+				// faint.
+				//
+				// Settled, not done: a skipped parent satisfies its edge exactly as a
+				// finished one does, which is what "settled instead of done" means in
+				// the scheduler. Drawing it faint would show a child that is already
+				// free to run as still waiting on something that will never happen.
+				const parentStatus = statusByNumber.get(edge.parent_task_number);
+				const done = parentStatus === "done" || parentStatus === "skipped";
 				return {
 					id: `${source}→${target}`,
 					type: "dependency" as const,

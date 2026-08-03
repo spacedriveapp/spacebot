@@ -108,6 +108,10 @@ export function TaskGraphView({taskNumber}: {taskNumber: number}) {
 	}
 
 	const done = tasks.filter((task) => task.status === "done").length;
+	// Counted apart from `done` rather than folded into it: skipped is settled,
+	// so the graph is finished, but nothing was achieved and saying "done" would
+	// claim it was.
+	const skipped = tasks.filter((task) => task.status === "skipped").length;
 
 	return (
 		<div className="flex h-full min-h-0 w-full flex-col">
@@ -132,7 +136,7 @@ export function TaskGraphView({taskNumber}: {taskNumber: number}) {
 					<p className="truncate text-[11px] text-ink-faint">
 						{tasks.length === 1
 							? "Not connected to anything — this task stands alone."
-							: `${tasks.length} connected tasks · ${done} done · ${drawnEdges} dependencies`}
+							: `${tasks.length} connected tasks · ${done} done${skipped > 0 ? ` · ${skipped} skipped` : ""} · ${drawnEdges} dependencies`}
 					</p>
 				</div>
 			</div>

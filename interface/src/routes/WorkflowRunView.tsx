@@ -176,7 +176,13 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	}
 
 	const run = data.run;
+	// Settled, not done. A run whose rollback branch skipped is finished, and a
+	// counter stuck at "3/5 done" would say otherwise forever — there is no
+	// un-skip, so those two tasks are never going to move. `skipped` is counted
+	// and named separately rather than folded in, because "5/5 done" over two
+	// tasks that never ran is the overstatement this feature exists to avoid.
 	const done = orderedTasks.filter((task) => task.status === "done").length;
+	const skipped = orderedTasks.filter((task) => task.status === "skipped").length;
 
 	return (
 		<div className="flex h-full min-h-0 w-full flex-col">
@@ -196,6 +202,15 @@ export function WorkflowRunView({runId}: {runId: string}) {
 						</h1>
 						<span className="shrink-0 text-xs text-ink-dull">
 							{done}/{orderedTasks.length} done
+						{skipped > 0 && (
+							<span
+								className="text-ink-faint"
+								title={`${skipped} task${skipped === 1 ? "" : "s"} a condition ruled out. They will never run, so they will never be done.`}
+							>
+								{" "}
+								· {skipped} skipped
+							</span>
+						)}
 						</span>
 					</div>
 					<p className="truncate text-[11px] text-ink-faint">
@@ -213,6 +228,7 @@ export function WorkflowRunView({runId}: {runId: string}) {
 							steps={workflow.steps}
 							edges={workflow.edges}
 							bindings={workflow.bindings}
+							gates={workflow.gates ?? []}
 							cycle={orderSteps(workflow.steps, workflow.edges).cycle}
 							selectedKey={selectedKey}
 							onSelect={setSelectedKey}

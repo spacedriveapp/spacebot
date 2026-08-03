@@ -37,11 +37,17 @@ const RENDERABLE: ReadonlySet<string> = new Set([
  * person", and it renders as an amber clock, which reads correctly. The real
  * status and its block kind are shown alongside by our own components, so the
  * substitution is never the only thing the reader sees.
+ *
+ * `skipped` maps to `done` instead, because the property that misleads if lost
+ * is *terminality*, not success. Drawn as an amber clock it would read as
+ * still-waiting, and someone would wait for a task that a condition ruled out
+ * and which will never run. `done` overstates the outcome, which our own
+ * components correct alongside; "pending" would misstate whether it is over,
+ * which nothing downstream would.
  */
 export function toDesignSystemStatus(status: TaskStatus): DesignSystemStatus {
-	return RENDERABLE.has(status)
-		? (status as DesignSystemStatus)
-		: "pending_approval";
+	if (RENDERABLE.has(status)) return status as DesignSystemStatus;
+	return status === "skipped" ? "done" : "pending_approval";
 }
 
 /** Whether this status is one the design system would mishandle. */

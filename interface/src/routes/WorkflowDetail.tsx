@@ -8,6 +8,7 @@ import {
 	api,
 	type LaunchRequest,
 	type SaveBindingRequest,
+	type SaveStepGateRequest,
 	type SaveStepRequest,
 	type SaveWorkflowRequest,
 	type StepEdgeRequest,
@@ -112,6 +113,23 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 			api.removeWorkflowBinding(workflowId, stepKey, inputKey),
 		onSuccess: absorb,
 	});
+	const setGate = useMutation({
+		mutationFn: ({
+			stepKey,
+			gateKey,
+			body,
+		}: {
+			stepKey: string;
+			gateKey: string;
+			body: SaveStepGateRequest;
+		}) => api.setWorkflowStepGate(workflowId, stepKey, gateKey, body),
+		onSuccess: absorb,
+	});
+	const removeGate = useMutation({
+		mutationFn: ({stepKey, gateKey}: {stepKey: string; gateKey: string}) =>
+			api.removeWorkflowStepGate(workflowId, stepKey, gateKey),
+		onSuccess: absorb,
+	});
 	const updateWorkflow = useMutation({
 		mutationFn: (body: SaveWorkflowRequest) =>
 			api.updateWorkflow(workflowId, body),
@@ -140,6 +158,10 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 	const steps = useMemo(() => data?.steps ?? [], [data]);
 	const edges = useMemo(() => data?.edges ?? [], [data]);
 	const bindings = useMemo(() => data?.bindings ?? [], [data]);
+	// A server older than this bundle has no `gates` in the detail response. An
+	// empty list is the right reading of that: the template declares no
+	// conditions, which is exactly what an older server means.
+	const gates = useMemo(() => data?.gates ?? [], [data]);
 
 	// Wiring is reachable two ways — dragged on the canvas, or picked in the
 	// panel — and both are the same call. Hoisting them here is what keeps a
@@ -374,6 +396,7 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 								steps={steps}
 								edges={edges}
 								bindings={bindings}
+								gates={gates}
 								cycle={cycle}
 								selectedKey={selectedKey}
 								onSelect={setSelectedKey}
@@ -420,6 +443,7 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 							steps={steps}
 							edges={edges}
 							bindings={bindings}
+							gates={gates}
 							hasRunInput={workflow.input_schema != null}
 							agents={agents}
 							stepBusy={saveStep.isPending || deleteStep.isPending}
@@ -455,6 +479,22 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 								setBinding.reset();
 								removeBinding.reset();
 								removeBinding.mutate({stepKey, inputKey});
+							}}
+							gateBusy={setGate.isPending || removeGate.isPending}
+							gateError={
+								(setGate.error ?? removeGate.error) instanceof Error
+									? ((setGate.error ?? removeGate.error) as Error).message
+									: null
+							}
+							onSetGate={(stepKey, gateKey, body) => {
+								setGate.reset();
+								removeGate.reset();
+								setGate.mutate({stepKey, gateKey, body});
+							}}
+							onRemoveGate={(stepKey, gateKey) => {
+								setGate.reset();
+								removeGate.reset();
+								removeGate.mutate({stepKey, gateKey});
 							}}
 						/>
 					) : (

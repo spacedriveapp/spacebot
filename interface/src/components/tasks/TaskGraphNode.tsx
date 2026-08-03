@@ -39,9 +39,16 @@ function TaskGraphNodeImpl({data, selected}: NodeProps<TaskGraphFlowNode>) {
 	// A blocked task's reason is the whole reason to be on this screen, so it
 	// takes the node's last line ahead of anything else. `last_error` is the
 	// fallback for a task that failed without being parked.
-	const trouble = task.block_reason
-		? `${task.block_kind ? `${task.block_kind}: ` : ""}${task.block_reason}`
-		: (task.last_error ?? null);
+	//
+	// `skip_reason` outranks both. It is the only one that explains a *settled*
+	// task, and a skipped box carrying a stale `last_error` from some earlier
+	// attempt would be captioned with the wrong story entirely.
+	const skipped = task.status === "skipped";
+	const trouble = task.skip_reason
+		? task.skip_reason
+		: task.block_reason
+			? `${task.block_kind ? `${task.block_kind}: ` : ""}${task.block_reason}`
+			: (task.last_error ?? null);
 
 	// Selection wins over seed: the panel on the right has to be attributable to
 	// a box on the left, and the seed is still marked by its badge.
@@ -53,6 +60,10 @@ function TaskGraphNodeImpl({data, selected}: NodeProps<TaskGraphFlowNode>) {
 				? "border-dashed border-ink-faint/50"
 				: task.status === "blocked"
 					? "border-status-error/60"
+					: // Ruled out. Dashed and faint rather than green or red: it is
+						// settled, but nothing was achieved and nothing went wrong.
+						skipped
+					? "border-dashed border-ink-faint/40"
 					: task.status === "done"
 						? "border-status-success/50"
 						: task.status === "in_progress"
@@ -63,7 +74,7 @@ function TaskGraphNodeImpl({data, selected}: NodeProps<TaskGraphFlowNode>) {
 		<div
 			className={`flex flex-col justify-between rounded-lg border bg-app-dark-box px-2.5 py-2 text-left transition-colors ${border} ${
 				task.fan_out_placeholder ? "opacity-80" : ""
-			} ${
+			} ${skipped ? "opacity-60" : ""} ${
 				seed
 					? "ring-2 ring-accent/40"
 					: selected
@@ -138,7 +149,13 @@ function TaskGraphNodeImpl({data, selected}: NodeProps<TaskGraphFlowNode>) {
 				{trouble ? (
 					<span
 						className={`min-w-0 flex-1 truncate text-[10px] ${
-							task.block_reason ? "text-status-error" : "text-status-warning"
+							// A skip reason is a decision the graph made, not trouble. Red
+							// here would report correct routing as a failure.
+							skipped
+								? "text-ink-faint"
+								: task.block_reason
+									? "text-status-error"
+									: "text-status-warning"
 						}`}
 						title={trouble}
 					>

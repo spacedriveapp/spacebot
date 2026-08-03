@@ -6,12 +6,14 @@ import {
 	faCircleNodes,
 	faCodeBranch,
 	faHandPaper,
+	faHourglassHalf,
 	faQuoteLeft,
 	faRightToBracket,
 	faRotate,
 	faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
+	GateDisposition,
 	LoopArm,
 	LoopResolution,
 	TaskStatus,
@@ -110,7 +112,25 @@ export type StepNodeData = {
 	 * story — see `LoopHoldNotice`.
 	 */
 	heldArm?: {group: string; arm: LoopArm} | null;
+	/**
+	 * The conditions under which this step runs at all.
+	 *
+	 * Drawn because a step with a condition may never run, and one without
+	 * always will — a difference the box otherwise does not show, which makes a
+	 * branching template look exactly like a linear one. `route` and `wait` are
+	 * drawn apart because they are different facts: "this might be skipped"
+	 * versus "this waits for the world".
+	 */
+	conditions?: NodeCondition[];
 };
+
+export interface NodeCondition {
+	/** The author's label if there is one, else the predicate in words. */
+	text: string;
+	disposition: GateDisposition;
+	/** Why the disposition is what it is. Reads as the pill's tooltip. */
+	hint: string;
+}
 
 export type StepFlowNode = Node<StepNodeData, "step">;
 
@@ -133,7 +153,14 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 		pass,
 		resolution,
 		heldArm,
+		conditions,
 	} = data;
+	// One pill has room for its label; three have room for nothing. The first is
+	// shown in full and the rest counted, because a reader who needs all three
+	// is reading the panel anyway.
+	const shownCondition = conditions?.[0];
+	const extraConditions = (conditions?.length ?? 0) - 1;
+	const maySkip = conditions?.some((c) => c.disposition === "route") ?? false;
 	// Captioned while it is still an invitation, and not once it has been taken
 	// up: the edge that leaves a wired handle carries its own label, and two
 	// copies of the word "converged" a few pixels apart read as one thing said
@@ -164,17 +191,29 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 					? "border-status-warning/50"
 					: status === "blocked"
 						? "border-status-error/60"
-						: status === "done"
-							? "border-status-success/50"
-							: status === "in_progress"
-								? "border-accent/60"
-								: "border-app-line";
+						: // Ruled out: settled, but neither an achievement nor a failure.
+							// Dashed says "this box did not happen" — the same grammar the
+							// fan-out placeholder uses for a box that has not happened yet.
+							status === "skipped"
+							? "border-dashed border-ink-faint/40"
+							: status === "done"
+								? "border-status-success/50"
+								: status === "in_progress"
+									? "border-accent/60"
+									: // No task yet and a condition that can rule this step out:
+										// the box is provisional, and drawn as such before a run
+										// exists to prove it either way.
+										maySkip && !status
+										? "border-dashed border-status-warning/40"
+										: "border-app-line";
 
 	return (
 		<div
 			className={`flex flex-col justify-between rounded-lg border bg-app-dark-box px-2.5 py-2 text-left transition-colors ${border} ${
 				placeholder ? "border-dashed opacity-80" : ""
-			} ${selected ? "shadow-lg shadow-accent/20" : "hover:border-ink-faint/60"}`}
+			} ${status === "skipped" ? "opacity-60" : ""} ${
+				selected ? "shadow-lg shadow-accent/20" : "hover:border-ink-faint/60"
+			}`}
 			style={{width: NODE_WIDTH, height: NODE_HEIGHT}}
 		>
 			<Handle
@@ -277,6 +316,46 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 				</div>
 			)}
 
+			{/* The condition line. A step that may never run says so here, and the
+			    label is the point — "waiting for CI on main" is what a reader can
+			    act on and a pointer is what they have to decode. */}
+			{shownCondition && (
+				<div className="flex min-w-0 items-center gap-1">
+					<span
+						className={`inline-flex min-w-0 shrink items-center gap-1 rounded-full border px-1.5 py-px text-[9px] ${
+							shownCondition.disposition === "route"
+								? "border-status-warning/50 bg-status-warning/10 text-status-warning"
+								: "border-status-info/50 bg-status-info/10 text-status-info"
+						}`}
+						title={shownCondition.hint}
+					>
+						<FontAwesomeIcon
+							icon={
+								shownCondition.disposition === "route"
+									? faCodeBranch
+									: faHourglassHalf
+							}
+							className="shrink-0 text-[7px]"
+						/>
+						<span className="truncate">
+							{shownCondition.disposition === "route" ? "may skip" : "waits"} ·{" "}
+							{shownCondition.text}
+						</span>
+					</span>
+					{extraConditions > 0 && (
+						<span
+							className="shrink-0 rounded-full border border-app-line bg-app-box/60 px-1 py-px text-[9px] text-ink-dull"
+							title={conditions
+								?.slice(1)
+								.map((c) => c.text)
+								.join("\n")}
+						>
+							+{extraConditions}
+						</span>
+					)}
+				</div>
+			)}
+
 			<div className="flex min-w-0 items-center gap-1">
 				{placeholder ? (
 					<span
@@ -309,7 +388,14 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 				{trouble ? (
 					<span
 						className={`min-w-0 flex-1 truncate text-[10px] ${
-							heldArm ? "text-status-warning" : "text-status-error"
+							// A skip reason is not trouble. It is the answer to "why is
+							// this box here and empty", and painting it error-red would
+							// report a decision the graph made correctly as a failure.
+							status === "skipped"
+								? "text-ink-faint"
+								: heldArm
+									? "text-status-warning"
+									: "text-status-error"
 						}`}
 						title={trouble}
 					>

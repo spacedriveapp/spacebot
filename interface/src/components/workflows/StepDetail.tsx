@@ -3,6 +3,8 @@ import {Button} from "@spacedrive/primitives";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
 	faArrowRightLong,
+	faCodeBranch,
+	faHourglassHalf,
 	faPen,
 	faQuoteLeft,
 	faRotate,
@@ -10,9 +12,12 @@ import {
 	faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
+	GateDisposition,
 	SaveBindingRequest,
+	SaveStepGateRequest,
 	SaveStepRequest,
 	StepBinding,
+	StepGate,
 	TaskPriority,
 	WorkflowEdge,
 	WorkflowStep,
@@ -24,7 +29,17 @@ import {
 	loopBodies,
 	readPredicate,
 	type LoopBody,
+	type LoopPredicate,
 } from "./loops";
+import {
+	DISPOSITION_HINT,
+	DISPOSITION_LABEL,
+	MIN_POLL_INTERVAL_SECS,
+	deriveStepDisposition,
+	describeCondition,
+	gatesForStep,
+	type DispositionChoice,
+} from "./conditions";
 import {parseJson} from "./schemaForm";
 
 const PRIORITIES: TaskPriority[] = ["critical", "high", "medium", "low"];
@@ -34,6 +49,8 @@ export interface StepDetailProps {
 	steps: WorkflowStep[];
 	edges: WorkflowEdge[];
 	bindings: StepBinding[];
+	/** Every condition in the template. Filtered to this step inside. */
+	gates: StepGate[];
 	/** Whether the template declares a launch input at all. */
 	hasRunInput: boolean;
 	agents: {id: string; display_name?: string | null}[];
@@ -51,12 +68,20 @@ export interface StepDetailProps {
 		body: SaveBindingRequest,
 	) => void;
 	onRemoveBinding: (stepKey: string, inputKey: string) => void;
+	onSetGate: (
+		stepKey: string,
+		gateKey: string,
+		body: SaveStepGateRequest,
+	) => void;
+	onRemoveGate: (stepKey: string, gateKey: string) => void;
 	stepBusy?: boolean;
 	stepError?: string | null;
 	edgeBusy?: boolean;
 	edgeError?: string | null;
 	bindingBusy?: boolean;
 	bindingError?: string | null;
+	gateBusy?: boolean;
+	gateError?: string | null;
 }
 
 /**
@@ -76,6 +101,10 @@ export function StepDetail(props: StepDetailProps) {
 	const stepBindings = useMemo(
 		() => bindings.filter((b) => b.step_key === step.step_key),
 		[bindings, step.step_key],
+	);
+	const stepGates = useMemo(
+		() => gatesForStep(props.gates, step.step_key),
+		[props.gates, step.step_key],
 	);
 	// Anything upstream at any depth, which is what "will have finished" means.
 	const ancestors = useMemo(
@@ -110,6 +139,16 @@ export function StepDetail(props: StepDetailProps) {
 					props.onAddEdge(parentKey, step.step_key, kind)
 				}
 				onRemove={(parentKey) => props.onRemoveEdge(parentKey, step.step_key)}
+			/>
+			<Conditions
+				step={step}
+				steps={steps}
+				edges={edges}
+				gates={stepGates}
+				busy={props.gateBusy}
+				error={props.gateError ?? null}
+				onSet={(gateKey, body) => props.onSetGate(step.step_key, gateKey, body)}
+				onRemove={(gateKey) => props.onRemoveGate(step.step_key, gateKey)}
 			/>
 			<Bindings
 				step={step}
@@ -523,43 +562,16 @@ function StepFields({
 								label="Stop when"
 								hint="Read from this step's output after each pass. The same shape a task_output gate takes."
 							>
-								<div className="flex items-center gap-1.5">
-									<input
-										value={pointer}
-										onChange={(event) => setPointer(event.target.value)}
-										spellCheck={false}
-										placeholder="/converged"
-										title="An RFC 6901 pointer into this step's outputs."
-										className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
-									/>
-									<select
-										value={mode}
-										onChange={(event) =>
-											setMode(
-												event.target.value as "equals" | "any_of" | "present",
-											)
-										}
-										className="shrink-0 rounded border border-app-line bg-app px-1.5 py-1 text-[11px] text-ink outline-none focus:border-accent"
-									>
-										<option value="equals">is</option>
-										<option value="any_of">is one of</option>
-										<option value="present">is present</option>
-									</select>
-									{mode !== "present" && (
-										<input
-											value={expected}
-											onChange={(event) => setExpected(event.target.value)}
-											spellCheck={false}
-											placeholder={mode === "equals" ? "true" : '["green"]'}
-											title={
-												mode === "equals"
-													? "JSON. A bare string still needs its quotes."
-													: "A JSON array of the values that count as done."
-											}
-											className="w-24 shrink-0 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
-										/>
-									)}
-								</div>
+								<PredicateFields
+									value={{pointer, mode, expected}}
+									pointerPlaceholder="/converged"
+									pointerTitle="An RFC 6901 pointer into this step's outputs."
+									onChange={(next) => {
+										setPointer(next.pointer);
+										setMode(next.mode);
+										setExpected(next.expected);
+									}}
+								/>
 							</Field>
 
 							<Field
@@ -686,6 +698,689 @@ function Field({
 			</label>
 			{hint && <p className="mb-1 text-[10px] text-ink-faint">{hint}</p>}
 			{children}
+		</div>
+	);
+}
+
+/**
+ * The predicate, as three controls: where to read, how to compare, and what to.
+ *
+ * One control rather than two because a loop's exit condition and a step's
+ * condition are the *same* predicate language — `loop_until` and a
+ * `task_output` gate are read by the same evaluator on the server. Two editors
+ * for one grammar is two places for "is one of" to start meaning something
+ * slightly different.
+ */
+export interface PredicateDraft {
+	pointer: string;
+	mode: "equals" | "any_of" | "present";
+	/** The comparison value as typed JSON. Unused when `mode` is `present`. */
+	expected: string;
+}
+
+/** A stored predicate as editable text. The inverse of `buildPredicate`. */
+function draftFromPredicate(predicate: LoopPredicate | null): PredicateDraft {
+	return {
+		pointer: predicate?.pointer ?? "",
+		mode: predicate?.mode ?? "equals",
+		expected:
+			predicate?.mode === "equals"
+				? JSON.stringify(predicate.value)
+				: predicate?.mode === "any_of"
+					? JSON.stringify(predicate.values)
+					: "true",
+	};
+}
+
+/**
+ * The draft as the object the server stores, or the reason it cannot be.
+ *
+ * Returns the message rather than throwing so each caller can prefix it with
+ * what the reader was editing — "Exit condition:" or "Condition:" — since the
+ * same malformed JSON means different things in the two places.
+ */
+function buildPredicate(
+	draft: PredicateDraft,
+): {value: Record<string, unknown>} | {error: string} {
+	const pointer = draft.pointer.trim();
+	if (pointer === "") {
+		return {error: "needs a pointer saying what to read."};
+	}
+	if (draft.mode === "present") return {value: {pointer}};
+	const parsed = parseJson(draft.expected);
+	if ("error" in parsed) return {error: parsed.error};
+	if (draft.mode === "equals") {
+		if (parsed.value === undefined || parsed.value === null) {
+			return {
+				error:
+					"needs a value to compare against. A bare string still needs its quotes.",
+			};
+		}
+		return {value: {pointer, equals: parsed.value}};
+	}
+	if (!Array.isArray(parsed.value) || parsed.value.length === 0) {
+		return {
+			error:
+				'"is one of" takes a JSON array of the values that count, e.g. ["green", "clean"].',
+		};
+	}
+	return {value: {pointer, any_of: parsed.value}};
+}
+
+function PredicateFields({
+	value,
+	onChange,
+	pointerPlaceholder,
+	pointerTitle,
+}: {
+	value: PredicateDraft;
+	onChange: (next: PredicateDraft) => void;
+	pointerPlaceholder: string;
+	pointerTitle: string;
+}) {
+	return (
+		<div className="flex items-center gap-1.5">
+			<input
+				value={value.pointer}
+				onChange={(event) => onChange({...value, pointer: event.target.value})}
+				spellCheck={false}
+				placeholder={pointerPlaceholder}
+				title={pointerTitle}
+				className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+			/>
+			<select
+				value={value.mode}
+				onChange={(event) =>
+					onChange({
+						...value,
+						mode: event.target.value as PredicateDraft["mode"],
+					})
+				}
+				className="shrink-0 rounded border border-app-line bg-app px-1.5 py-1 text-[11px] text-ink outline-none focus:border-accent"
+			>
+				<option value="equals">is</option>
+				<option value="any_of">is one of</option>
+				<option value="present">is present</option>
+			</select>
+			{value.mode !== "present" && (
+				<input
+					value={value.expected}
+					onChange={(event) =>
+						onChange({...value, expected: event.target.value})
+					}
+					spellCheck={false}
+					placeholder={value.mode === "equals" ? "true" : '["green"]'}
+					title={
+						value.mode === "equals"
+							? "JSON. A bare string still needs its quotes."
+							: "A JSON array of the values that count."
+					}
+					className="w-24 shrink-0 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+				/>
+			)}
+		</div>
+	);
+}
+
+/**
+ * Whether this step runs at all.
+ *
+ * Its own section rather than a field on the step, because a condition is not a
+ * property of the work — it is the question asked before the work is considered,
+ * and there can be more than one. Kept next to Dependencies since the two are
+ * read together: an edge says *when* this step is considered, a condition says
+ * *whether* it then runs.
+ */
+function Conditions({
+	step,
+	steps,
+	edges,
+	gates,
+	busy,
+	error,
+	onSet,
+	onRemove,
+}: {
+	step: WorkflowStep;
+	steps: WorkflowStep[];
+	edges: WorkflowEdge[];
+	gates: StepGate[];
+	busy?: boolean;
+	error: string | null;
+	onSet: (gateKey: string, body: SaveStepGateRequest) => void;
+	onRemove: (gateKey: string) => void;
+}) {
+	// `null` is the closed state; `""` means the blank form for a new condition.
+	// A gate key means editing that one, and it is the form's `key` so switching
+	// between two conditions remounts rather than leaving the first one's URL in
+	// the second one's box.
+	const [editing, setEditing] = useState<string | null>(null);
+	const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+
+	return (
+		<Section
+			title="Conditions"
+			hint="When this step should run at all. No condition means it always runs once its prerequisites are done."
+		>
+			{gates.length > 0 && (
+				<ul className="mb-2 flex flex-col gap-1.5">
+					{gates.map((gate) => {
+						const derived = deriveStepDisposition(
+							gate.kind,
+							gate.source_step_key,
+							step.step_key,
+							edges,
+						);
+						const effective = gate.disposition ?? derived.disposition;
+						const routes = effective === "route";
+						return (
+							<li
+								key={gate.gate_key}
+								className="rounded border border-app-line bg-app-box/40 px-2 py-1.5"
+							>
+								<div className="flex items-start gap-1.5">
+									<FontAwesomeIcon
+										icon={routes ? faCodeBranch : faHourglassHalf}
+										className={`mt-[3px] shrink-0 text-[9px] ${
+											routes ? "text-status-warning" : "text-status-info"
+										}`}
+										title={DISPOSITION_LABEL[effective]}
+									/>
+									<div className="min-w-0 flex-1">
+										<p className="break-words text-[11px] text-ink">
+											{describeCondition(gate)}
+										</p>
+										<p className="mt-0.5 text-[10px] text-ink-faint">
+											<span
+												className={
+													routes ? "text-status-warning" : "text-status-info"
+												}
+											>
+												{routes
+													? "skips this step if false"
+													: "holds this step until true"}
+											</span>
+											{gate.disposition == null && (
+												<span title={derived.because}> · derived</span>
+											)}
+											<span className="font-mono"> · {gate.gate_key}</span>
+										</p>
+									</div>
+									<button
+										type="button"
+										onClick={() =>
+											setEditing(editing === gate.gate_key ? null : gate.gate_key)
+										}
+										title="Edit this condition"
+										className="shrink-0 text-ink-faint hover:text-ink"
+									>
+										<FontAwesomeIcon icon={faPen} className="text-[9px]" />
+									</button>
+									<button
+										type="button"
+										onClick={() =>
+											setConfirmRemove(
+												confirmRemove === gate.gate_key ? null : gate.gate_key,
+											)
+										}
+										title="Remove this condition"
+										className="shrink-0 text-ink-faint hover:text-status-error"
+									>
+										<FontAwesomeIcon icon={faXmark} className="text-[10px]" />
+									</button>
+								</div>
+
+								{confirmRemove === gate.gate_key && (
+									<div className="mt-1.5 flex items-center gap-2 border-t border-app-line/40 pt-1.5">
+										<span className="text-[10px] text-ink-dull">
+											{routes
+												? "The step will then always run."
+												: "The step will no longer wait for this."}
+										</span>
+										<Button
+											size="sm"
+											variant="colored"
+											className="border-status-error bg-status-error"
+											disabled={busy}
+											onClick={() => {
+												onRemove(gate.gate_key);
+												setConfirmRemove(null);
+											}}
+										>
+											Remove
+										</Button>
+									</div>
+								)}
+
+								{editing === gate.gate_key && (
+									<div className="mt-2 border-t border-app-line/40 pt-2">
+										<ConditionForm
+											key={gate.gate_key}
+											gate={gate}
+											step={step}
+											steps={steps}
+											edges={edges}
+											busy={busy}
+											onSubmit={(body) => {
+												onSet(gate.gate_key, body);
+												setEditing(null);
+											}}
+											onCancel={() => setEditing(null)}
+										/>
+									</div>
+								)}
+							</li>
+						);
+					})}
+				</ul>
+			)}
+
+			{editing === "" ? (
+				<div className="rounded border border-accent/30 bg-accent/5 px-2 py-2">
+					<ConditionForm
+						key="__new__"
+						gate={null}
+						step={step}
+						steps={steps}
+						edges={edges}
+						busy={busy}
+						onSubmit={(body, gateKey) => {
+							onSet(gateKey, body);
+							setEditing(null);
+						}}
+						onCancel={() => setEditing(null)}
+					/>
+				</div>
+			) : (
+				<button
+					type="button"
+					onClick={() => setEditing("")}
+					className="text-[11px] text-accent hover:underline"
+				>
+					Add a condition…
+				</button>
+			)}
+
+			{error && (
+				<p className="mt-2 break-words rounded border border-status-error/30 bg-status-error/5 px-2 py-1 font-mono text-[11px] text-status-error">
+					{error}
+				</p>
+			)}
+		</Section>
+	);
+}
+
+/**
+ * One condition's fields.
+ *
+ * The disposition control shows what *Derive* currently resolves to and why. A
+ * silent default here is a branch that surprises someone: the same predicate
+ * with the other disposition either holds the pipeline forever or skips past a
+ * step that should have run, and neither failure announces itself. Making the
+ * derivation legible is what earns it the right to be the default.
+ */
+function ConditionForm({
+	gate,
+	step,
+	steps,
+	edges,
+	busy,
+	onSubmit,
+	onCancel,
+}: {
+	gate: StepGate | null;
+	step: WorkflowStep;
+	steps: WorkflowStep[];
+	edges: WorkflowEdge[];
+	busy?: boolean;
+	onSubmit: (body: SaveStepGateRequest, gateKey: string) => void;
+	onCancel: () => void;
+}) {
+	const config = useMemo(
+		() => ((gate?.config ?? {}) as Record<string, unknown>) ?? {},
+		[gate],
+	);
+	const [gateKey, setGateKey] = useState(gate?.gate_key ?? "");
+	const [kind, setKind] = useState<string>(gate?.kind ?? "task_output");
+	const [label, setLabel] = useState(gate?.label ?? "");
+	const [sourceStepKey, setSourceStepKey] = useState(gate?.source_step_key ?? "");
+	const [predicate, setPredicate] = useState<PredicateDraft>(() =>
+		draftFromPredicate(readPredicate(gate?.config)),
+	);
+	const [url, setUrl] = useState(
+		typeof config.url === "string" ? config.url : "",
+	);
+	const [expectStatus, setExpectStatus] = useState(
+		typeof config.expect_status === "number" ? String(config.expect_status) : "",
+	);
+	// An http gate needs at least one of `expect_status` or a pointer, so the
+	// body check is opt-in rather than always-on: a gate with an empty pointer
+	// silently sent would be refused by the server for a reason the form could
+	// have explained.
+	const [checkBody, setCheckBody] = useState(
+		gate?.kind === "http" && typeof config.pointer === "string",
+	);
+	const [headers, setHeaders] = useState(() =>
+		config.headers ? JSON.stringify(config.headers, null, 2) : "",
+	);
+	const [pollSecs, setPollSecs] = useState(
+		gate?.poll_interval_secs ? String(gate.poll_interval_secs) : "",
+	);
+	const [disposition, setDisposition] = useState<DispositionChoice>(
+		gate?.disposition ?? "derive",
+	);
+	const [localError, setLocalError] = useState<string | null>(null);
+
+	// Anything that is not this step. A condition reading its own step's output
+	// can never be true — the output does not exist until the step runs, and the
+	// step will not run until the condition is true — so the server refuses it
+	// and the picker does not offer it.
+	const candidates = useMemo(
+		() => steps.filter((candidate) => candidate.step_key !== step.step_key),
+		[steps, step.step_key],
+	);
+	const ancestors = useMemo(
+		() => ancestorsOf(edges, step.step_key),
+		[edges, step.step_key],
+	);
+
+	const derived = useMemo(
+		() => deriveStepDisposition(kind, sourceStepKey, step.step_key, edges),
+		[kind, sourceStepKey, step.step_key, edges],
+	);
+	const effective = disposition === "derive" ? derived.disposition : disposition;
+
+	const submit = () => {
+		const key = gateKey.trim();
+		if (key === "") {
+			setLocalError(
+				"A condition needs a name. It is what makes saving it twice an edit rather than a second condition.",
+			);
+			return;
+		}
+
+		let body: SaveStepGateRequest;
+		if (kind === "task_output") {
+			if (sourceStepKey.trim() === "") {
+				setLocalError("Pick the step whose output this reads.");
+				return;
+			}
+			const built = buildPredicate(predicate);
+			if ("error" in built) {
+				setLocalError(`Condition: ${built.error}`);
+				return;
+			}
+			body = {
+				kind,
+				source_step_key: sourceStepKey.trim(),
+				config: built.value,
+				label: label.trim() || null,
+				disposition: disposition === "derive" ? null : disposition,
+			};
+		} else {
+			const trimmedUrl = url.trim();
+			if (!/^https?:\/\//.test(trimmedUrl)) {
+				setLocalError(
+					"An http condition needs an http:// or https:// URL. It is fetched by the server, unattended, on a timer.",
+				);
+				return;
+			}
+			const httpConfig: Record<string, unknown> = {url: trimmedUrl};
+			if (expectStatus.trim() !== "") {
+				const parsed = Number(expectStatus.trim());
+				if (!Number.isInteger(parsed) || parsed < 100 || parsed > 599) {
+					setLocalError("Expected status must be a whole HTTP status code.");
+					return;
+				}
+				httpConfig.expect_status = parsed;
+			}
+			if (checkBody) {
+				const built = buildPredicate(predicate);
+				if ("error" in built) {
+					setLocalError(`Response body: ${built.error}`);
+					return;
+				}
+				Object.assign(httpConfig, built.value);
+			}
+			if (httpConfig.expect_status == null && !checkBody) {
+				setLocalError(
+					"A condition with nothing to assert is satisfied by any response, which makes it not a condition. Expect a status, check the body, or both.",
+				);
+				return;
+			}
+			if (headers.trim() !== "") {
+				const parsed = parseJson(headers);
+				if ("error" in parsed) {
+					setLocalError(`Headers: ${parsed.error}`);
+					return;
+				}
+				if (
+					typeof parsed.value !== "object" ||
+					parsed.value === null ||
+					Array.isArray(parsed.value)
+				) {
+					setLocalError('Headers must be a JSON object, e.g. {"Accept": "…"}.');
+					return;
+				}
+				httpConfig.headers = parsed.value;
+			}
+			let poll: number | null = null;
+			if (pollSecs.trim() !== "") {
+				const parsed = Number(pollSecs.trim());
+				if (!Number.isInteger(parsed) || parsed < MIN_POLL_INTERVAL_SECS) {
+					setLocalError(
+						`Poll interval must be a whole number of seconds, at least ${MIN_POLL_INTERVAL_SECS}. A condition is polled by the server, unattended and repeatedly, so the floor is enforced rather than trusted.`,
+					);
+					return;
+				}
+				poll = parsed;
+			}
+			body = {
+				kind,
+				config: httpConfig,
+				label: label.trim() || null,
+				poll_interval_secs: poll,
+				disposition: disposition === "derive" ? null : disposition,
+			};
+		}
+
+		setLocalError(null);
+		onSubmit(body, key);
+	};
+
+	return (
+		<div>
+			<Field
+				label="Name"
+				hint="What this condition is called in the template. Saving the same name twice edits it."
+			>
+				<input
+					value={gateKey}
+					onChange={(event) => setGateKey(event.target.value)}
+					disabled={gate != null}
+					spellCheck={false}
+					placeholder="deploy-was-green"
+					className="w-full rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent disabled:text-ink-faint"
+				/>
+			</Field>
+
+			<Field
+				label="Reads"
+				hint="Another step's output, or a URL polled until it answers."
+			>
+				<select
+					value={kind}
+					onChange={(event) => setKind(event.target.value)}
+					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+				>
+					<option value="task_output">Another step's output</option>
+					<option value="http">An HTTP endpoint</option>
+				</select>
+			</Field>
+
+			{kind === "task_output" ? (
+				<>
+					<Field label="Whose output">
+						<select
+							value={sourceStepKey}
+							onChange={(event) => setSourceStepKey(event.target.value)}
+							className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+						>
+							<option value="">Pick a step…</option>
+							{candidates.map((candidate) => (
+								<option key={candidate.step_key} value={candidate.step_key}>
+									{candidate.step_key}
+									{ancestors.has(candidate.step_key) ? "" : " (not upstream)"}
+								</option>
+							))}
+						</select>
+					</Field>
+					<Field
+						label="Runs when"
+						hint="Read from that step's output. The same shape a loop's exit condition takes."
+					>
+						<PredicateFields
+							value={predicate}
+							onChange={setPredicate}
+							pointerPlaceholder="/status"
+							pointerTitle="An RFC 6901 pointer into that step's outputs."
+						/>
+					</Field>
+				</>
+			) : (
+				<>
+					<Field label="URL">
+						<input
+							value={url}
+							onChange={(event) => setUrl(event.target.value)}
+							spellCheck={false}
+							placeholder="https://ci.example.com/status"
+							className="w-full rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+					<Field label="Expected status" hint="Blank to accept any status.">
+						<input
+							value={expectStatus}
+							onChange={(event) => setExpectStatus(event.target.value)}
+							inputMode="numeric"
+							spellCheck={false}
+							placeholder="200"
+							className="w-20 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+					<div className="mb-2">
+						<label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-dull">
+							<input
+								type="checkbox"
+								checked={checkBody}
+								onChange={(event) => setCheckBody(event.target.checked)}
+							/>
+							Also check the response body
+						</label>
+						{checkBody && (
+							<div className="mt-1">
+								<PredicateFields
+									value={predicate}
+									onChange={setPredicate}
+									pointerPlaceholder="/state"
+									pointerTitle="An RFC 6901 pointer into the JSON response."
+								/>
+							</div>
+						)}
+					</div>
+					<Field
+						label="Headers"
+						hint="JSON object, sent with every poll. For an auth token, blank is safer than a secret in a template."
+					>
+						<textarea
+							value={headers}
+							onChange={(event) => setHeaders(event.target.value)}
+							rows={2}
+							spellCheck={false}
+							placeholder={'{"Accept": "application/json"}'}
+							className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+					<Field
+						label="Poll every"
+						hint={`Seconds between polls. Minimum ${MIN_POLL_INTERVAL_SECS} — this is polled server-side with nobody watching, so a short interval is a way to be mistaken for an attack.`}
+					>
+						<input
+							value={pollSecs}
+							onChange={(event) => setPollSecs(event.target.value)}
+							inputMode="numeric"
+							spellCheck={false}
+							placeholder="60"
+							className="w-20 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+				</>
+			)}
+
+			<Field
+				label="Label"
+				hint='What the board shows. "waiting for CI on main" beats a URL.'
+			>
+				<input
+					value={label}
+					onChange={(event) => setLabel(event.target.value)}
+					placeholder="the deploy went green"
+					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+				/>
+			</Field>
+
+			<Field label="If it is false" hint="The whole of branching is this field.">
+				<select
+					value={disposition}
+					onChange={(event) =>
+						setDisposition(event.target.value as DispositionChoice)
+					}
+					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+				>
+					<option value="derive">Derive — work it out from the graph</option>
+					<option value="wait">{DISPOSITION_LABEL.wait}</option>
+					<option value="route">{DISPOSITION_LABEL.route}</option>
+				</select>
+			</Field>
+
+			<p
+				className={`mb-2 rounded border px-2 py-1 text-[10px] ${
+					effective === "route"
+						? "border-status-warning/30 bg-status-warning/5 text-ink-dull"
+						: "border-status-info/30 bg-status-info/5 text-ink-dull"
+				}`}
+			>
+				{disposition === "derive" ? (
+					<>
+						{derived.because} →{" "}
+						<strong className="font-medium text-ink">
+							{effective === "route"
+								? "will skip this step if false"
+								: "will hold this step until true"}
+						</strong>
+						.{" "}
+						{effective === "route" &&
+							"Anything binding this step's output skips too, unless that input is optional."}
+					</>
+				) : (
+					DISPOSITION_HINT[effective as GateDisposition]
+				)}
+			</p>
+
+			{localError && (
+				<p className="mb-2 break-words rounded border border-status-error/30 bg-status-error/5 px-2 py-1 font-mono text-[11px] text-status-error">
+					{localError}
+				</p>
+			)}
+
+			<div className="flex items-center gap-2">
+				<Button size="sm" variant="accent" disabled={busy} onClick={submit}>
+					{busy ? "Saving…" : gate ? "Save condition" : "Add condition"}
+				</Button>
+				<Button size="sm" variant="gray" onClick={onCancel}>
+					Cancel
+				</Button>
+			</div>
 		</div>
 	);
 }

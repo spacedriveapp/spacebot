@@ -16,10 +16,16 @@ import {
 import "@xyflow/react/dist/style.css";
 import type {
 	StepBinding,
+	StepGate,
 	TaskItem,
 	WorkflowEdge,
 	WorkflowStep,
 } from "@/api/client";
+import {
+	DISPOSITION_HINT,
+	deriveStepDisposition,
+	describeCondition,
+} from "./conditions";
 import {pathBetween, runNodes, wouldCycle} from "./graph";
 import {layoutSteps, loopRegions, type NodePosition} from "./layout";
 import {
@@ -32,6 +38,7 @@ import {
 import {
 	EXHAUSTED_HANDLE,
 	StepNode,
+	type NodeCondition,
 	type StepFlowNode,
 } from "./StepNode";
 import {LoopGroupNode, type LoopGroupFlowNode} from "./LoopGroupNode";
@@ -81,6 +88,12 @@ export interface WorkflowCanvasProps {
 	 * and keeping the last one drew a three-way fan-out as a single node.
 	 */
 	tasksByStep?: Map<string, TaskItem[]>;
+	/**
+	 * The template's conditions. A step with one may never run, and the canvas
+	 * has to say so — otherwise a branching template is drawn identically to a
+	 * linear one and the whole shape of it is invisible until a run proves it.
+	 */
+	gates?: StepGate[];
 	emptyHint?: string;
 }
 
@@ -121,6 +134,7 @@ function CanvasInner({
 	edgeBusy,
 	edgeError,
 	tasksByStep,
+	gates,
 	emptyHint,
 }: WorkflowCanvasProps) {
 	const editable = onAddEdge != null;
@@ -223,6 +237,36 @@ function CanvasInner({
 		return map;
 	}, [tasksByStep]);
 
+	/**
+	 * step key → the conditions on it, in the form the node draws.
+	 *
+	 * The disposition is resolved here rather than on the node: deriving it needs
+	 * the edges, and a node is deliberately given plain values so React Flow can
+	 * keep the node type referentially stable.
+	 */
+	const conditionsByStep = useMemo(() => {
+		const map = new Map<string, NodeCondition[]>();
+		for (const gate of gates ?? []) {
+			const derived = deriveStepDisposition(
+				gate.kind,
+				gate.source_step_key,
+				gate.step_key,
+				edges,
+			);
+			const disposition = gate.disposition ?? derived.disposition;
+			const list = map.get(gate.step_key) ?? [];
+			list.push({
+				text: describeCondition(gate),
+				disposition,
+				hint: `${describeCondition(gate)}\n\n${DISPOSITION_HINT[disposition]}${
+					gate.disposition == null ? `\n\nDerived: ${derived.because}.` : ""
+				}`,
+			});
+			map.set(gate.step_key, list);
+		}
+		return map;
+	}, [gates, edges]);
+
 	/** step key → how its loop came out on this run, once it has. */
 	const resolutionByStep = useMemo(() => {
 		const map = new Map<string, ReturnType<typeof finalResolution>>();
@@ -261,8 +305,15 @@ function CanvasInner({
 							inCycle: cycleKeys.has(stepKey),
 							status: task?.status,
 							taskNumber: task?.task_number,
+							// `skip_reason` is first because it is the only one of the three
+							// that explains a *settled* task. A skipped task with a stale
+							// `last_error` from an earlier attempt would otherwise be
+							// labelled with the wrong story entirely.
 							trouble: task
-								? (task.block_reason ?? task.last_error ?? null)
+								? (task.skip_reason ??
+									task.block_reason ??
+									task.last_error ??
+									null)
 								: null,
 							title: task ? withoutBranchSuffix(task) : undefined,
 							branchKey: task?.fan_out_branch_key ?? null,
@@ -294,6 +345,7 @@ function CanvasInner({
 								? finalResolution(passes)
 								: (task?.loop_resolution ?? null),
 							heldArm: held,
+							conditions: conditionsByStep.get(stepKey),
 						},
 					},
 				];
@@ -310,6 +362,7 @@ function CanvasInner({
 			strayExhausted,
 			armsWired,
 			passTotals,
+			conditionsByStep,
 			editable,
 		],
 	);
@@ -433,10 +486,16 @@ function CanvasInner({
 							return [];
 						}
 						const id = `${source}→${target}`;
-						// The arrow is drawn satisfied when *this* end of it is done, so a
-						// fan-out mid-flight shows finished branches feeding the fan-in in
-						// solid and the unfinished ones still faint.
-						const done = tasksByNode.get(source)?.status === "done";
+						// The arrow is drawn satisfied when *this* end of it is settled, so
+						// a fan-out mid-flight shows finished branches feeding the fan-in
+						// in solid and the unfinished ones still faint.
+						//
+						// Settled, not done: a skipped parent satisfies its edge exactly
+						// as a finished one does — that is the whole of "settled instead of
+						// done" the scheduler now runs on. Drawing it faint would show a
+						// child that is already free to run as still waiting.
+						const sourceStatus = tasksByNode.get(source)?.status;
+						const done = sourceStatus === "done" || sourceStatus === "skipped";
 						return [{
 							id,
 							type: "dependency" as const,

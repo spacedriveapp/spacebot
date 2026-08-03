@@ -86,6 +86,16 @@ pub enum GateResult {
     Failed,
     /// We could not tell. Our problem, not the graph's.
     Erroring,
+    /// It did not hold, and this condition routes rather than waits — so the
+    /// task it guarded is settled and this gate is finished.
+    ///
+    /// Distinct from `Failed`, which is trouble needing a person. Routing is an
+    /// ordinary outcome: the branch simply did not apply. And distinct from
+    /// `Pending`, which is what this used to be left as — a gate that had
+    /// already decided but still reported "not yet", while never being polled
+    /// again to correct itself. One label for "undecided" and "decided, and I
+    /// routed away" is the mistake this codebase keeps paying for.
+    Routed,
 }
 
 impl GateResult {
@@ -94,6 +104,7 @@ impl GateResult {
             GateResult::Pending => "pending",
             GateResult::Satisfied => "satisfied",
             GateResult::Failed => "failed",
+            GateResult::Routed => "routed",
             GateResult::Erroring => "erroring",
         }
     }
@@ -103,6 +114,7 @@ impl GateResult {
             "pending" => Some(GateResult::Pending),
             "satisfied" => Some(GateResult::Satisfied),
             "failed" => Some(GateResult::Failed),
+            "routed" => Some(GateResult::Routed),
             "erroring" => Some(GateResult::Erroring),
             _ => None,
         }
@@ -534,6 +546,10 @@ impl TaskGate {
             .unwrap_or_else(|| self.kind.as_str().to_string());
         match self.last_result {
             GateResult::Satisfied => format!("{name}: satisfied"),
+            GateResult::Routed => match &self.last_detail {
+                Some(detail) => format!("{name}: ruled this step out — {detail}"),
+                None => format!("{name}: ruled this step out"),
+            },
             GateResult::Pending => match &self.last_detail {
                 Some(detail) => format!("{name}: waiting — {detail}"),
                 None => format!("{name}: waiting"),
@@ -628,7 +644,24 @@ pub async fn poll_gates_once(
                 .unwrap_or_else(|| gate.kind.as_str().to_string());
             let reason = format!("condition `{name}` does not hold: {}", evaluation.detail);
             match tasks.skip_task(gate.task_number, &reason).await {
-                Ok(true) => skipped = Some(reason),
+                Ok(true) => {
+                    // Record what this gate actually did. Without it the row
+                    // keeps whatever the evaluation said — `pending` — while
+                    // `due_for_poll` never looks at it again, so it reports
+                    // "not yet" forever about a decision it already made.
+                    let verdict = Evaluation {
+                        result: GateResult::Routed,
+                        detail: evaluation.detail.clone(),
+                    };
+                    if let Err(error) = gates.record_evaluation(&gate.id, &verdict).await {
+                        tracing::warn!(
+                            %error,
+                            gate_id = %gate.id,
+                            "settled a task but failed to record the condition's verdict"
+                        );
+                    }
+                    skipped = Some(reason);
+                }
                 // Already settled, or already done. The sweep and this pass
                 // racing over one branch is the ordinary case, not a fault.
                 Ok(false) => {}
@@ -926,6 +959,27 @@ mod tests {
     /// The load-bearing distinction. If `satisfied` were re-polled, a gate
     /// could close under a task that is already running; if `failed` were
     /// re-polled, a settled answer would be re-asked forever.
+    /// A gate that routed has decided. Reporting `pending` afterwards — which
+    /// is what the evaluation says, since routing fires on a *pending* mismatch
+    /// — would leave the row claiming "not yet" about a settled branch, and
+    /// `due_for_poll` never looks again to correct it.
+    #[test]
+    fn a_routed_verdict_is_settled_and_reads_as_a_decision() {
+        assert!(!GateResult::Routed.is_worth_polling());
+        assert_eq!(GateResult::parse("routed"), Some(GateResult::Routed));
+        assert_eq!(GateResult::Routed.as_str(), "routed");
+
+        let mut gate = gate(GateResult::Routed, 0, None);
+        gate.label = Some("deploy reported red".into());
+        gate.last_detail = Some("`/status` is \"green\", expected \"red\"".into());
+        let text = gate.explain();
+        assert!(text.contains("ruled this step out"), "{text}");
+        assert!(
+            !text.contains("waiting"),
+            "a decided condition must not read as waiting: {text}"
+        );
+    }
+
     #[test]
     fn only_unsettled_gates_are_worth_polling() {
         assert!(GateResult::Pending.is_worth_polling());

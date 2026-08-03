@@ -73,15 +73,43 @@ const COLUMN_STYLE: Record<TaskStatus, ColumnStyle> = {
 	// Terminal like `done`, and deliberately not styled like it. A skipped task
 	// is settled — nothing downstream is waiting on it — but it never ran, and a
 	// board that congratulates you for work that did not happen is lying.
+	//
+	// The dot is hollow rather than filled, which is the one thing no other
+	// column's is. `backlog` is also a grey dot and means very nearly the
+	// opposite — waiting its turn, as against never getting one — and two
+	// identical grey dots is the same one-visual-two-meanings bug conditions
+	// exist to remove, reintroduced in the legend.
 	skipped: {
 		accent: "border-t-app-line",
-		dot: "bg-ink-faint",
+		dot: "border border-ink-dull bg-transparent",
 		hint: "A condition ruled this out — it will never run",
 	},
 };
 
 /** Every styled status, in lifecycle order. */
 export const COLUMN_ORDER = Object.keys(COLUMN_STYLE) as TaskStatus[];
+
+/**
+ * Columns that earn their width only when they have something in them.
+ *
+ * Every other column is a place a card can be *put*: an empty `Ready` is a drop
+ * target and a standing invitation, so it is worth 280px of a board that has to
+ * scroll at seven columns anyway. `skipped` is neither. There is no transition
+ * into it — the poller settles a task when a routing condition answers no, and
+ * there is deliberately no un-skip — so an empty Skipped column is not an
+ * invitation to anything. It is a permanent 280px of chrome on the six boards
+ * here that have no branching at all, pushing `done` off the edge of the
+ * viewport to advertise a state that will never occur.
+ *
+ * Folding it in beside `done` was the alternative and is worse: "we did it" and
+ * "we ruled it out" are exactly the two meanings that must not share a label,
+ * and the design this implements exists because that conflation has already
+ * caused three incidents in this codebase. So it keeps its own column and its
+ * own name, and simply is not drawn until there is something to draw.
+ */
+const HIDDEN_WHEN_EMPTY: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
+	"skipped",
+]);
 
 /** Fallback for a status a newer server knows and this build does not. */
 const UNKNOWN_STYLE: ColumnStyle = {
@@ -133,11 +161,16 @@ export function columnsFor(tasks: TaskItem[]): BoardColumn[] {
 		else buckets.set(task.status, [task]);
 	}
 
-	return [...buckets.entries()].map(([status, columnTasks]) => ({
-		status,
-		label: STATUS_LABEL[status] ?? status,
-		style: COLUMN_STYLE[status] ?? UNKNOWN_STYLE,
-		tasks: columnTasks,
-		unrecognised: COLUMN_STYLE[status] == null,
-	}));
+	return [...buckets.entries()]
+		.filter(
+			([status, columnTasks]) =>
+				columnTasks.length > 0 || !HIDDEN_WHEN_EMPTY.has(status),
+		)
+		.map(([status, columnTasks]) => ({
+			status,
+			label: STATUS_LABEL[status] ?? status,
+			style: COLUMN_STYLE[status] ?? UNKNOWN_STYLE,
+			tasks: columnTasks,
+			unrecognised: COLUMN_STYLE[status] == null,
+		}));
 }
