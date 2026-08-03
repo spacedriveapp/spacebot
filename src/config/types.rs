@@ -197,43 +197,163 @@ impl Default for MetricsConfig {
     }
 }
 
-/// API types supported by LLM providers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The API dialects Spacebot speaks. There are exactly two.
+///
+/// Anthropic's Messages API stays native because three things have no
+/// equivalent in the OpenAI wire format: OAuth (Claude Pro/Max subscription
+/// auth), `cache_control` breakpoints, and adaptive thinking budgets.
+///
+/// Everything else — LiteLLM, vLLM, Ollama, TGI, OpenRouter, a raw OpenAI key,
+/// a gateway behind your VPN — is an OpenAI-compatible `/chat/completions`
+/// endpoint that differs only by `base_url` and headers. Modelling those as
+/// separate variants bought nothing but 20 hardcoded URL constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiType {
-    /// OpenAI Chat Completions API (`/v1/chat/completions`)
-    OpenAiCompletions,
-    /// OpenAI-compatible Chat Completions API (`/chat/completions`)
-    OpenAiChatCompletions,
-    /// Kilo Gateway API (`/chat/completions`) with required gateway headers
-    KiloGateway,
-    /// OpenAI Responses API (`/v1/responses`)
-    OpenAiResponses,
-    /// Anthropic Messages API (https://api.anthropic.com/v1/messages)
+    /// Anthropic Messages API — `{base_url}/v1/messages`.
     Anthropic,
-    /// Google Gemini API (https://generativelanguage.googleapis.com/v1beta/openai/chat/completions)
-    Gemini,
-    /// Azure OpenAI API (https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={version})
-    Azure,
+    /// Any OpenAI-compatible endpoint — `{base_url}/chat/completions`.
+    ///
+    /// `base_url` is the full path prefix, so it must include `/v1` when the
+    /// upstream expects it (`http://localhost:4000/v1`).
+    OpenAiCompatible,
+}
+
+impl ApiType {
+    /// The canonical `api_type` string for this variant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+}
+
+impl std::fmt::Display for ApiType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A parsed `api_type` plus the `base_url` fixup its spelling implies.
+///
+/// Retired `api_type` names are still accepted for one release so existing
+/// deployments keep booting. Three of them (`openai_completions`, `gemini`,
+/// `kilo_gateway`) used to append `/v1/chat/completions` internally while
+/// `openai_chat_completions` appended only `/chat/completions`. That path
+/// suffix was the *only* difference between the variants, so collapsing them
+/// without rewriting `base_url` would silently 404 every existing config.
+#[derive(Debug, Clone)]
+pub struct ApiTypeSpec {
+    pub api_type: ApiType,
+    /// The retired spelling this was written as, if it was a retired spelling.
+    pub legacy_name: Option<String>,
+    /// Whether `base_url` needs `/v1` appended to preserve the old endpoint.
+    pub needs_v1_suffix: bool,
+}
+
+impl ApiTypeSpec {
+    /// Apply the legacy `base_url` fixup, returning the corrected URL and a
+    /// migration warning when one was needed.
+    pub fn migrate_base_url(&self, base_url: &str, provider_id: &str) -> (String, Option<String>) {
+        let Some(legacy) = &self.legacy_name else {
+            return (base_url.to_string(), None);
+        };
+
+        let canonical = self.api_type.as_str();
+        if !self.needs_v1_suffix {
+            return (
+                base_url.to_string(),
+                Some(format!(
+                    "[llm.provider.{provider_id}] api_type = \"{legacy}\" is retired; \
+                     it now behaves as \"{canonical}\". Update your config."
+                )),
+            );
+        }
+
+        let trimmed = base_url.trim_end_matches('/');
+        if trimmed.ends_with("/v1") {
+            return (
+                trimmed.to_string(),
+                Some(format!(
+                    "[llm.provider.{provider_id}] api_type = \"{legacy}\" is retired; \
+                     it now behaves as \"{canonical}\". Update your config."
+                )),
+            );
+        }
+
+        let migrated = format!("{trimmed}/v1");
+        (
+            migrated.clone(),
+            Some(format!(
+                "[llm.provider.{provider_id}] api_type = \"{legacy}\" is retired. \
+                 It used to append `/v1` to base_url for you; \"{canonical}\" does not. \
+                 Using base_url = \"{migrated}\" for this boot — write that into your \
+                 config along with api_type = \"{canonical}\"."
+            )),
+        )
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ApiTypeSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let spec = |api_type, legacy: Option<&str>, needs_v1_suffix| ApiTypeSpec {
+            api_type,
+            legacy_name: legacy.map(str::to_string),
+            needs_v1_suffix,
+        };
+
+        match raw.as_str() {
+            "anthropic" => Ok(spec(ApiType::Anthropic, None, false)),
+            "openai_compatible" => Ok(spec(ApiType::OpenAiCompatible, None, false)),
+
+            // Retired spellings that already meant `{base_url}/chat/completions`.
+            "openai_chat_completions" => Ok(spec(
+                ApiType::OpenAiCompatible,
+                Some("openai_chat_completions"),
+                false,
+            )),
+
+            // Retired spellings that appended `/v1` themselves.
+            "openai_completions" => Ok(spec(
+                ApiType::OpenAiCompatible,
+                Some("openai_completions"),
+                true,
+            )),
+            "gemini" => Ok(spec(ApiType::OpenAiCompatible, Some("gemini"), true)),
+            "kilo_gateway" => Ok(spec(ApiType::OpenAiCompatible, Some("kilo_gateway"), true)),
+
+            // No compatible replacement — these needed bespoke request shapes.
+            "openai_responses" => Err(serde::de::Error::custom(
+                "api_type = \"openai_responses\" has been removed. The Responses API \
+                 (/v1/responses) is no longer implemented. Use api_type = \"openai_compatible\" \
+                 against an endpoint that speaks /chat/completions — LiteLLM will translate \
+                 for you if your upstream only offers Responses.",
+            )),
+            "azure" => Err(serde::de::Error::custom(
+                "api_type = \"azure\" has been removed. Point an OpenAI-compatible provider \
+                 at your deployment instead:\n  \
+                 api_type = \"openai_compatible\"\n  \
+                 base_url = \"https://<resource>.openai.azure.com/openai/deployments/\
+                 <deployment>?api-version=<version>\"\n\
+                 or put LiteLLM in front of Azure, which is the supported path.",
+            )),
+
+            other => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(other),
+                &"\"anthropic\" or \"openai_compatible\"",
+            )),
+        }
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for ApiType {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "openai_completions" => Ok(Self::OpenAiCompletions),
-            "openai_chat_completions" => Ok(Self::OpenAiChatCompletions),
-            "kilo_gateway" => Ok(Self::KiloGateway),
-            "openai_responses" => Ok(Self::OpenAiResponses),
-            "anthropic" => Ok(Self::Anthropic),
-            "gemini" => Ok(Self::Gemini),
-            "azure" => Ok(Self::Azure),
-            other => Err(serde::de::Error::invalid_value(
-                serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", \"gemini\", or \"azure\"",
-            )),
-        }
+        ApiTypeSpec::deserialize(deserializer).map(|spec| spec.api_type)
     }
 }
 
@@ -321,16 +441,12 @@ pub struct ProviderConfig {
     /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
     #[serde(default)]
     pub use_bearer_auth: bool,
-    /// Additional HTTP headers included in requests to this provider.
-    /// Currently applied in `call_openai()` (the `OpenAiCompletions` path).
+    /// Additional HTTP headers included in every request to this provider.
+    ///
+    /// This is the escape hatch that replaced the hardcoded per-provider header
+    /// sets (OpenRouter attribution, Kilo gateway headers, the Kimi user-agent).
     #[serde(default)]
     pub extra_headers: Vec<(String, String)>,
-    /// Azure API version (e.g., "2024-12-01-preview"). Required for Azure providers.
-    #[serde(default)]
-    pub api_version: Option<String>,
-    /// Azure deployment name (e.g., "gpt-4o"). Required for Azure providers.
-    #[serde(default)]
-    pub deployment: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -354,136 +470,28 @@ impl std::fmt::Debug for ProviderConfig {
 }
 
 /// LLM provider credentials (instance-level).
-#[derive(Clone)]
+///
+/// There is exactly one place providers are defined: `[llm.provider.<id>]`.
+/// The 22 `*_key` shorthand fields that used to live here each implied a
+/// hardcoded base URL and API dialect; they were deleted along with the
+/// providers they named. See `docs/(configuration)/config.mdx`.
+#[derive(Clone, Default)]
 pub struct LlmConfig {
-    pub anthropic_key: Option<String>,
-    pub openai_key: Option<String>,
-    pub openrouter_key: Option<String>,
-    pub kilo_key: Option<String>,
-    pub zhipu_key: Option<String>,
-    pub groq_key: Option<String>,
-    pub together_key: Option<String>,
-    pub fireworks_key: Option<String>,
-    pub deepseek_key: Option<String>,
-    pub xai_key: Option<String>,
-    pub mistral_key: Option<String>,
-    pub gemini_key: Option<String>,
-    pub ollama_key: Option<String>,
-    pub ollama_base_url: Option<String>,
-    pub opencode_zen_key: Option<String>,
-    pub opencode_go_key: Option<String>,
-    pub nvidia_key: Option<String>,
-    pub minimax_key: Option<String>,
-    pub minimax_cn_key: Option<String>,
-    pub moonshot_key: Option<String>,
-    pub zai_coding_plan_key: Option<String>,
-    pub github_copilot_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
 
 impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmConfig")
-            .field(
-                "anthropic_key",
-                &self.anthropic_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "openai_key",
-                &self.openai_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "openrouter_key",
-                &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("kilo_key", &self.kilo_key.as_ref().map(|_| "[REDACTED]"))
-            .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
-            .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
-            .field(
-                "together_key",
-                &self.together_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "fireworks_key",
-                &self.fireworks_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "deepseek_key",
-                &self.deepseek_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
-            .field(
-                "mistral_key",
-                &self.mistral_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "gemini_key",
-                &self.gemini_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "ollama_key",
-                &self.ollama_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("ollama_base_url", &self.ollama_base_url)
-            .field(
-                "opencode_zen_key",
-                &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "opencode_go_key",
-                &self.opencode_go_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "nvidia_key",
-                &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "minimax_key",
-                &self.minimax_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "moonshot_key",
-                &self.moonshot_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "zai_coding_plan_key",
-                &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "github_copilot_key",
-                &self.github_copilot_key.as_ref().map(|_| "[REDACTED]"),
-            )
             .field("providers", &self.providers)
             .finish()
     }
 }
 
 impl LlmConfig {
-    /// Check if any provider configuration is set.
+    /// Check if any provider is configured.
     pub fn has_any_key(&self) -> bool {
-        self.anthropic_key.is_some()
-            || self.openai_key.is_some()
-            || self.openrouter_key.is_some()
-            || self.kilo_key.is_some()
-            || self.zhipu_key.is_some()
-            || self.groq_key.is_some()
-            || self.together_key.is_some()
-            || self.fireworks_key.is_some()
-            || self.deepseek_key.is_some()
-            || self.xai_key.is_some()
-            || self.mistral_key.is_some()
-            || self.gemini_key.is_some()
-            || self.ollama_key.is_some()
-            || self.ollama_base_url.is_some()
-            || self.opencode_zen_key.is_some()
-            || self.opencode_go_key.is_some()
-            || self.nvidia_key.is_some()
-            || self.minimax_key.is_some()
-            || self.minimax_cn_key.is_some()
-            || self.moonshot_key.is_some()
-            || self.zai_coding_plan_key.is_some()
-            || self.github_copilot_key.is_some()
-            || !self.providers.is_empty()
+        !self.providers.is_empty()
     }
 }
 
@@ -492,134 +500,16 @@ impl SystemSecrets for LlmConfig {
         "llm"
     }
 
+    /// Provider credentials now live in `[llm.provider.<id>].api_key`, which
+    /// already accepts `secret:` / `env:` references, so there is no flat
+    /// `llm.*_key` field left to auto-migrate into the secret store.
+    ///
+    /// The legacy provider key *names* are still classified as
+    /// `SecretCategory::System` — see `secrets::store::LEGACY_LLM_SECRET_NAMES`.
+    /// Dropping that classification would make a stored `OPENROUTER_API_KEY`
+    /// visible to worker subprocesses.
     fn secret_fields() -> &'static [SecretField] {
-        &[
-            SecretField {
-                toml_key: "anthropic_key",
-                secret_name: "ANTHROPIC_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "anthropic_key",
-                secret_name: "ANTHROPIC_AUTH_TOKEN",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "openai_key",
-                secret_name: "OPENAI_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "openrouter_key",
-                secret_name: "OPENROUTER_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "kilo_key",
-                secret_name: "KILO_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "zhipu_key",
-                secret_name: "ZHIPU_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "groq_key",
-                secret_name: "GROQ_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "together_key",
-                secret_name: "TOGETHER_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "fireworks_key",
-                secret_name: "FIREWORKS_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "deepseek_key",
-                secret_name: "DEEPSEEK_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "xai_key",
-                secret_name: "XAI_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "mistral_key",
-                secret_name: "MISTRAL_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "gemini_key",
-                secret_name: "GEMINI_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "gemini_key",
-                secret_name: "GOOGLE_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "ollama_key",
-                secret_name: "OLLAMA_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "opencode_zen_key",
-                secret_name: "OPENCODE_ZEN_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "opencode_go_key",
-                secret_name: "OPENCODE_GO_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "nvidia_key",
-                secret_name: "NVIDIA_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "minimax_key",
-                secret_name: "MINIMAX_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "minimax_cn_key",
-                secret_name: "MINIMAX_CN_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "moonshot_key",
-                secret_name: "MOONSHOT_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "zai_coding_plan_key",
-                secret_name: "ZAI_CODING_PLAN_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "cerebras_key",
-                secret_name: "CEREBRAS_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "sambanova_key",
-                secret_name: "SAMBANOVA_API_KEY",
-                instance_pattern: None,
-            },
-            SecretField {
-                toml_key: "github_copilot_key",
-                secret_name: "GITHUB_COPILOT_API_KEY",
-                instance_pattern: None,
-            },
-        ]
+        &[]
     }
 }
 

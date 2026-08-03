@@ -48,7 +48,7 @@ You can also manage updates from **Settings → Updates** in the web UI.
 - **Rust 1.85+** — `rustup update stable`
 - **protoc** (protobuf compiler) — required by LanceDB's build scripts. `apt install protobuf-compiler` or `brew install protobuf`
 - **Bun** (optional, for the web UI) — `curl -fsSL https://bun.sh/install | bash`
-- **An LLM API key** — Anthropic, OpenAI, OpenRouter, Kilo Gateway, or OpenCode Go
+- **An LLM API key** — Anthropic, or any OpenAI-compatible endpoint (LiteLLM, vLLM, Ollama, OpenRouter, OpenAI)
 
 ### Install
 
@@ -92,13 +92,18 @@ Just run `spacebot` with no config file and no API key env var set. It will walk
 Create `~/.spacebot/config.toml`:
 
 ```toml
-[llm]
-anthropic_key = "sk-ant-..."
-# or: openrouter_key = "sk-or-..."
-# or: kilo_key = "sk-..."
-# or: opencode_go_key = "..."
-# or: openai_key = "sk-..."
-# Keys also support env references: anthropic_key = "env:ANTHROPIC_API_KEY"
+# Anthropic, native. Required for OAuth, prompt caching, and extended thinking.
+[llm.provider.anthropic]
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key  = "sk-ant-..."          # also accepts "env:VAR" and "secret:NAME"
+
+# Anything else is an OpenAI-compatible endpoint. base_url is the full path
+# prefix, so include /v1 when your server expects it.
+# [llm.provider.litellm]
+# api_type = "openai_compatible"
+# base_url = "http://localhost:4000/v1"
+# api_key  = "env:LITELLM_API_KEY"
 
 [[agents]]
 id = "main"
@@ -174,8 +179,10 @@ mkdir -p ~/.spacebot/dev
 Create `~/.spacebot/dev/config.toml`:
 
 ```toml
-[llm]
-anthropic_key = "env:ANTHROPIC_API_KEY"
+[llm.provider.anthropic]
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key  = "env:ANTHROPIC_API_KEY"
 
 [[agents]]
 id = "main"

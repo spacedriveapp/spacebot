@@ -99,78 +99,21 @@ const KNOWN_VOICE_TRANSCRIPTION_MODELS: &[&str] = &[
     "openrouter/google/gemini-3.1-pro-preview",
 ];
 
-/// Maps models.dev provider IDs to spacebot's internal provider IDs for
-/// providers with direct integrations.
-fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
-    match models_dev_id {
-        "anthropic" => Some("anthropic"),
-        "openai" => Some("openai"),
-        "kilo" => Some("kilo"),
-        "deepseek" => Some("deepseek"),
-        "xai" => Some("xai"),
-        "mistral" => Some("mistral"),
-        "gemini" | "google" => Some("gemini"),
-        "groq" => Some("groq"),
-        "togetherai" => Some("together"),
-        "fireworks-ai" => Some("fireworks"),
-        "zhipuai" => Some("zhipu"),
-        "opencode" => Some("opencode-zen"),
-        "opencode-go" => Some("opencode-go"),
-        "zai-coding-plan" => Some("zai-coding-plan"),
-        "minimax" => Some("minimax"),
-        "moonshotai" => Some("moonshot"),
-        _ => None,
-    }
-}
-
 fn is_known_voice_transcription_model(model_id: &str) -> bool {
     KNOWN_VOICE_TRANSCRIPTION_MODELS.contains(&model_id)
 }
 
-fn as_openai_chatgpt_model(model: &ModelInfo) -> Option<ModelInfo> {
-    if model.provider != "openai" {
-        return None;
-    }
-
-    let model_name = model.id.strip_prefix("openai/")?;
-    Some(ModelInfo {
-        id: format!("openai-chatgpt/{model_name}"),
-        name: model.name.clone(),
-        provider: "openai-chatgpt".into(),
-        context_window: model.context_window,
-        tool_call: model.tool_call,
-        reasoning: model.reasoning,
-        input_audio: model.input_audio,
-    })
-}
-
-/// Models from providers not in models.dev (private/custom endpoints).
-fn extra_models() -> Vec<ModelInfo> {
-    vec![
-        // MiniMax CN - China-specific endpoint, not on models.dev
-        ModelInfo {
-            id: "minimax-cn/MiniMax-M2.5".into(),
-            name: "MiniMax M2.5".into(),
-            provider: "minimax-cn".into(),
-            context_window: Some(200000),
-            tool_call: true,
-            reasoning: true,
-            input_audio: false,
-        },
-        // Moonshot AI (Kimi) - moonshot-v1-8k not on models.dev
-        ModelInfo {
-            id: "moonshot/moonshot-v1-8k".into(),
-            name: "Moonshot V1 8K".into(),
-            provider: "moonshot".into(),
-            context_window: Some(8000),
-            tool_call: false,
-            reasoning: false,
-            input_audio: false,
-        },
-    ]
-}
-
-/// Fetch the full model catalog from models.dev and transform into ModelInfo entries.
+/// Fetch the model catalog from models.dev.
+///
+/// Entries are stored *unprefixed* — `id` is the bare model name as the
+/// upstream API expects it (`claude-sonnet-4`, `gpt-4.1`), and `provider` is
+/// the models.dev provider the entry came from, used only for labelling.
+///
+/// Prefixing happens per configured provider in `get_models`, because a model
+/// name is only meaningful relative to the endpoint being asked. The same
+/// `claude-sonnet-4` string is valid against Anthropic directly, against a
+/// LiteLLM alias, and against a self-hosted gateway — the catalog cannot know
+/// which of your providers serves it, so it offers all of them.
 async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
     let client = reqwest::Client::new();
     let response = client
@@ -181,7 +124,7 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
         .error_for_status()?;
 
     let catalog: HashMap<String, ModelsDevProvider> = response.json().await?;
-    let mut models = Vec::new();
+    let mut seen: HashMap<String, ModelInfo> = HashMap::new();
 
     for (provider_id, provider) in &catalog {
         for (model_id, model) in &provider.models {
@@ -198,22 +141,6 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
                 continue;
             }
 
-            let (routing_id, routing_provider) =
-                if let Some(spacebot_provider) = direct_provider_mapping(provider_id) {
-                    (
-                        format!("{spacebot_provider}/{model_id}"),
-                        spacebot_provider.to_string(),
-                    )
-                } else if provider_id == "openrouter" {
-                    (format!("openrouter/{model_id}"), "openrouter".into())
-                } else {
-                    (
-                        format!("openrouter/{provider_id}/{model_id}"),
-                        "openrouter".into(),
-                    )
-                };
-
-            let context_window = model.limit.as_ref().map(|l| l.context);
             let input_audio = model
                 .modalities
                 .as_ref()
@@ -224,19 +151,29 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
                         .any(|input| input.to_lowercase().contains("audio"))
                 });
 
-            models.push(ModelInfo {
-                id: routing_id,
-                name: model.name.clone(),
-                provider: routing_provider,
-                context_window,
-                tool_call: model.tool_call,
-                reasoning: model.reasoning,
-                input_audio,
-            });
+            // The same model id can appear under several models.dev providers.
+            // Keep the first, but let a later entry upgrade a capability flag —
+            // understating capabilities hides working models from the picker.
+            seen.entry(model_id.clone())
+                .and_modify(|existing| {
+                    existing.tool_call |= model.tool_call;
+                    existing.reasoning |= model.reasoning;
+                    existing.input_audio |= input_audio;
+                })
+                .or_insert_with(|| ModelInfo {
+                    id: model_id.clone(),
+                    name: model.name.clone(),
+                    provider: provider_id.clone(),
+                    context_window: model.limit.as_ref().map(|l| l.context),
+                    tool_call: model.tool_call,
+                    reasoning: model.reasoning,
+                    input_audio,
+                });
         }
     }
 
-    models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.name.cmp(&b.name)));
+    let mut models: Vec<ModelInfo> = seen.into_values().collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     Ok(models)
 }
@@ -264,90 +201,26 @@ pub(super) async fn ensure_models_cache() -> Vec<ModelInfo> {
     }
 }
 
-/// Helper: which providers have keys configured.
-pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str> {
-    let mut providers = Vec::new();
+/// The providers this instance has configured, as `[llm.provider.<id>]` ids.
+///
+/// Reads the resolved config rather than re-parsing TOML by hand, so
+/// env-var-bootstrapped providers (`ANTHROPIC_API_KEY`, `LITELLM_API_KEY`)
+/// show up here too.
+pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<String> {
+    let config_path = config_path.to_path_buf();
+    let config = tokio::task::spawn_blocking(move || {
+        crate::config::Config::load_from_path(&config_path).ok()
+    })
+    .await
+    .ok()
+    .flatten();
 
-    let document = tokio::fs::read_to_string(config_path)
-        .await
-        .ok()
-        .and_then(|content| content.parse::<toml_edit::DocumentMut>().ok());
-
-    let has_key = |key: &str, env_var: &str| {
-        if let Some(doc) = document.as_ref()
-            && let Some(llm) = doc.get("llm")
-            && let Some(val) = llm.get(key)
-            && let Some(s) = val.as_str()
-        {
-            if let Some(var_name) = s.strip_prefix("env:") {
-                return std::env::var(var_name).is_ok();
-            }
-            return !s.is_empty();
-        }
-        std::env::var(env_var).is_ok()
+    let Some(config) = config else {
+        return Vec::new();
     };
 
-    if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
-        providers.push("anthropic");
-    }
-    if has_key("openai_key", "OPENAI_API_KEY") {
-        providers.push("openai");
-    }
-    if config_path
-        .parent()
-        .is_some_and(|instance_dir| crate::openai_auth::credentials_path(instance_dir).exists())
-    {
-        providers.push("openai-chatgpt");
-    }
-    if has_key("openrouter_key", "OPENROUTER_API_KEY") {
-        providers.push("openrouter");
-    }
-    if has_key("kilo_key", "KILO_API_KEY") {
-        providers.push("kilo");
-    }
-    if has_key("zhipu_key", "ZHIPU_API_KEY") {
-        providers.push("zhipu");
-    }
-    if has_key("groq_key", "GROQ_API_KEY") {
-        providers.push("groq");
-    }
-    if has_key("together_key", "TOGETHER_API_KEY") {
-        providers.push("together");
-    }
-    if has_key("fireworks_key", "FIREWORKS_API_KEY") {
-        providers.push("fireworks");
-    }
-    if has_key("deepseek_key", "DEEPSEEK_API_KEY") {
-        providers.push("deepseek");
-    }
-    if has_key("xai_key", "XAI_API_KEY") {
-        providers.push("xai");
-    }
-    if has_key("mistral_key", "MISTRAL_API_KEY") {
-        providers.push("mistral");
-    }
-    if has_key("gemini_key", "GEMINI_API_KEY") {
-        providers.push("gemini");
-    }
-    if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
-        providers.push("opencode-zen");
-    }
-    if has_key("opencode_go_key", "OPENCODE_GO_API_KEY") {
-        providers.push("opencode-go");
-    }
-    if has_key("minimax_key", "MINIMAX_API_KEY") {
-        providers.push("minimax");
-    }
-    if has_key("minimax_cn_key", "MINIMAX_CN_API_KEY") {
-        providers.push("minimax-cn");
-    }
-    if has_key("moonshot_key", "MOONSHOT_API_KEY") {
-        providers.push("moonshot");
-    }
-    if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
-        providers.push("zai-coding-plan");
-    }
-
+    let mut providers: Vec<String> = config.llm.providers.into_keys().collect();
+    providers.sort();
     providers
 }
 
@@ -375,81 +248,53 @@ pub(super) async fn get_models(
         .as_deref()
         .map(str::trim)
         .filter(|provider| !provider.is_empty());
-    let requested_provider_for_catalog = if requested_provider == Some("openai-chatgpt") {
-        Some("openai")
-    } else {
-        requested_provider
-    };
     let requested_capability = query
         .capability
         .as_deref()
         .map(str::trim)
         .filter(|capability| !capability.is_empty());
 
-    let catalog = ensure_models_cache().await;
-    let capability_matches = |model: &ModelInfo| {
-        if let Some(capability) = requested_capability {
-            match capability {
-                "input_audio" => model.input_audio,
-                "voice_transcription" => {
-                    model.input_audio && is_known_voice_transcription_model(&model.id)
-                }
-                _ => true,
-            }
-        } else {
-            true
-        }
+    // Offer the catalog under each configured provider id. A gateway can serve
+    // any upstream model, so the picker cannot narrow this down for you — but
+    // a routing string is only usable if its prefix is a provider you have.
+    let target_providers: Vec<String> = match requested_provider {
+        Some(provider) => vec![provider.to_string()],
+        None => configured,
     };
 
-    let mut models: Vec<ModelInfo> = catalog
-        .iter()
-        .filter(|model| {
-            let provider_match = if let Some(provider) = requested_provider_for_catalog {
-                model.provider == provider
-            } else {
-                configured.contains(&model.provider.as_str())
-            };
-            if !provider_match {
-                return false;
-            }
-            capability_matches(model)
-        })
-        .cloned()
-        .collect();
+    let catalog = ensure_models_cache().await;
+    let mut models = Vec::new();
 
-    if requested_provider == Some("openai-chatgpt") {
-        models = models
-            .into_iter()
-            .filter_map(|model| as_openai_chatgpt_model(&model))
-            .collect();
-    } else if requested_provider.is_none() && configured.contains(&"openai-chatgpt") {
-        let chatgpt_models: Vec<ModelInfo> = catalog
-            .iter()
-            .filter(|model| model.provider == "openai" && capability_matches(model))
-            .filter_map(as_openai_chatgpt_model)
-            .collect();
-        models.extend(chatgpt_models);
-    }
+    for provider in &target_providers {
+        for model in &catalog {
+            let routing_id = format!("{provider}/{}", model.id);
 
-    for model in extra_models() {
-        if let Some(capability) = requested_capability {
-            if capability == "input_audio" && !model.input_audio {
-                continue;
+            if let Some(capability) = requested_capability {
+                let matches = match capability {
+                    "input_audio" => model.input_audio,
+                    "voice_transcription" => {
+                        model.input_audio && is_known_voice_transcription_model(&routing_id)
+                    }
+                    _ => true,
+                };
+                if !matches {
+                    continue;
+                }
             }
-            if capability == "voice_transcription"
-                && (!model.input_audio || !is_known_voice_transcription_model(&model.id))
-            {
-                continue;
-            }
-        }
-        if let Some(provider) = requested_provider {
-            if model.provider == provider {
-                models.push(model);
-            }
-        } else if configured.contains(&model.provider.as_str()) {
-            models.push(model);
+
+            models.push(ModelInfo {
+                id: routing_id,
+                name: model.name.clone(),
+                provider: provider.clone(),
+                context_window: model.context_window,
+                tool_call: model.tool_call,
+                reasoning: model.reasoning,
+                input_audio: model.input_audio,
+            });
         }
     }
+
+    models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.name.cmp(&b.name)));
 
     Ok(Json(ModelsResponse { models }))
 }

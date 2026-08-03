@@ -91,8 +91,10 @@ docker run -d \
 Config values can reference environment variables with `env:VAR_NAME`:
 
 ```toml
-[llm]
-anthropic_key = "env:ANTHROPIC_API_KEY"
+[llm.provider.anthropic]
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key  = "env:ANTHROPIC_API_KEY"
 ```
 
 See [config.md](config.md) for the full config reference.

@@ -18,23 +18,14 @@ pub use permissions::{
     DiscordPermissions, MattermostPermissions, SignalPermissions, SlackPermissions,
     TelegramPermissions, TwitchPermissions,
 };
-pub(crate) use providers::default_provider_config;
+pub(crate) use providers::ANTHROPIC_PROVIDER_BASE_URL;
 pub use runtime::RuntimeConfig;
 pub use types::*;
 pub use watcher::spawn_file_watcher;
 
-// Re-export pub(crate) items that need crate-wide visibility.
-// (GEMINI_PROVIDER_BASE_URL is only used within config submodules, no re-export needed.)
-
 // Make toml_schema types and internal helpers visible to tests in this module.
 #[cfg(test)]
 use load::warn_unknown_config_keys;
-#[cfg(test)]
-use providers::ANTHROPIC_PROVIDER_BASE_URL;
-#[cfg(test)]
-use providers::OPENAI_PROVIDER_BASE_URL;
-#[cfg(test)]
-use providers::OPENROUTER_PROVIDER_BASE_URL;
 #[cfg(test)]
 use toml_schema::*;
 #[cfg(test)]
@@ -90,6 +81,8 @@ mod tests {
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
                 "GITHUB_COPILOT_API_KEY",
+                "LITELLM_API_KEY",
+                "LITELLM_BASE_URL",
             ];
 
             let vars = KEYS
@@ -135,65 +128,150 @@ mod tests {
     }
 
     #[test]
-    fn test_api_type_deserialization() {
-        let toml1 = r#"
+    fn api_type_accepts_the_two_canonical_names() {
+        let parse = |api_type: &str| -> StdResult<TomlProviderConfig, toml::de::Error> {
+            toml::from_str(&format!(
+                "api_type = \"{api_type}\"\nbase_url = \"https://example.com\"\napi_key = \"k\"\n"
+            ))
+        };
+
+        assert_eq!(
+            parse("anthropic").expect("anthropic").api_type.api_type,
+            ApiType::Anthropic
+        );
+        assert_eq!(
+            parse("openai_compatible")
+                .expect("openai_compatible")
+                .api_type
+                .api_type,
+            ApiType::OpenAiCompatible
+        );
+    }
+
+    /// Retired spellings keep parsing for one release. Three of them used to
+    /// append `/v1` internally, so collapsing them without rewriting base_url
+    /// would silently 404 every existing config.
+    #[test]
+    fn retired_api_types_migrate_instead_of_breaking() {
+        let parse = |api_type: &str| -> TomlProviderConfig {
+            toml::from_str(&format!(
+                "api_type = \"{api_type}\"\nbase_url = \"https://gateway.example\"\napi_key = \"k\"\n"
+            ))
+            .unwrap_or_else(|error| panic!("{api_type} should still parse: {error}"))
+        };
+
+        for retired in ["openai_completions", "gemini", "kilo_gateway"] {
+            let config = parse(retired);
+            assert_eq!(config.api_type.api_type, ApiType::OpenAiCompatible);
+            let (base_url, warning) = config
+                .api_type
+                .migrate_base_url(&config.base_url, "gateway");
+            assert_eq!(
+                base_url, "https://gateway.example/v1",
+                "{retired} must keep its /v1 path segment"
+            );
+            assert!(warning.is_some(), "{retired} should warn");
+        }
+
+        // This one already meant `{base_url}/chat/completions`, so the URL is
+        // left alone.
+        let config = parse("openai_chat_completions");
+        assert_eq!(config.api_type.api_type, ApiType::OpenAiCompatible);
+        let (base_url, warning) = config
+            .api_type
+            .migrate_base_url(&config.base_url, "gateway");
+        assert_eq!(base_url, "https://gateway.example");
+        assert!(warning.is_some());
+    }
+
+    /// A config already carrying `/v1` must not end up with `/v1/v1`.
+    #[test]
+    fn retired_api_type_migration_is_idempotent() {
+        let config: TomlProviderConfig = toml::from_str(
+            "api_type = \"openai_completions\"\nbase_url = \"https://host/v1\"\napi_key = \"k\"\n",
+        )
+        .expect("parses");
+        let (base_url, _) = config
+            .api_type
+            .migrate_base_url(&config.base_url, "gateway");
+        assert_eq!(base_url, "https://host/v1");
+    }
+
+    /// End-to-end version of the above: the full config block as the live
+    /// preview and production instances have it on disk must still load, and
+    /// must resolve to the same URL the retired `openai_completions` arm hit.
+    #[test]
+    fn live_deployment_litellm_config_still_loads() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("LITE_LLM_KEY", "test-litellm-key");
+        }
+
+        let toml_source = r#"
+[llm.provider.litellm]
 api_type = "openai_completions"
-base_url = "https://api.openai.com"
-api_key = "test-key"
-"#;
-        let result1: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml1);
-        assert!(result1.is_ok(), "Error: {:?}", result1.err());
-        assert_eq!(result1.unwrap().api_type, ApiType::OpenAiCompletions);
+base_url = "https://litellm.lashwing.dev"
+api_key = "env:LITE_LLM_KEY"
+name = "litellm"
 
-        let toml2 = r#"
-api_type = "openai_chat_completions"
-base_url = "https://api.example.com"
-api_key = "test-key"
-"#;
-        let result2: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml2);
-        assert!(result2.is_ok(), "Error: {:?}", result2.err());
-        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiChatCompletions);
+[defaults.routing]
+channel = "litellm/Deepseek v4 Flash"
 
-        let toml3 = r#"
-api_type = "kilo_gateway"
-base_url = "https://api.kilo.ai/api/gateway"
-api_key = "test-key"
+[[agents]]
+id = "main"
+default = true
 "#;
-        let result3: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml3);
-        assert!(result3.is_ok(), "Error: {:?}", result3.err());
-        assert_eq!(result3.unwrap().api_type, ApiType::KiloGateway);
 
-        let toml4 = r#"
-api_type = "openai_responses"
-base_url = "https://api.openai.com"
-api_key = "test-key"
-"#;
-        let result4: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml4);
-        assert!(result4.is_ok(), "Error: {:?}", result4.err());
-        assert_eq!(result4.unwrap().api_type, ApiType::OpenAiResponses);
+        let parsed: TomlConfig = toml::from_str(toml_source).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("live config must load");
 
-        let toml5 = r#"
-api_type = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key = "test-key"
-"#;
-        let result5: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml5);
-        assert!(result5.is_ok(), "Error: {:?}", result5.err());
-        assert_eq!(result5.unwrap().api_type, ApiType::Anthropic);
+        let provider = config
+            .llm
+            .providers
+            .get("litellm")
+            .expect("litellm provider missing");
+        assert_eq!(provider.api_type, ApiType::OpenAiCompatible);
+        assert_eq!(provider.base_url, "https://litellm.lashwing.dev/v1");
+        assert_eq!(provider.api_key, "test-litellm-key");
+        assert_eq!(provider.name.as_deref(), Some("litellm"));
+
+        unsafe {
+            std::env::remove_var("LITE_LLM_KEY");
+        }
+    }
+
+    /// The preview and production deployments both use this exact shape.
+    #[test]
+    fn litellm_openai_completions_config_keeps_its_endpoint() {
+        let config: TomlProviderConfig = toml::from_str(
+            "api_type = \"openai_completions\"\n             base_url = \"https://litellm.lashwing.dev\"\n             api_key = \"env:LITE_LLM_KEY\"\n",
+        )
+        .expect("existing deployment config must still parse");
+
+        let (base_url, _) = config
+            .api_type
+            .migrate_base_url(&config.base_url, "litellm");
+
+        // stream_openai appends `/chat/completions`, so this resolves to the
+        // same URL the old OpenAiCompletions arm produced.
+        assert_eq!(base_url, "https://litellm.lashwing.dev/v1");
     }
 
     #[test]
-    fn test_api_type_deserialization_invalid() {
-        let toml = r#"api_type = "invalid_type""#;
-        let result: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml);
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert!(error.to_string().contains("invalid value"));
-        assert!(error.to_string().contains("openai_completions"));
-        assert!(error.to_string().contains("openai_chat_completions"));
-        assert!(error.to_string().contains("kilo_gateway"));
-        assert!(error.to_string().contains("openai_responses"));
-        assert!(error.to_string().contains("anthropic"));
+    fn removed_api_types_fail_with_a_migration_message() {
+        for (removed, expected) in [
+            ("azure", "openai_compatible"),
+            ("openai_responses", "openai_compatible"),
+        ] {
+            let result: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(&format!(
+                "api_type = \"{removed}\"\nbase_url = \"https://example.com\"\napi_key = \"k\"\n"
+            ));
+            let error = result.expect_err("{removed} must be rejected").to_string();
+            assert!(error.contains("has been removed"), "{removed}: {error}");
+            assert!(error.contains(expected), "{removed}: {error}");
+        }
     }
 
     #[test]
@@ -207,7 +285,7 @@ name = "Anthropic"
         let result: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml);
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert_eq!(config.api_type, ApiType::Anthropic);
+        assert_eq!(config.api_type.api_type, ApiType::Anthropic);
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert_eq!(config.api_key, "sk-ant-api03-abc123");
         assert_eq!(config.name, Some("Anthropic".to_string()));
@@ -216,14 +294,14 @@ name = "Anthropic"
     #[test]
     fn test_provider_config_deserialization_no_name() {
         let toml = r#"
-api_type = "openai_responses"
+api_type = "openai_compatible"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-proj-xyz789"
 "#;
         let result: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml);
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert_eq!(config.api_type, ApiType::OpenAiResponses);
+        assert_eq!(config.api_type.api_type, ApiType::OpenAiCompatible);
         assert_eq!(config.base_url, "https://api.openai.com/v1");
         assert_eq!(config.api_key, "sk-proj-xyz789");
         assert_eq!(config.name, None);
@@ -236,7 +314,7 @@ api_key = "sk-proj-xyz789"
 
         let toml = r#"
 [llm.provider.MyProv]
-api_type = "openai_responses"
+api_type = "openai_compatible"
 base_url = "https://api.example.com/v1"
 api_key = "env:PATH"
 
@@ -258,7 +336,7 @@ api_key = "static-provider-key"
             .providers
             .get("myprov")
             .expect("myprov provider missing");
-        assert_eq!(my_provider.api_type, ApiType::OpenAiResponses);
+        assert_eq!(my_provider.api_type, ApiType::OpenAiCompatible);
         assert_eq!(my_provider.base_url, "https://api.example.com/v1");
         assert_eq!(
             my_provider.api_key,
@@ -275,138 +353,60 @@ api_key = "static-provider-key"
         assert_eq!(second_provider.api_key, "static-provider-key");
     }
 
+    /// The `llm.<provider>_key` shorthands each implied a hidden base URL and
+    /// API dialect. Silently ignoring them would leave a working-looking config
+    /// with zero providers, so they now fail the load with a migration message.
     #[test]
-    fn test_legacy_llm_keys_auto_migrate_to_providers() {
-        let _lock = env_test_lock().lock();
-        let _env = EnvGuard::new();
-
+    fn retired_llm_shorthand_keys_fail_loudly() {
         let toml = r#"
 [llm]
 anthropic_key = "legacy-anthropic-key"
-openai_key = "legacy-openai-key"
 openrouter_key = "legacy-openrouter-key"
 "#;
 
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
-        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let error = Config::from_toml(parsed, PathBuf::from("."))
+            .expect_err("retired keys must not be silently dropped")
+            .to_string();
 
-        let anthropic_provider = config
-            .llm
-            .providers
-            .get("anthropic")
-            .expect("anthropic provider missing");
-        assert_eq!(anthropic_provider.api_type, ApiType::Anthropic);
-        assert_eq!(anthropic_provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
-        assert_eq!(anthropic_provider.api_key, "legacy-anthropic-key");
-        assert!(
-            anthropic_provider.extra_headers.is_empty(),
-            "anthropic provider should have no extra_headers"
-        );
-
-        let openai_provider = config
-            .llm
-            .providers
-            .get("openai")
-            .expect("openai provider missing");
-        assert_eq!(openai_provider.api_type, ApiType::OpenAiCompletions);
-        assert_eq!(openai_provider.base_url, OPENAI_PROVIDER_BASE_URL);
-        assert_eq!(openai_provider.api_key, "legacy-openai-key");
-        assert!(
-            openai_provider.extra_headers.is_empty(),
-            "openai provider should have no extra_headers"
-        );
-
-        let openrouter_provider = config
-            .llm
-            .providers
-            .get("openrouter")
-            .expect("openrouter provider missing");
-        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
-        assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
-        assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
-        assert_eq!(openrouter_provider.extra_headers.len(), 4);
-        let find_header = |name: &str| -> Option<&str> {
-            openrouter_provider
-                .extra_headers
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
-        assert_eq!(find_header("X-Title"), Some("Spacebot"));
-        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
-        assert_eq!(
-            find_header("X-OpenRouter-Categories"),
-            Some("cloud-agent,cli-agent")
-        );
+        assert!(error.contains("anthropic_key"), "{error}");
+        assert!(error.contains("openrouter_key"), "{error}");
+        assert!(error.contains("llm.provider"), "{error}");
     }
 
+    /// Per-provider headers used to be hardcoded by provider name (OpenRouter
+    /// attribution, Kilo gateway headers). They are now plain config.
     #[test]
-    fn test_explicit_provider_config_takes_priority_over_legacy_key_migration() {
-        let toml = r#"
-[llm]
-openai_key = "legacy-openai-key"
-
-[llm.provider.openai]
-api_type = "openai_responses"
-base_url = "https://custom.openai.example/v1"
-api_key = "explicit-openai-key"
-name = "Custom OpenAI"
-"#;
-
-        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
-        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
-
-        let openai_provider = config
-            .llm
-            .providers
-            .get("openai")
-            .expect("openai provider missing");
-        assert_eq!(openai_provider.api_type, ApiType::OpenAiResponses);
-        assert_eq!(openai_provider.base_url, "https://custom.openai.example/v1");
-        assert_eq!(openai_provider.api_key, "explicit-openai-key");
-        assert_eq!(openai_provider.name.as_deref(), Some("Custom OpenAI"));
-        assert_eq!(config.llm.openai_key.as_deref(), Some("legacy-openai-key"));
-    }
-
-    #[test]
-    fn test_explicit_openrouter_provider_toml_injects_extra_headers() {
+    fn extra_headers_come_from_config_not_from_the_provider_name() {
         let toml = r#"
 [llm.provider.openrouter]
-api_type = "openai_completions"
+api_type = "openai_compatible"
 base_url = "https://openrouter.ai/api/v1"
 api_key = "explicit-openrouter-key"
 name = "My OpenRouter"
+extra_headers = { "HTTP-Referer" = "https://spacebot.sh/", "X-Title" = "Spacebot" }
 "#;
 
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
 
-        let openrouter_provider = config
+        let provider = config
             .llm
             .providers
             .get("openrouter")
             .expect("openrouter provider missing");
-        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
-        assert_eq!(openrouter_provider.base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(openrouter_provider.api_key, "explicit-openrouter-key");
-        assert_eq!(openrouter_provider.name.as_deref(), Some("My OpenRouter"));
-
-        // Verify attribution headers are injected even for explicit TOML config
-        assert_eq!(openrouter_provider.extra_headers.len(), 4);
-        let find_header = |name: &str| -> Option<&str> {
-            openrouter_provider
-                .extra_headers
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
-        assert_eq!(find_header("X-Title"), Some("Spacebot"));
-        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(provider.api_type, ApiType::OpenAiCompatible);
+        assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(provider.name.as_deref(), Some("My OpenRouter"));
         assert_eq!(
-            find_header("X-OpenRouter-Categories"),
-            Some("cloud-agent,cli-agent")
+            provider.extra_headers,
+            vec![
+                (
+                    "HTTP-Referer".to_string(),
+                    "https://spacebot.sh/".to_string()
+                ),
+                ("X-Title".to_string(), "Spacebot".to_string()),
+            ]
         );
     }
 
@@ -447,44 +447,56 @@ name = "My OpenRouter"
         assert!(!Config::needs_onboarding());
     }
 
+    /// `ANTHROPIC_API_KEY` and `LITELLM_API_KEY` are the only two env vars that
+    /// still bootstrap a provider without a config file.
     #[test]
-    fn test_needs_onboarding_false_with_openai_oauth_credentials() {
-        let _lock = env_test_lock().lock();
-        let _env = EnvGuard::new();
-
-        let instance_dir = Config::default_instance_dir();
-        let creds = crate::openai_auth::OAuthCredentials {
-            access_token: "openai-access-token-test".to_string(),
-            refresh_token: "openai-refresh-token-test".to_string(),
-            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
-            account_id: Some("acct_test_123".to_string()),
-        };
-        crate::openai_auth::save_credentials(&instance_dir, &creds)
-            .expect("failed to save OpenAI OAuth credentials");
-
-        assert!(!Config::needs_onboarding());
-    }
-
-    #[test]
-    fn test_load_from_env_populates_legacy_key_and_provider() {
+    fn env_only_boot_registers_anthropic_and_litellm_providers() {
         let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+            std::env::set_var("ANTHROPIC_API_KEY", "env-anthropic-key");
+            std::env::set_var("LITELLM_API_KEY", "env-litellm-key");
+            std::env::set_var("LITELLM_BASE_URL", "https://litellm.example/v1");
         }
 
-        let config = Config::load_from_env(&Config::default_instance_dir())
-            .expect("failed to load config from env");
+        let config = Config::load_from_env(&PathBuf::from(".")).expect("failed to load env config");
 
-        assert_eq!(config.llm.anthropic_key.as_deref(), Some("test-key"));
-        let provider = config
+        let anthropic = config
             .llm
             .providers
             .get("anthropic")
-            .expect("missing anthropic provider from env");
-        assert_eq!(provider.api_key, "test-key");
-        assert_eq!(provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
+            .expect("anthropic provider missing");
+        assert_eq!(anthropic.api_type, ApiType::Anthropic);
+        assert_eq!(anthropic.base_url, ANTHROPIC_PROVIDER_BASE_URL);
+        assert_eq!(anthropic.api_key, "env-anthropic-key");
+
+        let litellm = config
+            .llm
+            .providers
+            .get("litellm")
+            .expect("litellm provider missing");
+        assert_eq!(litellm.api_type, ApiType::OpenAiCompatible);
+        assert_eq!(litellm.base_url, "https://litellm.example/v1");
+        assert_eq!(litellm.api_key, "env-litellm-key");
+    }
+
+    /// A deployment that only sets a retired var must not boot as if it were
+    /// configured — otherwise every LLM call fails at runtime instead.
+    #[test]
+    fn retired_provider_env_vars_do_not_register_a_provider() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "env-openrouter-key");
+        }
+
+        let config = Config::load_from_env(&PathBuf::from(".")).expect("failed to load env config");
+        assert!(
+            config.llm.providers.is_empty(),
+            "OPENROUTER_API_KEY must no longer configure a provider"
+        );
     }
 
     #[test]
@@ -881,81 +893,6 @@ id = "main"
     }
 
     #[test]
-    fn ollama_base_url_registers_provider() {
-        let toml = r#"
-[llm]
-ollama_base_url = "http://localhost:11434"
-
-[[agents]]
-id = "main"
-"#;
-        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
-        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
-        let provider = config
-            .llm
-            .providers
-            .get("ollama")
-            .expect("ollama provider should be registered");
-        assert_eq!(provider.base_url, "http://localhost:11434");
-        assert_eq!(provider.api_type, ApiType::OpenAiCompletions);
-        assert_eq!(provider.api_key, "");
-    }
-
-    #[test]
-    fn ollama_key_alone_registers_provider_with_default_url() {
-        let toml = r#"
-[llm]
-ollama_key = "test-key"
-
-[[agents]]
-id = "main"
-"#;
-        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
-        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
-        let provider = config
-            .llm
-            .providers
-            .get("ollama")
-            .expect("ollama provider should be registered");
-        assert_eq!(provider.base_url, "http://localhost:11434");
-        assert_eq!(provider.api_key, "test-key");
-    }
-
-    #[test]
-    fn ollama_custom_provider_takes_precedence_over_shorthand() {
-        // Custom provider block should win over shorthand keys (or_insert_with semantics)
-        let toml = r#"
-[llm]
-ollama_base_url = "http://localhost:11434"
-
-[llm.providers.ollama]
-api_type = "openai_completions"
-base_url = "http://remote-ollama:11434"
-api_key = ""
-
-[[agents]]
-id = "main"
-"#;
-        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
-        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
-        let provider = config
-            .llm
-            .providers
-            .get("ollama")
-            .expect("ollama provider should be registered");
-        assert_eq!(provider.base_url, "http://remote-ollama:11434");
-    }
-
-    #[test]
-    fn default_provider_config_ollama_uses_base_url_and_empty_api_key() {
-        let provider = default_provider_config("ollama", "http://remote-ollama.local:11434")
-            .expect("ollama provider should be supported");
-        assert_eq!(provider.api_type, ApiType::OpenAiCompletions);
-        assert_eq!(provider.base_url, "http://remote-ollama.local:11434");
-        assert_eq!(provider.api_key, "");
-    }
-
-    #[test]
     fn test_warmup_defaults_applied_when_not_configured() {
         let toml = r#"
 [[agents]]
@@ -1333,153 +1270,6 @@ id = "main"
         assert!(readiness.ready);
         assert_eq!(readiness.reason, None);
         assert_eq!(readiness.bulletin_age_secs, Some(110));
-    }
-
-    /// Verify that every shorthand key field in `LlmConfig` actually registers a provider.
-    ///
-    /// This is a regression test for the recurring "unknown provider: X" bug pattern
-    /// (nvidia #82, ollama #175, deepseek #179). If a new shorthand key is added to
-    /// `LlmConfig` without wiring it up in `load_from_env` / `from_toml`, this test fails.
-    #[test]
-    fn all_shorthand_keys_register_providers_via_toml() {
-        let _lock = env_test_lock().lock();
-        let _env = EnvGuard::new();
-
-        // (toml_key, toml_value, provider_name, expected_base_url_substring)
-        let cases: &[(&str, &str, &str, &str)] = &[
-            ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
-            ("openai_key", "test-key", "openai", "openai.com"),
-            ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
-            ("kilo_key", "test-key", "kilo", "api.kilo.ai"),
-            ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
-            ("minimax_key", "test-key", "minimax", "minimax.io"),
-            ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
-            ("moonshot_key", "test-key", "moonshot", "moonshot.ai"),
-            ("nvidia_key", "test-key", "nvidia", "nvidia.com"),
-            ("fireworks_key", "test-key", "fireworks", "fireworks.ai"),
-            ("zhipu_key", "test-key", "zhipu", "z.ai"),
-            ("gemini_key", "test-key", "gemini", "google"),
-            ("groq_key", "test-key", "groq", "groq.com"),
-            ("together_key", "test-key", "together", "together"),
-            ("xai_key", "test-key", "xai", "x.ai"),
-            ("mistral_key", "test-key", "mistral", "mistral.ai"),
-            (
-                "opencode_zen_key",
-                "test-key",
-                "opencode-zen",
-                "opencode.ai/zen",
-            ),
-            (
-                "opencode_go_key",
-                "test-key",
-                "opencode-go",
-                "opencode.ai/zen/go",
-            ),
-            (
-                "ollama_base_url",
-                "http://localhost:11434",
-                "ollama",
-                "localhost:11434",
-            ),
-        ];
-
-        for (toml_key, toml_value, provider_name, url_substr) in cases {
-            let toml_str =
-                format!("[llm]\n{toml_key} = \"{toml_value}\"\n\n[[agents]]\nid = \"main\"\n");
-
-            let parsed: TomlConfig = toml::from_str(&toml_str)
-                .unwrap_or_else(|e| panic!("failed to parse toml for {toml_key}: {e}"));
-            let config = Config::from_toml(parsed, PathBuf::from("."))
-                .unwrap_or_else(|e| panic!("failed to build config for {toml_key}: {e}"));
-
-            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
-                panic!(
-                    "provider '{provider_name}' not registered when '{toml_key}' is set — \
-                     add an .entry(\"{provider_name}\").or_insert_with(...) block in from_toml()"
-                )
-            });
-
-            assert!(
-                provider.base_url.contains(url_substr),
-                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
-                provider.base_url
-            );
-        }
-    }
-
-    #[test]
-    fn all_shorthand_keys_register_providers_via_env() {
-        let _lock = env_test_lock().lock();
-
-        // (env_var, env_value, provider_name, expected_base_url_substring)
-        let cases: &[(&str, &str, &str, &str)] = &[
-            (
-                "ANTHROPIC_API_KEY",
-                "test-key",
-                "anthropic",
-                "anthropic.com",
-            ),
-            ("OPENAI_API_KEY", "test-key", "openai", "openai.com"),
-            (
-                "OPENROUTER_API_KEY",
-                "test-key",
-                "openrouter",
-                "openrouter.ai",
-            ),
-            ("KILO_API_KEY", "test-key", "kilo", "api.kilo.ai"),
-            ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
-            ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
-            ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
-            ("FIREWORKS_API_KEY", "test-key", "fireworks", "fireworks.ai"),
-            ("ZHIPU_API_KEY", "test-key", "zhipu", "z.ai"),
-            ("GEMINI_API_KEY", "test-key", "gemini", "google"),
-            ("GROQ_API_KEY", "test-key", "groq", "groq.com"),
-            ("TOGETHER_API_KEY", "test-key", "together", "together"),
-            ("XAI_API_KEY", "test-key", "xai", "x.ai"),
-            ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
-            (
-                "OPENCODE_ZEN_API_KEY",
-                "test-key",
-                "opencode-zen",
-                "opencode.ai/zen",
-            ),
-            (
-                "OPENCODE_GO_API_KEY",
-                "test-key",
-                "opencode-go",
-                "opencode.ai/zen/go",
-            ),
-            (
-                "OLLAMA_BASE_URL",
-                "http://localhost:11434",
-                "ollama",
-                "localhost:11434",
-            ),
-        ];
-
-        for (env_var, env_value, provider_name, url_substr) in cases {
-            let guard = EnvGuard::new();
-            unsafe {
-                std::env::set_var(env_var, env_value);
-            }
-
-            let config = Config::load_from_env(&guard.test_dir)
-                .unwrap_or_else(|e| panic!("load_from_env failed for {env_var}: {e}"));
-            drop(guard);
-
-            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
-                panic!(
-                    "provider '{provider_name}' not registered when '{env_var}' is set — \
-                     add an .entry(\"{provider_name}\").or_insert_with(...) block in load_from_env()"
-                )
-            });
-
-            assert!(
-                provider.base_url.contains(url_substr),
-                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
-                provider.base_url
-            );
-        }
     }
 
     // --- Named Messaging Adapter Tests ---

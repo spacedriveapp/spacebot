@@ -1,12 +1,5 @@
 use super::providers::{
-    ANTHROPIC_PROVIDER_BASE_URL, DEEPSEEK_PROVIDER_BASE_URL, FIREWORKS_PROVIDER_BASE_URL,
-    GEMINI_PROVIDER_BASE_URL, GITHUB_COPILOT_DEFAULT_BASE_URL, GROQ_PROVIDER_BASE_URL,
-    KILO_PROVIDER_BASE_URL, MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL,
-    MISTRAL_PROVIDER_BASE_URL, MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL,
-    OLLAMA_PROVIDER_BASE_URL, OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL,
-    OPENCODE_ZEN_PROVIDER_BASE_URL, OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL,
-    XAI_PROVIDER_BASE_URL, ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL,
-    add_shorthand_provider, infer_routing_from_providers, openrouter_extra_headers,
+    ANTHROPIC_PROVIDER_BASE_URL, LITELLM_PROVIDER_BASE_URL, infer_routing_from_providers,
     resolve_routing,
 };
 use super::toml_schema::*;
@@ -112,6 +105,202 @@ pub(super) fn warn_unknown_config_keys(content: &str) {
             );
         }
     }
+}
+
+/// The `llm.*` shorthand keys that used to define a provider, mapped to the
+/// `[llm.provider.*]` block that replaces each one.
+///
+/// Every entry here silently implied a base URL and an API dialect. Deleting
+/// them without a diagnostic would leave a deployment that sets
+/// `llm.openrouter_key` booting with *zero* providers configured — the config
+/// would parse, the daemon would start, and every LLM call would fail with
+/// "unknown provider". Failing at load is the only honest option.
+const RETIRED_LLM_KEYS: &[(&str, &str)] = &[
+    (
+        "anthropic_key",
+        "anthropic (api_type = \"anthropic\", base_url = \"https://api.anthropic.com\")",
+    ),
+    (
+        "deepseek_key",
+        "openai_compatible, base_url = \"https://api.deepseek.com/v1\"",
+    ),
+    (
+        "fireworks_key",
+        "openai_compatible, base_url = \"https://api.fireworks.ai/inference/v1\"",
+    ),
+    (
+        "gemini_key",
+        "openai_compatible, base_url = \"https://generativelanguage.googleapis.com/v1beta/openai\"",
+    ),
+    (
+        "github_copilot_key",
+        "no replacement — GitHub Copilot auth has been removed",
+    ),
+    (
+        "groq_key",
+        "openai_compatible, base_url = \"https://api.groq.com/openai/v1\"",
+    ),
+    (
+        "kilo_key",
+        "openai_compatible, base_url = \"https://api.kilo.ai/api/gateway/v1\"",
+    ),
+    (
+        "minimax_cn_key",
+        "anthropic, base_url = \"https://api.minimaxi.com/anthropic\"",
+    ),
+    (
+        "minimax_key",
+        "anthropic, base_url = \"https://api.minimax.io/anthropic\"",
+    ),
+    (
+        "mistral_key",
+        "openai_compatible, base_url = \"https://api.mistral.ai/v1\"",
+    ),
+    (
+        "moonshot_key",
+        "openai_compatible, base_url = \"https://api.moonshot.ai/v1\"",
+    ),
+    (
+        "nvidia_key",
+        "openai_compatible, base_url = \"https://integrate.api.nvidia.com/v1\"",
+    ),
+    (
+        "ollama_base_url",
+        "openai_compatible, base_url = \"<your ollama host>/v1\"",
+    ),
+    (
+        "ollama_key",
+        "openai_compatible, base_url = \"<your ollama host>/v1\"",
+    ),
+    (
+        "openai_key",
+        "openai_compatible, base_url = \"https://api.openai.com/v1\"",
+    ),
+    (
+        "opencode_go_key",
+        "openai_compatible, base_url = \"https://opencode.ai/zen/go/v1\"",
+    ),
+    (
+        "opencode_zen_key",
+        "openai_compatible, base_url = \"https://opencode.ai/zen/v1\"",
+    ),
+    (
+        "openrouter_key",
+        "openai_compatible, base_url = \"https://openrouter.ai/api/v1\"",
+    ),
+    (
+        "together_key",
+        "openai_compatible, base_url = \"https://api.together.xyz/v1\"",
+    ),
+    (
+        "xai_key",
+        "openai_compatible, base_url = \"https://api.x.ai/v1\"",
+    ),
+    (
+        "zai_coding_plan_key",
+        "openai_compatible, base_url = \"https://api.z.ai/api/coding/paas/v4\"",
+    ),
+    (
+        "zhipu_key",
+        "openai_compatible, base_url = \"https://api.z.ai/api/paas/v4\"",
+    ),
+];
+
+/// Env vars that used to configure a provider and now do nothing.
+///
+/// Warned about rather than rejected: unlike config keys, a stray env var in a
+/// shared shell or CI image is not necessarily this deployment's intent, and
+/// hard-failing on one would be hostile. But a Docker deployment that only sets
+/// `OPENROUTER_API_KEY` gets no LLM at all, so it has to say something.
+const RETIRED_ENV_VARS: &[&str] = &[
+    "DEEPSEEK_API_KEY",
+    "FIREWORKS_API_KEY",
+    "GEMINI_API_KEY",
+    "GITHUB_COPILOT_API_KEY",
+    "GROQ_API_KEY",
+    "KILO_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY",
+    "NVIDIA_API_KEY",
+    "OLLAMA_API_KEY",
+    "OLLAMA_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
+    "XAI_API_KEY",
+    "ZAI_CODING_PLAN_API_KEY",
+    "ZHIPU_API_KEY",
+];
+
+/// Fail the config load if it still uses a retired `llm.<provider>_key` field.
+fn reject_retired_llm_keys(unknown_keys: &[String]) -> Result<()> {
+    let mut retired = Vec::new();
+    let mut unrecognised = Vec::new();
+
+    for key in unknown_keys {
+        match RETIRED_LLM_KEYS
+            .iter()
+            .find(|(retired_key, _)| *retired_key == key.as_str())
+        {
+            Some((_, replacement)) => {
+                retired.push(format!(
+                    "  llm.{key}  ->  [llm.provider.<id>] {replacement}"
+                ));
+            }
+            None => unrecognised.push(key.as_str()),
+        }
+    }
+
+    for key in unrecognised {
+        tracing::warn!(
+            "config.toml contains unknown key `llm.{key}` — it will be ignored. \
+             Providers are defined as [llm.provider.<id>] blocks."
+        );
+    }
+
+    if retired.is_empty() {
+        return Ok(());
+    }
+
+    Err(ConfigError::Invalid(format!(
+        "config.toml uses LLM provider keys that no longer exist. Spacebot now speaks \
+         exactly two APIs: `anthropic` (native Messages API) and `openai_compatible` \
+         (everything else — LiteLLM, vLLM, Ollama, OpenRouter, OpenAI, ...).\n\n\
+         Replace each of these with a [llm.provider.<id>] block:\n\n{}\n\n\
+         Example:\n\n  \
+         [llm.provider.litellm]\n  \
+         api_type = \"openai_compatible\"\n  \
+         base_url = \"http://localhost:4000/v1\"\n  \
+         api_key  = \"secret:LITELLM_API_KEY\"\n\n\
+         Then point [defaults.routing] at `litellm/<model>`.",
+        retired.join("\n")
+    ))
+    .into())
+}
+
+/// Warn about retired provider env vars that are set but no longer read.
+fn report_retired_env_vars() {
+    let set: Vec<&str> = RETIRED_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+        .collect();
+
+    if set.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        "these environment variables no longer configure a provider and are being ignored: {}. \
+         Only ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN (+ ANTHROPIC_BASE_URL) and \
+         LITELLM_API_KEY (+ LITELLM_BASE_URL) bootstrap a provider from the environment. \
+         Everything else needs an explicit [llm.provider.<id>] block in config.toml.",
+        set.join(", ")
+    );
 }
 
 /// Parse response_mode from TOML, with backwards compatibility for listen_only_mode.
@@ -374,36 +563,7 @@ impl Config {
         }
 
         // OAuth credentials count as configured
-        if crate::auth::credentials_path(&instance_dir).exists()
-            || crate::openai_auth::credentials_path(&instance_dir).exists()
-        {
-            return false;
-        }
-
-        // Check if we have any legacy env keys configured
-        let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || std::env::var("OPENAI_API_KEY").is_ok()
-            || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("KILO_API_KEY").is_ok()
-            || std::env::var("ZHIPU_API_KEY").is_ok()
-            || std::env::var("GROQ_API_KEY").is_ok()
-            || std::env::var("TOGETHER_API_KEY").is_ok()
-            || std::env::var("FIREWORKS_API_KEY").is_ok()
-            || std::env::var("DEEPSEEK_API_KEY").is_ok()
-            || std::env::var("XAI_API_KEY").is_ok()
-            || std::env::var("MISTRAL_API_KEY").is_ok()
-            || std::env::var("NVIDIA_API_KEY").is_ok()
-            || std::env::var("OLLAMA_API_KEY").is_ok()
-            || std::env::var("OLLAMA_BASE_URL").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
-            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
-            || std::env::var("MINIMAX_API_KEY").is_ok()
-            || std::env::var("MINIMAX_CN_API_KEY").is_ok()
-            || std::env::var("MOONSHOT_API_KEY").is_ok()
-            || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
-
-        // If we have any legacy keys, no onboarding needed
-        if has_legacy_keys {
+        if crate::auth::credentials_path(&instance_dir).exists() {
             return false;
         }
 
@@ -414,17 +574,12 @@ impl Config {
                 || key.contains("PROVIDER") && key.contains("API_KEY")
         });
 
-        // Also check for specific legacy env vars that can bootstrap
-        let has_legacy_bootstrap_vars = std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
-            || std::env::var("OPENAI_API_KEY").is_ok()
-            || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("KILO_API_KEY").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
-            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
-            || std::env::var("MINIMAX_CN_API_KEY").is_ok();
+        // The two env vars that can bootstrap a working provider on their own.
+        let has_bootstrap_vars = std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+            || std::env::var("LITELLM_API_KEY").is_ok();
 
-        !has_provider_env_vars && !has_legacy_bootstrap_vars
+        !has_provider_env_vars && !has_bootstrap_vars
     }
 
     /// Load configuration from the default config file, falling back to env vars.
@@ -465,434 +620,54 @@ impl Config {
 
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
+        let mut llm = LlmConfig::default();
+
+        // Two env-var pairs bootstrap a provider without a config file. Every
+        // other `*_API_KEY` a deployment might be setting is now inert — see
+        // `report_retired_env_vars`, which says so out loud rather than
+        // starting up with no LLM at all.
+        report_retired_env_vars();
+
         let anthropic_from_auth_token = std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
-        let mut llm = LlmConfig {
-            anthropic_key: std::env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
-            openai_key: std::env::var("OPENAI_API_KEY").ok(),
-            openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
-            kilo_key: std::env::var("KILO_API_KEY").ok(),
-            zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
-            groq_key: std::env::var("GROQ_API_KEY").ok(),
-            together_key: std::env::var("TOGETHER_API_KEY").ok(),
-            fireworks_key: std::env::var("FIREWORKS_API_KEY").ok(),
-            deepseek_key: std::env::var("DEEPSEEK_API_KEY").ok(),
-            xai_key: std::env::var("XAI_API_KEY").ok(),
-            mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
-            gemini_key: std::env::var("GEMINI_API_KEY").ok(),
-            ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
-            ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
-            opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
-            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok(),
-            nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
-            minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
-            minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
-            moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
-            zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
-            github_copilot_key: std::env::var("GITHUB_COPILOT_API_KEY").ok(),
-            providers: HashMap::new(),
-        };
-
-        // Populate providers from env vars (same as from_toml does)
-        if let Some(anthropic_key) = llm.anthropic_key.clone() {
-            let base_url = std::env::var("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
-            llm.providers
-                .entry("anthropic".to_string())
-                .or_insert_with(|| ProviderConfig {
+        if let Some(anthropic_key) = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok())
+        {
+            llm.providers.insert(
+                "anthropic".to_string(),
+                ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url,
+                    base_url: std::env::var("ANTHROPIC_BASE_URL")
+                        .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string()),
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
                     extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
+                },
+            );
         }
 
-        if let Some(openrouter_key) = llm.openrouter_key.clone() {
-            llm.providers
-                .entry("openrouter".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
-                    api_key: openrouter_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: openrouter_extra_headers(),
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "kilo",
-            llm.kilo_key.clone(),
-            ApiType::KiloGateway,
-            KILO_PROVIDER_BASE_URL,
-            Some("Kilo Gateway"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zhipu",
-            llm.zhipu_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZHIPU_PROVIDER_BASE_URL,
-            Some("Z.AI (GLM)"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zai-coding-plan",
-            llm.zai_coding_plan_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZAI_CODING_PLAN_BASE_URL,
-            Some("Z.AI Coding Plan"),
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "opencode-zen",
-            llm.opencode_zen_key.clone(),
-            ApiType::OpenAiCompletions,
-            OPENCODE_ZEN_PROVIDER_BASE_URL,
-            None,
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "opencode-go",
-            llm.opencode_go_key.clone(),
-            ApiType::OpenAiCompletions,
-            OPENCODE_GO_PROVIDER_BASE_URL,
-            None,
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "github-copilot",
-            llm.github_copilot_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            GITHUB_COPILOT_DEFAULT_BASE_URL,
-            Some("GitHub Copilot"),
-            true,
-        );
-
-        if let Some(minimax_key) = llm.minimax_key.clone() {
-            llm.providers
-                .entry("minimax".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_key,
-                    name: None,
+        if let Ok(litellm_key) = std::env::var("LITELLM_API_KEY") {
+            llm.providers.insert(
+                "litellm".to_string(),
+                ProviderConfig {
+                    api_type: ApiType::OpenAiCompatible,
+                    base_url: std::env::var("LITELLM_BASE_URL")
+                        .unwrap_or_else(|_| LITELLM_PROVIDER_BASE_URL.to_string()),
+                    api_key: litellm_key,
+                    name: Some("LiteLLM".to_string()),
                     use_bearer_auth: false,
                     extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
-            llm.providers
-                .entry("minimax-cn".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_cn_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(openai_key) = llm.openai_key.clone() {
-            llm.providers
-                .entry("openai".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: openai_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(openrouter_key) = llm.openrouter_key.clone() {
-            llm.providers
-                .entry("openrouter".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
-                    api_key: openrouter_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: openrouter_extra_headers(),
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "kilo",
-            llm.kilo_key.clone(),
-            ApiType::KiloGateway,
-            KILO_PROVIDER_BASE_URL,
-            Some("Kilo Gateway"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zhipu",
-            llm.zhipu_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZHIPU_PROVIDER_BASE_URL,
-            Some("Z.AI (GLM)"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zai-coding-plan",
-            llm.zai_coding_plan_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZAI_CODING_PLAN_BASE_URL,
-            Some("Z.AI Coding Plan"),
-            false,
-        );
-
-        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
-            llm.providers
-                .entry("opencode-zen".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_zen_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(opencode_go_key) = llm.opencode_go_key.clone() {
-            llm.providers
-                .entry("opencode-go".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_go_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(minimax_key) = llm.minimax_key.clone() {
-            llm.providers
-                .entry("minimax".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
-            llm.providers
-                .entry("minimax-cn".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_cn_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(moonshot_key) = llm.moonshot_key.clone() {
-            llm.providers
-                .entry("moonshot".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
-                    api_key: moonshot_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(nvidia_key) = llm.nvidia_key.clone() {
-            llm.providers
-                .entry("nvidia".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
-                    api_key: nvidia_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(fireworks_key) = llm.fireworks_key.clone() {
-            llm.providers
-                .entry("fireworks".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
-                    api_key: fireworks_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(deepseek_key) = llm.deepseek_key.clone() {
-            llm.providers
-                .entry("deepseek".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
-                    api_key: deepseek_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(gemini_key) = llm.gemini_key.clone() {
-            llm.providers
-                .entry("gemini".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Gemini,
-                    base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
-                    api_key: gemini_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(groq_key) = llm.groq_key.clone() {
-            llm.providers
-                .entry("groq".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
-                    api_key: groq_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(together_key) = llm.together_key.clone() {
-            llm.providers
-                .entry("together".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
-                    api_key: together_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(xai_key) = llm.xai_key.clone() {
-            llm.providers
-                .entry("xai".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: xai_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(mistral_key) = llm.mistral_key.clone() {
-            llm.providers
-                .entry("mistral".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
-                    api_key: mistral_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
-            llm.providers
-                .entry("ollama".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: llm
-                        .ollama_base_url
-                        .clone()
-                        .unwrap_or_else(|| OLLAMA_PROVIDER_BASE_URL.to_string()),
-                    api_key: llm.ollama_key.clone().unwrap_or_default(),
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
+                },
+            );
         }
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
         // Env-only routing: infer from configured providers, then apply env
-        // overrides.  This way users who only set OPENROUTER_API_KEY get
-        // openrouter/* routing instead of the hardcoded anthropic/* default.
+        // overrides.
         let mut routing = infer_routing_from_providers(&llm.providers).unwrap_or_default();
         if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
             routing.channel = model.clone();
@@ -1051,144 +826,10 @@ impl Config {
             }
         }
 
-        let toml_llm_anthropic_key_was_none = toml
-            .llm
-            .anthropic_key
-            .as_deref()
-            .and_then(resolve_env_value)
-            .is_none();
+        reject_retired_llm_keys(&toml.llm.unknown_keys)?;
+        report_retired_env_vars();
 
         let mut llm = LlmConfig {
-            anthropic_key: toml
-                .llm
-                .anthropic_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
-            openai_key: toml
-                .llm
-                .openai_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
-            openrouter_key: toml
-                .llm
-                .openrouter_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
-            kilo_key: std::env::var("KILO_API_KEY")
-                .ok()
-                .or_else(|| toml.llm.kilo_key.as_deref().and_then(resolve_env_value)),
-            zhipu_key: toml
-                .llm
-                .zhipu_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
-            groq_key: toml
-                .llm
-                .groq_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GROQ_API_KEY").ok()),
-            together_key: toml
-                .llm
-                .together_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("TOGETHER_API_KEY").ok()),
-            fireworks_key: toml
-                .llm
-                .fireworks_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("FIREWORKS_API_KEY").ok()),
-            deepseek_key: toml
-                .llm
-                .deepseek_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok()),
-            xai_key: toml
-                .llm
-                .xai_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("XAI_API_KEY").ok()),
-            mistral_key: toml
-                .llm
-                .mistral_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("MISTRAL_API_KEY").ok()),
-            gemini_key: toml
-                .llm
-                .gemini_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GEMINI_API_KEY").ok()),
-            ollama_key: toml
-                .llm
-                .ollama_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("OLLAMA_API_KEY").ok()),
-            ollama_base_url: toml
-                .llm
-                .ollama_base_url
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("OLLAMA_BASE_URL").ok()),
-            opencode_zen_key: toml
-                .llm
-                .opencode_zen_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
-            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok().or_else(|| {
-                toml.llm
-                    .opencode_go_key
-                    .as_deref()
-                    .and_then(resolve_env_value)
-            }),
-            nvidia_key: toml
-                .llm
-                .nvidia_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
-            minimax_key: toml
-                .llm
-                .minimax_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
-            minimax_cn_key: toml
-                .llm
-                .minimax_cn_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("MINIMAX_CN_API_KEY").ok()),
-            moonshot_key: toml
-                .llm
-                .moonshot_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("MOONSHOT_API_KEY").ok()),
-            zai_coding_plan_key: toml
-                .llm
-                .zai_coding_plan_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
-            github_copilot_key: toml
-                .llm
-                .github_copilot_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GITHUB_COPILOT_API_KEY").ok()),
             providers: toml
                 .llm
                 .providers
@@ -1198,321 +839,70 @@ impl Config {
                         anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
                     let normalized_id = provider_id.to_lowercase();
-                    let extra_headers = if normalized_id == "openrouter" {
-                        openrouter_extra_headers()
-                    } else {
-                        vec![]
-                    };
+
+                    // Retired `api_type` spellings used to imply a `/v1` path
+                    // segment. Rewrite base_url so those configs keep hitting
+                    // the same endpoint instead of silently 404ing.
+                    let (base_url, migration_warning) = config
+                        .api_type
+                        .migrate_base_url(&config.base_url, &normalized_id);
+                    if let Some(warning) = migration_warning {
+                        tracing::warn!("{warning}");
+                    }
+
+                    let mut extra_headers: Vec<(String, String)> =
+                        config.extra_headers.into_iter().collect();
+                    // HashMap order is arbitrary; keep headers stable so config
+                    // reloads don't look like changes.
+                    extra_headers.sort();
+
                     Ok((
                         normalized_id,
                         ProviderConfig {
-                            api_type: config.api_type,
-                            base_url: config.base_url,
+                            api_type: config.api_type.api_type,
+                            base_url,
                             api_key,
                             name: config.name,
-                            use_bearer_auth: false,
+                            use_bearer_auth: config.use_bearer_auth,
                             extra_headers,
-                            api_version: config.api_version,
-                            deployment: config.deployment,
                         },
                     ))
                 })
-                .collect::<anyhow::Result<_>>()?,
+                .collect::<Result<HashMap<_, _>>>()?,
         };
 
-        // Detect if the Anthropic key came from ANTHROPIC_AUTH_TOKEN (proxy auth).
-        // In from_toml, the key may come from toml config, ANTHROPIC_API_KEY, or
-        // ANTHROPIC_AUTH_TOKEN (in that priority order). We only set use_bearer_auth
-        // if AUTH_TOKEN was the actual source.
-        let anthropic_from_auth_token = toml_llm_anthropic_key_was_none
-            && std::env::var("ANTHROPIC_API_KEY").is_err()
+        // Env vars still bootstrap a provider when the config file defines none
+        // with that name, so `ANTHROPIC_API_KEY` in a container keeps working.
+        let anthropic_from_auth_token = std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
-
-        if let Some(anthropic_key) = llm.anthropic_key.clone() {
-            let base_url = std::env::var("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
+        if let Some(anthropic_key) = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok())
+        {
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url,
+                    base_url: std::env::var("ANTHROPIC_BASE_URL")
+                        .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string()),
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
                     extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
                 });
         }
 
-        if let Some(openai_key) = llm.openai_key.clone() {
+        if let Ok(litellm_key) = std::env::var("LITELLM_API_KEY") {
             llm.providers
-                .entry("openai".to_string())
+                .entry("litellm".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: openai_key,
-                    name: None,
+                    api_type: ApiType::OpenAiCompatible,
+                    base_url: std::env::var("LITELLM_BASE_URL")
+                        .unwrap_or_else(|_| LITELLM_PROVIDER_BASE_URL.to_string()),
+                    api_key: litellm_key,
+                    name: Some("LiteLLM".to_string()),
                     use_bearer_auth: false,
                     extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(openrouter_key) = llm.openrouter_key.clone() {
-            llm.providers
-                .entry("openrouter".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
-                    api_key: openrouter_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: openrouter_extra_headers(),
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "kilo",
-            llm.kilo_key.clone(),
-            ApiType::KiloGateway,
-            KILO_PROVIDER_BASE_URL,
-            Some("Kilo Gateway"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zhipu",
-            llm.zhipu_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZHIPU_PROVIDER_BASE_URL,
-            Some("Z.AI (GLM)"),
-            false,
-        );
-        add_shorthand_provider(
-            &mut llm.providers,
-            "zai-coding-plan",
-            llm.zai_coding_plan_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            ZAI_CODING_PLAN_BASE_URL,
-            Some("Z.AI Coding Plan"),
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "opencode-zen",
-            llm.opencode_zen_key.clone(),
-            ApiType::OpenAiCompletions,
-            OPENCODE_ZEN_PROVIDER_BASE_URL,
-            None,
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "opencode-go",
-            llm.opencode_go_key.clone(),
-            ApiType::OpenAiCompletions,
-            OPENCODE_GO_PROVIDER_BASE_URL,
-            None,
-            false,
-        );
-
-        add_shorthand_provider(
-            &mut llm.providers,
-            "github-copilot",
-            llm.github_copilot_key.clone(),
-            ApiType::OpenAiChatCompletions,
-            GITHUB_COPILOT_DEFAULT_BASE_URL,
-            Some("GitHub Copilot"),
-            true,
-        );
-
-        if let Some(minimax_key) = llm.minimax_key.clone() {
-            llm.providers
-                .entry("minimax".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
-            llm.providers
-                .entry("minimax-cn".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
-                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
-                    api_key: minimax_cn_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(moonshot_key) = llm.moonshot_key.clone() {
-            llm.providers
-                .entry("moonshot".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
-                    api_key: moonshot_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(nvidia_key) = llm.nvidia_key.clone() {
-            llm.providers
-                .entry("nvidia".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
-                    api_key: nvidia_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(fireworks_key) = llm.fireworks_key.clone() {
-            llm.providers
-                .entry("fireworks".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
-                    api_key: fireworks_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(deepseek_key) = llm.deepseek_key.clone() {
-            llm.providers
-                .entry("deepseek".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
-                    api_key: deepseek_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(gemini_key) = llm.gemini_key.clone() {
-            llm.providers
-                .entry("gemini".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Gemini,
-                    base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
-                    api_key: gemini_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(groq_key) = llm.groq_key.clone() {
-            llm.providers
-                .entry("groq".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
-                    api_key: groq_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(together_key) = llm.together_key.clone() {
-            llm.providers
-                .entry("together".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
-                    api_key: together_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(xai_key) = llm.xai_key.clone() {
-            llm.providers
-                .entry("xai".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: xai_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if let Some(mistral_key) = llm.mistral_key.clone() {
-            llm.providers
-                .entry("mistral".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
-                    api_key: mistral_key,
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
-                });
-        }
-
-        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
-            llm.providers
-                .entry("ollama".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: llm
-                        .ollama_base_url
-                        .clone()
-                        .unwrap_or_else(|| OLLAMA_PROVIDER_BASE_URL.to_string()),
-                    api_key: llm.ollama_key.clone().unwrap_or_default(),
-                    name: None,
-                    use_bearer_auth: false,
-                    extra_headers: vec![],
-                    api_version: None,
-                    deployment: None,
                 });
         }
 

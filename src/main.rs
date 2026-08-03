@@ -1565,9 +1565,7 @@ fn has_provider_credentials(
     llm_config: &spacebot::config::LlmConfig,
     instance_dir: &std::path::Path,
 ) -> bool {
-    llm_config.has_any_key()
-        || spacebot::auth::credentials_path(instance_dir).exists()
-        || spacebot::openai_auth::credentials_path(instance_dir).exists()
+    llm_config.has_any_key() || spacebot::auth::credentials_path(instance_dir).exists()
 }
 
 fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::api::AgentInfo> {

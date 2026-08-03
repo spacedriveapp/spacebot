@@ -1677,38 +1677,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/providers/openai/browser-oauth/start": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["start_openai_browser_oauth"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/providers/openai/browser-oauth/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["openai_browser_oauth_status"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/providers/test-model": {
         parameters: {
             query?: never;
@@ -1736,22 +1704,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["delete_provider"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/providers/{provider}/config": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_provider_config"];
-        put?: never;
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3792,22 +3744,6 @@ export interface components {
         NotificationsResponse: {
             notifications: components["schemas"]["Notification"][];
         };
-        OpenAiOAuthBrowserStartRequest: {
-            model: string;
-        };
-        OpenAiOAuthBrowserStartResponse: {
-            message: string;
-            state?: string | null;
-            success: boolean;
-            user_code?: string | null;
-            verification_url?: string | null;
-        };
-        OpenAiOAuthBrowserStatusResponse: {
-            done: boolean;
-            found: boolean;
-            message?: string | null;
-            success: boolean;
-        };
         OpenCodePermissionsResponse: {
             bash: string;
             edit: string;
@@ -4038,18 +3974,25 @@ export interface components {
             channel_id: string;
             enabled: boolean;
         };
-        ProviderConfigResponse: {
-            api_version?: string | null;
-            base_url?: string | null;
-            deployment?: string | null;
-            message: string;
-            success: boolean;
+        /** @description A configured provider, as reported to the UI. Never includes the API key. */
+        ProviderEntry: {
+            /** @description `"anthropic"` or `"openai_compatible"`. */
+            api_type: string;
+            base_url: string;
+            /** @description Optional human-readable label from `name`. */
+            display_name?: string | null;
+            /**
+             * @description Whether an API key resolves for this provider. False means the block
+             *     exists but its `secret:`/`env:` reference is unresolvable.
+             */
+            has_key: boolean;
+            /** @description Provider id — the prefix in `provider/model` routing strings. */
+            id: string;
         };
         ProviderModelTestRequest: {
             api_key: string;
-            api_version?: string | null;
+            api_type?: string | null;
             base_url?: string | null;
-            deployment?: string | null;
             model: string;
             provider: string;
         };
@@ -4060,37 +4003,18 @@ export interface components {
             sample?: string | null;
             success: boolean;
         };
-        ProviderStatus: {
-            anthropic: boolean;
-            azure: boolean;
-            deepseek: boolean;
-            fireworks: boolean;
-            gemini: boolean;
-            github_copilot: boolean;
-            groq: boolean;
-            kilo: boolean;
-            minimax: boolean;
-            minimax_cn: boolean;
-            mistral: boolean;
-            moonshot: boolean;
-            nvidia: boolean;
-            ollama: boolean;
-            openai: boolean;
-            openai_chatgpt: boolean;
-            opencode_go: boolean;
-            opencode_zen: boolean;
-            openrouter: boolean;
-            together: boolean;
-            xai: boolean;
-            zai_coding_plan: boolean;
-            zhipu: boolean;
-        };
         ProviderUpdateRequest: {
             api_key: string;
-            api_version?: string | null;
+            /** @description `"anthropic"` or `"openai_compatible"`. Defaults to `openai_compatible`. */
+            api_type?: string | null;
+            /** @description Full path prefix. Required unless `api_type` is `anthropic`. */
             base_url?: string | null;
-            deployment?: string | null;
+            /**
+             * @description Routing string to apply to defaults and the default agent, e.g.
+             *     `"litellm/claude-sonnet-4"`. Must be prefixed with `provider`.
+             */
             model: string;
+            /** @description Provider id to create or replace, e.g. `"litellm"`. */
             provider: string;
         };
         ProviderUpdateResponse: {
@@ -4098,8 +4022,13 @@ export interface components {
             success: boolean;
         };
         ProvidersResponse: {
+            /**
+             * @description Whether Anthropic OAuth credentials are on disk (`spacebot auth login`).
+             *     This authenticates the `anthropic` provider without an API key.
+             */
+            anthropic_oauth: boolean;
             has_any: boolean;
-            providers: components["schemas"]["ProviderStatus"];
+            providers: components["schemas"]["ProviderEntry"][];
         };
         PutSecretBody: {
             category?: null | components["schemas"]["SecretCategory"];
@@ -4374,6 +4303,7 @@ export interface components {
              *     actually saw survives a crash and stays readable after upstream changes.
              */
             inputs?: unknown;
+            last_block_kind?: null | components["schemas"]["BlockKind"];
             /**
              * @description Text of the most recent failure, kept on the task so the board can
              *     show why it is parked without joining `task_runs`.
@@ -4406,11 +4336,26 @@ export interface components {
             source_memory_id?: string | null;
             status: components["schemas"]["TaskStatus"];
             subtasks: components["schemas"]["TaskSubtask"][];
+            /**
+             * @description Extra instructions appended to the worker prompt at pickup. Appended,
+             *     never substituted — this is task guidance, not an identity override.
+             */
+            system_prompt?: string | null;
             /** Format: int64 */
             task_number: number;
             title: string;
             updated_at: string;
             worker_id?: string | null;
+            /**
+             * @description The workflow launch this task was compiled from, if any.
+             *
+             *     Plain text rather than a foreign key: a task outlives its template, and
+             *     deleting a workflow must not take the record of work that actually
+             *     happened with it.
+             */
+            workflow_run_id?: string | null;
+            /** @description Which step of that workflow produced this task. */
+            workflow_step_key?: string | null;
             /**
              * @description Worktree to execute in. When set, the worker's working directory is
              *     resolved from it rather than from the repo or project root.
@@ -4801,6 +4746,15 @@ export interface components {
             clear_binding?: boolean;
             complete_subtask?: number | null;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description How many failures this task tolerates before it is parked.
+             *
+             *     Absent leaves it alone; explicit `null` returns it to the instance
+             *     default. Distinguishing those needs the doubly-nested option — a plain
+             *     `Option` cannot express "clear this".
+             */
+            max_retries?: number | null;
             metadata?: unknown;
             priority?: string | null;
             project_id?: string | null;
@@ -9225,65 +9179,6 @@ export interface operations {
             };
         };
     };
-    start_openai_browser_oauth: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["OpenAiOAuthBrowserStartRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpenAiOAuthBrowserStartResponse"];
-                };
-            };
-            /** @description Invalid request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    openai_browser_oauth_status: {
-        parameters: {
-            query: {
-                /** @description OAuth state parameter */
-                state: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpenAiOAuthBrowserStatusResponse"];
-                };
-            };
-            /** @description Invalid request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     test_provider_model: {
         parameters: {
             query?: never;
@@ -9319,7 +9214,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Provider name to delete */
+                /** @description Provider ID to delete */
                 provider: string;
             };
             cookie?: never;
@@ -9340,35 +9235,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Provider not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    get_provider_config: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Provider ID */
-                provider: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProviderConfigResponse"];
-                };
             };
             /** @description Provider not found */
             404: {

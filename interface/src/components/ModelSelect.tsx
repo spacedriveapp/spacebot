@@ -12,28 +12,6 @@ interface ModelSelectProps {
 	capability?: "input_audio" | "voice_transcription";
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-	anthropic: "Anthropic",
-	openrouter: "OpenRouter",
-	kilo: "Kilo Gateway",
-	openai: "OpenAI",
-	"openai-chatgpt": "ChatGPT Plus (OAuth)",
-	deepseek: "DeepSeek",
-	xai: "xAI",
-	mistral: "Mistral",
-	gemini: "Google Gemini",
-	groq: "Groq",
-	together: "Together AI",
-	fireworks: "Fireworks AI",
-	zhipu: "Z.ai (GLM)",
-	ollama: "Ollama",
-	"opencode-zen": "OpenCode Zen",
-	"opencode-go": "OpenCode Go",
-	minimax: "MiniMax",
-	"minimax-cn": "MiniMax CN",
-	"github-copilot": "GitHub Copilot",
-};
-
 function formatContextWindow(tokens: number | null): string {
 	if (!tokens) return "";
 	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -178,7 +156,7 @@ export function ModelSelect({
 						{sortedProviders.map((provider) => (
 							<div key={provider}>
 								<div className="sticky top-0 bg-app-box/95 backdrop-blur-sm px-3 py-1.5 text-xs font-semibold text-ink-dull border-b border-app-line/30">
-									{PROVIDER_LABELS[provider] ?? provider}
+									{provider}
 								</div>
 								{grouped[provider].map((model) => (
 									<button

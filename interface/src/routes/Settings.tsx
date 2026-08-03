@@ -1,4 +1,4 @@
-import {useState, useEffect, useRef} from "react";
+import {useState, useEffect} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api} from "@/api/client";
 import {
@@ -14,7 +14,7 @@ import {
 import {SettingSidebarButton} from "@/ui/SettingSidebarButton";
 import {useSearch, useNavigate} from "@tanstack/react-router";
 import {ModelSelect} from "@/components/ModelSelect";
-import {copyText} from "@/lib/clipboard";
+import {ProviderIcon} from "@/lib/providerIcons";
 import {
 	InstanceSection,
 	AppearanceSection,
@@ -28,10 +28,10 @@ import {
 	ChangelogSection,
 	ConfigFileSection,
 	ProviderCard,
-	ChatGptOAuthDialog,
 	SECTIONS,
-	PROVIDERS,
-	CHATGPT_OAUTH_DEFAULT_MODEL,
+	API_TYPES,
+	DEFAULT_NEW_PROVIDER,
+	type ApiTypeId,
 	type SectionId,
 } from "@/components/settings";
 
@@ -52,7 +52,14 @@ export function Settings() {
 		setActiveSection(section);
 		navigate({to: "/settings", search: {tab: section}});
 	};
+	// `editingProvider` holds the id being edited, or "" for a brand-new one —
+	// null means the dialog is closed.
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
+	const [providerIdInput, setProviderIdInput] = useState("");
+	const [apiTypeInput, setApiTypeInput] = useState<ApiTypeId>(
+		DEFAULT_NEW_PROVIDER.apiType,
+	);
+	const [baseUrlInput, setBaseUrlInput] = useState("");
 	const [keyInput, setKeyInput] = useState("");
 	const [modelInput, setModelInput] = useState("");
 	const [testedSignature, setTestedSignature] = useState<string | null>(null);
@@ -61,27 +68,11 @@ export function Settings() {
 		message: string;
 		sample?: string | null;
 	} | null>(null);
-	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] =
-		useState(false);
-	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
-		text: string;
-		type: "success" | "error";
-	} | null>(null);
-	const [openAiOAuthDialogOpen, setOpenAiOAuthDialogOpen] = useState(false);
-	const [deviceCodeInfo, setDeviceCodeInfo] = useState<{
-		userCode: string;
-		verificationUrl: string;
-	} | null>(null);
-	const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
 	} | null>(null);
 
-	const [azureBaseUrl, setAzureBaseUrl] = useState("");
-	const [azureApiVersion, setAzureApiVersion] = useState("");
-	const [azureDeployment, setAzureDeployment] = useState("");
-	const fetchAbortControllerRef = useRef<AbortController | null>(null);
 
 	// Fetch providers data (only when on providers tab)
 	const {data, isLoading} = useQuery({
@@ -109,35 +100,22 @@ export function Settings() {
 			provider,
 			apiKey,
 			model,
+			apiType,
 			baseUrl,
-			apiVersion,
-			deployment,
 		}: {
 			provider: string;
 			apiKey: string;
 			model: string;
+			apiType: string;
 			baseUrl?: string;
-			apiVersion?: string;
-			deployment?: string;
-		}) =>
-			api.updateProvider(
-				provider,
-				apiKey,
-				model,
-				baseUrl,
-				apiVersion,
-				deployment,
-			),
+		}) => api.updateProvider(provider, apiKey, model, apiType, baseUrl),
 		onSuccess: (result) => {
 			if (result.success) {
-				setEditingProvider(null);
-				setKeyInput("");
-				setModelInput("");
-				setTestedSignature(null);
-				setTestResult(null);
+				handleClose();
 				setMessage({text: result.message, type: "success"});
 				queryClient.invalidateQueries({queryKey: ["providers"]});
-				// Agents will auto-start on the backend, refetch agent list after a short delay
+				queryClient.invalidateQueries({queryKey: ["models"]});
+				// Agents auto-start on the backend; refetch after a short delay.
 				setTimeout(() => {
 					queryClient.invalidateQueries({queryKey: ["agents"]});
 					queryClient.invalidateQueries({queryKey: ["overview"]});
@@ -156,29 +134,15 @@ export function Settings() {
 			provider,
 			apiKey,
 			model,
+			apiType,
 			baseUrl,
-			apiVersion,
-			deployment,
 		}: {
 			provider: string;
 			apiKey: string;
 			model: string;
+			apiType: string;
 			baseUrl?: string;
-			apiVersion?: string;
-			deployment?: string;
-		}) =>
-			api.testProviderModel(
-				provider,
-				apiKey,
-				model,
-				baseUrl,
-				apiVersion,
-				deployment,
-			),
-	});
-	const startOpenAiBrowserOAuthMutation = useMutation({
-		mutationFn: (params: {model: string}) =>
-			api.startOpenAiOAuthBrowser(params),
+		}) => api.testProviderModel(provider, apiKey, model, apiType, baseUrl),
 	});
 
 	const removeMutation = useMutation({
@@ -187,6 +151,7 @@ export function Settings() {
 			if (result.success) {
 				setMessage({text: result.message, type: "success"});
 				queryClient.invalidateQueries({queryKey: ["providers"]});
+				queryClient.invalidateQueries({queryKey: ["models"]});
 			} else {
 				setMessage({text: result.message, type: "error"});
 			}
@@ -196,88 +161,62 @@ export function Settings() {
 		},
 	});
 
-	const editingProviderData = PROVIDERS.find((p) => p.id === editingProvider);
+	const providers = data?.providers ?? [];
+	const apiTypeMeta =
+		API_TYPES.find((entry) => entry.id === apiTypeInput) ?? API_TYPES[0];
+	const normalizedProviderId = providerIdInput.trim().toLowerCase();
 
-	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${editingProvider === "azure" ? azureDeployment.trim() : modelInput.trim()}`;
+	// Re-testing is only skippable when nothing that affects the request has
+	// changed — a verified badge over a different base URL is a lie.
+	const currentSignature = [
+		normalizedProviderId,
+		apiTypeInput,
+		baseUrlInput.trim(),
+		keyInput.trim(),
+		modelInput.trim(),
+	].join("|");
 
-	const oauthAutoStartRef = useRef(false);
-	const oauthAbortRef = useRef<AbortController | null>(null);
+	const buildTestArgs = () => ({
+		provider: normalizedProviderId,
+		apiKey: keyInput.trim(),
+		model: modelInput.trim(),
+		apiType: apiTypeInput,
+		baseUrl: baseUrlInput.trim() || undefined,
+	});
+
+	const validationError = (): string | null => {
+		if (!normalizedProviderId) return "Provider name is required";
+		if (normalizedProviderId.includes("/") || /\s/.test(normalizedProviderId)) {
+			return "Provider name cannot contain '/' or whitespace";
+		}
+		if (apiTypeInput === "openai_compatible" && !baseUrlInput.trim()) {
+			return "Base URL is required for OpenAI-compatible providers";
+		}
+		if (!modelInput.trim()) return "Model is required";
+		if (!modelInput.trim().startsWith(`${normalizedProviderId}/`)) {
+			return `Model must be prefixed with the provider name, e.g. ${normalizedProviderId}/claude-sonnet-4`;
+		}
+		return null;
+	};
 
 	const handleTestModel = async (): Promise<boolean> => {
-		if (!editingProvider || !modelInput.trim()) return false;
-
-		if (editingProvider === "azure") {
-			if (!keyInput.trim()) {
-				setTestResult({
-					success: false,
-					message: "API key is required for Azure OpenAI",
-				});
-				return false;
-			}
-			if (!azureBaseUrl.trim()) {
-				setTestResult({
-					success: false,
-					message: "Base URL is required for Azure OpenAI",
-				});
-				return false;
-			}
-			if (!azureApiVersion.trim()) {
-				setTestResult({
-					success: false,
-					message: "API Version is required for Azure OpenAI",
-				});
-				return false;
-			}
-			if (!azureDeployment.trim()) {
-				setTestResult({
-					success: false,
-					message: "Deployment Name is required for Azure OpenAI",
-				});
-				return false;
-			}
-			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, "");
-			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
-				setTestResult({
-					success: false,
-					message:
-						"Base URL must end with '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)",
-				});
-				return false;
-			}
+		const invalid = validationError();
+		if (invalid) {
+			setTestResult({success: false, message: invalid});
+			return false;
 		}
 
 		setMessage(null);
 		setTestResult(null);
 		try {
-			const azureModel =
-				editingProvider === "azure"
-					? `azure/${azureDeployment.trim()}`
-					: modelInput.trim();
-			const result = await testModelMutation.mutateAsync({
-				provider: editingProvider,
-				apiKey: keyInput.trim(),
-				model: azureModel,
-				baseUrl:
-					editingProvider === "azure"
-						? azureBaseUrl.trim().replace(/\/+$/, "")
-						: undefined,
-				apiVersion:
-					editingProvider === "azure" ? azureApiVersion.trim() : undefined,
-				deployment:
-					editingProvider === "azure" ? azureDeployment.trim() : undefined,
-			});
+			const result = await testModelMutation.mutateAsync(buildTestArgs());
 			setTestResult({
 				success: result.success,
 				message: result.message,
 				sample: result.sample,
 			});
-			if (result.success) {
-				setTestedSignature(currentSignature);
-				return true;
-			} else {
-				setTestedSignature(null);
-				return false;
-			}
+			setTestedSignature(result.success ? currentSignature : null);
+			return result.success;
 		} catch (error: any) {
 			setTestResult({success: false, message: `Failed: ${error.message}`});
 			setTestedSignature(null);
@@ -286,45 +225,10 @@ export function Settings() {
 	};
 
 	const handleSave = async () => {
-		if (!editingProvider || !modelInput.trim()) return;
-
-		if (editingProvider === "azure") {
-			if (!keyInput.trim()) {
-				setMessage({
-					text: "API key is required for Azure OpenAI",
-					type: "error",
-				});
-				return;
-			}
-			if (!azureBaseUrl.trim()) {
-				setMessage({
-					text: "Base URL is required for Azure OpenAI",
-					type: "error",
-				});
-				return;
-			}
-			if (!azureApiVersion.trim()) {
-				setMessage({
-					text: "API Version is required for Azure OpenAI",
-					type: "error",
-				});
-				return;
-			}
-			if (!azureDeployment.trim()) {
-				setMessage({
-					text: "Deployment Name is required for Azure OpenAI",
-					type: "error",
-				});
-				return;
-			}
-			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, "");
-			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
-				setMessage({
-					text: "Base URL must end with '.openai.azure.com'",
-					type: "error",
-				});
-				return;
-			}
+		const invalid = validationError();
+		if (invalid) {
+			setMessage({text: invalid, type: "error"});
+			return;
 		}
 
 		if (testedSignature !== currentSignature) {
@@ -332,191 +236,48 @@ export function Settings() {
 			if (!testPassed) return;
 		}
 
-		if (editingProvider === "azure") {
-			const azureModel = `azure/${azureDeployment.trim()}`;
-			updateMutation.mutate({
-				provider: editingProvider,
-				apiKey: keyInput.trim(),
-				model: azureModel,
-				baseUrl: azureBaseUrl.trim().replace(/\/+$/, ""),
-				apiVersion: azureApiVersion.trim(),
-				deployment: azureDeployment.trim(),
-			});
-		} else {
-			updateMutation.mutate({
-				provider: editingProvider,
-				apiKey: keyInput.trim(),
-				model: modelInput.trim(),
-			});
-		}
-	};
-
-	const monitorOpenAiBrowserOAuth = async (
-		stateToken: string,
-		signal: AbortSignal,
-	) => {
-		setIsPollingOpenAiBrowserOAuth(true);
-		setOpenAiBrowserOAuthMessage(null);
-		try {
-			for (let attempt = 0; attempt < 360; attempt += 1) {
-				if (signal.aborted) return;
-				const status = await api.openAiOAuthBrowserStatus(stateToken);
-				if (signal.aborted) return;
-				if (status.done) {
-					setDeviceCodeInfo(null);
-					setDeviceCodeCopied(false);
-					if (status.success) {
-						setOpenAiBrowserOAuthMessage({
-							text: status.message || "ChatGPT OAuth configured.",
-							type: "success",
-						});
-						queryClient.invalidateQueries({queryKey: ["providers"]});
-						setTimeout(() => {
-							queryClient.invalidateQueries({queryKey: ["agents"]});
-							queryClient.invalidateQueries({queryKey: ["overview"]});
-						}, 3000);
-					} else {
-						setOpenAiBrowserOAuthMessage({
-							text: status.message || "Sign-in failed.",
-							type: "error",
-						});
-					}
-					return;
-				}
-				await new Promise((resolve) => {
-					const onAbort = () => {
-						clearTimeout(timer);
-						resolve(undefined);
-					};
-					const timer = setTimeout(() => {
-						signal.removeEventListener("abort", onAbort);
-						resolve(undefined);
-					}, 2000);
-					signal.addEventListener("abort", onAbort, {once: true});
-				});
-			}
-			if (signal.aborted) return;
-			setDeviceCodeInfo(null);
-			setDeviceCodeCopied(false);
-			setOpenAiBrowserOAuthMessage({
-				text: "Sign-in timed out. Please try again.",
-				type: "error",
-			});
-		} catch (error: any) {
-			if (signal.aborted) return;
-			setDeviceCodeInfo(null);
-			setDeviceCodeCopied(false);
-			setOpenAiBrowserOAuthMessage({
-				text: `Failed to verify sign-in: ${error.message}`,
-				type: "error",
-			});
-		} finally {
-			setIsPollingOpenAiBrowserOAuth(false);
-		}
-	};
-
-	const handleStartChatGptOAuth = async () => {
-		setOpenAiBrowserOAuthMessage(null);
-		setDeviceCodeInfo(null);
-		setDeviceCodeCopied(false);
-		try {
-			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
-				model: CHATGPT_OAUTH_DEFAULT_MODEL,
-			});
-			if (
-				!result.success ||
-				!result.user_code ||
-				!result.verification_url ||
-				!result.state
-			) {
-				setOpenAiBrowserOAuthMessage({
-					text: result.message || "Failed to start device sign-in",
-					type: "error",
-				});
-				return;
-			}
-
-			oauthAbortRef.current?.abort();
-			const abort = new AbortController();
-			oauthAbortRef.current = abort;
-
-			setDeviceCodeInfo({
-				userCode: result.user_code,
-				verificationUrl: result.verification_url,
-			});
-			void monitorOpenAiBrowserOAuth(result.state, abort.signal);
-		} catch (error: any) {
-			setOpenAiBrowserOAuthMessage({
-				text: `Failed: ${error.message}`,
-				type: "error",
-			});
-		}
-	};
-
-	useEffect(() => {
-		if (!openAiOAuthDialogOpen) {
-			oauthAutoStartRef.current = false;
-			oauthAbortRef.current?.abort();
-			oauthAbortRef.current = null;
-			setDeviceCodeInfo(null);
-			setDeviceCodeCopied(false);
-			setOpenAiBrowserOAuthMessage(null);
-			setIsPollingOpenAiBrowserOAuth(false);
-			return;
-		}
-
-		if (oauthAutoStartRef.current) return;
-		oauthAutoStartRef.current = true;
-		void handleStartChatGptOAuth();
-	}, [openAiOAuthDialogOpen]);
-
-	const handleCopyDeviceCode = async () => {
-		if (!deviceCodeInfo) return;
-		try {
-			// `copyText` owns the secure-context fallback that used to be
-			// duplicated here, and reports whether the copy actually landed —
-			// which the old branch could not, so a silent failure looked like a
-			// success and the user pasted nothing.
-			if (!(await copyText(deviceCodeInfo.userCode))) {
-				throw new Error("the browser refused the copy");
-			}
-			setDeviceCodeCopied(true);
-		} catch (error: any) {
-			setOpenAiBrowserOAuthMessage({
-				text: `Failed to copy code: ${error.message}`,
-				type: "error",
-			});
-		}
-	};
-
-	const handleOpenDeviceLogin = () => {
-		if (!deviceCodeInfo || !deviceCodeCopied) return;
-		window.open(
-			deviceCodeInfo.verificationUrl,
-			"spacebot-openai-device",
-			"popup=true,width=780,height=960,noopener,noreferrer",
-		);
+		updateMutation.mutate(buildTestArgs());
 	};
 
 	const handleClose = () => {
-		fetchAbortControllerRef.current?.abort();
 		setEditingProvider(null);
+		setProviderIdInput("");
+		setBaseUrlInput("");
 		setKeyInput("");
 		setModelInput("");
 		setTestedSignature(null);
 		setTestResult(null);
-		setAzureBaseUrl("");
-		setAzureApiVersion("");
-		setAzureDeployment("");
 	};
 
-	const isConfigured = (providerId: string): boolean => {
-		if (!data) return false;
-		const statusKey = providerId.replace(
-			/-/g,
-			"_",
-		) as keyof typeof data.providers;
-		return data.providers[statusKey] ?? false;
+	const openNewProviderDialog = () => {
+		setEditingProvider("");
+		setProviderIdInput(DEFAULT_NEW_PROVIDER.id);
+		setApiTypeInput(DEFAULT_NEW_PROVIDER.apiType);
+		setBaseUrlInput(DEFAULT_NEW_PROVIDER.baseUrl);
+		setKeyInput("");
+		setModelInput("");
+		setTestedSignature(null);
+		setTestResult(null);
+		setMessage(null);
+	};
+
+	const openEditProviderDialog = (provider: {
+		id: string;
+		api_type: string;
+		base_url: string;
+	}) => {
+		setEditingProvider(provider.id);
+		setProviderIdInput(provider.id);
+		setApiTypeInput(
+			provider.api_type === "anthropic" ? "anthropic" : "openai_compatible",
+		);
+		setBaseUrlInput(provider.base_url);
+		// Never prefill a credential — the API deliberately never returns one.
+		setKeyInput("");
+		setModelInput("");
+		setTestedSignature(null);
+		setTestResult(null);
+		setMessage(null);
 	};
 
 	return (
@@ -559,16 +320,20 @@ export function Settings() {
 									LLM Providers
 								</h2>
 								<p className="mt-1 text-sm text-ink-dull">
-									Configure credentials/endpoints for LLM providers. At least
-									one provider is required for agents to function.
+									A provider is an endpoint plus a credential. Spacebot speaks
+									two APIs: Anthropic's Messages API natively, and
+									OpenAI-compatible <code>/chat/completions</code> for everything
+									else. At least one provider is required for agents to function.
 								</p>
 							</div>
 
 							<div className="mb-4 rounded-md border border-app-line bg-app-dark-box/20 px-4 py-3">
 								<p className="text-sm text-ink-faint">
-									When you add a provider, choose a model and run a completion
-									test before saving. Saving applies that model to all five
-									default routing roles and to your default agent.
+									The name you give a provider becomes its routing prefix, so a
+									provider called <code>litellm</code> serves models as{" "}
+									<code>litellm/&lt;model&gt;</code>. Saving runs a completion
+									test, then applies that model to all five default routing roles
+									and to your default agent.
 								</p>
 							</div>
 
@@ -579,110 +344,111 @@ export function Settings() {
 								</div>
 							) : (
 								<div className="flex flex-col gap-3">
-									{PROVIDERS.map((provider) => [
+									{data?.anthropic_oauth && (
+										<div className="rounded-lg border border-app-line bg-app-box p-4">
+											<div className="flex items-center gap-3">
+												<ProviderIcon provider="anthropic" size={32} />
+												<div className="flex-1">
+													<div className="flex items-center gap-2">
+														<span className="text-sm font-medium text-ink">
+															Anthropic OAuth
+														</span>
+														<span className="h-2 w-2 rounded-full bg-green-400" />
+													</div>
+													<p className="mt-0.5 text-sm text-ink-dull">
+														Signed in with a Claude Pro/Max subscription via{" "}
+														<code>spacebot auth login</code>. This overrides the{" "}
+														<code>anthropic</code> provider's API key.
+													</p>
+												</div>
+												<Button
+													onClick={() =>
+														removeMutation.mutate("anthropic-oauth")
+													}
+													variant="outline"
+													size="md"
+													loading={removeMutation.isPending}
+												>
+													Sign out
+												</Button>
+											</div>
+										</div>
+									)}
+
+									{providers.map((provider) => (
 										<ProviderCard
 											key={provider.id}
 											provider={provider.id}
-											name={provider.name}
-											description={provider.description}
-											configured={isConfigured(provider.id)}
-											defaultModel={provider.defaultModel}
-											onEdit={() => {
-												setEditingProvider(provider.id);
-												setKeyInput("");
-												setModelInput(provider.defaultModel ?? "");
-												setTestedSignature(null);
-												setTestResult(null);
-												setMessage(null);
-												if (provider.id === "azure") {
-													// Reset Azure fields before hydrating
-													setAzureBaseUrl("");
-													setAzureApiVersion("");
-													setAzureDeployment("");
-
-													// Cancel previous request
-													fetchAbortControllerRef.current?.abort();
-
-													// Create new abort controller
-													const abortController = new AbortController();
-													fetchAbortControllerRef.current = abortController;
-
-													api
-														.getProviderConfig("azure", {
-															signal: abortController.signal,
-														})
-														.then((result) => {
-															// Check if aborted
-															if (abortController.signal.aborted) return;
-															if (!result.success) return;
-
-															setAzureBaseUrl(result.base_url ?? "");
-															setAzureApiVersion(result.api_version ?? "");
-															const deployment = result.deployment ?? "";
-															setAzureDeployment(deployment);
-															if (deployment) {
-																setModelInput(`azure/${deployment}`);
-															}
-														})
-														.catch((error) => {
-															if (error.name === "AbortError") return;
-															console.error(
-																"Failed to fetch Azure config:",
-																error,
-															);
-														});
-												}
-											}}
+											apiType={provider.api_type}
+											baseUrl={provider.base_url}
+											displayName={provider.display_name}
+											hasKey={provider.has_key}
+											onEdit={() => openEditProviderDialog(provider)}
 											onRemove={() => removeMutation.mutate(provider.id)}
 											removing={removeMutation.isPending}
-										/>,
-										provider.id === "openai" ? (
-											<ProviderCard
-												key="openai-chatgpt"
-												provider="openai-chatgpt"
-												name="ChatGPT Plus (OAuth)"
-												description="Sign in with your ChatGPT Plus account using a device code."
-												configured={isConfigured("openai-chatgpt")}
-												defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
-												onEdit={() => setOpenAiOAuthDialogOpen(true)}
-												onRemove={() => removeMutation.mutate("openai-chatgpt")}
-												removing={removeMutation.isPending}
-												actionLabel="Sign in"
-												showRemove={isConfigured("openai-chatgpt")}
-											/>
-										) : null,
-									])}
+										/>
+									))}
+
+									{providers.length === 0 && !data?.anthropic_oauth && (
+										<div className="rounded-lg border border-dashed border-app-line px-4 py-8 text-center text-sm text-ink-faint">
+											No providers configured yet.
+										</div>
+									)}
+
+									<Button
+										onClick={openNewProviderDialog}
+										variant="outline"
+										size="md"
+										className="self-start"
+									>
+										Add provider
+									</Button>
+								</div>
+							)}
+
+							{message && !editingProvider && (
+								<div
+									className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+										message.type === "success"
+											? "border-green-500/20 bg-green-500/10 text-green-400"
+											: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
 								</div>
 							)}
 
 							{/* Info note */}
 							<div className="mt-6 rounded-md border border-app-line bg-app-dark-box/20 px-4 py-3">
 								<p className="text-sm text-ink-faint">
-									Provider values are written to{" "}
+									Providers are written as{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										[llm.provider.&lt;id&gt;]
+									</code>{" "}
+									blocks in{" "}
 									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
 										config.toml
-									</code>{" "}
-									in your instance directory. You can also set them via
-									environment variables (
+									</code>
+									. Two environment variable pairs also bootstrap one without a
+									config file:{" "}
 									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
 										ANTHROPIC_API_KEY
+									</code>{" "}
+									/{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										ANTHROPIC_BASE_URL
+									</code>{" "}
+									and{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										LITELLM_API_KEY
+									</code>{" "}
+									/{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										LITELLM_BASE_URL
 									</code>
-									, etc.).
+									.
 								</p>
 							</div>
-
-							<ChatGptOAuthDialog
-								open={openAiOAuthDialogOpen}
-								onOpenChange={setOpenAiOAuthDialogOpen}
-								isRequesting={startOpenAiBrowserOAuthMutation.isPending}
-								isPolling={isPollingOpenAiBrowserOAuth}
-								message={openAiBrowserOAuthMessage}
-								deviceCodeInfo={deviceCodeInfo}
-								deviceCodeCopied={deviceCodeCopied}
-								onCopyDeviceCode={handleCopyDeviceCode}
-								onOpenDeviceLogin={handleOpenDeviceLogin}
-								onRestart={handleStartChatGptOAuth}
-							/>
 						</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
@@ -719,7 +485,7 @@ export function Settings() {
 			</div>
 
 			<DialogRoot
-				open={!!editingProvider}
+				open={editingProvider !== null}
 				onOpenChange={(open) => {
 					if (!open) handleClose();
 				}}
@@ -727,145 +493,107 @@ export function Settings() {
 				<DialogContent className="max-w-md">
 					<DialogHeader>
 						<DialogTitle>
-							{isConfigured(editingProvider ?? "") ? "Update" : "Add"}{" "}
-							{editingProvider === "ollama" || editingProvider === "azure"
-								? "Endpoint"
-								: "API Key"}
+							{editingProvider ? "Update provider" : "Add provider"}
 						</DialogTitle>
 						<DialogDescription>
-							{editingProvider === "ollama"
-								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
-								: editingProvider === "azure"
-									? "Enter your Azure OpenAI configuration. API key, base URL, API version, and deployment name are required."
-									: editingProvider === "openai"
-										? "Enter an OpenAI API key. The model below will be applied to routing."
-										: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
+							{apiTypeMeta.description}
 						</DialogDescription>
 					</DialogHeader>
-					{editingProvider === "azure" ? (
-						<>
-							<Input
-								type="password"
-								value={keyInput}
-								onChange={(e) => {
-									setKeyInput(e.target.value);
-									setTestedSignature(null);
-								}}
-								placeholder="Azure API key"
-								autoFocus
-								onKeyDown={(e) => {
-									if (e.key === "Enter") handleSave();
-								}}
-							/>
-							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">Base URL</label>
-								<Input
-									type="text"
-									value={azureBaseUrl}
-									onChange={(e) => {
-										setAzureBaseUrl(e.target.value);
+
+					<div className="space-y-1.5">
+						<label className="text-sm font-medium text-ink">
+							Provider name
+						</label>
+						<Input
+							type="text"
+							value={providerIdInput}
+							onChange={(e) => {
+								setProviderIdInput(e.target.value);
+								setTestedSignature(null);
+							}}
+							placeholder="litellm"
+							disabled={!!editingProvider}
+							autoFocus={!editingProvider}
+						/>
+						<p className="text-tiny text-ink-faint">
+							Used as the routing prefix:{" "}
+							<code>{normalizedProviderId || "litellm"}/&lt;model&gt;</code>
+						</p>
+					</div>
+
+					<div className="space-y-1.5 mt-3">
+						<label className="text-sm font-medium text-ink">API type</label>
+						<div className="flex gap-2">
+							{API_TYPES.map((entry) => (
+								<Button
+									key={entry.id}
+									onClick={() => {
+										setApiTypeInput(entry.id);
 										setTestedSignature(null);
+										if (!baseUrlInput.trim()) {
+											setBaseUrlInput(entry.baseUrlPlaceholder);
+										}
 									}}
-									placeholder="https://{resource-name}.openai.azure.com"
-									onKeyDown={(e) => {
-										if (e.key === "Enter") handleSave();
-									}}
-								/>
-								<p className="text-tiny text-ink-faint">
-									Must end with '.openai.azure.com'
-								</p>
-							</div>
-							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">
-									API Version
-								</label>
-								<Input
-									type="text"
-									value={azureApiVersion}
-									onChange={(e) => {
-										setAzureApiVersion(e.target.value);
-										setTestedSignature(null);
-									}}
-									placeholder="2024-06-01"
-									onKeyDown={(e) => {
-										if (e.key === "Enter") handleSave();
-									}}
-								/>
-								<p className="text-tiny text-ink-faint">
-									For example: 2024-06-01, 2024-10-01-preview
-								</p>
-							</div>
-							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">
-									Deployment Name
-								</label>
-								<Input
-									type="text"
-									value={azureDeployment}
-									onChange={(e) => {
-										setAzureDeployment(e.target.value);
-										setTestedSignature(null);
-									}}
-									placeholder="gpt-4o"
-									onKeyDown={(e) => {
-										if (e.key === "Enter") handleSave();
-									}}
-								/>
-								<p className="text-tiny text-ink-faint">
-									Your Azure OpenAI deployment name
-								</p>
-							</div>
-							<div className="space-y-1.5 mt-3">
-								<label className="text-sm font-medium text-ink">Model</label>
-								<Input
-									type="text"
-									value={`azure/${azureDeployment || "deployment"}`}
-									disabled
-									className="bg-app-dark-box/50"
-								/>
-								<p className="text-tiny text-ink-faint">
-									Model is auto-generated from deployment name
-								</p>
-							</div>
-						</>
-					) : (
-						<>
-							<Input
-								type={editingProvider === "ollama" ? "text" : "password"}
-								value={keyInput}
-								onChange={(e) => {
-									setKeyInput(e.target.value);
-									setTestedSignature(null);
-								}}
-								placeholder={editingProviderData?.placeholder}
-								autoFocus
-								onKeyDown={(e) => {
-									if (e.key === "Enter") handleSave();
-								}}
-							/>
-							<ModelSelect
-								label="Model"
-								description="Pick the exact model ID to verify and apply to routing"
-								value={modelInput}
-								onChange={(value) => {
-									setModelInput(value);
-									setTestedSignature(null);
-								}}
-								provider={editingProvider ?? undefined}
-							/>
-						</>
-					)}
+									variant={apiTypeInput === entry.id ? "accent" : "outline"}
+									size="md"
+								>
+									{entry.label}
+								</Button>
+							))}
+						</div>
+					</div>
+
+					<div className="space-y-1.5 mt-3">
+						<label className="text-sm font-medium text-ink">Base URL</label>
+						<Input
+							type="text"
+							value={baseUrlInput}
+							onChange={(e) => {
+								setBaseUrlInput(e.target.value);
+								setTestedSignature(null);
+							}}
+							placeholder={apiTypeMeta.baseUrlPlaceholder}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") handleSave();
+							}}
+						/>
+						<p className="text-tiny text-ink-faint">
+							{apiTypeMeta.baseUrlHint}
+						</p>
+					</div>
+
+					<div className="space-y-1.5 mt-3">
+						<label className="text-sm font-medium text-ink">API key</label>
+						<Input
+							type="password"
+							value={keyInput}
+							onChange={(e) => {
+								setKeyInput(e.target.value);
+								setTestedSignature(null);
+							}}
+							placeholder={apiTypeMeta.keyPlaceholder}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") handleSave();
+							}}
+						/>
+					</div>
+
+					<ModelSelect
+						label="Model"
+						description="Pick the exact model ID to verify and apply to routing"
+						value={modelInput}
+						onChange={(value) => {
+							setModelInput(value);
+							setTestedSignature(null);
+						}}
+						provider={normalizedProviderId || undefined}
+					/>
+
 					<div className="flex items-center gap-2 mt-3">
 						<Button
 							onClick={handleTestModel}
-							disabled={
-								!editingProvider ||
-								!modelInput.trim() ||
-								(editingProvider === "azure" &&
-									(!azureBaseUrl.trim() ||
-										!azureApiVersion.trim() ||
-										!azureDeployment.trim()))
-							}
+							disabled={!!validationError()}
+							loading={testModelMutation.isPending}
 							variant="outline"
 							size="md"
 						>
@@ -891,7 +619,7 @@ export function Settings() {
 							) : null}
 						</div>
 					)}
-					{message && (
+					{message && editingProvider !== null && (
 						<div
 							className={`rounded-md border px-3 py-2 text-sm ${
 								message.type === "success"
@@ -903,53 +631,17 @@ export function Settings() {
 						</div>
 					)}
 					<DialogFooter>
-						{editingProvider === "azure" ? (
-							<>
-								{isConfigured(editingProvider ?? "") && (
-									<Button
-										onClick={() =>
-											removeMutation.mutate(editingProvider, {
-												onSuccess: (result) => {
-													if (result.success) handleClose();
-												},
-											})
-										}
-										variant="accent"
-										size="md"
-									>
-										Remove
-									</Button>
-								)}
-								<Button onClick={handleClose} variant="outline" size="md">
-									Cancel
-								</Button>
-								<Button
-									onClick={handleSave}
-									disabled={
-										!keyInput.trim() ||
-										!azureBaseUrl.trim() ||
-										!azureApiVersion.trim() ||
-										!azureDeployment.trim()
-									}
-									size="md"
-								>
-									Save
-								</Button>
-							</>
-						) : (
-							<>
-								<Button onClick={handleClose} variant="outline" size="md">
-									Cancel
-								</Button>
-								<Button
-									onClick={handleSave}
-									disabled={!modelInput.trim()}
-									size="md"
-								>
-									Save
-								</Button>
-							</>
-						)}
+						<Button onClick={handleClose} variant="outline" size="md">
+							Cancel
+						</Button>
+						<Button
+							onClick={handleSave}
+							disabled={!!validationError()}
+							loading={updateMutation.isPending}
+							size="md"
+						>
+							Save
+						</Button>
 					</DialogFooter>
 				</DialogContent>
 			</DialogRoot>

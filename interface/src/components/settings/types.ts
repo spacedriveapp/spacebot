@@ -35,27 +35,14 @@ export interface ChangelogRelease {
 }
 
 export interface ProviderCardProps {
+	/** Provider id — the prefix in `provider/model` routing strings. */
 	provider: string;
-	name: string;
-	description: string;
-	configured: boolean;
-	defaultModel: string;
+	/** `"anthropic"` or `"openai_compatible"`. */
+	apiType: string;
+	baseUrl: string;
+	displayName?: string | null;
+	hasKey: boolean;
 	onEdit: () => void;
 	onRemove: () => void;
 	removing: boolean;
-	actionLabel?: string;
-	showRemove?: boolean;
-}
-
-export interface ChatGptOAuthDialogProps {
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-	isRequesting: boolean;
-	isPolling: boolean;
-	message: {text: string; type: "success" | "error"} | null;
-	deviceCodeInfo: {userCode: string; verificationUrl: string} | null;
-	deviceCodeCopied: boolean;
-	onCopyDeviceCode: () => void;
-	onOpenDeviceLogin: () => void;
-	onRestart: () => void;
 }

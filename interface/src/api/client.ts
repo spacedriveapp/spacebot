@@ -71,8 +71,7 @@ export type {
 	ProvidersResponse,
 	ProviderUpdateResponse,
 	ProviderModelTestResponse,
-	OpenAiOAuthBrowserStartResponse,
-	OpenAiOAuthBrowserStatusResponse,
+	ProviderEntry,
 	ModelInfo,
 	ModelsResponse,
 	// Ingest
@@ -1098,65 +1097,39 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<Types.ProvidersResponse>("/providers"),
-	updateProvider: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
+	updateProvider: async (
+		provider: string,
+		apiKey: string,
+		model: string,
+		apiType: string,
+		baseUrl?: string,
+	) => {
 		const response = await fetch(`${getApiBase()}/providers`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, api_type: apiType, base_url: baseUrl }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderUpdateResponse>;
 	},
-	testProviderModel: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
+	testProviderModel: async (
+		provider: string,
+		apiKey: string,
+		model: string,
+		apiType: string,
+		baseUrl?: string,
+	) => {
 		const response = await fetch(`${getApiBase()}/providers/test-model`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, api_type: apiType, base_url: baseUrl }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderModelTestResponse>;
-	},
-	getProviderConfig: async (provider: string, options?: { signal?: AbortSignal }) => {
-		const response = await fetch(`${getApiBase()}/providers/${provider}/config`, {
-			method: "GET",
-			signal: options?.signal,
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<{
-			success: boolean;
-			message: string;
-			base_url?: string | null;
-			api_version?: string | null;
-			deployment?: string | null;
-		}>;
-	},
-	startOpenAiOAuthBrowser: async (params: {model: string}) => {
-		const response = await fetch(`${getApiBase()}/providers/openai/browser-oauth/start`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model: params.model,
-			}),
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<Types.OpenAiOAuthBrowserStartResponse>;
-	},
-	openAiOAuthBrowserStatus: async (state: string) => {
-		const response = await fetch(
-			`${getApiBase()}/providers/openai/browser-oauth/status?state=${encodeURIComponent(state)}`,
-		);
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<Types.OpenAiOAuthBrowserStatusResponse>;
 	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${getApiBase()}/providers/${encodeURIComponent(provider)}`, {

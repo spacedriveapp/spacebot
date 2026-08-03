@@ -1,0 +1,167 @@
+---
+title: LiteLLM
+description: Point Spacebot at any model provider through a single OpenAI-compatible gateway.
+---
+
+# LiteLLM
+
+Spacebot speaks two APIs: Anthropic's Messages API natively, and
+OpenAI-compatible `/chat/completions` for everything else. That second one is
+where LiteLLM comes in — it is a proxy that puts an OpenAI-compatible face on
+roughly a hundred upstreams (Bedrock, Vertex, Azure, Together, Groq, your own
+vLLM box) and lets you add new ones without waiting on a Spacebot release.
+
+**LiteLLM is a recommendation, not a dependency.** Spacebot is a single binary
+with no server requirements, and it talks to any OpenAI-compatible endpoint
+directly — vLLM, Ollama, TGI, OpenRouter, or OpenAI itself. Use LiteLLM when you
+want one place to manage keys, budgets, and fallbacks across several vendors.
+
+## Why not just add providers to Spacebot?
+
+Spacebot used to ship 20 hardcoded providers, each with a baked-in base URL and
+one of 7 API dialects. Every new vendor meant a code change, a release, and a
+URL that would eventually go stale. Vendor differences turn out to be almost
+entirely `base_url` plus a couple of headers — which is exactly what a proxy is
+for. See [Configuration → Migrating from the old provider
+keys](/docs/config#migrating-from-the-old-provider-keys) if you are coming from
+a config that used them.
+
+## Standing one up
+
+```bash
+pip install 'litellm[proxy]'
+```
+
+Write a `config.yaml`. The `model_name` values are the aliases Spacebot will
+use; everything under `litellm_params` is LiteLLM's business.
+
+```yaml
+model_list:
+  - model_name: claude-sonnet-4
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-haiku-4.5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: gpt-4.1
+    litellm_params:
+      model: openai/gpt-4.1
+      api_key: os.environ/OPENAI_API_KEY
+
+  # A local vLLM server, exposed under the same gateway.
+  - model_name: qwen-72b
+    litellm_params:
+      model: openai/Qwen2.5-72B-Instruct
+      api_base: http://localhost:8000/v1
+      api_key: none
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+```
+
+```bash
+litellm --config config.yaml --port 4000
+```
+
+## Pointing Spacebot at it
+
+```toml
+[llm.provider.litellm]
+api_type = "openai_compatible"
+base_url = "http://localhost:4000/v1"
+api_key  = "secret:LITELLM_API_KEY"
+name     = "LiteLLM"
+
+[defaults.routing]
+channel   = "litellm/claude-sonnet-4"
+branch    = "litellm/claude-sonnet-4"
+worker    = "litellm/claude-haiku-4.5"
+compactor = "litellm/claude-haiku-4.5"
+cortex    = "litellm/claude-haiku-4.5"
+```
+
+The provider id (`litellm` here) becomes the routing prefix, and everything
+after the first `/` is passed to LiteLLM verbatim — so it must match a
+`model_name` from your `config.yaml`.
+
+Store the key rather than inlining it:
+
+```bash
+spacebot secrets set LITELLM_API_KEY
+```
+
+Or skip `config.toml` entirely and use environment variables:
+
+```bash
+export LITELLM_API_KEY="sk-..."
+export LITELLM_BASE_URL="http://localhost:4000/v1"   # defaults to this
+```
+
+> `base_url` is the complete path prefix. Spacebot appends only
+> `/chat/completions`, so the `/v1` has to be there.
+
+## Keep Anthropic native
+
+If you have Anthropic access, configure it as its own provider alongside
+LiteLLM rather than routing it through the proxy:
+
+```toml
+[llm.provider.anthropic]
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key  = "secret:ANTHROPIC_API_KEY"
+```
+
+Three things only work on the native path:
+
+- **`spacebot auth login`** — Claude Pro/Max subscription auth. LiteLLM requires
+  an API key, so proxying it forces you onto metered billing.
+- **Prompt caching.** Spacebot places `cache_control` breakpoints on the system
+  prompt and history. A harness that re-sends a large system prompt every turn
+  pays real money for losing them, and LiteLLM's OpenAI-format translation is
+  lossy here.
+- **Extended thinking.** Adaptive thinking budgets are set per request on the
+  Messages API and do not survive the round trip through
+  `/chat/completions`.
+
+Mixing is fine and expected — route the channel through Anthropic for caching,
+and workers through LiteLLM for cost:
+
+```toml
+[defaults.routing]
+channel   = "anthropic/claude-sonnet-4"
+branch    = "anthropic/claude-sonnet-4"
+worker    = "litellm/qwen-72b"
+compactor = "litellm/claude-haiku-4.5"
+cortex    = "litellm/claude-haiku-4.5"
+```
+
+## Fallbacks
+
+Spacebot has its own fallback chains, which work across providers:
+
+```toml
+[defaults.routing.fallbacks]
+"anthropic/claude-sonnet-4" = ["litellm/claude-sonnet-4", "litellm/gpt-4.1"]
+```
+
+LiteLLM has router-level fallbacks too. Prefer Spacebot's when you want to fall
+back *across* gateways (including off a dead LiteLLM), and LiteLLM's when you
+want to fall back between upstreams that Spacebot sees as one model name.
+
+## Verifying
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "ok?"}]}'
+```
+
+If that returns a completion, the same URL and key will work in
+`[llm.provider.litellm]`. The settings UI also has a **Test model** button that
+runs a real completion before saving.

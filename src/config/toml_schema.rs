@@ -158,40 +158,23 @@ pub(super) fn default_metrics_bind() -> String {
 
 #[derive(Deserialize, Debug)]
 pub(super) struct TomlProviderConfig {
-    pub(super) api_type: super::ApiType,
+    pub(super) api_type: super::ApiTypeSpec,
     pub(super) base_url: String,
     pub(super) api_key: String,
     pub(super) name: Option<String>,
+    /// Send `Authorization: Bearer` instead of `x-api-key` on the Anthropic path.
+    /// Needed by Anthropic-compatible proxies that expect a bearer token.
     #[serde(default)]
-    pub(super) api_version: Option<String>,
+    pub(super) use_bearer_auth: bool,
+    /// Extra HTTP headers sent with every request to this provider.
+    ///
+    /// Written as a table: `extra_headers = { "HTTP-Referer" = "https://example.com" }`.
     #[serde(default)]
-    pub(super) deployment: Option<String>,
+    pub(super) extra_headers: HashMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
 pub(super) struct TomlLlmConfigFields {
-    pub(super) anthropic_key: Option<String>,
-    pub(super) openai_key: Option<String>,
-    pub(super) openrouter_key: Option<String>,
-    pub(super) kilo_key: Option<String>,
-    pub(super) zhipu_key: Option<String>,
-    pub(super) groq_key: Option<String>,
-    pub(super) together_key: Option<String>,
-    pub(super) fireworks_key: Option<String>,
-    pub(super) deepseek_key: Option<String>,
-    pub(super) xai_key: Option<String>,
-    pub(super) mistral_key: Option<String>,
-    pub(super) gemini_key: Option<String>,
-    pub(super) ollama_key: Option<String>,
-    pub(super) ollama_base_url: Option<String>,
-    pub(super) opencode_zen_key: Option<String>,
-    pub(super) opencode_go_key: Option<String>,
-    pub(super) nvidia_key: Option<String>,
-    pub(super) minimax_key: Option<String>,
-    pub(super) minimax_cn_key: Option<String>,
-    pub(super) moonshot_key: Option<String>,
-    pub(super) zai_coding_plan_key: Option<String>,
-    pub(super) github_copilot_key: Option<String>,
     #[serde(default)]
     pub(super) providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -201,29 +184,14 @@ pub(super) struct TomlLlmConfigFields {
 
 #[derive(Default)]
 pub(super) struct TomlLlmConfig {
-    pub(super) anthropic_key: Option<String>,
-    pub(super) openai_key: Option<String>,
-    pub(super) openrouter_key: Option<String>,
-    pub(super) kilo_key: Option<String>,
-    pub(super) zhipu_key: Option<String>,
-    pub(super) groq_key: Option<String>,
-    pub(super) together_key: Option<String>,
-    pub(super) fireworks_key: Option<String>,
-    pub(super) deepseek_key: Option<String>,
-    pub(super) xai_key: Option<String>,
-    pub(super) mistral_key: Option<String>,
-    pub(super) gemini_key: Option<String>,
-    pub(super) ollama_key: Option<String>,
-    pub(super) ollama_base_url: Option<String>,
-    pub(super) opencode_zen_key: Option<String>,
-    pub(super) opencode_go_key: Option<String>,
-    pub(super) nvidia_key: Option<String>,
-    pub(super) minimax_key: Option<String>,
-    pub(super) minimax_cn_key: Option<String>,
-    pub(super) moonshot_key: Option<String>,
-    pub(super) zai_coding_plan_key: Option<String>,
-    pub(super) github_copilot_key: Option<String>,
     pub(super) providers: HashMap<String, TomlProviderConfig>,
+    /// Keys under `[llm]` that the schema does not recognise.
+    ///
+    /// Captured rather than dropped so `load.rs` can fail loudly on the retired
+    /// `llm.<provider>_key` shorthands instead of booting with no LLM
+    /// configured — a silent no-provider boot is the worst possible outcome of
+    /// this migration.
+    pub(super) unknown_keys: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for TomlLlmConfig {
@@ -231,8 +199,9 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
     where
         D: Deserializer<'de>,
     {
-        let mut fields = TomlLlmConfigFields::deserialize(deserializer)?;
+        let fields = TomlLlmConfigFields::deserialize(deserializer)?;
         let mut providers = fields.providers;
+        let mut unknown_keys = Vec::new();
 
         for (key, value) in fields.extra {
             if key == "provider" {
@@ -246,40 +215,23 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
                         .map_err(serde::de::Error::custom)?;
                     providers.insert(provider_id.to_string(), provider_config);
                 }
+                continue;
             }
 
             if let Some(provider_id) = key.strip_prefix("provider.") {
                 let provider_config = value.try_into().map_err(serde::de::Error::custom)?;
                 providers.insert(provider_id.to_string(), provider_config);
+                continue;
             }
+
+            unknown_keys.push(key);
         }
 
-        fields.providers = providers;
+        unknown_keys.sort();
 
         Ok(Self {
-            anthropic_key: fields.anthropic_key,
-            openai_key: fields.openai_key,
-            openrouter_key: fields.openrouter_key,
-            kilo_key: fields.kilo_key,
-            zhipu_key: fields.zhipu_key,
-            groq_key: fields.groq_key,
-            together_key: fields.together_key,
-            fireworks_key: fields.fireworks_key,
-            deepseek_key: fields.deepseek_key,
-            xai_key: fields.xai_key,
-            mistral_key: fields.mistral_key,
-            gemini_key: fields.gemini_key,
-            ollama_key: fields.ollama_key,
-            ollama_base_url: fields.ollama_base_url,
-            opencode_zen_key: fields.opencode_zen_key,
-            opencode_go_key: fields.opencode_go_key,
-            nvidia_key: fields.nvidia_key,
-            minimax_key: fields.minimax_key,
-            minimax_cn_key: fields.minimax_cn_key,
-            moonshot_key: fields.moonshot_key,
-            zai_coding_plan_key: fields.zai_coding_plan_key,
-            github_copilot_key: fields.github_copilot_key,
-            providers: fields.providers,
+            providers,
+            unknown_keys,
         })
     }
 }

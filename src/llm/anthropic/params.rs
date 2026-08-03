@@ -59,6 +59,7 @@ pub fn build_anthropic_request(
     request: &CompletionRequest,
     thinking_effort: &str,
     force_bearer: bool,
+    extra_headers: &[(String, String)],
 ) -> AnthropicRequest {
     let is_oauth = auth::detect_auth_path(api_key, force_bearer) == AnthropicAuthPath::OAuthToken;
     let adaptive_thinking = supports_adaptive_thinking(model_name);
@@ -97,10 +98,17 @@ pub fn build_anthropic_request(
         body["output_config"] = serde_json::json!({ "effort": effort });
     }
 
-    let builder = http_client
+    let mut builder = http_client
         .post(&url)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
+
+    // Anthropic-compatible proxies sometimes need their own headers. Applied
+    // before auth so a provider block cannot accidentally clobber the
+    // credential header with a stale value.
+    for (name, value) in extra_headers {
+        builder = builder.header(name, value);
+    }
 
     let (builder, auth_path) = auth::apply_auth_headers(builder, api_key, false, force_bearer);
     let builder = builder.json(&body);
@@ -201,6 +209,46 @@ fn build_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `extra_headers` is settable on any provider block, including
+    /// `api_type = "anthropic"`. Silently dropping it here would be config that
+    /// exists, validates, and does nothing.
+    #[test]
+    fn extra_headers_reach_the_anthropic_request() {
+        let client = reqwest::Client::new();
+        let request = CompletionRequest {
+            preamble: None,
+            chat_history: rig::one_or_many::OneOrMany::one(rig::message::Message::user("hi")),
+            tools: Vec::new(),
+            documents: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            additional_params: None,
+            model: Some("claude-sonnet-4".to_string()),
+            output_schema: None,
+            tool_choice: None,
+        };
+
+        let built = build_anthropic_request(
+            &client,
+            "sk-ant-test",
+            "https://proxy.example",
+            "claude-sonnet-4",
+            &request,
+            "auto",
+            false,
+            &[("X-Proxy-Tenant".to_string(), "acme".to_string())],
+        );
+
+        let http_request = built.builder.build().expect("request should build");
+        assert_eq!(
+            http_request
+                .headers()
+                .get("x-proxy-tenant")
+                .map(|value| value.to_str().expect("ascii header")),
+            Some("acme")
+        );
+    }
 
     #[test]
     fn adaptive_thinking_detected_for_4_6_models() {

@@ -46,26 +46,12 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
 
     println!();
 
-    // 1. Pick a provider
+    // 1. Pick a provider. There are two: Anthropic natively, or any
+    // OpenAI-compatible endpoint. LiteLLM is the recommended way to reach
+    // anything else, but it is a suggestion, not a dependency.
     let providers = &[
         "Anthropic",
-        "OpenRouter",
-        "OpenAI",
-        "Z.ai (GLM)",
-        "Groq",
-        "Together AI",
-        "Fireworks AI",
-        "DeepSeek",
-        "xAI (Grok)",
-        "Mistral AI",
-        "Gemini",
-        "Ollama",
-        "OpenCode Zen",
-        "OpenCode Go",
-        "MiniMax",
-        "Moonshot AI (Kimi)",
-        "Z.AI Coding Plan",
-        "Kilo Gateway",
+        "OpenAI-compatible endpoint (LiteLLM, vLLM, Ollama, OpenRouter, ...)",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -108,59 +94,59 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         None
     };
 
-    let (provider_input_name, toml_key, provider_id) = match provider_idx {
-        0 => ("Anthropic API key", "anthropic_key", "anthropic"),
-        1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
-        2 => ("OpenAI API key", "openai_key", "openai"),
-        3 => ("Z.ai (GLM) API key", "zhipu_key", "zhipu"),
-        4 => ("Groq API key", "groq_key", "groq"),
-        5 => ("Together AI API key", "together_key", "together"),
-        6 => ("Fireworks AI API key", "fireworks_key", "fireworks"),
-        7 => ("DeepSeek API key", "deepseek_key", "deepseek"),
-        8 => ("xAI API key", "xai_key", "xai"),
-        9 => ("Mistral API key", "mistral_key", "mistral"),
-        10 => ("Google Gemini API key", "gemini_key", "gemini"),
-        11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
-        12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
-        13 => ("OpenCode Go API key", "opencode_go_key", "opencode-go"),
-        14 => ("MiniMax API key", "minimax_key", "minimax"),
-        15 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        16 => (
-            "Z.AI Coding Plan API key",
-            "zai_coding_plan_key",
-            "zai-coding-plan",
-        ),
-        17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
-        _ => unreachable!(),
-    };
-    let is_secret = provider_id != "ollama";
+    // 2. Provider endpoint + credential.
+    let (provider_id, api_type, base_url, api_key) = if provider_idx == 0 {
+        let api_key = if anthropic_oauth.is_some() {
+            // OAuth tokens live in the credentials file, not config.toml.
+            String::new()
+        } else {
+            let api_key: String = Password::new()
+                .with_prompt("Enter your Anthropic API key")
+                .interact()?;
+            let api_key = api_key.trim().to_string();
+            if api_key.is_empty() {
+                anyhow::bail!("API key cannot be empty");
+            }
+            api_key
+        };
+        (
+            "anthropic".to_string(),
+            "anthropic",
+            crate::config::ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+            api_key,
+        )
+    } else {
+        let provider_id: String = Input::new()
+            .with_prompt("Provider name (used as the model prefix, e.g. litellm/claude-sonnet-4)")
+            .default("litellm".to_string())
+            .interact_text()?;
+        let provider_id = provider_id.trim().to_lowercase().replace(' ', "-");
+        if provider_id.is_empty() {
+            anyhow::bail!("Provider name cannot be empty");
+        }
 
-    // 2. Get provider credential/endpoint (skip if OAuth was used)
-    let provider_value = if anthropic_oauth.is_some() {
-        // OAuth tokens are stored in anthropic_oauth.json, not in config.toml.
-        // Use a placeholder so the config still has an [llm] section.
-        String::new()
-    } else if is_secret {
+        // base_url is the full path prefix — nothing is appended but the
+        // endpoint, so most OpenAI-compatible servers need the trailing /v1.
+        let base_url: String = Input::new()
+            .with_prompt("Base URL (full path prefix, including /v1 if required)")
+            .default("http://localhost:4000/v1".to_string())
+            .interact_text()?;
+        let base_url = base_url.trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() {
+            anyhow::bail!("Base URL cannot be empty");
+        }
+
         let api_key: String = Password::new()
-            .with_prompt(format!("Enter your {provider_input_name}"))
+            .with_prompt("API key (leave blank if the endpoint needs none)")
+            .allow_empty_password(true)
             .interact()?;
 
-        let api_key = api_key.trim().to_string();
-        if api_key.is_empty() {
-            anyhow::bail!("API key cannot be empty");
-        }
-        api_key
-    } else {
-        let base_url: String = Input::new()
-            .with_prompt(format!("Enter your {provider_input_name}"))
-            .default("http://localhost:11434".to_string())
-            .interact_text()?;
-
-        let base_url = base_url.trim().to_string();
-        if base_url.is_empty() {
-            anyhow::bail!("Ollama base URL cannot be empty");
-        }
-        base_url
+        (
+            provider_id,
+            "openai_compatible",
+            base_url,
+            api_key.trim().to_string(),
+        )
     };
 
     // 3. Agent name
@@ -253,18 +239,27 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         .with_context(|| format!("failed to create {}", instance_dir.display()))?;
 
     let mut config_content = String::new();
-    config_content.push_str("[llm]\n");
+    config_content.push_str(&format!("[llm.provider.{provider_id}]\n"));
+    config_content.push_str(&format!("api_type = \"{api_type}\"\n"));
+    config_content.push_str(&format!("base_url = \"{base_url}\"\n"));
     if anthropic_oauth.is_some() {
-        config_content
-            .push_str("# Anthropic authentication via OAuth (see anthropic_oauth.json)\n");
+        config_content.push_str("# Authenticated via OAuth — see `spacebot auth login`\n");
+        config_content.push_str("api_key = \"\"\n");
     } else {
-        config_content.push_str(&format!("{toml_key} = \"{provider_value}\"\n"));
+        config_content.push_str(&format!("api_key = \"{api_key}\"\n"));
     }
     config_content.push('\n');
 
-    // Write routing defaults for the chosen provider
-    let routing = crate::llm::routing::defaults_for_provider(provider_id);
+    // Routing defaults. Only Anthropic has model names we can pick for the
+    // user; an OpenAI-compatible endpoint serves whatever its operator
+    // configured, so leave those blank rather than writing a model that 404s.
+    let routing = crate::llm::routing::defaults_for_provider(&provider_id);
     config_content.push_str("[defaults.routing]\n");
+    if routing.channel.is_empty() {
+        config_content.push_str(&format!(
+            "# Set these to models your endpoint serves, e.g. \"{provider_id}/claude-sonnet-4\"\n"
+        ));
+    }
     config_content.push_str(&format!("channel = \"{}\"\n", routing.channel));
     config_content.push_str(&format!("branch = \"{}\"\n", routing.branch));
     config_content.push_str(&format!("worker = \"{}\"\n", routing.worker));

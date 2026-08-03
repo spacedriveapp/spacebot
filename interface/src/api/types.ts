@@ -297,7 +297,7 @@ export type TriggerCronRequest = components["schemas"]["TriggerCronRequest"];
 // Provider/Model Types
 // =============================================================================
 
-export type ProviderStatus = components["schemas"]["ProviderStatus"];
+export type ProviderEntry = components["schemas"]["ProviderEntry"];
 export type ProvidersResponse = components["schemas"]["ProvidersResponse"];
 export type ProviderUpdateRequest =
   components["schemas"]["ProviderUpdateRequest"];
@@ -309,14 +309,6 @@ export type ProviderModelTestRequest =
   components["schemas"]["ProviderModelTestRequest"];
 export type ProviderModelTestResponse =
   components["schemas"]["ProviderModelTestResponse"];
-
-// OAuth
-export type OpenAiOAuthBrowserStartRequest =
-  components["schemas"]["OpenAiOAuthBrowserStartRequest"];
-export type OpenAiOAuthBrowserStartResponse =
-  components["schemas"]["OpenAiOAuthBrowserStartResponse"];
-export type OpenAiOAuthBrowserStatusResponse =
-  components["schemas"]["OpenAiOAuthBrowserStatusResponse"];
 
 // Models
 export type ModelInfo = components["schemas"]["ModelInfo"];

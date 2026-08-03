@@ -10,7 +10,6 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod factory;
-pub mod github_copilot_auth;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -19,7 +18,6 @@ pub mod mcp;
 pub mod memory;
 pub mod messaging;
 pub mod notifications;
-pub mod openai_auth;
 pub mod opencode;
 pub mod projects;
 pub mod prompts;
@@ -34,6 +32,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod update;
 pub mod wiki;
+pub mod workflows;
 
 pub use error::{Error, Result};
 

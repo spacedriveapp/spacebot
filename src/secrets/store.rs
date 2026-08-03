@@ -1432,6 +1432,46 @@ pub fn system_secret_registry() -> Vec<&'static SecretField> {
     fields
 }
 
+/// LLM provider credential names that Spacebot no longer has a built-in
+/// provider for, but which must stay classified as [`SecretCategory::System`].
+///
+/// These used to be covered by `LlmConfig::secret_fields()`. That list was
+/// config-migration plumbing for the `llm.*_key` shorthand fields, which are
+/// gone — but the *names* are still live credentials in existing secret stores
+/// and in LiteLLM upstream configuration. Letting them fall through to the
+/// `Tool` default would hand real API keys to worker subprocesses as
+/// environment variables. This list is a security classification, not
+/// provider support: nothing here implies Spacebot can talk to that provider.
+const LEGACY_LLM_SECRET_NAMES: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CEREBRAS_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "FIREWORKS_API_KEY",
+    "GEMINI_API_KEY",
+    "GITHUB_COPILOT_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "KILO_API_KEY",
+    "LITELLM_API_KEY",
+    "LITELLM_MASTER_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY",
+    "NVIDIA_API_KEY",
+    "OLLAMA_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
+    "OPENROUTER_API_KEY",
+    "SAMBANOVA_API_KEY",
+    "TOGETHER_API_KEY",
+    "XAI_API_KEY",
+    "ZAI_CODING_PLAN_API_KEY",
+    "ZHIPU_API_KEY",
+];
+
 /// Auto-detect the category for a secret based on its name.
 ///
 /// Secrets whose names match a known internal credential (LLM provider key,
@@ -1448,6 +1488,10 @@ pub fn system_secret_registry() -> Vec<&'static SecretField> {
 /// always credentials for CLI tools that workers invoke.
 pub fn auto_categorize(name: &str) -> SecretCategory {
     let upper = name.to_uppercase();
+
+    if LEGACY_LLM_SECRET_NAMES.contains(&upper.as_str()) {
+        return SecretCategory::System;
+    }
 
     for field in system_secret_registry() {
         // Exact match on the canonical secret name.
@@ -1752,6 +1796,7 @@ mod tests {
         assert_eq!(auto_categorize("GEMINI_API_KEY"), SecretCategory::System);
         assert_eq!(auto_categorize("DEEPSEEK_API_KEY"), SecretCategory::System);
         assert_eq!(auto_categorize("CEREBRAS_API_KEY"), SecretCategory::System);
+        assert_eq!(auto_categorize("LITELLM_API_KEY"), SecretCategory::System);
 
         // Messaging adapter tokens (default adapters via AdapterSecrets):
         assert_eq!(auto_categorize("DISCORD_BOT_TOKEN"), SecretCategory::System);
@@ -2069,10 +2114,16 @@ mod tests {
         // Helper: check if a secret name is in the registry.
         let has_secret = |name: &str| fields.iter().any(|f| f.secret_name == name);
 
-        // LLM provider keys.
-        assert!(has_secret("ANTHROPIC_API_KEY"), "missing ANTHROPIC_API_KEY");
-        assert!(has_secret("OPENAI_API_KEY"), "missing OPENAI_API_KEY");
-        assert!(has_secret("DEEPSEEK_API_KEY"), "missing DEEPSEEK_API_KEY");
+        // LLM provider keys are deliberately *not* in this registry — they are
+        // no longer flat `llm.*_key` config fields to migrate. They stay System
+        // via `LEGACY_LLM_SECRET_NAMES`; see the classification test below.
+        assert!(
+            !has_secret("ANTHROPIC_API_KEY"),
+            "LLM keys should not be migratable config fields any more"
+        );
+        assert_eq!(auto_categorize("ANTHROPIC_API_KEY"), SecretCategory::System);
+        assert_eq!(auto_categorize("OPENAI_API_KEY"), SecretCategory::System);
+        assert_eq!(auto_categorize("DEEPSEEK_API_KEY"), SecretCategory::System);
 
         // Search / internal tool keys.
         assert!(
@@ -2097,17 +2148,17 @@ mod tests {
             "missing EMAIL_IMAP_PASSWORD"
         );
 
-        // Adapter fields have instance patterns, LLM fields don't.
+        // Adapter fields have instance patterns, non-adapter fields don't.
         let discord_field = fields
             .iter()
             .find(|f| f.secret_name == "DISCORD_BOT_TOKEN")
             .expect("Discord field");
         assert!(discord_field.instance_pattern.is_some());
 
-        let anthropic_field = fields
+        let brave_field = fields
             .iter()
-            .find(|f| f.secret_name == "ANTHROPIC_API_KEY")
-            .expect("Anthropic field");
-        assert!(anthropic_field.instance_pattern.is_none());
+            .find(|f| f.secret_name == "BRAVE_SEARCH_API_KEY")
+            .expect("Brave field");
+        assert!(brave_field.instance_pattern.is_none());
     }
 }

@@ -226,7 +226,7 @@ Native adapters for Discord, Slack, Telegram, Twitch, Signal, Mattermost, Email,
 
 Three-level routing picks the right model for every call, decided explicitly from the process type and task type — no keyword scoring, no classifier, no content analysis. Channels get the best conversational model. Workers, the compactor, and the cortex get something fast and cheap. Task-type overrides upgrade coding workers automatically. Per-model fallback chains retry on a different model when one fails, with rate-limit cooldown.
 
-Any OpenAI-compatible or Anthropic-compatible endpoint works, including Ollama for local models, Z.ai GLM models, Azure OpenAI, and custom providers. Built-in support for Kilo Gateway, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Go, and more.
+Two provider types, not twenty: Anthropic's Messages API natively — required for OAuth, prompt caching, and extended thinking — and any OpenAI-compatible endpoint for everything else. That second one covers LiteLLM, vLLM, Ollama, TGI, OpenRouter, OpenAI, and anything else that speaks `/chat/completions`. A provider is a `base_url` plus a key, so adding one never needs a Spacebot release. LiteLLM is the recommended way to fan out to many upstreams, but it is not required.
 
 ### MCP Integration
 
@@ -273,7 +273,7 @@ Everything goes through typed tools into structured storage. Nothing drifts.
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
 - **protoc** (protobuf compiler) — required by LanceDB's build scripts. `apt install protobuf-compiler`, `brew install protobuf`, or use the included nix flake
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Zen, OpenCode Go), or use `spacebot auth login` for Anthropic OAuth
+- An Anthropic API key, or any OpenAI-compatible endpoint (LiteLLM recommended for reaching multiple vendors) — or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 

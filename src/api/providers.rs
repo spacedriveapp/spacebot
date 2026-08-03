@@ -1,87 +1,61 @@
-use super::state::ApiState;
-use crate::openai_auth::DeviceTokenPollResult;
+//! Provider configuration endpoints.
+//!
+//! A provider is a `[llm.provider.<id>]` block: an `api_type` (`anthropic` or
+//! `openai_compatible`), a `base_url`, and an `api_key`. That is the whole
+//! model. There is no per-vendor endpoint here because there are no per-vendor
+//! providers — adding OpenRouter, Groq, or a self-hosted vLLM is the same POST
+//! with a different `base_url`.
 
-use anyhow::Context as _;
+use super::state::ApiState;
+
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-use tokio::time::sleep;
-use uuid::Uuid;
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::sync::Arc;
 
-const OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS: i64 = 30 * 60;
-const OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
-const OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
-const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
-
-static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-#[derive(Clone, Debug)]
-struct DeviceOAuthSession {
-    expires_at: i64,
-    status: DeviceOAuthSessionStatus,
-}
-
-#[derive(Clone, Debug)]
-enum DeviceOAuthSessionStatus {
-    Pending,
-    Completed(String),
-    Failed(String),
-}
-
+/// A configured provider, as reported to the UI. Never includes the API key.
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct ProviderStatus {
-    anthropic: bool,
-    openai: bool,
-    openai_chatgpt: bool,
-    openrouter: bool,
-    kilo: bool,
-    zhipu: bool,
-    groq: bool,
-    together: bool,
-    fireworks: bool,
-    deepseek: bool,
-    xai: bool,
-    mistral: bool,
-    gemini: bool,
-    ollama: bool,
-    opencode_zen: bool,
-    opencode_go: bool,
-    nvidia: bool,
-    minimax: bool,
-    minimax_cn: bool,
-    moonshot: bool,
-    zai_coding_plan: bool,
-    github_copilot: bool,
-    azure: bool,
+pub(super) struct ProviderEntry {
+    /// Provider id — the prefix in `provider/model` routing strings.
+    id: String,
+    /// `"anthropic"` or `"openai_compatible"`.
+    api_type: String,
+    base_url: String,
+    /// Optional human-readable label from `name`.
+    display_name: Option<String>,
+    /// Whether an API key resolves for this provider. False means the block
+    /// exists but its `secret:`/`env:` reference is unresolvable.
+    has_key: bool,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProvidersResponse {
-    providers: ProviderStatus,
+    providers: Vec<ProviderEntry>,
+    /// Whether Anthropic OAuth credentials are on disk (`spacebot auth login`).
+    /// This authenticates the `anthropic` provider without an API key.
+    anthropic_oauth: bool,
     has_any: bool,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct ProviderUpdateRequest {
+    /// Provider id to create or replace, e.g. `"litellm"`.
     provider: String,
     api_key: String,
+    /// Routing string to apply to defaults and the default agent, e.g.
+    /// `"litellm/claude-sonnet-4"`. Must be prefixed with `provider`.
     model: String,
-    // Azure-specific fields (optional, required for Azure)
+    /// `"anthropic"` or `"openai_compatible"`. Defaults to `openai_compatible`.
+    #[serde(default)]
+    api_type: Option<String>,
+    /// Full path prefix. Required unless `api_type` is `anthropic`.
     #[serde(default)]
     base_url: Option<String>,
-    #[serde(default)]
-    api_version: Option<String>,
-    #[serde(default)]
-    deployment: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -95,13 +69,10 @@ pub(super) struct ProviderModelTestRequest {
     provider: String,
     api_key: String,
     model: String,
-    // Azure-specific fields (optional, required for Azure)
+    #[serde(default)]
+    api_type: Option<String>,
     #[serde(default)]
     base_url: Option<String>,
-    #[serde(default)]
-    api_version: Option<String>,
-    #[serde(default)]
-    deployment: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -113,57 +84,52 @@ pub(super) struct ProviderModelTestResponse {
     sample: Option<String>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
-pub(super) struct OpenAiOAuthBrowserStartRequest {
-    model: String,
+/// Provider ids must be usable as a routing prefix and a TOML key.
+fn validate_provider_id(provider: &str) -> Result<(), String> {
+    if provider.is_empty() || provider.len() > 64 {
+        return Err("Provider ID must be between 1 and 64 characters".to_string());
+    }
+    if provider.contains('/') || provider.contains(char::is_whitespace) {
+        return Err("Provider ID cannot contain '/' or whitespace".to_string());
+    }
+    Ok(())
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct OpenAiOAuthBrowserStartResponse {
-    success: bool,
-    message: String,
-    user_code: Option<String>,
-    verification_url: Option<String>,
-    state: Option<String>,
+/// Parse the `api_type` field from a request into the two supported values.
+fn parse_api_type(api_type: Option<&str>) -> Result<crate::config::ApiType, String> {
+    match api_type.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("openai_compatible") => Ok(crate::config::ApiType::OpenAiCompatible),
+        Some("anthropic") => Ok(crate::config::ApiType::Anthropic),
+        Some(other) => Err(format!(
+            "Unknown api_type '{other}'. Use \"anthropic\" or \"openai_compatible\"."
+        )),
+    }
 }
 
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub(super) struct OpenAiOAuthBrowserStatusRequest {
-    state: String,
-}
+/// Resolve the `base_url` for a provider, defaulting only for Anthropic.
+///
+/// An OpenAI-compatible provider without a base URL is not a provider, so this
+/// refuses rather than guessing an endpoint that would 404 later.
+fn resolve_base_url(
+    api_type: crate::config::ApiType,
+    base_url: Option<&str>,
+) -> Result<String, String> {
+    let supplied = base_url.map(str::trim).filter(|value| !value.is_empty());
 
-#[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct OpenAiOAuthBrowserStatusResponse {
-    found: bool,
-    done: bool,
-    success: bool,
-    message: Option<String>,
-}
-
-fn provider_toml_key(provider: &str) -> Option<&'static str> {
-    match provider {
-        "anthropic" => Some("anthropic_key"),
-        "openai" => Some("openai_key"),
-        "openrouter" => Some("openrouter_key"),
-        "kilo" => Some("kilo_key"),
-        "zhipu" => Some("zhipu_key"),
-        "groq" => Some("groq_key"),
-        "together" => Some("together_key"),
-        "fireworks" => Some("fireworks_key"),
-        "deepseek" => Some("deepseek_key"),
-        "xai" => Some("xai_key"),
-        "mistral" => Some("mistral_key"),
-        "gemini" => Some("gemini_key"),
-        "ollama" => Some("ollama_base_url"),
-        "opencode-zen" => Some("opencode_zen_key"),
-        "opencode-go" => Some("opencode_go_key"),
-        "nvidia" => Some("nvidia_key"),
-        "minimax" => Some("minimax_key"),
-        "minimax-cn" => Some("minimax_cn_key"),
-        "moonshot" => Some("moonshot_key"),
-        "zai-coding-plan" => Some("zai_coding_plan_key"),
-        "github-copilot" => Some("github_copilot_key"),
-        _ => None,
+    match (api_type, supplied) {
+        (_, Some(url)) => {
+            reqwest::Url::parse(url)
+                .map_err(|error| format!("Invalid base_url '{url}': {error}"))?;
+            Ok(url.trim_end_matches('/').to_string())
+        }
+        (crate::config::ApiType::Anthropic, None) => {
+            Ok(crate::config::ANTHROPIC_PROVIDER_BASE_URL.to_string())
+        }
+        (crate::config::ApiType::OpenAiCompatible, None) => Err(
+            "base_url is required for openai_compatible providers. It is the full path \
+             prefix, e.g. \"http://localhost:4000/v1\"."
+                .to_string(),
+        ),
     }
 }
 
@@ -189,51 +155,27 @@ async fn refresh_defaults_config(state: &Arc<ApiState>) {
     }
 }
 
-fn normalize_openai_chatgpt_model(model: &str) -> Option<String> {
-    let trimmed = model.trim();
-    let (provider, model_name) = trimmed.split_once('/')?;
-    if model_name.is_empty() {
-        return None;
-    }
-
-    match provider {
-        "openai" => Some(format!("openai-chatgpt/{model_name}")),
-        "openai-chatgpt" => Some(trimmed.to_string()),
-        _ => None,
-    }
-}
-
-fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::LlmConfig {
+/// Build a throwaway `LlmConfig` holding exactly the provider under test.
+fn build_test_llm_config(
+    provider: &str,
+    api_type: crate::config::ApiType,
+    base_url: String,
+    credential: &str,
+) -> crate::config::LlmConfig {
     let mut providers = HashMap::new();
-    if let Some(provider_config) = crate::config::default_provider_config(provider, credential) {
-        providers.insert(provider.to_string(), provider_config);
-    }
+    providers.insert(
+        provider.to_string(),
+        crate::config::ProviderConfig {
+            api_type,
+            base_url,
+            api_key: credential.to_string(),
+            name: None,
+            use_bearer_auth: false,
+            extra_headers: Vec::new(),
+        },
+    );
 
-    crate::config::LlmConfig {
-        anthropic_key: (provider == "anthropic").then(|| credential.to_string()),
-        openai_key: (provider == "openai").then(|| credential.to_string()),
-        openrouter_key: (provider == "openrouter").then(|| credential.to_string()),
-        kilo_key: (provider == "kilo").then(|| credential.to_string()),
-        zhipu_key: (provider == "zhipu").then(|| credential.to_string()),
-        groq_key: (provider == "groq").then(|| credential.to_string()),
-        together_key: (provider == "together").then(|| credential.to_string()),
-        fireworks_key: (provider == "fireworks").then(|| credential.to_string()),
-        deepseek_key: (provider == "deepseek").then(|| credential.to_string()),
-        xai_key: (provider == "xai").then(|| credential.to_string()),
-        mistral_key: (provider == "mistral").then(|| credential.to_string()),
-        gemini_key: (provider == "gemini").then(|| credential.to_string()),
-        ollama_key: None,
-        ollama_base_url: (provider == "ollama").then(|| credential.to_string()),
-        opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
-        opencode_go_key: (provider == "opencode-go").then(|| credential.to_string()),
-        nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
-        minimax_key: (provider == "minimax").then(|| credential.to_string()),
-        minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
-        moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
-        zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
-        github_copilot_key: (provider == "github-copilot").then(|| credential.to_string()),
-        providers,
-    }
+    crate::config::LlmConfig { providers }
 }
 
 fn apply_model_routing(doc: &mut toml_edit::DocumentMut, model: &str) {
@@ -282,82 +224,6 @@ fn apply_model_routing(doc: &mut toml_edit::DocumentMut, model: &str) {
     }
 }
 
-impl DeviceOAuthSession {
-    fn is_expired(&self, now: i64) -> bool {
-        now >= self.expires_at
-    }
-}
-
-impl DeviceOAuthSessionStatus {
-    fn is_pending(&self) -> bool {
-        matches!(self, DeviceOAuthSessionStatus::Pending)
-    }
-}
-
-async fn prune_expired_device_oauth_sessions() {
-    let cutoff = chrono::Utc::now().timestamp() - OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS;
-    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
-    sessions.retain(|_, session| session.expires_at >= cutoff);
-}
-
-async fn is_device_oauth_session_pending(state_key: &str) -> bool {
-    let sessions = OPENAI_DEVICE_OAUTH_SESSIONS.read().await;
-    sessions
-        .get(state_key)
-        .is_some_and(|session| session.status.is_pending())
-}
-
-async fn update_device_oauth_status(state_key: &str, status: DeviceOAuthSessionStatus) {
-    if let Some(session) = OPENAI_DEVICE_OAUTH_SESSIONS
-        .write()
-        .await
-        .get_mut(state_key)
-    {
-        session.status = status;
-    }
-}
-
-async fn finalize_openai_oauth(
-    state: &Arc<ApiState>,
-    credentials: &crate::openai_auth::OAuthCredentials,
-    model: &str,
-) -> anyhow::Result<()> {
-    let instance_dir = (**state.instance_dir.load()).clone();
-    crate::openai_auth::save_credentials(&instance_dir, credentials)
-        .context("failed to save OpenAI OAuth credentials")?;
-
-    if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
-        llm_manager
-            .set_openai_oauth_credentials(credentials.clone())
-            .await;
-    }
-
-    let config_path = state.config_path.read().await.clone();
-    let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .context("failed to read config.toml")?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml_edit::DocumentMut = content.parse().context("failed to parse config.toml")?;
-    apply_model_routing(&mut doc, model);
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .context("failed to write config.toml")?;
-
-    // Refresh in-memory defaults so newly created agents inherit the updated routing.
-    refresh_defaults_config(state).await;
-
-    state
-        .provider_setup_tx
-        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
-        .ok();
-
-    Ok(())
-}
-
 #[utoipa::path(
     get,
     path = "/providers",
@@ -372,452 +238,44 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
-    let secrets_store = state.secrets_store.load();
-    let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
-    let env_set = |name: &str| {
-        std::env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    };
+    let anthropic_oauth = crate::auth::credentials_path(&instance_dir).exists();
 
-    let (
-        anthropic,
-        openai,
-        openai_chatgpt,
-        openrouter,
-        kilo,
-        zhipu,
-        groq,
-        together,
-        fireworks,
-        deepseek,
-        xai,
-        mistral,
-        gemini,
-        ollama,
-        opencode_zen,
-        opencode_go,
-        nvidia,
-        minimax,
-        minimax_cn,
-        moonshot,
-        zai_coding_plan,
-        github_copilot,
-        azure,
-    ) = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for providers");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-            tracing::error!(%error, "failed to parse config.toml for providers");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        let resolve_value = |value: &str| -> Option<String> {
-            if let Some(alias) = value.strip_prefix("secret:") {
-                let store = secrets_store.as_ref().as_ref()?;
-                return match store.get(&crate::secrets::store::SecretScope::shared(), alias) {
-                    Ok(secret) => Some(secret.expose().to_string()),
-                    Err(error) => {
-                        tracing::warn!(%error, alias, "failed to resolve secret reference");
-                        None
-                    }
-                };
-            }
-
-            if let Some(var_name) = value.strip_prefix("env:") {
-                return std::env::var(var_name)
-                    .ok()
-                    .filter(|resolved| !resolved.trim().is_empty());
-            }
-
-            if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            }
-        };
-
-        let has_value = |key: &str, env_var: &str| -> bool {
-            if let Some(llm) = doc.get("llm")
-                && let Some(val) = llm.get(key)
-                && let Some(s) = val.as_str()
-            {
-                return resolve_value(s).is_some();
-            }
-            env_set(env_var)
-        };
-
-        (
-            has_value("anthropic_key", "ANTHROPIC_API_KEY"),
-            has_value("openai_key", "OPENAI_API_KEY"),
-            openai_oauth_configured,
-            has_value("openrouter_key", "OPENROUTER_API_KEY"),
-            has_value("kilo_key", "KILO_API_KEY"),
-            has_value("zhipu_key", "ZHIPU_API_KEY"),
-            has_value("groq_key", "GROQ_API_KEY"),
-            has_value("together_key", "TOGETHER_API_KEY"),
-            has_value("fireworks_key", "FIREWORKS_API_KEY"),
-            has_value("deepseek_key", "DEEPSEEK_API_KEY"),
-            has_value("xai_key", "XAI_API_KEY"),
-            has_value("mistral_key", "MISTRAL_API_KEY"),
-            has_value("gemini_key", "GEMINI_API_KEY"),
-            has_value("ollama_base_url", "OLLAMA_BASE_URL")
-                || has_value("ollama_key", "OLLAMA_API_KEY"),
-            has_value("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
-            has_value("opencode_go_key", "OPENCODE_GO_API_KEY"),
-            has_value("nvidia_key", "NVIDIA_API_KEY"),
-            has_value("minimax_key", "MINIMAX_API_KEY"),
-            has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
-            has_value("moonshot_key", "MOONSHOT_API_KEY"),
-            has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
-            has_value("github_copilot_key", "GITHUB_COPILOT_API_KEY"),
-            doc.get("llm")
-                .and_then(|llm| llm.get("provider"))
-                .and_then(|provider| provider.get("azure"))
-                .and_then(|azure| azure.get("base_url"))
-                .and_then(|base_url| base_url.as_str())
-                .is_some_and(|url| !url.trim().is_empty()),
-        )
-    } else {
-        (
-            env_set("ANTHROPIC_API_KEY"),
-            env_set("OPENAI_API_KEY"),
-            openai_oauth_configured,
-            env_set("OPENROUTER_API_KEY"),
-            env_set("KILO_API_KEY"),
-            env_set("ZHIPU_API_KEY"),
-            env_set("GROQ_API_KEY"),
-            env_set("TOGETHER_API_KEY"),
-            env_set("FIREWORKS_API_KEY"),
-            env_set("DEEPSEEK_API_KEY"),
-            env_set("XAI_API_KEY"),
-            env_set("MISTRAL_API_KEY"),
-            env_set("GEMINI_API_KEY"),
-            env_set("OLLAMA_BASE_URL") || env_set("OLLAMA_API_KEY"),
-            env_set("OPENCODE_ZEN_API_KEY"),
-            env_set("OPENCODE_GO_API_KEY"),
-            env_set("NVIDIA_API_KEY"),
-            env_set("MINIMAX_API_KEY"),
-            env_set("MINIMAX_CN_API_KEY"),
-            env_set("MOONSHOT_API_KEY"),
-            env_set("ZAI_CODING_PLAN_API_KEY"),
-            env_set("GITHUB_COPILOT_API_KEY"),
-            false,
-        )
-    };
-
-    let providers = ProviderStatus {
-        anthropic,
-        openai,
-        openai_chatgpt,
-        openrouter,
-        kilo,
-        zhipu,
-        groq,
-        together,
-        fireworks,
-        deepseek,
-        xai,
-        mistral,
-        gemini,
-        ollama,
-        opencode_zen,
-        opencode_go,
-        nvidia,
-        minimax,
-        minimax_cn,
-        moonshot,
-        zai_coding_plan,
-        github_copilot,
-        azure,
-    };
-    let has_any = providers.anthropic
-        || providers.openai
-        || providers.openai_chatgpt
-        || providers.openrouter
-        || providers.kilo
-        || providers.zhipu
-        || providers.groq
-        || providers.together
-        || providers.fireworks
-        || providers.deepseek
-        || providers.xai
-        || providers.mistral
-        || providers.gemini
-        || providers.ollama
-        || providers.opencode_zen
-        || providers.opencode_go
-        || providers.nvidia
-        || providers.minimax
-        || providers.minimax_cn
-        || providers.moonshot
-        || providers.zai_coding_plan
-        || providers.github_copilot
-        || providers.azure;
-
-    Ok(Json(ProvidersResponse { providers, has_any }))
-}
-
-#[utoipa::path(
-    post,
-    path = "/providers/openai/browser-oauth/start",
-    request_body = OpenAiOAuthBrowserStartRequest,
-    responses(
-        (status = 200, body = OpenAiOAuthBrowserStartResponse),
-        (status = 400, description = "Invalid request"),
-    ),
-    tag = "providers",
-)]
-pub(super) async fn start_openai_browser_oauth(
-    State(state): State<Arc<ApiState>>,
-    Json(request): Json<OpenAiOAuthBrowserStartRequest>,
-) -> Result<Json<OpenAiOAuthBrowserStartResponse>, StatusCode> {
-    if request.model.trim().is_empty() {
-        return Ok(Json(OpenAiOAuthBrowserStartResponse {
-            success: false,
-            message: "Model cannot be empty".to_string(),
-            user_code: None,
-            verification_url: None,
-            state: None,
-        }));
-    }
-    let Some(chatgpt_model) = normalize_openai_chatgpt_model(&request.model) else {
-        return Ok(Json(OpenAiOAuthBrowserStartResponse {
-            success: false,
-            message: format!(
-                "Model '{}' must use provider 'openai' or 'openai-chatgpt'.",
-                request.model
-            ),
-            user_code: None,
-            verification_url: None,
-            state: None,
-        }));
-    };
-
-    prune_expired_device_oauth_sessions().await;
-
-    let device_code = match crate::openai_auth::request_device_code().await {
-        Ok(device_code) => device_code,
+    // Read straight from the parsed config so the API reports what the daemon
+    // actually resolved — including env-var bootstrapped providers that never
+    // appear in config.toml.
+    let providers = match crate::config::Config::load_from_path(&config_path) {
+        Ok(config) => {
+            let mut entries: Vec<ProviderEntry> = config
+                .llm
+                .providers
+                .into_iter()
+                .map(|(id, provider)| ProviderEntry {
+                    id,
+                    api_type: provider.api_type.as_str().to_string(),
+                    base_url: provider.base_url,
+                    display_name: provider.name,
+                    has_key: !provider.api_key.trim().is_empty(),
+                })
+                .collect();
+            entries.sort_by(|a, b| a.id.cmp(&b.id));
+            entries
+        }
         Err(error) => {
-            return Ok(Json(OpenAiOAuthBrowserStartResponse {
-                success: false,
-                message: format!("Failed to start device authorization: {error}"),
-                user_code: None,
-                verification_url: None,
-                state: None,
-            }));
+            // A config that no longer parses (e.g. still using retired keys)
+            // must not take down the settings UI — that is where the user goes
+            // to fix it.
+            tracing::warn!(%error, "failed to load config for provider listing");
+            Vec::new()
         }
     };
 
-    if device_code.device_auth_id.trim().is_empty() || device_code.user_code.trim().is_empty() {
-        return Ok(Json(OpenAiOAuthBrowserStartResponse {
-            success: false,
-            message: "Device authorization response was missing required fields.".to_string(),
-            user_code: None,
-            verification_url: None,
-            state: None,
-        }));
-    }
+    let has_any = !providers.is_empty() || anthropic_oauth;
 
-    let now = chrono::Utc::now().timestamp();
-    let expires_in = device_code
-        .expires_in
-        .unwrap_or(OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS as u64);
-    let expires_at = now + expires_in as i64;
-    let poll_interval = device_code
-        .interval
-        .unwrap_or(OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS);
-    let verification_url = crate::openai_auth::device_verification_url(&device_code);
-    let state_key = Uuid::new_v4().to_string();
-
-    OPENAI_DEVICE_OAUTH_SESSIONS.write().await.insert(
-        state_key.clone(),
-        DeviceOAuthSession {
-            expires_at,
-            status: DeviceOAuthSessionStatus::Pending,
-        },
-    );
-
-    let state_clone = state.clone();
-    let state_key_clone = state_key.clone();
-    let device_auth_id = device_code.device_auth_id.clone();
-    let user_code = device_code.user_code.clone();
-    tokio::spawn(async move {
-        run_device_oauth_background(
-            state_clone,
-            state_key_clone,
-            device_auth_id,
-            user_code,
-            poll_interval,
-            expires_at,
-            chatgpt_model,
-        )
-        .await;
-    });
-
-    Ok(Json(OpenAiOAuthBrowserStartResponse {
-        success: true,
-        message: "Device authorization started".to_string(),
-        user_code: Some(device_code.user_code),
-        verification_url: Some(verification_url),
-        state: Some(state_key),
+    Ok(Json(ProvidersResponse {
+        providers,
+        anthropic_oauth,
+        has_any,
     }))
-}
-
-async fn run_device_oauth_background(
-    state: Arc<ApiState>,
-    state_key: String,
-    device_auth_id: String,
-    user_code: String,
-    mut poll_interval_secs: u64,
-    expires_at: i64,
-    model: String,
-) {
-    poll_interval_secs = poll_interval_secs.max(1);
-
-    loop {
-        if !is_device_oauth_session_pending(&state_key).await {
-            return;
-        }
-
-        let now = chrono::Utc::now().timestamp();
-        if now >= expires_at {
-            update_device_oauth_status(
-                &state_key,
-                DeviceOAuthSessionStatus::Failed(
-                    "Sign-in expired. Please start again.".to_string(),
-                ),
-            )
-            .await;
-            return;
-        }
-
-        sleep(Duration::from_secs(poll_interval_secs)).await;
-
-        let poll_result = crate::openai_auth::poll_device_token(&device_auth_id, &user_code).await;
-        let grant = match poll_result {
-            Ok(DeviceTokenPollResult::Pending) => continue,
-            Ok(DeviceTokenPollResult::SlowDown) => {
-                poll_interval_secs = poll_interval_secs
-                    .saturating_add(OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS)
-                    .min(OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS);
-                continue;
-            }
-            Ok(DeviceTokenPollResult::Approved(grant)) => grant,
-            Err(error) => {
-                let message = format!("Device authorization polling failed: {error}");
-                tracing::warn!(%message, "OpenAI device OAuth polling failed");
-                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
-                    .await;
-                return;
-            }
-        };
-
-        let credentials = match crate::openai_auth::exchange_device_code(
-            &grant.authorization_code,
-            &grant.code_verifier,
-        )
-        .await
-        {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                let message = format!("Device code exchange failed: {error}");
-                tracing::warn!(%message, "OpenAI device OAuth failed during token exchange");
-                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
-                    .await;
-                return;
-            }
-        };
-
-        match finalize_openai_oauth(&state, &credentials, &model).await {
-            Ok(()) => {
-                update_device_oauth_status(
-                    &state_key,
-                    DeviceOAuthSessionStatus::Completed(format!(
-                        "OpenAI configured via device OAuth. Model '{}' applied to defaults and default agent routing.",
-                        model
-                    )),
-                )
-                .await;
-            }
-            Err(error) => {
-                let message =
-                    format!("Device OAuth sign-in completed but finalization failed: {error}");
-                tracing::warn!(%message, "OpenAI device OAuth finalization failed");
-                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
-                    .await;
-            }
-        }
-
-        return;
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/providers/openai/browser-oauth/status",
-    params(
-        ("state" = String, Query, description = "OAuth state parameter"),
-    ),
-    responses(
-        (status = 200, body = OpenAiOAuthBrowserStatusResponse),
-        (status = 400, description = "Invalid request"),
-    ),
-    tag = "providers",
-)]
-pub(super) async fn openai_browser_oauth_status(
-    Query(request): Query<OpenAiOAuthBrowserStatusRequest>,
-) -> Result<Json<OpenAiOAuthBrowserStatusResponse>, StatusCode> {
-    prune_expired_device_oauth_sessions().await;
-    if request.state.trim().is_empty() {
-        return Ok(Json(OpenAiOAuthBrowserStatusResponse {
-            found: false,
-            done: false,
-            success: false,
-            message: Some("Missing OAuth state".to_string()),
-        }));
-    }
-
-    let state_key = request.state.trim();
-    let now = chrono::Utc::now().timestamp();
-    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
-    let Some(session) = sessions.get_mut(state_key) else {
-        return Ok(Json(OpenAiOAuthBrowserStatusResponse {
-            found: false,
-            done: false,
-            success: false,
-            message: None,
-        }));
-    };
-
-    if session.status.is_pending() && session.is_expired(now) {
-        session.status =
-            DeviceOAuthSessionStatus::Failed("Sign-in expired. Please start again.".to_string());
-    }
-
-    let response = match &session.status {
-        DeviceOAuthSessionStatus::Pending => OpenAiOAuthBrowserStatusResponse {
-            found: true,
-            done: false,
-            success: false,
-            message: None,
-        },
-        DeviceOAuthSessionStatus::Completed(message) => OpenAiOAuthBrowserStatusResponse {
-            found: true,
-            done: true,
-            success: true,
-            message: Some(message.clone()),
-        },
-        DeviceOAuthSessionStatus::Failed(message) => OpenAiOAuthBrowserStatusResponse {
-            found: true,
-            done: true,
-            success: false,
-            message: Some(message.clone()),
-        },
-    };
-    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -834,50 +292,43 @@ pub(super) async fn update_provider(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<ProviderUpdateRequest>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
-    let normalized_provider = request.provider.trim().to_lowercase();
+    let provider_id = request.provider.trim().to_lowercase();
     let normalized_model = request.model.trim().to_string();
 
-    if normalized_provider == "azure" {
-        let azure_request = ProviderUpdateRequest {
-            provider: request.provider,
-            api_key: request.api_key,
-            model: request.model,
-            base_url: request.base_url,
-            api_version: request.api_version,
-            deployment: request.deployment,
-        };
-        return update_azure_provider(state, azure_request, &normalized_model).await;
+    let reject = |message: String| {
+        Ok(Json(ProviderUpdateResponse {
+            success: false,
+            message,
+        }))
+    };
+
+    if let Err(message) = validate_provider_id(&provider_id) {
+        return reject(message);
     }
 
-    let Some(key_name) = provider_toml_key(&normalized_provider) else {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: format!("Unknown provider: {}", request.provider),
-        }));
+    let api_type = match parse_api_type(request.api_type.as_deref()) {
+        Ok(api_type) => api_type,
+        Err(message) => return reject(message),
+    };
+
+    let base_url = match resolve_base_url(api_type, request.base_url.as_deref()) {
+        Ok(base_url) => base_url,
+        Err(message) => return reject(message),
     };
 
     if request.api_key.trim().is_empty() {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "API key cannot be empty".into(),
-        }));
+        return reject("API key cannot be empty".into());
     }
 
-    if request.model.trim().is_empty() {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "Model cannot be empty".into(),
-        }));
+    if normalized_model.is_empty() {
+        return reject("Model cannot be empty".into());
     }
 
-    if !model_matches_provider(&normalized_provider, &normalized_model) {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: format!(
-                "Model '{}' does not match provider '{}'.",
-                request.model, request.provider
-            ),
-        }));
+    if !model_matches_provider(&provider_id, &normalized_model) {
+        return reject(format!(
+            "Model '{normalized_model}' must be prefixed with the provider id, \
+             e.g. '{provider_id}/{normalized_model}'."
+        ));
     }
 
     let config_path = state.config_path.read().await.clone();
@@ -899,8 +350,14 @@ pub(super) async fn update_provider(
     if doc.get("llm").is_none() {
         doc["llm"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
+    if doc["llm"].get("provider").is_none() {
+        doc["llm"]["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
 
-    doc["llm"][key_name] = toml_edit::value(request.api_key);
+    doc["llm"]["provider"][&provider_id]["api_type"] = toml_edit::value(api_type.as_str());
+    doc["llm"]["provider"][&provider_id]["base_url"] = toml_edit::value(&base_url);
+    doc["llm"]["provider"][&provider_id]["api_key"] = toml_edit::value(request.api_key.trim());
+
     apply_model_routing(&mut doc, &normalized_model);
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -910,7 +367,6 @@ pub(super) async fn update_provider(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Refresh in-memory defaults so newly created agents inherit the updated routing.
     refresh_defaults_config(&state).await;
 
     state
@@ -921,294 +377,9 @@ pub(super) async fn update_provider(
     Ok(Json(ProviderUpdateResponse {
         success: true,
         message: format!(
-            "Provider '{}' configured. Model '{}' verified and applied to defaults and the default agent routing.",
-            request.provider, request.model
+            "Provider '{provider_id}' configured. Model '{normalized_model}' applied to \
+             defaults and the default agent routing."
         ),
-    }))
-}
-
-async fn update_azure_provider(
-    state: Arc<ApiState>,
-    request: ProviderUpdateRequest,
-    normalized_model: &str,
-) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
-    let base_url = request.base_url.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
-    let normalized_base_url = base_url.trim().trim_end_matches('/');
-
-    if !normalized_base_url.ends_with(".openai.azure.com") {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "Base URL must end with .openai.azure.com".to_string(),
-        }));
-    }
-
-    let api_version = request
-        .api_version
-        .as_ref()
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let api_version_regex = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}(-preview)?$").map_err(|e| {
-        tracing::error!(error = %e, "failed to compile api_version regex");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if !api_version_regex.is_match(api_version.trim()) {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "API version must match format: YYYY-MM-DD or YYYY-MM-DD-preview".to_string(),
-        }));
-    }
-
-    let deployment = request.deployment.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
-    let deployment_regex = regex::Regex::new(r"^[a-zA-Z0-9.-]+$").map_err(|e| {
-        tracing::error!(error = %e, "failed to compile deployment regex");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if !deployment_regex.is_match(deployment.trim()) {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "Deployment name must contain only alphanumeric characters, hyphens, and dots"
-                .to_string(),
-        }));
-    }
-
-    if normalized_model.is_empty() {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "Model cannot be empty".into(),
-        }));
-    }
-
-    let normalized_deployment = request.deployment.as_ref().map(|s| s.trim()).unwrap_or("");
-    let azure_model = format!("azure/{}", normalized_deployment);
-    if !model_matches_provider("azure", &azure_model) {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: format!(
-                "Deployment '{}' does not match provider 'azure'.",
-                normalized_deployment
-            ),
-        }));
-    }
-
-    let config_path = state.config_path.read().await.clone();
-    let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure setup");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-        tracing::error!(%error, "failed to parse config.toml for azure setup");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // Determine the API key: use incoming if non-empty, otherwise preserve existing
-    let api_key = if request.api_key.trim().is_empty() {
-        // Read existing API key from config
-        match doc
-            .get("llm")
-            .and_then(|llm| llm.get("provider"))
-            .and_then(|provider| provider.get("azure"))
-            .and_then(|azure| azure.get("api_key"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-        {
-            Some(key) => key,
-            None => {
-                return Ok(Json(ProviderUpdateResponse {
-                    success: false,
-                    message: "API key is required but no existing key found".to_string(),
-                }));
-            }
-        }
-    } else {
-        request.api_key.trim().to_string()
-    };
-
-    if doc.get("llm").is_none() {
-        doc["llm"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    if doc["llm"].get("provider").is_none() {
-        doc["llm"]["provider"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    if doc["llm"]["provider"].get("azure").is_none() {
-        doc["llm"]["provider"]["azure"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-
-    // Just initialized above if it was missing, so the table is guaranteed to exist.
-    let azure_table = doc["llm"]["provider"]["azure"]
-        .as_table_mut()
-        .expect("azure table must exist after initialization above");
-    azure_table["api_type"] = toml_edit::value("azure");
-    azure_table["base_url"] = toml_edit::value(base_url.trim());
-    azure_table["api_key"] = toml_edit::value(api_key.trim());
-    azure_table["api_version"] = toml_edit::value(api_version.trim());
-    azure_table["deployment"] = toml_edit::value(deployment.trim());
-
-    if doc.get("defaults").is_none() {
-        doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-
-    if let Some(defaults) = doc.get_mut("defaults").and_then(|item| item.as_table_mut()) {
-        if defaults.get("routing").is_none() {
-            defaults["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-
-        if let Some(routing_table) = defaults
-            .get_mut("routing")
-            .and_then(|item| item.as_table_mut())
-        {
-            if routing_table.get("channel").is_none() {
-                routing_table["channel"] =
-                    toml_edit::value(format!("azure/{}", normalized_deployment));
-            }
-            if routing_table.get("branch").is_none() {
-                routing_table["branch"] =
-                    toml_edit::value(format!("azure/{}", normalized_deployment));
-            }
-            if routing_table.get("worker").is_none() {
-                routing_table["worker"] =
-                    toml_edit::value(format!("azure/{}", normalized_deployment));
-            }
-            if routing_table.get("compactor").is_none() {
-                routing_table["compactor"] =
-                    toml_edit::value(format!("azure/{}", normalized_deployment));
-            }
-            if routing_table.get("cortex").is_none() {
-                routing_table["cortex"] =
-                    toml_edit::value(format!("azure/{}", normalized_deployment));
-            }
-        }
-    }
-
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to write config.toml for azure provider");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    refresh_defaults_config(&state).await;
-
-    state
-        .provider_setup_tx
-        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
-        .ok();
-
-    Ok(Json(ProviderUpdateResponse {
-        success: true,
-        message: format!(
-            "Azure provider configured. Deployment '{}' with model '{}' verified and applied to defaults and the default agent routing.",
-            deployment, normalized_model
-        ),
-    }))
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct ProviderConfigResponse {
-    success: bool,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deployment: Option<String>,
-    // Note: api_key is intentionally excluded for security.
-    // Credentials should never be returned to the client.
-}
-
-#[utoipa::path(
-    get,
-    path = "/providers/{provider}/config",
-    responses(
-        (status = 200, body = ProviderConfigResponse),
-        (status = 404, description = "Provider not found"),
-    ),
-    tag = "providers",
-    params(
-        ("provider" = String, Path, description = "Provider ID"),
-    ),
-)]
-pub(super) async fn get_provider_config(
-    State(state): State<Arc<ApiState>>,
-    axum::extract::Path(provider): axum::extract::Path<String>,
-) -> Result<Json<ProviderConfigResponse>, StatusCode> {
-    let normalized_provider = provider.trim().to_lowercase();
-
-    // Only Azure needs special config retrieval
-    if normalized_provider != "azure" {
-        return Ok(Json(ProviderConfigResponse {
-            success: true,
-            message: "No additional configuration needed for this provider".to_string(),
-            base_url: None,
-            api_version: None,
-            deployment: None,
-        }));
-    }
-
-    let config_path = state.config_path.read().await.clone();
-    if !config_path.exists() {
-        return Ok(Json(ProviderConfigResponse {
-            success: false,
-            message: "No config file found".to_string(),
-            base_url: None,
-            api_version: None,
-            deployment: None,
-        }));
-    }
-
-    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-        tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure config");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-        tracing::error!(%error, "failed to parse config.toml for azure config");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // Get Azure config from [llm.provider.azure]
-    let azure_config = doc
-        .get("llm")
-        .and_then(|llm| llm.get("provider"))
-        .and_then(|provider| provider.get("azure"));
-
-    if let Some(azure_table) = azure_config.and_then(|item| item.as_table_like()) {
-        let base_url = azure_table
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let api_version = azure_table
-            .get("api_version")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let deployment = azure_table
-            .get("deployment")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        if base_url.is_some() || api_version.is_some() || deployment.is_some() {
-            return Ok(Json(ProviderConfigResponse {
-                success: true,
-                message: "Azure configuration found".to_string(),
-                base_url,
-                api_version,
-                deployment,
-            }));
-        }
-    }
-
-    Ok(Json(ProviderConfigResponse {
-        success: false,
-        message: "Azure configuration not found".to_string(),
-        base_url: None,
-        api_version: None,
-        deployment: None,
     }))
 }
 
@@ -1226,229 +397,82 @@ pub(super) async fn test_provider_model(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<ProviderModelTestRequest>,
 ) -> Result<Json<ProviderModelTestResponse>, StatusCode> {
-    let normalized_provider = request.provider.trim().to_lowercase();
+    let provider_id = request.provider.trim().to_lowercase();
     let normalized_model = request.model.trim().to_string();
 
-    // Azure is handled specially and doesn't have a TOML key
-    if normalized_provider == "azure" {
-        // Azure validation happens later in the function
-    } else if provider_toml_key(&normalized_provider).is_none() {
-        return Ok(Json(ProviderModelTestResponse {
+    let reject = |message: String| {
+        Ok(Json(ProviderModelTestResponse {
             success: false,
-            message: format!("Unknown provider: {}", request.provider),
-            provider: request.provider,
-            model: request.model,
+            message,
+            provider: request.provider.clone(),
+            model: request.model.clone(),
             sample: None,
-        }));
-    }
-
-    // Determine the API key to use
-    let api_key_to_use = if request.api_key.trim().is_empty() {
-        if normalized_provider == "azure" {
-            // For Azure, try to use the existing stored key from config
-            let config_path = state.config_path.read().await.clone();
-            if config_path.exists() {
-                let content = tokio::fs::read_to_string(&config_path).await.ok();
-                if let Some(doc) = content.and_then(|c| c.parse::<toml_edit::DocumentMut>().ok()) {
-                    doc.get("llm")
-                        .and_then(|llm| llm.get("provider"))
-                        .and_then(|provider| provider.get("azure"))
-                        .and_then(|azure| azure.get("api_key"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        Some(request.api_key.trim().to_string())
+        }))
     };
 
-    // If no key found, return error
-    let api_key = match api_key_to_use {
-        Some(key) => key,
-        None => {
-            return Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message: "API key is required but not provided".to_string(),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            }));
-        }
+    if let Err(message) = validate_provider_id(&provider_id) {
+        return reject(message);
+    }
+
+    let api_type = match parse_api_type(request.api_type.as_deref()) {
+        Ok(api_type) => api_type,
+        Err(message) => return reject(message),
     };
 
     if normalized_model.is_empty() {
-        return Ok(Json(ProviderModelTestResponse {
-            success: false,
-            message: "Model cannot be empty".to_string(),
-            provider: request.provider,
-            model: request.model,
-            sample: None,
-        }));
+        return reject("Model cannot be empty".to_string());
     }
 
-    if !model_matches_provider(&normalized_provider, &normalized_model) {
-        return Ok(Json(ProviderModelTestResponse {
-            success: false,
-            message: format!(
-                "Model '{}' does not match provider '{}'.",
-                normalized_model, request.provider
-            ),
-            provider: request.provider,
-            model: request.model,
-            sample: None,
-        }));
+    if !model_matches_provider(&provider_id, &normalized_model) {
+        return reject(format!(
+            "Model '{normalized_model}' must be prefixed with the provider id, \
+             e.g. '{provider_id}/{normalized_model}'."
+        ));
     }
 
-    if normalized_provider == "azure" {
-        let base_url = request.base_url.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
-        let normalized_base_url = base_url.trim().trim_end_matches('/');
+    // An empty key means "test what is already configured" — used by the UI to
+    // re-check a provider without asking the user to retype a secret.
+    let stored = if request.api_key.trim().is_empty() || request.base_url.is_none() {
+        let config_path = state.config_path.read().await.clone();
+        crate::config::Config::load_from_path(&config_path)
+            .ok()
+            .and_then(|config| config.llm.providers.get(&provider_id).cloned())
+    } else {
+        None
+    };
 
-        if !normalized_base_url.ends_with(".openai.azure.com") {
-            return Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message: "Base URL must end with .openai.azure.com".to_string(),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            }));
+    let api_key = if request.api_key.trim().is_empty() {
+        match stored.as_ref().map(|provider| provider.api_key.clone()) {
+            Some(key) if !key.trim().is_empty() => key,
+            _ => return reject("API key is required but not provided".to_string()),
         }
+    } else {
+        request.api_key.trim().to_string()
+    };
 
-        let api_version = request
-            .api_version
-            .as_ref()
-            .ok_or(StatusCode::BAD_REQUEST)?;
-        let api_version_regex =
-            regex::Regex::new(r"^\d{4}-\d{2}-\d{2}(-preview)?$").map_err(|e| {
-                tracing::error!(error = %e, "failed to compile api_version regex");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        if !api_version_regex.is_match(api_version.trim()) {
-            return Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message: "API version must match format: YYYY-MM-DD or YYYY-MM-DD-preview"
-                    .to_string(),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            }));
-        }
-
-        let deployment = request.deployment.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
-        let deployment_regex = regex::Regex::new(r"^[a-zA-Z0-9.-]+$").map_err(|e| {
-            tracing::error!(error = %e, "failed to compile deployment regex");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        if !deployment_regex.is_match(deployment.trim()) {
-            return Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message:
-                    "Deployment name must contain only alphanumeric characters, hyphens, and dots"
-                        .to_string(),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            }));
-        }
-
-        let llm_config = crate::config::LlmConfig {
-            anthropic_key: None,
-            openai_key: None,
-            openrouter_key: None,
-            kilo_key: None,
-            zhipu_key: None,
-            groq_key: None,
-            together_key: None,
-            fireworks_key: None,
-            deepseek_key: None,
-            xai_key: None,
-            mistral_key: None,
-            gemini_key: None,
-            ollama_key: None,
-            ollama_base_url: None,
-            opencode_zen_key: None,
-            opencode_go_key: None,
-            nvidia_key: None,
-            minimax_key: None,
-            minimax_cn_key: None,
-            moonshot_key: None,
-            zai_coding_plan_key: None,
-            github_copilot_key: None,
-            providers: {
-                let mut providers = HashMap::new();
-                providers.insert(
-                    "azure".to_string(),
-                    crate::config::ProviderConfig {
-                        api_type: crate::config::ApiType::Azure,
-                        base_url: base_url.trim().to_string(),
-                        api_key: api_key.trim().to_string(),
-                        name: None,
-                        use_bearer_auth: false,
-                        extra_headers: Vec::new(),
-                        api_version: Some(api_version.trim().to_string()),
-                        deployment: Some(deployment.trim().to_string()),
-                    },
-                );
-                providers
+    let base_url = match request
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(url) => match resolve_base_url(api_type, Some(url)) {
+            Ok(base_url) => base_url,
+            Err(message) => return reject(message),
+        },
+        None => match stored.as_ref().map(|provider| provider.base_url.clone()) {
+            Some(url) => url,
+            None => match resolve_base_url(api_type, None) {
+                Ok(base_url) => base_url,
+                Err(message) => return reject(message),
             },
-        };
+        },
+    };
 
-        let llm_manager = match crate::llm::LlmManager::new(llm_config).await {
-            Ok(manager) => Arc::new(manager),
-            Err(error) => {
-                return Ok(Json(ProviderModelTestResponse {
-                    success: false,
-                    message: format!("Failed to initialize provider: {error}"),
-                    provider: request.provider,
-                    model: request.model,
-                    sample: None,
-                }));
-            }
-        };
-
-        let model = crate::llm::SpacebotModel::make(&llm_manager, normalized_model);
-        let agent = AgentBuilder::new(model)
-            .preamble("You are running a provider connectivity check. Reply with exactly: OK")
-            .build();
-
-        return match agent.prompt("Connection test").await {
-            Ok(sample) => Ok(Json(ProviderModelTestResponse {
-                success: true,
-                message: "Model responded successfully".to_string(),
-                provider: request.provider,
-                model: request.model,
-                sample: Some(sample),
-            })),
-            Err(error) => Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message: format!("Model test failed: {error}"),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            })),
-        };
-    }
-
-    let llm_config = build_test_llm_config(&normalized_provider, api_key.trim());
+    let llm_config = build_test_llm_config(&provider_id, api_type, base_url, &api_key);
     let llm_manager = match crate::llm::LlmManager::new(llm_config).await {
         Ok(manager) => Arc::new(manager),
-        Err(error) => {
-            return Ok(Json(ProviderModelTestResponse {
-                success: false,
-                message: format!("Failed to initialize provider: {error}"),
-                provider: request.provider,
-                model: request.model,
-                sample: None,
-            }));
-        }
+        Err(error) => return reject(format!("Failed to initialize provider: {error}")),
     };
 
     let model = crate::llm::SpacebotModel::make(&llm_manager, normalized_model);
@@ -1478,7 +502,7 @@ pub(super) async fn test_provider_model(
     delete,
     path = "/providers/{provider}",
     params(
-        ("provider" = String, Path, description = "Provider name to delete"),
+        ("provider" = String, Path, description = "Provider ID to delete"),
     ),
     responses(
         (status = 200, body = ProviderUpdateResponse),
@@ -1491,92 +515,24 @@ pub(super) async fn delete_provider(
     State(state): State<Arc<ApiState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
-    let provider = provider.trim().to_lowercase();
-    // OpenAI ChatGPT OAuth credentials are stored as a separate JSON file,
-    // not in the TOML config, so handle removal separately.
-    if provider == "openai-chatgpt" {
+    let provider_id = provider.trim().to_lowercase();
+
+    // `anthropic-oauth` is not a config block — it is the credentials file
+    // written by `spacebot auth login`.
+    if provider_id == "anthropic-oauth" {
         let instance_dir = (**state.instance_dir.load()).clone();
-        let cred_path = crate::openai_auth::credentials_path(&instance_dir);
-        if cred_path.exists() {
-            tokio::fs::remove_file(&cred_path).await.map_err(|error| {
-                tracing::error!(%error, path = %cred_path.display(), "failed to remove OpenAI OAuth credentials");
+        let credentials_path = crate::auth::credentials_path(&instance_dir);
+        if credentials_path.exists() {
+            tokio::fs::remove_file(&credentials_path).await.map_err(|error| {
+                tracing::error!(%error, path = %credentials_path.display(), "failed to remove Anthropic OAuth credentials");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-        }
-        if let Some(mgr) = state.llm_manager.read().await.as_ref() {
-            mgr.clear_openai_oauth_credentials().await;
         }
         return Ok(Json(ProviderUpdateResponse {
             success: true,
-            message: "ChatGPT Plus OAuth credentials removed".into(),
+            message: "Anthropic OAuth credentials removed".into(),
         }));
     }
-
-    // GitHub Copilot has a cached token file alongside the TOML key.
-    // Remove both the TOML key and the cached token.
-    if provider == "github-copilot" {
-        let instance_dir = (**state.instance_dir.load()).clone();
-        let token_path = crate::github_copilot_auth::credentials_path(&instance_dir);
-        if token_path.exists() {
-            tokio::fs::remove_file(&token_path).await.map_err(|error| {
-                tracing::error!(%error, path = %token_path.display(), "failed to remove github copilot token");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        }
-        if let Some(manager) = state.llm_manager.read().await.as_ref() {
-            manager.clear_copilot_token().await;
-        }
-    }
-
-    if provider == "azure" {
-        let config_path = state.config_path.read().await.clone();
-        if !config_path.exists() {
-            return Ok(Json(ProviderUpdateResponse {
-                success: false,
-                message: "No config file found".into(),
-            }));
-        }
-
-        let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-            tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for azure removal");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-            tracing::error!(%error, "failed to parse config.toml for azure removal");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        if let Some(llm) = doc.get_mut("llm")
-            && let Some(llm_table) = llm.as_table_mut()
-            && let Some(provider_table) = llm_table.get_mut("provider")
-            && let Some(provider_tbl) = provider_table.as_table_mut()
-        {
-            provider_tbl.remove("azure");
-            if provider_tbl.is_empty() {
-                llm_table.remove("provider");
-            }
-        }
-
-        tokio::fs::write(&config_path, doc.to_string())
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "failed to write config after azure removal");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        return Ok(Json(ProviderUpdateResponse {
-            success: true,
-            message: "Provider 'azure' removed".into(),
-        }));
-    }
-
-    let Some(key_name) = provider_toml_key(&provider) else {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: format!("Unknown provider: {}", provider),
-        }));
-    };
 
     let config_path = state.config_path.read().await.clone();
     if !config_path.exists() {
@@ -1596,10 +552,23 @@ pub(super) async fn delete_provider(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if let Some(llm) = doc.get_mut("llm")
-        && let Some(table) = llm.as_table_mut()
+    let mut removed = false;
+    if let Some(llm_table) = doc.get_mut("llm").and_then(|llm| llm.as_table_mut())
+        && let Some(provider_table) = llm_table
+            .get_mut("provider")
+            .and_then(|item| item.as_table_mut())
     {
-        table.remove(key_name);
+        removed = provider_table.remove(&provider_id).is_some();
+        if provider_table.is_empty() {
+            llm_table.remove("provider");
+        }
+    }
+
+    if !removed {
+        return Ok(Json(ProviderUpdateResponse {
+            success: false,
+            message: format!("Provider '{provider_id}' is not configured in config.toml"),
+        }));
     }
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -1611,23 +580,61 @@ pub(super) async fn delete_provider(
 
     Ok(Json(ProviderUpdateResponse {
         success: true,
-        message: format!("Provider '{}' removed", provider),
+        message: format!("Provider '{provider_id}' removed"),
     }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_test_llm_config;
+    use super::*;
+    use crate::config::ApiType;
 
     #[test]
-    fn build_test_llm_config_registers_ollama_provider_from_base_url() {
-        let config = build_test_llm_config("ollama", "http://remote-ollama.local:11434");
-        let provider = config
-            .providers
-            .get("ollama")
-            .expect("ollama provider should be registered");
+    fn parse_api_type_defaults_to_openai_compatible() {
+        assert_eq!(parse_api_type(None).unwrap(), ApiType::OpenAiCompatible);
+        assert_eq!(parse_api_type(Some("")).unwrap(), ApiType::OpenAiCompatible);
+        assert_eq!(
+            parse_api_type(Some("openai_compatible")).unwrap(),
+            ApiType::OpenAiCompatible
+        );
+        assert_eq!(
+            parse_api_type(Some("anthropic")).unwrap(),
+            ApiType::Anthropic
+        );
+    }
 
-        assert_eq!(provider.base_url, "http://remote-ollama.local:11434");
-        assert_eq!(provider.api_key, "");
+    #[test]
+    fn parse_api_type_rejects_retired_names() {
+        for retired in ["azure", "gemini", "kilo_gateway", "openai_responses"] {
+            assert!(
+                parse_api_type(Some(retired)).is_err(),
+                "{retired} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compatible_requires_an_explicit_base_url() {
+        assert!(resolve_base_url(ApiType::OpenAiCompatible, None).is_err());
+        assert_eq!(
+            resolve_base_url(ApiType::OpenAiCompatible, Some("http://localhost:4000/v1/")).unwrap(),
+            "http://localhost:4000/v1"
+        );
+    }
+
+    #[test]
+    fn anthropic_falls_back_to_the_public_endpoint() {
+        assert_eq!(
+            resolve_base_url(ApiType::Anthropic, None).unwrap(),
+            "https://api.anthropic.com"
+        );
+    }
+
+    #[test]
+    fn provider_ids_cannot_break_routing_strings() {
+        assert!(validate_provider_id("litellm").is_ok());
+        assert!(validate_provider_id("").is_err());
+        assert!(validate_provider_id("has/slash").is_err());
+        assert!(validate_provider_id("has space").is_err());
     }
 }

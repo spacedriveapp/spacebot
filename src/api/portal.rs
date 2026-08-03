@@ -500,16 +500,22 @@ pub(super) async fn conversation_defaults(
     let configured = super::models::configured_providers(&config_path).await;
     let catalog = super::models::ensure_models_cache().await;
 
-    let available_models: Vec<ModelOption> = catalog
-        .into_iter()
-        .filter(|m| configured.contains(&m.provider.as_str()) && m.tool_call)
-        .map(|m| ModelOption {
-            id: m.id,
-            name: m.name,
-            provider: m.provider,
-            context_window: m.context_window.unwrap_or(0) as usize,
-            supports_tools: m.tool_call,
-            supports_thinking: m.reasoning,
+    // The catalog holds bare model names; a routing string needs a configured
+    // provider prefix, so offer each tool-capable model under each provider.
+    let available_models: Vec<ModelOption> = configured
+        .iter()
+        .flat_map(|provider| {
+            catalog
+                .iter()
+                .filter(|model| model.tool_call)
+                .map(move |model| ModelOption {
+                    id: format!("{provider}/{}", model.id),
+                    name: model.name.clone(),
+                    provider: provider.clone(),
+                    context_window: model.context_window.unwrap_or(0) as usize,
+                    supports_tools: model.tool_call,
+                    supports_thinking: model.reasoning,
+                })
         })
         .collect();
 
