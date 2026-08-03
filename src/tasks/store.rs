@@ -511,6 +511,13 @@ pub struct UpdateTaskInput {
     pub binding: TaskBindingPatch,
     /// Clear all three binding columns, overriding `binding`.
     pub clear_binding: bool,
+    /// Change how many failures this task tolerates before it is parked.
+    ///
+    /// Three-valued for the same reason the binding patch is: `None` leaves it
+    /// alone, `Some(None)` returns the task to the instance default, and
+    /// `Some(Some(n))` sets an explicit limit. Without the middle case there is
+    /// no way to undo an override once set.
+    pub max_retries: Option<Option<i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -969,6 +976,9 @@ impl TaskStore {
         if binding_patch.worktree_id.is_some() {
             query.push_str("worktree_id = ?, ");
         }
+        if input.max_retries.is_some() {
+            query.push_str("max_retries = ?, ");
+        }
 
         query.push_str(
             "approved_by = COALESCE(?, approved_by), \
@@ -1010,6 +1020,9 @@ impl TaskStore {
         }
         if let Some(worktree_id) = &binding_patch.worktree_id {
             sql = sql.bind(worktree_id.clone());
+        }
+        if let Some(max_retries) = input.max_retries {
+            sql = sql.bind(max_retries);
         }
 
         sql.bind(input.approved_by)
@@ -4600,5 +4613,109 @@ mod tests {
         let sweep = store.recompute_ready("agent-test").await.expect("sweep");
         assert_eq!(sweep.promoted, vec![child.task_number]);
         assert!(sweep.stalled.is_empty());
+    }
+    /// The budget has to be adjustable *and* resettable. A plain `Option` can
+    /// express "set it" but not "put it back to the default", which would make
+    /// an override permanent once applied.
+    #[tokio::test]
+    async fn max_retries_can_be_set_cleared_and_left_alone() {
+        let store = setup_store().await;
+        let task = task_at(&store, "tunable", TaskStatus::Backlog).await;
+        assert!(task.max_retries.is_none(), "starts on the instance default");
+
+        let set = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    max_retries: Some(Some(5)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(set.max_retries, Some(5));
+
+        // An unrelated update must not disturb it.
+        let untouched = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    title: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert_eq!(untouched.max_retries, Some(5));
+
+        let cleared = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    max_retries: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+        assert!(
+            cleared.max_retries.is_none(),
+            "an override must be removable, not just replaceable"
+        );
+    }
+
+    /// The budget is what `record_failure` reads, so a change has to actually
+    /// move the parking threshold rather than only the displayed number.
+    #[tokio::test]
+    async fn a_raised_budget_delays_parking() {
+        let store = setup_store().await;
+        let task = task_at(&store, "patient", TaskStatus::InProgress).await;
+        store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    max_retries: Some(Some(3)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+
+        for round in 0..2 {
+            if round > 0 {
+                store
+                    .claim_next_ready("agent-test")
+                    .await
+                    .expect("claim")
+                    .expect("requeued");
+            }
+            let disposition = store
+                .record_failure(task.task_number, TaskRunOutcome::Failed, "boom")
+                .await
+                .expect("record failure");
+            assert!(
+                matches!(disposition, FailureDisposition::Requeued { .. }),
+                "under the raised limit the task should still retry: {disposition:?}"
+            );
+        }
+
+        // Third failure reaches the raised limit.
+        store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("requeued");
+        let final_disposition = store
+            .record_failure(task.task_number, TaskRunOutcome::Failed, "boom")
+            .await
+            .expect("record failure");
+        assert!(matches!(
+            final_disposition,
+            FailureDisposition::Parked { limit: 3, .. }
+        ));
     }
 }

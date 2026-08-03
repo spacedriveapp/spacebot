@@ -104,6 +104,13 @@ pub(super) struct UpdateTaskRequest {
     /// Unbind the task from its project/repo/worktree entirely.
     #[serde(default)]
     clear_binding: bool,
+    /// How many failures this task tolerates before it is parked.
+    ///
+    /// Absent leaves it alone; explicit `null` returns it to the instance
+    /// default. Distinguishing those needs the doubly-nested option — a plain
+    /// `Option` cannot express "clear this".
+    #[serde(default, deserialize_with = "double_option")]
+    max_retries: Option<Option<i64>>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -219,6 +226,20 @@ pub(super) struct BlockTaskRequest {
     /// dependency | needs_input | capability | transient
     kind: String,
     reason: String,
+}
+
+/// Distinguish "field absent" from "field explicitly null".
+///
+/// `#[serde(default)]` yields `None` when the key is missing; this wraps a
+/// present value — including `null` — in `Some`. Without it, clearing a field
+/// and not mentioning it are the same request, which is how the binding patch
+/// used to null columns nobody asked about.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +519,7 @@ pub(super) async fn update_task(
                 complete_subtask: request.complete_subtask,
                 binding,
                 clear_binding: request.clear_binding,
+                max_retries: request.max_retries,
                 ..Default::default()
             },
         )
