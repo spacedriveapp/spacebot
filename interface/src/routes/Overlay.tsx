@@ -411,7 +411,7 @@ export function Overlay() {
 						</div>
 					</div>
 					{profilesQuery.isError && (
-						<div className="border-b border-white/5 px-4 py-2 text-tiny text-amber-300/80">
+						<div className="border-b border-white/5 px-4 py-2 text-tiny text-status-warning/80">
 							Couldn&apos;t load Voicebox profiles. Restart Spacebot after
 							backend changes, or set `SPACEBOT_VOICEBOX_PROFILE_ID`.
 						</div>
@@ -447,9 +447,9 @@ export function Overlay() {
 				className={cx(
 					"voice-overlay-pill mb-2 flex w-full max-w-[460px] cursor-pointer items-center gap-2.5 overflow-hidden rounded-[20px] border px-3 py-2 shadow-2xl backdrop-blur-xl transition-all",
 					voiceState === "recording"
-						? "border-sky-300/35 bg-sky-400/10"
+						? "border-accent/35 bg-accent/10"
 						: voiceState === "speaking"
-							? "border-violet-300/35 bg-violet-400/10"
+							? "border-accent/35 bg-accent/10"
 							: "border-white/10 bg-app-dark-box/95",
 				)}
 				onClick={() => {
@@ -470,9 +470,9 @@ export function Overlay() {
 						className={cx(
 							"absolute inset-0 transition-all duration-150",
 							voiceState === "recording"
-								? "bg-sky-400/12"
+								? "bg-accent/12"
 								: voiceState === "speaking"
-									? "bg-violet-400/12"
+									? "bg-accent/12"
 									: "bg-transparent",
 						)}
 						style={{transform: `scale(${1 + activeEnergy * 0.22})`}}
@@ -489,11 +489,11 @@ export function Overlay() {
 							className={cx(
 								"rounded-full py-0.5 text-[8px] font-semibold uppercase tracking-[0.14em]",
 								voiceState === "recording"
-									? "bg-sky-400/14 text-sky-200"
+									? "bg-accent/14 text-accent"
 									: voiceState === "speaking"
-										? "bg-violet-400/14 text-violet-200"
+										? "bg-accent/14 text-accent"
 										: voiceState === "processing"
-											? "bg-violet-400/14 text-violet-200"
+											? "bg-accent/14 text-accent"
 											: "bg-white/6 text-ink-faint",
 							)}
 						>
@@ -535,11 +535,11 @@ export function Overlay() {
 						voiceState === "idle" &&
 							"border-white/10 bg-white/5 text-ink-faint hover:bg-white/10 hover:text-ink",
 						voiceState === "processing" &&
-							"animate-pulse border-violet-300/30 bg-violet-400/15 text-violet-100",
+							"animate-pulse border-accent/30 bg-accent/15 text-accent",
 						voiceState === "speaking" &&
-							"border-violet-300/30 bg-violet-400/15 text-violet-100",
+							"border-accent/30 bg-accent/15 text-accent",
 						voiceState === "recording" &&
-							"border-sky-300/30 bg-sky-400/15 text-sky-100",
+							"border-accent/30 bg-accent/15 text-accent",
 					)}
 				>
 					{voiceState === "speaking" ? <SpeakerIcon /> : <MicIcon />}
@@ -552,7 +552,7 @@ export function Overlay() {
 							event.stopPropagation();
 							handleStopRecording();
 						}}
-						className="relative z-10 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-sky-300/30 bg-sky-400/15 text-sky-100 transition-colors hover:bg-sky-400/20"
+						className="relative z-10 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-accent/30 bg-accent/15 text-accent transition-colors hover:bg-accent/20"
 					>
 						<StopIcon />
 					</button>

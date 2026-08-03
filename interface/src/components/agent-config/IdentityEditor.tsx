@@ -98,7 +98,7 @@ export function IdentityEditor({
 						</button>
 					</div>
 					{localDirty ? (
-						<span className="text-tiny text-amber-400">Unsaved changes</span>
+						<span className="text-tiny text-status-warning">Unsaved changes</span>
 					) : (
 						<span className="text-tiny text-ink-faint/50">Cmd+S to save</span>
 					)}

@@ -618,7 +618,7 @@ function RepoCard({
 	const isSingleRepo = repo.path === ".";
 
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-active">
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
@@ -686,7 +686,7 @@ function WorktreeCard({
 	isDeleting: boolean;
 }) {
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-active">
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">

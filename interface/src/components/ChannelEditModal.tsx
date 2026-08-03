@@ -945,8 +945,8 @@ export function ChannelEditModal({
 					<div
 						className={`rounded-md border px-3 py-2 text-sm ${
 							message.type === "success"
-								? "border-green-500/20 bg-green-500/10 text-green-400"
-								: "border-red-500/20 bg-red-500/10 text-red-400"
+								? "border-status-success/20 bg-status-success/10 text-status-success"
+								: "border-status-error/20 bg-status-error/10 text-status-error"
 						}`}
 					>
 						{message.text}
@@ -961,13 +961,13 @@ export function ChannelEditModal({
 								variant="bare"
 								size="sm"
 								onClick={() => setConfirmDisconnect(true)}
-								className="text-red-400 hover:text-red-300"
+								className="text-status-error hover:text-status-error/80"
 							>
 								Disconnect {name}
 							</Button>
 						) : (
 							<div className="flex flex-col gap-2">
-								<p className="text-sm text-red-400">
+								<p className="text-sm text-status-error">
 									This will remove all credentials and bindings for {name}. The
 									bot will stop responding immediately.
 								</p>
@@ -983,7 +983,7 @@ export function ChannelEditModal({
 										size="sm"
 										onClick={() => disconnect.mutate()}
 										loading={disconnect.isPending}
-										className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
+										className="bg-status-error/20 text-status-error hover:bg-status-error/30"
 									>
 										Confirm Disconnect
 									</Button>

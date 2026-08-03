@@ -400,7 +400,7 @@ function CardBody({
 			ref={ref}
 			role="button"
 			tabIndex={0}
-			className={`cursor-grab select-none rounded border border-app-line bg-app-box/80 p-2 text-left transition-colors hover:border-app-line-hover hover:bg-app-box active:cursor-grabbing ${
+			className={`cursor-grab select-none rounded border border-app-line bg-app-box/80 p-2 text-left transition-colors hover:border-app-active hover:bg-app-box active:cursor-grabbing ${
 				className ?? ""
 			}`}
 			{...rest}

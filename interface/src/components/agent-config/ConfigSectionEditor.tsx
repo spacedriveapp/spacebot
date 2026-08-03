@@ -639,7 +639,7 @@ export function ConfigSectionEditor({
 					<span className="text-tiny text-ink-faint">{description}</span>
 				</div>
 				{localDirty ? (
-					<span className="text-tiny text-amber-400">Unsaved changes</span>
+					<span className="text-tiny text-status-warning">Unsaved changes</span>
 				) : (
 					<span className="text-tiny text-ink-faint/50">
 						Changes saved to config.toml

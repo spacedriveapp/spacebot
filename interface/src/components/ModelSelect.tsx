@@ -194,7 +194,7 @@ export function ModelSelect({
 											)}
 											{model.reasoning && (
 												<span
-													className="text-[10px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-400 font-medium"
+													className="text-[10px] px-1 py-0.5 rounded bg-app-box text-ink-dull font-medium"
 													title="Reasoning"
 												>
 													think

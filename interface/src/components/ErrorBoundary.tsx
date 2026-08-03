@@ -30,8 +30,8 @@ export class ErrorBoundary extends Component<Props, State> {
 
 		return (
 			<div className="flex h-screen w-screen items-center justify-center bg-app">
-				<div className="max-w-md space-y-4 rounded-lg border border-red-500/20 bg-red-500/10 p-6">
-					<h2 className="text-lg font-semibold text-red-400">
+				<div className="max-w-md space-y-4 rounded-lg border border-status-error/20 bg-status-error/10 p-6">
+					<h2 className="text-lg font-semibold text-status-error">
 						Something went wrong
 					</h2>
 					<p className="text-sm text-ink-faint">
@@ -46,7 +46,7 @@ export class ErrorBoundary extends Component<Props, State> {
 					<button
 						type="button"
 						onClick={() => window.location.reload()}
-						className="rounded bg-red-500/20 px-4 py-2 text-sm font-medium text-red-400 transition-colors hover:bg-red-500/30"
+						className="rounded bg-status-error/20 px-4 py-2 text-sm font-medium text-status-error transition-colors hover:bg-status-error/30"
 					>
 						Reload
 					</button>

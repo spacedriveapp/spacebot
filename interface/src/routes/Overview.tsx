@@ -86,9 +86,9 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 					<div className="flex items-center gap-2">
 						<h1 className="font-plex text-sm font-medium text-ink">Spacebot</h1>
 						{statusData ? (
-							<div className="h-2 w-2 rounded-full bg-green-500" />
+							<div className="h-2 w-2 rounded-full bg-status-success" />
 						) : (
-							<div className="h-2 w-2 rounded-full bg-red-500" />
+							<div className="h-2 w-2 rounded-full bg-status-error" />
 						)}
 					</div>
 
@@ -105,17 +105,17 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 					{(activity.workers > 0 || activity.branches > 0) && (
 						<div className="flex items-center gap-2">
 							{activity.workers > 0 && (
-								<span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-tiny">
-									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-									<span className="font-medium text-amber-400">
+								<span className="flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-tiny">
+									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+									<span className="font-medium text-accent">
 										{activity.workers}w
 									</span>
 								</span>
 							)}
 							{activity.branches > 0 && (
-								<span className="flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-1 text-tiny">
-									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-									<span className="font-medium text-violet-400">
+								<span className="flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-tiny">
+									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+									<span className="font-medium text-accent">
 										{activity.branches}b
 									</span>
 								</span>
@@ -154,15 +154,15 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 				</div>
 			</div>
 			{providersData && !providersData.has_any && agents.length > 0 && (
-				<div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
-					<p className="text-sm text-amber-200">
+				<div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg border border-status-warning/25 bg-status-warning/10 px-4 py-3">
+					<p className="text-sm text-status-warning">
 						Agents are configured, but no provider credentials are available.
 						Add or unlock secrets to bring agents online.
 					</p>
 					<Link
 						to="/settings"
 						search={{tab: "secrets"}}
-						className="shrink-0 text-sm font-medium text-amber-100 underline-offset-4 hover:underline"
+						className="shrink-0 text-sm font-medium text-status-warning underline-offset-4 hover:underline"
 					>
 						Open Secrets Settings
 					</Link>

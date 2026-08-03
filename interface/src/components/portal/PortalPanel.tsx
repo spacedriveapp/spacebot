@@ -275,7 +275,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 						/>
 
 						{error && (
-							<div className="mx-4 mb-2 rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+							<div className="mx-4 mb-2 rounded-lg border border-status-error/20 bg-status-error/5 px-4 py-3 text-sm text-status-error">
 								{error}
 							</div>
 						)}

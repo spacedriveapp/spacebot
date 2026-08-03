@@ -385,7 +385,7 @@ export function InstanceCard({
 							{instance.name || "default"}
 						</span>
 						<span
-							className={`text-tiny ${instance.enabled ? "text-green-400" : "text-ink-faint"}`}
+							className={`text-tiny ${instance.enabled ? "text-status-success" : "text-ink-faint"}`}
 						>
 							{instance.enabled ? "● Active" : "○ Disabled"}
 						</span>
@@ -562,8 +562,8 @@ export function InstanceCard({
 								<div
 									className={`rounded-md border px-3 py-2 text-sm ${
 										message.type === "success"
-											? "border-green-500/20 bg-green-500/10 text-green-400"
-											: "border-red-500/20 bg-red-500/10 text-red-400"
+											? "border-status-success/20 bg-status-success/10 text-status-success"
+											: "border-status-error/20 bg-status-error/10 text-status-error"
 									}`}
 								>
 									{message.text}
@@ -582,7 +582,7 @@ export function InstanceCard({
 									</Button>
 								) : (
 									<div className="flex flex-col gap-2">
-										<p className="text-sm text-red-400">
+										<p className="text-sm text-status-error">
 											This will remove credentials and bindings for{" "}
 											{instanceLabel}. The adapter will stop immediately.
 										</p>
@@ -598,7 +598,7 @@ export function InstanceCard({
 												size="sm"
 												onClick={() => deleteInstance.mutate()}
 												loading={deleteInstance.isPending}
-												className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
+												className="bg-status-error/20 text-status-error hover:bg-status-error/30"
 											>
 												Confirm Remove
 											</Button>
@@ -1396,8 +1396,8 @@ export function AddInstanceCard({
 					<div
 						className={`rounded-md border px-3 py-2 text-sm ${
 							message.type === "success"
-								? "border-green-500/20 bg-green-500/10 text-green-400"
-								: "border-red-500/20 bg-red-500/10 text-red-400"
+								? "border-status-success/20 bg-status-success/10 text-status-success"
+								: "border-status-error/20 bg-status-error/10 text-status-error"
 						}`}
 					>
 						{message.text}

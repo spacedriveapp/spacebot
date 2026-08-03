@@ -544,7 +544,7 @@ export function GlobalTasks({
 						Loading tasks...
 					</div>
 				) : error ? (
-					<div className="py-8 text-center text-sm text-red-400">
+					<div className="py-8 text-center text-sm text-status-error">
 						Failed to load tasks.
 						<div className="mt-1 font-mono text-[10px] text-ink-faint">
 							{(error as Error).message}

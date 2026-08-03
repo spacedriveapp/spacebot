@@ -486,7 +486,7 @@ export function WorkerDetail({
 								/>
 							</span>
 						) : isIdle ? (
-							<span className="text-blue-500">
+							<span className="text-status-info">
 								Idle — waiting for follow-up
 							</span>
 						) : (
@@ -528,7 +528,7 @@ export function WorkerDetail({
 						{currentTool ? (
 							<span className="text-accent">Running {currentTool}...</span>
 						) : displayStatus ? (
-							<span className="text-amber-500">{displayStatus}</span>
+							<span className="text-accent">{displayStatus}</span>
 						) : null}
 					</div>
 				)}
@@ -579,7 +579,7 @@ export function WorkerDetail({
 									</div>
 								)}
 								{isIdle && (
-									<div className="flex items-center gap-2 py-2 text-tiny text-blue-500">
+									<div className="flex items-center gap-2 py-2 text-tiny text-status-info">
 										Waiting for follow-up input...
 									</div>
 								)}
@@ -608,7 +608,7 @@ export function WorkerDetail({
 									</motion.div>
 								))}
 								{isIdle && (
-									<div className="flex items-center gap-2 py-2 text-tiny text-blue-500">
+									<div className="flex items-center gap-2 py-2 text-tiny text-status-info">
 										Waiting for follow-up input...
 									</div>
 								)}
@@ -616,7 +616,7 @@ export function WorkerDetail({
 						</div>
 					) : liveWorker && !isIdle ? (
 						<div className="flex flex-col items-center justify-center gap-2 py-12 text-ink-faint">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
 							<p className="text-xs">Waiting for first tool call...</p>
 						</div>
 					) : (

@@ -350,7 +350,7 @@ function ThreadList({
 							<button
 								type="button"
 								onClick={(event) => handleDelete(event, thread.thread_id)}
-								className="mt-0.5 shrink-0 rounded p-0.5 text-ink-faint opacity-0 transition-all hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100"
+								className="mt-0.5 shrink-0 rounded p-0.5 text-ink-faint opacity-0 transition-all hover:bg-status-error/10 hover:text-status-error group-hover:opacity-100"
 								title="Delete thread"
 							>
 								<Trash className="h-3 w-3" />
@@ -509,7 +509,7 @@ export function CortexChatPanel({
 					)}
 
 					{error && (
-						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-sm text-red-400">
+						<div className="rounded-lg border border-status-error/20 bg-status-error/5 px-3 py-2.5 text-sm text-status-error">
 							{error}
 						</div>
 					)}

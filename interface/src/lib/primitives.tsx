@@ -58,7 +58,7 @@ function mapButtonVariant(
 
 function legacyButtonClassName(variant: ButtonVariant | undefined) {
 	if (variant === "destructive") {
-		return "border-red-500/40 text-red-300 hover:border-red-500/60 hover:bg-red-500/10";
+		return "border-status-error/40 text-status-error hover:border-status-error/60 hover:bg-status-error/10";
 	}
 
 	return undefined;

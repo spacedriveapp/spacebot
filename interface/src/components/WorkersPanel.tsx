@@ -305,7 +305,7 @@ function WorkerPanelRow({
 					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
 				)}
 				{isIdle && (
-					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-status-info" />
 				)}
 				{!isRunning && !isIdle && (
 					<span

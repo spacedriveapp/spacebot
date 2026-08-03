@@ -290,7 +290,7 @@ function HeroSection({
 					<div className="mt-2 flex items-center gap-4 text-sm">
 						<div className="flex items-center gap-2">
 							<div
-								className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-amber-400" : "bg-green-500"}`}
+								className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-accent" : "bg-status-success"}`}
 							/>
 							<span className="text-ink-dull">
 								{hasLiveActivity ? "Active" : "Idle"}
@@ -307,7 +307,7 @@ function HeroSection({
 				</div>
 				<button
 					onClick={onDelete}
-					className="rounded-md px-3 py-1.5 text-sm text-ink-faint transition-colors hover:bg-red-500/10 hover:text-red-400"
+					className="rounded-md px-3 py-1.5 text-sm text-ink-faint transition-colors hover:bg-status-error/10 hover:text-status-error"
 				>
 					Delete
 				</button>
@@ -316,17 +316,17 @@ function HeroSection({
 			{(workers > 0 || branches > 0) && (
 				<div className="flex flex-wrap gap-2">
 					{workers > 0 && (
-						<div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 text-sm">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-							<span className="font-medium text-amber-400">
+						<div className="flex items-center gap-2 rounded-full bg-accent/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							<span className="font-medium text-accent">
 								{workers} worker{workers !== 1 ? "s" : ""}
 							</span>
 						</div>
 					)}
 					{branches > 0 && (
-						<div className="flex items-center gap-2 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
-							<span className="font-medium text-violet-400">
+						<div className="flex items-center gap-2 rounded-full bg-accent/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							<span className="font-medium text-accent">
 								{branches} branch{branches !== 1 ? "es" : ""}
 							</span>
 						</div>
@@ -762,25 +762,26 @@ function ModelRoutingList({
 		};
 	};
 }) {
+	// The five routing roles used to be tinted five different hues. The token
+	// palette has no five distinct decorative hues, and the role is already
+	// spelled out in the label beside each value, so the model names render in
+	// plain ink — which is exactly how they have always rendered, since the
+	// palette classes generated no CSS.
 	const models = [
-		{label: "Channel", model: config.routing.channel, color: "text-green-400"},
-		{label: "Branch", model: config.routing.branch, color: "text-violet-400"},
-		{label: "Worker", model: config.routing.worker, color: "text-amber-400"},
-		{
-			label: "Compactor",
-			model: config.routing.compactor,
-			color: "text-blue-400",
-		},
-		{label: "Cortex", model: config.routing.cortex, color: "text-pink-400"},
+		{label: "Channel", model: config.routing.channel},
+		{label: "Branch", model: config.routing.branch},
+		{label: "Worker", model: config.routing.worker},
+		{label: "Compactor", model: config.routing.compactor},
+		{label: "Cortex", model: config.routing.cortex},
 	];
 
 	return (
 		<div className="flex h-full flex-col justify-evenly gap-2">
-			{models.map(({label, model, color}) => (
+			{models.map(({label, model}) => (
 				<div key={label} className="flex items-center justify-between">
 					<span className="text-tiny text-ink-faint">{label}</span>
 					<span
-						className={`text-sm ${color} truncate max-w-[140px]`}
+						className="max-w-[140px] truncate text-sm text-ink"
 						title={model}
 					>
 						{formatModelName(model)}
@@ -899,7 +900,7 @@ function CronSection({agentId, jobs}: {agentId: string; jobs: CronJobInfo[]}) {
 						className="flex items-center gap-3 rounded-xl bg-app-dark-box px-4 py-3"
 					>
 						<div
-							className={`h-2 w-2 rounded-full ${job.enabled ? "bg-green-500" : "bg-gray-500"}`}
+							className={`h-2 w-2 rounded-full ${job.enabled ? "bg-status-success" : "bg-ink-faint"}`}
 							title={job.enabled ? "Enabled" : "Disabled"}
 						/>
 						<span
@@ -908,7 +909,7 @@ function CronSection({agentId, jobs}: {agentId: string; jobs: CronJobInfo[]}) {
 						>
 							{job.prompt}
 						</span>
-						<code className="rounded bg-app-lightBox/60 px-1.5 py-0.5 font-mono text-tiny text-ink-faint">
+						<code className="rounded bg-app-light-box/60 px-1.5 py-0.5 font-mono text-tiny text-ink-faint">
 							{formatCronSchedule(job.cron_expr ?? null, job.interval_secs)}
 						</code>
 						{job.active_hours && (
@@ -928,19 +929,19 @@ function CronSection({agentId, jobs}: {agentId: string; jobs: CronJobInfo[]}) {
 }
 
 const CORTEX_EVENT_COLORS: Record<string, string> = {
-	bulletin_generated: "bg-green-500/20 text-green-400",
-	bulletin_failed: "bg-red-500/20 text-red-400",
-	maintenance_run: "bg-blue-500/20 text-blue-400",
-	memory_merged: "bg-cyan-500/20 text-cyan-400",
-	memory_decayed: "bg-yellow-500/20 text-yellow-400",
-	memory_pruned: "bg-orange-500/20 text-orange-400",
-	association_created: "bg-purple-500/20 text-purple-400",
-	contradiction_flagged: "bg-red-500/20 text-red-400",
-	worker_killed: "bg-red-500/20 text-red-400",
-	branch_killed: "bg-red-500/20 text-red-400",
-	circuit_breaker_tripped: "bg-amber-500/20 text-amber-400",
-	observation_created: "bg-indigo-500/20 text-indigo-400",
-	health_check: "bg-gray-500/20 text-gray-400",
+	bulletin_generated: "bg-status-success/20 text-status-success",
+	bulletin_failed: "bg-status-error/20 text-status-error",
+	maintenance_run: "bg-status-info/20 text-status-info",
+	memory_merged: "bg-status-info/20 text-status-info",
+	memory_decayed: "bg-status-info/20 text-status-info",
+	memory_pruned: "bg-status-info/20 text-status-info",
+	association_created: "bg-status-info/20 text-status-info",
+	contradiction_flagged: "bg-status-warning/20 text-status-warning",
+	worker_killed: "bg-status-warning/20 text-status-warning",
+	branch_killed: "bg-status-warning/20 text-status-warning",
+	circuit_breaker_tripped: "bg-status-warning/20 text-status-warning",
+	observation_created: "bg-status-info/20 text-status-info",
+	health_check: "bg-app-box text-ink-dull",
 };
 
 function CortexEventsSection({
@@ -993,7 +994,7 @@ function CortexEventsSection({
 }
 
 function CortexEventBadge({type}: {type: string}) {
-	const color = CORTEX_EVENT_COLORS[type] ?? "bg-gray-500/20 text-gray-400";
+	const color = CORTEX_EVENT_COLORS[type] ?? "bg-app-box text-ink-dull";
 	const label = type.replace(/_/g, " ");
 	return (
 		<span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-tiny ${color}`}>

@@ -30,7 +30,7 @@ export function DependencyBadges({ summary, onClick }: DependencyBadgesProps) {
 					: `${summary.parents} upstream, ${summary.children} downstream`
 			}
 			className={`inline-flex shrink-0 items-center gap-1.5 rounded border border-app-line bg-app-box/60 px-1.5 py-px font-mono text-[10px] leading-4 ${
-				onClick ? "hover:border-app-line-hover hover:bg-app-box" : ""
+				onClick ? "hover:border-app-active hover:bg-app-box" : ""
 			}`}
 		>
 			{summary.parents > 0 && (

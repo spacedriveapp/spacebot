@@ -23,10 +23,10 @@ const TYPE_CONFIG: Record<
 	ActivityItem["type"],
 	{icon: React.ElementType; iconClass: string}
 > = {
-	task_created: {icon: Circle, iconClass: "text-blue-400"},
+	task_created: {icon: Circle, iconClass: "text-status-info"},
 	task_completed: {icon: CheckSquare, iconClass: "text-status-success"},
-	cortex: {icon: Brain, iconClass: "text-violet-400"},
-	worker_done: {icon: Robot, iconClass: "text-amber-400"},
+	cortex: {icon: Brain, iconClass: "text-ink-dull"},
+	worker_done: {icon: Robot, iconClass: "text-status-warning"},
 };
 
 const FILTERS: {key: FilterType; label: string}[] = [

@@ -143,8 +143,8 @@ function WorkerRow({
 			<span
 				className={cx(
 					"h-2 w-2 flex-shrink-0 rounded-full",
-					isRunning && "animate-pulse bg-green-500",
-					isIdle && "bg-yellow-500",
+					isRunning && "animate-pulse bg-status-success",
+					isIdle && "bg-status-info",
 					!isRunning && !isIdle && "bg-ink-faint/40",
 				)}
 			/>

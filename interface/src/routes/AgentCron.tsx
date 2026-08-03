@@ -334,7 +334,7 @@ export function AgentCron({agentId}: AgentCronProps) {
 				)}
 
 				{error && (
-					<div className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-400">
+					<div className="rounded-xl bg-status-error/10 px-4 py-3 text-sm text-status-error">
 						Failed to load cron jobs
 					</div>
 				)}
@@ -421,7 +421,7 @@ export function AgentCron({agentId}: AgentCronProps) {
 
 							<Field label="Schedule">
 								<div className="flex flex-col gap-3">
-									<div className="flex gap-1 rounded-lg bg-app-lightBox p-0.5">
+									<div className="flex gap-1 rounded-lg bg-app-light-box p-0.5">
 										<button
 											type="button"
 											className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
@@ -763,17 +763,17 @@ function CronJobCard({
 				{/* Status dot */}
 				<div
 					className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${
-						job.enabled ? "bg-green-500" : "bg-gray-500"
+						job.enabled ? "bg-status-success" : "bg-ink-faint"
 					}`}
 				/>
 
 				{/* Info */}
 				<div className="min-w-0 flex-1">
 					<div className="mb-1 flex items-center gap-2">
-						<code className="rounded bg-app-lightBox px-1.5 py-0.5 text-xs font-medium text-ink">
+						<code className="rounded bg-app-light-box px-1.5 py-0.5 text-xs font-medium text-ink">
 							{job.id}
 						</code>
-						<code className="rounded bg-app-lightBox/60 px-1.5 py-0.5 font-mono text-tiny text-ink-dull">
+						<code className="rounded bg-app-light-box/60 px-1.5 py-0.5 font-mono text-tiny text-ink-dull">
 							{schedule}
 						</code>
 						{job.active_hours && (
@@ -783,7 +783,7 @@ function CronJobCard({
 							</span>
 						)}
 						{!job.enabled && (
-							<span className="rounded bg-gray-500/20 px-1.5 py-0.5 text-tiny text-gray-400">
+							<span className="rounded bg-app-box px-1.5 py-0.5 text-tiny text-ink-dull">
 								disabled
 							</span>
 						)}
@@ -814,10 +814,10 @@ function CronJobCard({
 								<span
 									className={
 										executionSuccessRate >= 90
-											? "text-green-500"
+											? "text-status-success"
 											: executionSuccessRate >= 50
-												? "text-yellow-500"
-												: "text-red-500"
+												? "text-status-warning"
+												: "text-status-error"
 									}
 								>
 									exec {executionSuccessRate}% ({job.execution_success_count}/
@@ -876,7 +876,7 @@ function CronJobCard({
 						onClick={onDelete}
 						variant="gray"
 						size="sm"
-						className="hover:text-red-400"
+						className="hover:text-status-error"
 					>
 						<Trash className="h-3.5 w-3.5" />
 					</Button>
@@ -894,7 +894,7 @@ function CronJobCard({
 			<button
 				type="button"
 				onClick={onToggleExpand}
-				className="flex w-full items-center justify-center gap-1.5 border-t border-app-line/50 px-3 py-1.5 text-tiny text-ink-faint transition-colors hover:bg-app-lightBox/30 hover:text-ink-dull"
+				className="flex w-full items-center justify-center gap-1.5 border-t border-app-line/50 px-3 py-1.5 text-tiny text-ink-faint transition-colors hover:bg-app-light-box/30 hover:text-ink-dull"
 			>
 				{isExpanded ? (
 					<CaretUp className="h-3 w-3" />
@@ -931,14 +931,14 @@ function JobExecutions({agentId, jobId}: {agentId: string; jobId: string}) {
 		<div className="flex flex-col gap-1">
 			{data.executions.map((execution) => {
 				const statusTone = !execution.execution_succeeded
-					? "bg-red-500"
+					? "bg-status-error"
 					: execution.delivery_attempted &&
 						  execution.delivery_succeeded === false
-						? "bg-yellow-500"
+						? "bg-status-warning"
 						: execution.delivery_attempted &&
 							  execution.delivery_succeeded === true
-							? "bg-green-500"
-							: "bg-gray-500";
+							? "bg-status-success"
+							: "bg-ink-faint";
 				const detail =
 					execution.delivery_error ??
 					execution.execution_error ??
@@ -963,8 +963,8 @@ function JobExecutions({agentId, jobId}: {agentId: string; jobId: string}) {
 						<span
 							className={`rounded px-1.5 py-0.5 text-tiny ${
 								execution.execution_succeeded
-									? "bg-green-500/10 text-green-400"
-									: "bg-red-500/10 text-red-400"
+									? "bg-status-success/10 text-status-success"
+									: "bg-status-error/10 text-status-error"
 							}`}
 						>
 							{execution.execution_succeeded ? "exec ok" : "exec failed"}
@@ -972,12 +972,12 @@ function JobExecutions({agentId, jobId}: {agentId: string; jobId: string}) {
 						<span
 							className={`rounded px-1.5 py-0.5 text-tiny ${
 								!execution.delivery_attempted
-									? "bg-app-lightBox text-ink-faint"
+									? "bg-app-light-box text-ink-faint"
 									: execution.delivery_succeeded === true
-										? "bg-green-500/10 text-green-400"
+										? "bg-status-success/10 text-status-success"
 										: execution.delivery_succeeded === false
-											? "bg-yellow-500/10 text-yellow-300"
-											: "bg-app-lightBox text-ink-faint"
+											? "bg-status-warning/10 text-status-warning"
+											: "bg-app-light-box text-ink-faint"
 							}`}
 						>
 							{deliveryLabel}

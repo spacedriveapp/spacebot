@@ -96,8 +96,8 @@ export function GithubMetadataBadges({
         );
 
         const className = compact
-          ? "cursor-pointer hover:border-blue-400/50 hover:text-blue-300"
-          : "cursor-pointer hover:border-blue-400/50 hover:bg-blue-500/20 hover:text-blue-300";
+          ? "cursor-pointer hover:border-status-info/50 hover:text-status-info"
+          : "cursor-pointer hover:border-status-info/50 hover:bg-status-info/20 hover:text-status-info";
 
         if (reference.url) {
           return (

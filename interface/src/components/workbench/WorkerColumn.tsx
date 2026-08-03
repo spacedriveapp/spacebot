@@ -22,8 +22,8 @@ export function WorkerColumn({worker}: {worker: OrchestrationWorker}) {
 					<span
 						className={cx(
 							"h-2 w-2 bg-ink-faint flex-shrink-0 rounded-full",
-							isRunning && "animate-pulse bg-green-500",
-							isIdle && "bg-yellow-500",
+							isRunning && "animate-pulse bg-status-success",
+							isIdle && "bg-status-info",
 							!isRunning && !isIdle && "bg-ink-faint",
 						)}
 					/>
@@ -90,7 +90,7 @@ function CancelButton({
 					.catch(console.warn)
 					.finally(() => setCancelling(false));
 			}}
-			className="flex-shrink-0 rounded-md border border-app-line px-1.5 py-0.5 text-tiny font-medium text-ink-dull transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
+			className="flex-shrink-0 rounded-md border border-app-line px-1.5 py-0.5 text-tiny font-medium text-ink-dull transition-colors hover:border-status-error/50 hover:text-status-error disabled:opacity-50"
 			title="Cancel worker"
 		>
 			{cancelling ? "..." : "Cancel"}

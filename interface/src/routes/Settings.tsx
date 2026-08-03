@@ -353,7 +353,7 @@ export function Settings() {
 														<span className="text-sm font-medium text-ink">
 															Anthropic OAuth
 														</span>
-														<span className="h-2 w-2 rounded-full bg-green-400" />
+														<span className="h-2 w-2 rounded-full bg-status-success" />
 													</div>
 													<p className="mt-0.5 text-sm text-ink-dull">
 														Signed in with a Claude Pro/Max subscription via{" "}
@@ -410,8 +410,8 @@ export function Settings() {
 								<div
 									className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 										message.type === "success"
-											? "border-green-500/20 bg-green-500/10 text-green-400"
-											: "border-red-500/20 bg-red-500/10 text-red-400"
+											? "border-status-success/20 bg-status-success/10 text-status-success"
+											: "border-status-error/20 bg-status-error/10 text-status-error"
 									}`}
 								>
 									{message.text}
@@ -600,15 +600,15 @@ export function Settings() {
 							Test model
 						</Button>
 						{testedSignature === currentSignature && testResult?.success && (
-							<span className="text-xs text-green-400">Verified</span>
+							<span className="text-xs text-status-success">Verified</span>
 						)}
 					</div>
 					{testResult && (
 						<div
 							className={`rounded-md border px-3 py-2 text-sm ${
 								testResult.success
-									? "border-green-500/20 bg-green-500/10 text-green-400"
-									: "border-red-500/20 bg-red-500/10 text-red-400"
+									? "border-status-success/20 bg-status-success/10 text-status-success"
+									: "border-status-error/20 bg-status-error/10 text-status-error"
 							}`}
 						>
 							<div>{testResult.message}</div>
@@ -623,8 +623,8 @@ export function Settings() {
 						<div
 							className={`rounded-md border px-3 py-2 text-sm ${
 								message.type === "success"
-									? "border-green-500/20 bg-green-500/10 text-green-400"
-									: "border-red-500/20 bg-red-500/10 text-red-400"
+									? "border-status-success/20 bg-status-success/10 text-status-success"
+									: "border-status-error/20 bg-status-error/10 text-status-error"
 							}`}
 						>
 							{message.text}

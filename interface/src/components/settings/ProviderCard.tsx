@@ -32,7 +32,7 @@ export function ProviderCard({
 						{hasKey && (
 							<span className="inline-flex items-center">
 								<span
-									className="h-2 w-2 rounded-full bg-green-400"
+									className="h-2 w-2 rounded-full bg-status-success"
 									aria-hidden="true"
 								/>
 								<span className="sr-only">Credential resolved</span>
@@ -44,7 +44,7 @@ export function ProviderCard({
 						Models route as{" "}
 						<span className="text-ink-dull">{provider}/&lt;model&gt;</span>
 						{!hasKey && (
-							<span className="text-red-400">
+							<span className="text-status-error">
 								{" "}
 								&middot; no API key resolved
 							</span>

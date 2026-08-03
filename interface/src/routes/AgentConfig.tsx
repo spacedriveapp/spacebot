@@ -173,7 +173,7 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 	if (isError) {
 		return (
 			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-red-400">Failed to load configuration</p>
+				<p className="text-sm text-status-error">Failed to load configuration</p>
 			</div>
 		);
 	}

@@ -232,7 +232,7 @@ export function UpdatesSection() {
 								</p>
 							)}
 							{!data?.can_apply && data?.cannot_apply_reason && (
-								<p className="mt-3 text-xs text-yellow-300">
+								<p className="mt-3 text-xs text-status-warning">
 									{data.cannot_apply_reason}
 								</p>
 							)}
@@ -327,7 +327,7 @@ export function UpdatesSection() {
 					</div>
 
 					{data?.error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-md border border-status-error/20 bg-status-error/10 px-3 py-2 text-sm text-status-error">
 							Update check error: {data.error}
 						</div>
 					)}
@@ -338,8 +338,8 @@ export function UpdatesSection() {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-status-success/20 bg-status-success/10 text-status-success"
+							: "border-status-error/20 bg-status-error/10 text-status-error"
 					}`}
 				>
 					{message.text}

@@ -121,7 +121,7 @@ export function GeneralEditor({
 					<span className="text-tiny text-ink-faint">Agent metadata</span>
 				</div>
 				{localDirty ? (
-					<span className="text-tiny text-amber-400">Unsaved changes</span>
+					<span className="text-tiny text-status-warning">Unsaved changes</span>
 				) : (
 					<span className="text-tiny text-ink-faint/50">
 						Changes saved to config.toml
@@ -207,7 +207,7 @@ export function GeneralEditor({
 											variant="bare"
 											size="sm"
 											onClick={() => deleteAvatarMutation.mutate()}
-											className="text-ink-faint hover:text-red-400"
+											className="text-ink-faint hover:text-status-error"
 										>
 											Remove
 										</Button>

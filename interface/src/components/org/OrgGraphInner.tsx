@@ -572,7 +572,7 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 	if (error) {
 		return (
 			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-red-400">Failed to load topology</p>
+				<p className="text-sm text-status-error">Failed to load topology</p>
 			</div>
 		);
 	}

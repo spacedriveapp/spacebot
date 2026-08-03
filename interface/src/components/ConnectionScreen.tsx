@@ -205,7 +205,7 @@ export function ConnectionScreen() {
 							)}
 
 							{sidecarState === "error" && sidecarError && (
-								<p className="text-xs text-red-400">
+								<p className="text-xs text-status-error">
 									{sidecarError}
 								</p>
 							)}

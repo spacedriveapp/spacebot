@@ -491,16 +491,16 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">Old</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
+							<p className="text-tiny font-medium text-status-error/70">Old</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-error/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
 						</div>
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">New</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
+							<p className="text-tiny font-medium text-status-success/70">New</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-success/60">
 								{truncate(String(newStr), 500)}
 							</pre>
 						</div>
@@ -667,16 +667,16 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">Old</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
+							<p className="text-tiny font-medium text-status-error/70">Old</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-error/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
 						</div>
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">New</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
+							<p className="text-tiny font-medium text-status-success/70">New</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-success/60">
 								{truncate(String(newStr), 500)}
 							</pre>
 						</div>
@@ -961,7 +961,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 			{/* Exit code badge for non-zero */}
 			{isError && (
 				<div className="flex items-center gap-1.5 border-b border-app-line/20 px-3 py-1.5">
-					<span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-tiny font-medium text-red-400">
+					<span className="rounded bg-status-error/15 px-1.5 py-0.5 font-mono text-tiny font-medium text-status-error">
 						exit {exitCode}
 					</span>
 				</div>
@@ -981,7 +981,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 						<span
 							className={cx(
 								"text-tiny font-medium",
-								isError ? "text-red-400/70" : "text-yellow-500/70",
+								isError ? "text-status-error/70" : "text-status-warning/70",
 							)}
 						>
 							stderr
@@ -990,7 +990,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 					<pre
 						className={cx(
 							"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
-							isError ? "text-red-300/60" : "text-yellow-300/50",
+							isError ? "text-status-error/60" : "text-status-warning/50",
 						)}
 					>
 						{stderr.replace(/\n$/, "")}
@@ -1016,7 +1016,7 @@ const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
 	completed: "text-status-success",
 	error: "text-status-error",
-	waiting_for_input: "text-blue-500",
+	waiting_for_input: "text-status-info",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1068,7 +1068,7 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 				pair.status === "error"
 					? "border-status-error/30"
 					: pair.status === "waiting_for_input"
-						? "border-blue-500/30"
+						? "border-status-info/30"
 						: "border-app-line/50",
 			)}
 		>
@@ -1096,7 +1096,7 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
 				)}
 				{pair.status === "waiting_for_input" && !expanded && (
-					<span className="text-tiny text-blue-500">Waiting for input</span>
+					<span className="text-tiny text-status-info">Waiting for input</span>
 				)}
 			</button>
 
@@ -1178,8 +1178,8 @@ function renderResult(
 
 	if (pair.status === "waiting_for_input" && !pair.resultRaw) {
 		return (
-			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-blue-500">
-				<span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-status-info">
+				<span className="h-1.5 w-1.5 rounded-full bg-status-info" />
 				Waiting for input
 			</div>
 		);
