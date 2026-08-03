@@ -1654,6 +1654,9 @@ async fn run(
     );
     api_state.auth_token = config.api.auth_token.clone();
     api_state.set_task_store(global_task_store.clone());
+    api_state.set_workflow_store(Arc::new(spacebot::workflows::WorkflowStore::new(
+        instance_pool.clone(),
+    )));
     api_state.set_wiki_store(global_wiki_store.clone());
     api_state.set_notification_store(global_notification_store.clone());
     // Wired here with the other instance-level stores rather than after agent

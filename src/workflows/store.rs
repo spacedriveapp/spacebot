@@ -191,6 +191,33 @@ impl WorkflowStore {
             .map_err(Into::into)
     }
 
+    /// Replace a template's own fields. Steps, edges, and bindings are
+    /// addressed separately and are untouched by this.
+    pub async fn update_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        input_schema: Option<&Value>,
+    ) -> Result<Option<Workflow>> {
+        let result = sqlx::query(
+            "UPDATE workflows SET name = ?, description = ?, input_schema = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
+        )
+        .bind(name)
+        .bind(description)
+        .bind(input_schema.map(|value| value.to_string()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("failed to update workflow")?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_workflow(id).await
+    }
+
     pub async fn get_workflow(&self, id: &str) -> Result<Option<Workflow>> {
         let row = sqlx::query(
             "SELECT id, name, description, input_schema, created_at, updated_at \
@@ -271,6 +298,49 @@ impl WorkflowStore {
         rows.into_iter().map(step_from_row).collect()
     }
 
+    /// Remove a step, and everything that referenced it.
+    ///
+    /// The cascade is the point. An edge or binding naming a step that no
+    /// longer exists makes *every* future launch fail validation, and the
+    /// dangling row is invisible in a step-oriented editor — so the template
+    /// would be permanently unlaunchable with nothing on screen to explain it.
+    /// Deleting a step is the only moment we can be sure those rows are stale.
+    pub async fn delete_step(&self, workflow_id: &str, step_key: &str) -> Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM workflow_steps WHERE workflow_id = ? AND step_key = ?")
+                .bind(workflow_id)
+                .bind(step_key)
+                .execute(&self.pool)
+                .await
+                .context("failed to delete workflow step")?;
+
+        sqlx::query(
+            "DELETE FROM workflow_step_edges WHERE workflow_id = ? \
+             AND (parent_step_key = ? OR child_step_key = ?)",
+        )
+        .bind(workflow_id)
+        .bind(step_key)
+        .bind(step_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete edges of a removed step")?;
+
+        // Both directions: bindings *on* the step, and bindings elsewhere that
+        // read *from* it.
+        sqlx::query(
+            "DELETE FROM workflow_step_bindings WHERE workflow_id = ? \
+             AND (step_key = ? OR source_step_key = ?)",
+        )
+        .bind(workflow_id)
+        .bind(step_key)
+        .bind(step_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete bindings of a removed step")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn link_steps(&self, workflow_id: &str, parent: &str, child: &str) -> Result<()> {
         sqlx::query(
             "INSERT OR IGNORE INTO workflow_step_edges \
@@ -283,6 +353,20 @@ impl WorkflowStore {
         .await
         .context("failed to link workflow steps")?;
         Ok(())
+    }
+
+    pub async fn unlink_steps(&self, workflow_id: &str, parent: &str, child: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM workflow_step_edges WHERE workflow_id = ? \
+             AND parent_step_key = ? AND child_step_key = ?",
+        )
+        .bind(workflow_id)
+        .bind(parent)
+        .bind(child)
+        .execute(&self.pool)
+        .await
+        .context("failed to unlink workflow steps")?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn list_edges(&self, workflow_id: &str) -> Result<Vec<(String, String)>> {
@@ -331,6 +415,25 @@ impl WorkflowStore {
         Ok(())
     }
 
+    pub async fn delete_binding(
+        &self,
+        workflow_id: &str,
+        step_key: &str,
+        input_key: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM workflow_step_bindings WHERE workflow_id = ? \
+             AND step_key = ? AND input_key = ?",
+        )
+        .bind(workflow_id)
+        .bind(step_key)
+        .bind(input_key)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete workflow binding")?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn list_bindings(&self, workflow_id: &str) -> Result<Vec<StepBinding>> {
         let rows = sqlx::query(
             "SELECT workflow_id, step_key, input_key, source, source_step_key, source_pointer, \
@@ -349,10 +452,12 @@ impl WorkflowStore {
 
     /// Compile a workflow into tasks, edges, and bindings, and record the run.
     ///
-    /// Everything is validated before anything is written. A half-built graph
-    /// is worse than none, because the scheduler would start running the part
-    /// that exists — so validation, task creation, linking, and binding all
-    /// happen inside one transaction.
+    /// Everything is validated before anything is written, because a half-built
+    /// graph is worse than none: the scheduler would immediately start running
+    /// the part that exists. Validation cannot be the whole story though —
+    /// writing spans two stores and can still fail on its own (a closed pool, a
+    /// disk error), so a failure part-way through unwinds what it emitted
+    /// before returning. See `rollback_run`.
     pub async fn launch(
         &self,
         task_store: &TaskStore,
@@ -467,8 +572,49 @@ impl WorkflowStore {
         .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
         let mut task_numbers: HashMap<String, i64> = HashMap::new();
+        if let Err(error) = self
+            .emit_graph(
+                task_store,
+                &run_id,
+                &steps,
+                &edges,
+                &bindings,
+                &frozen,
+                launched_by,
+                &mut task_numbers,
+            )
+            .await
+        {
+            self.rollback_run(task_store, &run_id, &task_numbers).await;
+            return Err(error);
+        }
 
-        for step in &steps {
+        let run = self
+            .get_run(&run_id)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?
+            .ok_or_else(|| LaunchError::Storage("run inserted but not found".to_string()))?;
+
+        Ok(InstantiatedRun { run, task_numbers })
+    }
+
+    /// Write the tasks, edges, and bindings for a validated launch.
+    ///
+    /// `task_numbers` is an out-parameter rather than a return value so the
+    /// caller can clean up whatever was emitted before a failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_graph(
+        &self,
+        task_store: &TaskStore,
+        run_id: &str,
+        steps: &[WorkflowStep],
+        edges: &[(String, String)],
+        bindings: &[StepBinding],
+        frozen: &HashMap<(String, String), Value>,
+        launched_by: &str,
+        task_numbers: &mut HashMap<String, i64>,
+    ) -> std::result::Result<(), LaunchError> {
+        for step in steps {
             let task = task_store
                 .create(CreateTaskInput {
                     owner_agent_id: launched_by.to_string(),
@@ -500,7 +646,7 @@ impl WorkflowStore {
                 "UPDATE tasks SET workflow_run_id = ?, workflow_step_key = ?, \
                  input_schema = ?, output_schema = ?, system_prompt = ? WHERE task_number = ?",
             )
-            .bind(&run_id)
+            .bind(run_id)
             .bind(&step.step_key)
             .bind(step.input_schema.as_ref().map(|v| v.to_string()))
             .bind(step.output_schema.as_ref().map(|v| v.to_string()))
@@ -513,7 +659,7 @@ impl WorkflowStore {
             task_numbers.insert(step.step_key.clone(), task.task_number);
         }
 
-        for (parent, child) in &edges {
+        for (parent, child) in edges {
             let (Some(parent_number), Some(child_number)) =
                 (task_numbers.get(parent), task_numbers.get(child))
             else {
@@ -525,7 +671,7 @@ impl WorkflowStore {
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
-        for binding in &bindings {
+        for binding in bindings {
             let Some(child_number) = task_numbers.get(&binding.step_key) else {
                 continue;
             };
@@ -568,13 +714,42 @@ impl WorkflowStore {
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
-        let run = self
-            .get_run(&run_id)
-            .await
-            .map_err(|error| LaunchError::Storage(error.to_string()))?
-            .ok_or_else(|| LaunchError::Storage("run inserted but not found".to_string()))?;
+        Ok(())
+    }
 
-        Ok(InstantiatedRun { run, task_numbers })
+    /// Undo a launch that failed part-way through emitting.
+    ///
+    /// Best-effort by necessity — the reason we are here is that writes are
+    /// failing. Every failure is logged rather than propagated, because the
+    /// caller already has the error that matters and replacing it with a
+    /// cleanup error would hide the cause.
+    ///
+    /// Tasks go first. A leftover `workflow_runs` row is an orphan nobody
+    /// reads; a leftover *task* gets picked up and run, which is the outcome
+    /// this whole path exists to prevent.
+    async fn rollback_run(
+        &self,
+        task_store: &TaskStore,
+        run_id: &str,
+        task_numbers: &HashMap<String, i64>,
+    ) {
+        for (step_key, number) in task_numbers {
+            if let Err(error) = task_store.delete(*number).await {
+                tracing::error!(
+                    %error, run_id, step_key, task_number = number,
+                    "failed to remove a task from a rolled-back workflow launch; \
+                     it may run on its own"
+                );
+            }
+        }
+
+        if let Err(error) = sqlx::query("DELETE FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+        {
+            tracing::error!(%error, run_id, "failed to remove a rolled-back workflow run");
+        }
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<Option<WorkflowRun>> {
@@ -1078,6 +1253,153 @@ mod tests {
         assert!(
             matches!(error, LaunchError::MissingRunInput { .. }),
             "{error:?}"
+        );
+    }
+
+    /// Per-step instructions have to reach the task, or the field is decoration.
+    #[tokio::test]
+    async fn a_step_stamps_its_system_prompt_onto_the_task_it_becomes() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut build = step(&id, "build", 0);
+        build.system_prompt = Some("Answer in British English.".into());
+        workflows.put_step(&build).await.expect("step");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+
+        let task = tasks
+            .get_by_number(launched.task_numbers["build"])
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            task.system_prompt.as_deref(),
+            Some("Answer in British English."),
+        );
+    }
+
+    /// Deleting a step must not leave an edge or binding pointing at it.
+    ///
+    /// A dangling reference fails *every* future launch, and it is invisible in
+    /// a step-oriented editor — the template would be permanently unlaunchable
+    /// with nothing on screen to explain why.
+    #[tokio::test]
+    async fn deleting_a_step_takes_its_edges_and_bindings_with_it() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["build", "test", "deploy"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("step");
+        }
+        workflows
+            .link_steps(&id, "build", "test")
+            .await
+            .expect("link");
+        workflows
+            .link_steps(&id, "test", "deploy")
+            .await
+            .expect("link");
+        // deploy reads from test — a reference *into* the step being removed.
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "deploy".into(),
+                input_key: "report".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("test".into()),
+                source_pointer: Some("/report".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        assert!(workflows.delete_step(&id, "test").await.expect("delete"));
+
+        assert!(
+            workflows.list_edges(&id).await.expect("edges").is_empty(),
+            "both edges touched the removed step"
+        );
+        assert!(
+            workflows
+                .list_bindings(&id)
+                .await
+                .expect("bindings")
+                .is_empty(),
+            "the binding read from the removed step"
+        );
+
+        // The real assertion: the template still launches.
+        workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("a workflow with a step removed must still launch");
+    }
+
+    /// A launch that dies part-way through must not leave runnable tasks.
+    ///
+    /// Validation catches bad templates, but emitting spans two stores and can
+    /// fail on its own. Whatever is left behind gets *picked up and run*, which
+    /// is worse than the failure itself.
+    #[tokio::test]
+    async fn a_launch_that_fails_while_emitting_leaves_nothing_runnable() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["build", "test"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("step");
+        }
+        workflows
+            .link_steps(&id, "build", "test")
+            .await
+            .expect("link");
+
+        // Emit half a graph by hand, then roll it back — the same call the
+        // launch path makes when a write fails under it.
+        let run_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO workflow_runs (id, workflow_id, inputs, launched_by) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&run_id)
+        .bind(&id)
+        .bind("{}")
+        .bind("agent-1")
+        .execute(workflows.pool())
+        .await
+        .expect("insert run");
+
+        let mut emitted = HashMap::new();
+        workflows
+            .emit_graph(
+                &tasks,
+                &run_id,
+                &workflows.list_steps(&id).await.expect("steps"),
+                &workflows.list_edges(&id).await.expect("edges"),
+                &[],
+                &HashMap::new(),
+                "agent-1",
+                &mut emitted,
+            )
+            .await
+            .expect("emit");
+        assert_eq!(emitted.len(), 2);
+
+        workflows.rollback_run(&tasks, &run_id, &emitted).await;
+
+        assert!(
+            tasks
+                .list(crate::tasks::TaskListFilter::default())
+                .await
+                .expect("list")
+                .is_empty(),
+            "a rolled-back launch must leave no task the sweep could promote"
+        );
+        assert!(
+            workflows.get_run(&run_id).await.expect("run").is_none(),
+            "the run row goes too"
         );
     }
 

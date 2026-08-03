@@ -36,6 +36,7 @@ mod tools;
 mod usage;
 mod wiki;
 mod workers;
+mod workflows;
 
 pub use server::{api_router, start_http_server};
 pub use state::{AgentInfo, ApiEvent, ApiState, ChannelToolCallEntry};

@@ -799,6 +799,23 @@ impl TaskStore {
         row.map(task_from_row).transpose()
     }
 
+    /// Every task one launch produced, oldest first.
+    ///
+    /// The join is on a plain column, not a foreign key: a task outlives the
+    /// template it came from, so this returns work that really happened even
+    /// when the workflow has since been deleted.
+    pub async fn list_by_workflow_run(&self, run_id: &str) -> Result<Vec<Task>> {
+        let rows = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE workflow_run_id = ? ORDER BY task_number ASC"
+        ))
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list tasks for a workflow run")?;
+
+        rows.into_iter().map(task_from_row).collect()
+    }
+
     pub async fn update(&self, task_number: i64, input: UpdateTaskInput) -> Result<Option<Task>> {
         Ok(self
             .update_with_status_transition(task_number, input)

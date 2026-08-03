@@ -5,6 +5,7 @@ use super::{
     activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
     links, mcp, memories, messaging, models, notifications, opencode_proxy, portal, projects,
     providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki, workers,
+    workflows,
 };
 
 use axum::Json;
@@ -155,6 +156,22 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::set_task_binding, tasks::remove_task_binding))
         .routes(routes!(tasks::block_task))
         .routes(routes!(tasks::unblock_task))
+        // Workflow routes
+        .routes(routes!(
+            workflows::list_workflows,
+            workflows::create_workflow
+        ))
+        .routes(routes!(
+            workflows::get_workflow,
+            workflows::update_workflow,
+            workflows::delete_workflow
+        ))
+        .routes(routes!(workflows::put_step, workflows::delete_step))
+        .routes(routes!(workflows::add_edge, workflows::remove_edge))
+        .routes(routes!(workflows::put_binding, workflows::delete_binding))
+        .routes(routes!(workflows::launch_workflow))
+        .routes(routes!(workflows::list_runs))
+        .routes(routes!(workflows::get_run))
         // Wiki routes
         .routes(routes!(wiki::list_pages, wiki::create_page))
         .routes(routes!(wiki::search_pages))

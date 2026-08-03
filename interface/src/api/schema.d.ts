@@ -2582,6 +2582,161 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workflow-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /workflow-runs/{run_id}` — one run and the tasks it produced.
+         * @description Not nested under the workflow: a run outlives the template it came from, so
+         *     requiring the template's id to look one up would make deleted templates take
+         *     their history with them.
+         */
+        get: operations["get_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows` — list templates. */
+        get: operations["list_workflows"];
+        put?: never;
+        /** `POST /workflows` — create a template. */
+        post: operations["create_workflow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}` — a template with its steps, edges, and bindings. */
+        get: operations["get_workflow"];
+        /** `PUT /workflows/{id}` — rename or re-describe a template. */
+        put: operations["update_workflow"];
+        post?: never;
+        /**
+         * `DELETE /workflows/{id}` — delete a template.
+         * @description Runs already launched from it keep running: tasks carry the run id as plain
+         *     text, not a foreign key, so deleting the recipe never deletes the history of
+         *     work that was done from it.
+         */
+        delete: operations["delete_workflow"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/edges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /workflows/{id}/edges` — make one step wait for another. */
+        post: operations["add_edge"];
+        /** `DELETE /workflows/{id}/edges` — drop a wait. */
+        delete: operations["remove_edge"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /workflows/{id}/run` — launch a pipeline from one input. */
+        post: operations["launch_workflow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/runs` — launches of one template, newest first. */
+        get: operations["list_runs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/steps/{step_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** `PUT /workflows/{id}/steps/{step_key}` — add or replace a step. */
+        put: operations["put_step"];
+        post?: never;
+        /** `DELETE /workflows/{id}/steps/{step_key}` — remove a step and its references. */
+        delete: operations["delete_step"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/steps/{step_key}/bindings/{input_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /workflows/{id}/steps/{step_key}/bindings/{input_key}` — declare where
+         *     one of a step's inputs comes from.
+         */
+        put: operations["put_binding"];
+        post?: never;
+        /** `DELETE /workflows/{id}/steps/{step_key}/bindings/{input_key}` */
+        delete: operations["delete_binding"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2804,6 +2959,16 @@ export interface components {
             team_id?: string | null;
             workspace_id?: string | null;
         };
+        /**
+         * @description Where a step's input comes from.
+         *
+         *     Named rather than inferred from which column is populated. The task-level
+         *     table infers "literal" from a NULL source, which works for rows the store
+         *     writes and is a trap for rows a human edits: a malformed binding is
+         *     indistinguishable from a deliberate one.
+         * @enum {string}
+         */
+        BindingSource: "step" | "literal" | "run_input";
         BindingsListResponse: {
             bindings: components["schemas"]["BindingResponse"][];
         };
@@ -3562,6 +3727,22 @@ export interface components {
             uptime_seconds: number;
             version: string;
         };
+        LaunchRequest: {
+            /** @description The single payload the whole pipeline is driven from. */
+            inputs?: unknown;
+            /**
+             * @description Agent credited with the launch, and the default assignee for any step
+             *     that does not name one.
+             */
+            launched_by: string;
+        };
+        LaunchResponse: {
+            run: components["schemas"]["WorkflowRun"];
+            /** @description Emitted task numbers, keyed by the step they came from. */
+            task_numbers: {
+                [key: string]: number;
+            };
+        };
         McpAgentStatus: {
             agent_id: string;
             servers: components["schemas"]["McpServerInfo"][];
@@ -4140,6 +4321,14 @@ export interface components {
             worker?: string | null;
             worker_thinking_effort?: string | null;
         };
+        /** @description A run and the tasks it produced. */
+        RunDetailResponse: {
+            run: components["schemas"]["WorkflowRun"];
+            tasks: components["schemas"]["Task"][];
+        };
+        RunListResponse: {
+            runs: components["schemas"]["WorkflowRun"][];
+        };
         SandboxSection: {
             mode: string;
             passthrough_env: string[];
@@ -4149,6 +4338,39 @@ export interface components {
             mode?: string | null;
             passthrough_env?: string[] | null;
             writable_paths?: string[] | null;
+        };
+        SaveBindingRequest: {
+            /** @description Required when `source` is `literal`. */
+            literal_value?: unknown;
+            /** @description `step` | `literal` | `run_input` */
+            source: string;
+            /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
+            source_pointer?: string | null;
+            /** @description Required when `source` is `step`. */
+            source_step_key?: string | null;
+        };
+        SaveStepRequest: {
+            /** @description Omit to run the step as whoever launched the run. */
+            assigned_agent_id?: string | null;
+            description?: string | null;
+            input_schema?: unknown;
+            output_schema?: unknown;
+            /**
+             * Format: int64
+             * @description Display order only — execution order comes from the edges.
+             */
+            position?: number | null;
+            priority?: string | null;
+            repo_id?: string | null;
+            /** @description Extra instructions appended to the worker prompt when this step runs. */
+            system_prompt?: string | null;
+            title: string;
+        };
+        SaveWorkflowRequest: {
+            description?: string | null;
+            /** @description JSON Schema for the input a whole run is launched with. */
+            input_schema?: unknown;
+            name: string;
         };
         /** @description Metadata for a saved attachment, returned after persisting to disk and DB. */
         SavedAttachmentMeta: {
@@ -4264,6 +4486,20 @@ export interface components {
             /** Format: int64 */
             uptime_seconds: number;
             version: string;
+        };
+        StepBinding: {
+            input_key: string;
+            literal_value?: unknown;
+            source: components["schemas"]["BindingSource"];
+            /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
+            source_pointer?: string | null;
+            source_step_key?: string | null;
+            step_key: string;
+            workflow_id: string;
+        };
+        StepEdgeRequest: {
+            child_step_key: string;
+            parent_step_key: string;
         };
         StorageStatus: {
             /** Format: int64 */
@@ -5032,6 +5268,69 @@ export interface components {
          * @enum {string}
          */
         WorkerMemoryMode: "none" | "ambient" | "tools" | "full";
+        /** @description A reusable pipeline definition. */
+        Workflow: {
+            created_at: string;
+            description?: string | null;
+            id: string;
+            /** @description JSON Schema for the input a whole run is launched with. */
+            input_schema?: unknown;
+            name: string;
+            updated_at: string;
+        };
+        WorkflowActionResponse: {
+            message: string;
+            success: boolean;
+        };
+        /**
+         * @description A template and everything that references it.
+         *
+         *     One response rather than four endpoints because the editor cannot render
+         *     anything useful without all of it — a step list with no edges is not a
+         *     pipeline — and four round trips can interleave with a save.
+         */
+        WorkflowDetailResponse: {
+            bindings: components["schemas"]["StepBinding"][];
+            edges: components["schemas"]["WorkflowEdge"][];
+            steps: components["schemas"]["WorkflowStep"][];
+            workflow: components["schemas"]["Workflow"];
+        };
+        WorkflowEdge: {
+            child_step_key: string;
+            parent_step_key: string;
+        };
+        WorkflowListResponse: {
+            workflows: components["schemas"]["Workflow"][];
+        };
+        WorkflowResponse: {
+            workflow: components["schemas"]["Workflow"];
+        };
+        /** @description One launch of a workflow. */
+        WorkflowRun: {
+            created_at: string;
+            id: string;
+            inputs: unknown;
+            launched_by: string;
+            workflow_id: string;
+        };
+        /** @description One step of a pipeline. Becomes exactly one task per launch. */
+        WorkflowStep: {
+            /** @description `None` means the agent that launched the run. */
+            assigned_agent_id?: string | null;
+            description?: string | null;
+            input_schema?: unknown;
+            output_schema?: unknown;
+            /** Format: int64 */
+            position: number;
+            priority: components["schemas"]["TaskPriority"];
+            repo_id?: string | null;
+            /** @description Stable name that edges and bindings reference. */
+            step_key: string;
+            /** @description Per-step instructions appended to the worker prompt at pickup. */
+            system_prompt?: string | null;
+            title: string;
+            workflow_id: string;
+        };
         WorktreeResponse: {
             worktree: components["schemas"]["ProjectWorktree"];
         };
@@ -11300,6 +11599,460 @@ export interface operations {
             };
             /** @description Wiki store not initialized */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDetailResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_workflows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowListResponse"];
+                };
+            };
+            /** @description Workflow store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWorkflowRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description A workflow with that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWorkflowRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowActionResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepEdgeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description Self-loop, or a step that does not exist */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepEdgeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such edge */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    launch_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LaunchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LaunchResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The steps form a cycle */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad input, or a reference that does not resolve */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunListResponse"];
+                };
+            };
+        };
+    };
+    put_step: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Stable step name */
+                step_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveStepRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown priority */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_step: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Stable step name */
+                step_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being bound */
+                step_key: string;
+                /** @description Name of the input */
+                input_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveBindingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description Unknown source, or a source that does not match its kind */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being bound */
+                step_key: string;
+                /** @description Name of the input */
+                input_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such binding */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
