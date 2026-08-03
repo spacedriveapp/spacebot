@@ -295,6 +295,17 @@ pub struct Task {
     pub inputs: Option<Value>,
     /// Validated outputs. What downstream tasks read from.
     pub outputs: Option<Value>,
+    /// The workflow launch this task was compiled from, if any.
+    ///
+    /// Plain text rather than a foreign key: a task outlives its template, and
+    /// deleting a workflow must not take the record of work that actually
+    /// happened with it.
+    pub workflow_run_id: Option<String>,
+    /// Which step of that workflow produced this task.
+    pub workflow_step_key: Option<String>,
+    /// Extra instructions appended to the worker prompt at pickup. Appended,
+    /// never substituted — this is task guidance, not an identity override.
+    pub system_prompt: Option<String>,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -1416,6 +1427,19 @@ impl TaskStore {
         let mut sweep = ReadySweep::default();
 
         // Promote: eligible and waiting.
+        //
+        // The last clause decides what "waiting" means, and the two halves are
+        // different situations. A task with parents is waiting on them, so
+        // their completion is the signal to promote it. A task with no parents
+        // is only promotable if somebody already decided it should run —
+        // otherwise every hand-parked backlog card would be dragged into the
+        // queue by a sweep, which is precisely what backlog exists to prevent.
+        //
+        // Launching a workflow *is* that decision, and it covers every step at
+        // once. So a workflow-run task is promotable on the ordinary rule even
+        // with no parents, which is how an entry step starts. Without this the
+        // first step of every pipeline sits in the backlog forever, waiting on
+        // dependencies it does not have.
         let promoted: Vec<i64> = sqlx::query_scalar(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
@@ -1425,8 +1449,11 @@ impl TaskStore {
                  SELECT 1 FROM task_dependencies d \
                    JOIN tasks p ON p.task_number = d.parent_task_number \
                   WHERE d.child_task_number = t.task_number AND p.status <> 'done') \
-               AND EXISTS (\
-                 SELECT 1 FROM task_dependencies d WHERE d.child_task_number = t.task_number)",
+               AND (\
+                 EXISTS (\
+                   SELECT 1 FROM task_dependencies d \
+                    WHERE d.child_task_number = t.task_number) \
+                 OR t.workflow_run_id IS NOT NULL)",
         )
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
@@ -2401,7 +2428,8 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
      consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
      block_kind, block_reason, block_recurrences, last_block_kind, \
-     input_schema, output_schema, inputs, outputs";
+     input_schema, output_schema, inputs, outputs, \
+     workflow_run_id, workflow_step_key, system_prompt";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -2574,6 +2602,13 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         output_schema: read_optional_json(&row, "output_schema"),
         inputs: read_optional_json(&row, "inputs"),
         outputs: read_optional_json(&row, "outputs"),
+        workflow_run_id: read_optional_id(&row, "workflow_run_id"),
+        workflow_step_key: read_optional_id(&row, "workflow_step_key"),
+        system_prompt: row
+            .try_get::<Option<String>, _>("system_prompt")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -2697,7 +2732,10 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             input_schema TEXT,
             output_schema TEXT,
             inputs TEXT,
-            outputs TEXT
+            outputs TEXT,
+            workflow_run_id TEXT,
+            workflow_step_key TEXT,
+            system_prompt TEXT
         )
         "#,
     )
