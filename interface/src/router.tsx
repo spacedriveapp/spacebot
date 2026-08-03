@@ -24,6 +24,7 @@ import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {GlobalTasks} from "@/routes/GlobalTasks";
+import {TaskGraphView} from "@/routes/TaskGraphView";
 import {Workflows} from "@/routes/Workflows";
 import {WorkflowDetail} from "@/routes/WorkflowDetail";
 import {WorkflowRunView} from "@/routes/WorkflowRunView";
@@ -129,6 +130,35 @@ const tasksRoute = createRoute({
 	component: function TasksPage() {
 		const {task} = tasksRoute.useSearch();
 		return <GlobalTasks initialTaskNumber={task} />;
+	},
+});
+
+/**
+ * One task's dependency graph.
+ *
+ * Keyed on the task number rather than on a run or a workflow, because that is
+ * the only identifier that always exists: a graph can outlive the template it
+ * was compiled from, and plenty of graphs were never compiled from one at all.
+ * The number is what the drawer, the run view and every refusal already speak
+ * in, so `/tasks?task=N` and `/tasks/N/graph` are two views of the same thing
+ * and each links to the other.
+ */
+const taskGraphRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/tasks/$taskNumber/graph",
+	component: function TaskGraphPage() {
+		const {taskNumber} = taskGraphRoute.useParams();
+		const parsed = Number(taskNumber);
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			return (
+				<div className="flex flex-1 items-center justify-center">
+					<p className="text-sm text-ink-faint">
+						`{taskNumber}` is not a task number.
+					</p>
+				</div>
+			);
+		}
+		return <TaskGraphView taskNumber={parsed} />;
 	},
 });
 
@@ -330,6 +360,7 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	workbenchRoute,
 	tasksRoute,
+	taskGraphRoute,
 	workflowsRoute,
 	workflowDetailRoute,
 	workflowRunRoute,

@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
 	faArrowLeftLong,
 	faArrowRightLong,
+	faDiagramProject,
 	faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import {
@@ -67,6 +69,12 @@ export function DependencySection({
 		<DependencySectionView
 			data={data}
 			taskNumber={taskNumber}
+			// The one click from a task to its whole graph. It lives on this
+			// heading because the list underneath is the same relationship seen one
+			// hop at a time — `#41, #42` answers "what is next", and the canvas
+			// answers "what is this part of", which is the question two hops out
+			// that a list of numbers cannot be read for.
+			headerAction={<TaskGraphLink taskNumber={taskNumber} />}
 			onSelectTask={onSelectTask}
 			onAddParent={(parent) => add.mutate(parent)}
 			onRemoveParent={(parent) => remove.mutate(parent)}
@@ -78,10 +86,32 @@ export function DependencySection({
 	);
 }
 
+/**
+ * The graph canvas for this task, one click away.
+ *
+ * Mirrors the `/tasks?task=N` convention going the other way: both routes are
+ * keyed on the task number, so the drawer and the canvas can always reach each
+ * other regardless of which workflow — if any — the task came from.
+ */
+function TaskGraphLink({ taskNumber }: { taskNumber: number }) {
+	return (
+		<Link
+			to="/tasks/$taskNumber/graph"
+			params={{ taskNumber: String(taskNumber) }}
+			className="inline-flex shrink-0 items-center gap-1 text-[11px] normal-case tracking-normal text-accent hover:underline"
+			title="See every task connected to this one, drawn as a graph"
+		>
+			<FontAwesomeIcon icon={faDiagramProject} className="text-[9px]" />
+			Graph
+		</Link>
+	);
+}
+
 /** Split from the fetching wrapper so it can be rendered against fixtures. */
 export function DependencySectionView({
 	data,
 	taskNumber,
+	headerAction,
 	onSelectTask,
 	onAddParent,
 	onRemoveParent,
@@ -93,6 +123,12 @@ export function DependencySectionView({
 	data: TaskDependenciesResponse;
 	/** Required to author edges; the fixture harness renders read-only. */
 	taskNumber?: number;
+	/**
+	 * Rendered beside the heading. Kept as a prop rather than built here so this
+	 * component stays renderable without a router — the UI lab mounts it against
+	 * fixtures, and a `<Link>` outside a router throws.
+	 */
+	headerAction?: ReactNode;
 	onSelectTask?: (taskNumber: number) => void;
 	onAddParent?: (parentTaskNumber: number) => void;
 	onRemoveParent?: (parentTaskNumber: number) => void;
@@ -112,9 +148,12 @@ export function DependencySectionView({
 
 	return (
 		<div className="border-t border-app-line/40 px-4 py-3">
-			<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
-				Dependencies
-			</h3>
+			<div className="mb-2 flex items-baseline justify-between gap-2">
+				<h3 className="text-xs font-medium uppercase tracking-wide text-ink-dull">
+					Dependencies
+				</h3>
+				{headerAction}
+			</div>
 
 			{/* Naming the specific tasks is the point. "Blocked" tells you nothing
 			    you could act on; "waiting on #41" tells you where to go. */}

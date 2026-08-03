@@ -24,8 +24,13 @@ import {orderSteps, parentsByStep} from "./graph";
 export const NODE_WIDTH = 232;
 export const NODE_HEIGHT = 92;
 
-const COLUMN_GAP = 104;
-const ROW_GAP = 30;
+/**
+ * Exported so a second canvas laying out a different kind of node still lands
+ * on the same grid. Two graph screens in one app that disagree about column
+ * width read as two apps.
+ */
+export const COLUMN_GAP = 104;
+export const ROW_GAP = 30;
 /**
  * Gap between two branches of the same fan-out.
  *

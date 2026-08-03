@@ -379,6 +379,8 @@ export type TaskProvenanceResponse =
 	components["schemas"]["TaskProvenanceResponse"];
 export type TaskTransitionsResponse =
 	components["schemas"]["TaskTransitionsResponse"];
+export type TaskGraph = components["schemas"]["TaskGraph"];
+export type TaskGraphEdge = components["schemas"]["TaskGraphEdge"];
 
 // Requests
 export type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];

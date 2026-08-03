@@ -699,6 +699,8 @@ export type TaskEdgeSummary = Types.TaskEdgeSummary;
 export type TaskDependenciesResponse = Types.TaskDependenciesResponse;
 export type TaskTransition = Types.TaskTransition;
 export type TaskTransitionsResponse = Types.TaskTransitionsResponse;
+export type TaskGraph = Types.TaskGraph;
+export type TaskGraphEdge = Types.TaskGraphEdge;
 export type ContractProblem = Types.ContractProblem;
 export type ContractSide = Types.ContractSide;
 export type TaskInputBinding = Types.TaskInputBinding;
@@ -1760,6 +1762,19 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
+	/**
+	 * The whole connected component this task belongs to.
+	 *
+	 * Undirected: siblings of a fan-out are only reachable through the parent
+	 * they share, and "what else is running beside this" is most of the question
+	 * somebody has when they open one branch of three.
+	 *
+	 * Unlike the run view this owes nothing to a workflow template — the edges
+	 * are the task edges themselves — so it still draws after the template has
+	 * been deleted, and it draws graphs that never came from one.
+	 */
+	getTaskGraph: (taskNumber: number) =>
+		fetchJson<TaskGraph>(`/tasks/${taskNumber}/graph`),
 	/** Per-attempt execution log for a task, oldest first. */
 	listTaskRuns: (taskNumber: number) =>
 		fetchJson<TaskRunsResponse>(`/tasks/${taskNumber}/runs`),
