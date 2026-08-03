@@ -1428,18 +1428,34 @@ impl TaskStore {
 
         // Promote: eligible and waiting.
         //
-        // The last clause decides what "waiting" means, and the two halves are
-        // different situations. A task with parents is waiting on them, so
-        // their completion is the signal to promote it. A task with no parents
-        // is only promotable if somebody already decided it should run —
-        // otherwise every hand-parked backlog card would be dragged into the
-        // queue by a sweep, which is precisely what backlog exists to prevent.
+        // The last clause decides what "waiting" means, and it turns on who put
+        // the task in the backlog. Backlog is two different situations wearing
+        // one status:
         //
-        // Launching a workflow *is* that decision, and it covers every step at
-        // once. So a workflow-run task is promotable on the ordinary rule even
-        // with no parents, which is how an entry step starts. Without this the
-        // first step of every pipeline sits in the backlog forever, waiting on
-        // dependencies it does not have.
+        //   - A person parked it. It waits until a person says otherwise, and a
+        //     sweep that dragged it into the queue would defeat the point of
+        //     having a backlog at all.
+        //   - Something automatic put it there, or something automatic decided
+        //     it should run. Then the same automation is entitled to promote it
+        //     once the reason has cleared.
+        //
+        // Four signals say "automatic", and each is a decision already taken:
+        //
+        //   has parents        waiting on them; their completion is the signal
+        //   workflow_run_id    a launch decided the whole pipeline should run,
+        //                      which is how an entry step with no parents starts
+        //   created_by task:N  a worker filed it; filing *is* the decision, so
+        //                      it does not need a second one
+        //   block_kind         the scheduler parked it, so the scheduler
+        //                      reconsiders it
+        //
+        // The last two matter more than they look. A worker can file a card
+        // with input bindings but no dependency edges — `depends_on` and
+        // `input_bindings` are separate arguments — and if those inputs do not
+        // resolve at claim time the card is parked as `dependency`. With only
+        // the first two signals it would then have no parents, no run id, and
+        // no way back out: stranded in the backlog permanently by the very
+        // mechanism meant to reconsider it.
         let promoted: Vec<i64> = sqlx::query_scalar(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
@@ -1453,7 +1469,9 @@ impl TaskStore {
                  EXISTS (\
                    SELECT 1 FROM task_dependencies d \
                     WHERE d.child_task_number = t.task_number) \
-                 OR t.workflow_run_id IS NOT NULL)",
+                 OR t.workflow_run_id IS NOT NULL \
+                 OR t.created_by LIKE 'task:%' \
+                 OR t.block_kind = 'dependency')",
         )
         .bind(assigned_agent_id)
         .fetch_all(&self.pool)
@@ -4755,5 +4773,75 @@ mod tests {
             final_disposition,
             FailureDisposition::Parked { limit: 3, .. }
         ));
+    }
+    /// A worker-filed card is already a decision to run. It must not need a
+    /// second one, and it must not be strandable.
+    ///
+    /// `depends_on` and `input_bindings` are separate arguments, so a filed
+    /// card can have bindings and no edges. If its inputs fail to resolve it is
+    /// parked as `dependency` — with no parents and no run id. A promote rule
+    /// keyed only on edges would leave it in the backlog permanently.
+    #[tokio::test]
+    async fn a_filed_card_parked_without_edges_is_still_reconsidered() {
+        let store = setup_store().await;
+        let filer = task_at(&store, "decomposer", TaskStatus::InProgress).await;
+
+        let filed = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-test".into(),
+                assigned_agent_id: "agent-test".into(),
+                title: "filed with a binding but no edge".into(),
+                status: TaskStatus::Backlog,
+                created_by: filer_id(filer.task_number),
+                ..Default::default()
+            })
+            .await
+            .expect("create filed card");
+
+        // The scheduler parks it: inputs did not resolve. No edges exist.
+        store
+            .block_task(filed.task_number, BlockKind::Dependency, "input unresolved")
+            .await
+            .expect("block")
+            .expect("exists");
+        assert!(
+            store
+                .list_parents(filed.task_number)
+                .await
+                .expect("parents")
+                .is_empty(),
+            "the fixture is only meaningful with no edges"
+        );
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(
+            sweep.promoted,
+            vec![filed.task_number],
+            "a card the scheduler parked must be one the scheduler can release"
+        );
+    }
+
+    /// The other half of the same rule: a card a person parked stays parked.
+    /// Without this the sweep would empty the backlog on its next tick.
+    #[tokio::test]
+    async fn a_hand_parked_card_is_left_alone_by_the_sweep() {
+        let store = setup_store().await;
+        store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-test".into(),
+                assigned_agent_id: "agent-test".into(),
+                title: "parked on purpose".into(),
+                status: TaskStatus::Backlog,
+                created_by: "human".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            sweep.is_empty(),
+            "a backlog nobody automated must survive a sweep: {sweep:?}"
+        );
     }
 }
