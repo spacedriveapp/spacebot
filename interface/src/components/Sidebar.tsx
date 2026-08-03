@@ -31,6 +31,7 @@ import {
 	TreeStructure,
 	Wrench,
 	CheckSquare,
+	FlowArrow,
 	GearSix,
 	DotsThree,
 	ChatCircleDots,
@@ -174,6 +175,9 @@ const navItems = [
 	{to: "/", icon: TreeStructure, label: "Org Chart", exact: true},
 	{to: "/workbench", icon: Wrench, label: "Workbench", exact: true},
 	{to: "/tasks", icon: CheckSquare, label: "Tasks", exact: true},
+	// Not `exact`: the editor and the run view live under this section too, and
+	// an exact match would unhighlight the moment you opened a template.
+	{to: "/workflows", icon: FlowArrow, label: "Workflows", exact: false},
 	{to: "/wiki", icon: BookBookmark, label: "Wiki", exact: true},
 ] as const;
 

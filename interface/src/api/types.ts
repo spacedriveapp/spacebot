@@ -387,6 +387,33 @@ export type ApproveRequest = components["schemas"]["ApproveRequest"];
 export type AssignRequest = components["schemas"]["AssignRequest"];
 
 // =============================================================================
+// Workflow Types
+// =============================================================================
+
+export type Workflow = components["schemas"]["Workflow"];
+export type WorkflowStep = components["schemas"]["WorkflowStep"];
+export type WorkflowEdge = components["schemas"]["WorkflowEdge"];
+export type StepBinding = components["schemas"]["StepBinding"];
+export type BindingSource = components["schemas"]["BindingSource"];
+export type WorkflowListResponse = components["schemas"]["WorkflowListResponse"];
+export type WorkflowResponse = components["schemas"]["WorkflowResponse"];
+export type WorkflowDetailResponse =
+	components["schemas"]["WorkflowDetailResponse"];
+export type WorkflowActionResponse =
+	components["schemas"]["WorkflowActionResponse"];
+export type WorkflowRun = components["schemas"]["WorkflowRun"];
+export type RunDetailResponse = components["schemas"]["RunDetailResponse"];
+export type RunListResponse = components["schemas"]["RunListResponse"];
+
+// Requests
+export type SaveWorkflowRequest = components["schemas"]["SaveWorkflowRequest"];
+export type SaveStepRequest = components["schemas"]["SaveStepRequest"];
+export type SaveBindingRequest = components["schemas"]["SaveBindingRequest"];
+export type StepEdgeRequest = components["schemas"]["StepEdgeRequest"];
+export type LaunchRequest = components["schemas"]["LaunchRequest"];
+export type LaunchResponse = components["schemas"]["LaunchResponse"];
+
+// =============================================================================
 // Messaging Types
 // =============================================================================
 

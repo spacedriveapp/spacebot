@@ -321,6 +321,38 @@ async function fetchJson<T>(path: string): Promise<T> {
 	return response.json();
 }
 
+/**
+ * A mutating call whose refusal text is the point.
+ *
+ * Every workflow endpoint answers a rejection with a plain-text body that names
+ * what is actually wrong — "step `draft` cannot wait for itself", "no step
+ * `nope` in this workflow", "the steps form a cycle and cannot be ordered:
+ * draft -> publish -> review". Those sentences are the whole diagnosis, and
+ * flattening them into "API error: 409" leaves the author with a number and no
+ * idea which edge to remove. So the body is the message; the status code is
+ * only the fallback for the rare empty one.
+ */
+async function mutateJson<T>(
+	path: string,
+	method: string,
+	body?: unknown,
+): Promise<T> {
+	const response = await fetch(`${getApiBase()}${path}`, {
+		method,
+		...(body === undefined
+			? {}
+			: {
+					headers: {"Content-Type": "application/json"},
+					body: JSON.stringify(body),
+				}),
+	});
+	if (!response.ok) {
+		const text = (await response.text().catch(() => "")).trim();
+		throw new Error(text || `API error: ${response.status}`);
+	}
+	return (await response.json()) as T;
+}
+
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
@@ -677,6 +709,31 @@ export type TaskItem = Types.Task;
 export type CreateTaskRequest = Types.CreateTaskRequest;
 
 export type UpdateTaskRequest = Types.UpdateTaskRequest;
+
+// -- Workflow Types --
+//
+// A workflow is the reusable template; a run is one launch of it, compiled into
+// real tasks with real dependency edges. Same rule as above: everything with a
+// server counterpart is aliased from the generated schema, never redeclared.
+export type Workflow = Types.Workflow;
+export type WorkflowStep = Types.WorkflowStep;
+export type WorkflowEdge = Types.WorkflowEdge;
+export type StepBinding = Types.StepBinding;
+export type BindingSource = Types.BindingSource;
+export type WorkflowListResponse = Types.WorkflowListResponse;
+export type WorkflowResponse = Types.WorkflowResponse;
+export type WorkflowDetailResponse = Types.WorkflowDetailResponse;
+export type WorkflowActionResponse = Types.WorkflowActionResponse;
+export type WorkflowRun = Types.WorkflowRun;
+export type RunDetailResponse = Types.RunDetailResponse;
+export type RunListResponse = Types.RunListResponse;
+
+export type SaveWorkflowRequest = Types.SaveWorkflowRequest;
+export type SaveStepRequest = Types.SaveStepRequest;
+export type SaveBindingRequest = Types.SaveBindingRequest;
+export type StepEdgeRequest = Types.StepEdgeRequest;
+export type LaunchRequest = Types.LaunchRequest;
+export type LaunchResponse = Types.LaunchResponse;
 
 // -- Notification Types --
 
@@ -1837,6 +1894,90 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
+
+	// Workflows API
+	//
+	// A workflow is a reusable template; launching one compiles it into real
+	// tasks with real dependency edges and hands them to the same scheduler the
+	// board already shows. Every mutation below goes through `mutateJson` so the
+	// server's refusal text reaches the editor intact.
+	listWorkflows: () => fetchJson<WorkflowListResponse>("/workflows"),
+	/** The template plus its steps, edges and bindings — one round trip. */
+	getWorkflow: (id: string) =>
+		fetchJson<WorkflowDetailResponse>(`/workflows/${encodeURIComponent(id)}`),
+	createWorkflow: (body: SaveWorkflowRequest) =>
+		mutateJson<WorkflowResponse>("/workflows", "POST", body),
+	updateWorkflow: (id: string, body: SaveWorkflowRequest) =>
+		mutateJson<WorkflowResponse>(
+			`/workflows/${encodeURIComponent(id)}`,
+			"PUT",
+			body,
+		),
+	deleteWorkflow: (id: string) =>
+		mutateJson<WorkflowActionResponse>(
+			`/workflows/${encodeURIComponent(id)}`,
+			"DELETE",
+		),
+	/**
+	 * Add or replace a step.
+	 *
+	 * Keyed by `step_key` rather than an id, so saving the same key twice edits
+	 * the step instead of leaving two behind — the same rule task bindings use,
+	 * and the reason edges and bindings can reference a step by name at all.
+	 */
+	saveWorkflowStep: (id: string, stepKey: string, body: SaveStepRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}`,
+			"PUT",
+			body,
+		),
+	deleteWorkflowStep: (id: string, stepKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}`,
+			"DELETE",
+		),
+	addWorkflowEdge: (id: string, body: StepEdgeRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/edges`,
+			"POST",
+			body,
+		),
+	// The pair being removed identifies the edge, and there is no edge id to put
+	// in a path — hence a body on DELETE.
+	removeWorkflowEdge: (id: string, body: StepEdgeRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/edges`,
+			"DELETE",
+			body,
+		),
+	setWorkflowBinding: (
+		id: string,
+		stepKey: string,
+		inputKey: string,
+		body: SaveBindingRequest,
+	) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/bindings/${encodeURIComponent(inputKey)}`,
+			"PUT",
+			body,
+		),
+	removeWorkflowBinding: (id: string, stepKey: string, inputKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/bindings/${encodeURIComponent(inputKey)}`,
+			"DELETE",
+		),
+	/** Compile the template into tasks. Returns the step → task number map. */
+	launchWorkflow: (id: string, body: LaunchRequest) =>
+		mutateJson<LaunchResponse>(
+			`/workflows/${encodeURIComponent(id)}/run`,
+			"POST",
+			body,
+		),
+	listWorkflowRuns: (id: string) =>
+		fetchJson<RunListResponse>(`/workflows/${encodeURIComponent(id)}/runs`),
+	// Not nested under the workflow: a run outlives the template it came from.
+	getWorkflowRun: (runId: string) =>
+		fetchJson<RunDetailResponse>(`/workflow-runs/${encodeURIComponent(runId)}`),
 
 	// Secrets API
 	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),

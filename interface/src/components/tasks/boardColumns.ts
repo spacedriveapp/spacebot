@@ -82,6 +82,20 @@ const UNKNOWN_STYLE: ColumnStyle = {
 	hint: "Unrecognised status — this page is older than the server",
 };
 
+/**
+ * The style for one status, wherever a status needs rendering.
+ *
+ * Shared rather than re-tabulated because `@spacedrive/ai`'s `TaskStatusIcon`
+ * *throws* on a status it does not know — it indexes a five-entry map and calls
+ * a method on the result — so every surface outside the board that shows a
+ * status has to bring its own table or crash on `blocked`. Bringing its own is
+ * how the board and the drawer end up disagreeing; this keeps one table and one
+ * fallback, and neither can throw.
+ */
+export function styleFor(status: TaskStatus): ColumnStyle {
+	return COLUMN_STYLE[status] ?? UNKNOWN_STYLE;
+}
+
 export interface BoardColumn {
 	status: TaskStatus;
 	label: string;

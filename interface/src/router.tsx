@@ -24,6 +24,9 @@ import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {GlobalTasks} from "@/routes/GlobalTasks";
+import {Workflows} from "@/routes/Workflows";
+import {WorkflowDetail} from "@/routes/WorkflowDetail";
+import {WorkflowRunView} from "@/routes/WorkflowRunView";
 import {Wiki} from "@/routes/Wiki";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
@@ -113,8 +116,47 @@ const workbenchRoute = createRoute({
 const tasksRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/tasks",
+	// `?task=<number>` opens a task's drawer directly. The drawer is the task UI
+	// and it was previously reachable only by clicking a row, which left the run
+	// view with nowhere to link a task to.
+	validateSearch: (search: Record<string, unknown>): {task?: number} => {
+		const raw = search.task;
+		const parsed = typeof raw === "string" ? Number(raw) : raw;
+		return typeof parsed === "number" && Number.isInteger(parsed) && parsed > 0
+			? {task: parsed}
+			: {};
+	},
 	component: function TasksPage() {
-		return <GlobalTasks />;
+		const {task} = tasksRoute.useSearch();
+		return <GlobalTasks initialTaskNumber={task} />;
+	},
+});
+
+const workflowsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflows",
+	component: function WorkflowsPage() {
+		return <Workflows />;
+	},
+});
+
+const workflowDetailRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflows/$workflowId",
+	component: function WorkflowDetailPage() {
+		const {workflowId} = workflowDetailRoute.useParams();
+		return <WorkflowDetail workflowId={workflowId} />;
+	},
+});
+
+// Not nested under the workflow: a run outlives the template it came from, so
+// the URL must not require one that may have been deleted.
+const workflowRunRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflow-runs/$runId",
+	component: function WorkflowRunPage() {
+		const {runId} = workflowRunRoute.useParams();
+		return <WorkflowRunView runId={runId} />;
 	},
 });
 
@@ -288,6 +330,9 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	workbenchRoute,
 	tasksRoute,
+	workflowsRoute,
+	workflowDetailRoute,
+	workflowRunRoute,
 	wikiRoute,
 	agentRoute,
 	agentChatRoute,
