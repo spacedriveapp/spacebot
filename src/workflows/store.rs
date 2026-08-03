@@ -54,6 +54,65 @@ pub struct WorkflowStep {
     /// index is used and the keys come out `0`, `1`, `2` — honest, but far less
     /// useful in a report.
     pub for_each_key: Option<String>,
+    /// Which loop body this step belongs to.
+    ///
+    /// A loop is one or more steps sharing this name. A body of one step is the
+    /// degenerate case and needs no special handling.
+    pub loop_group: Option<String>,
+    /// How many passes the body may run before the loop gives up.
+    ///
+    /// `None` means [`crate::tasks::DEFAULT_LOOP_MAX_ITERATIONS`]. Read from the
+    /// body's exit step only; set anywhere else it would be a number nothing
+    /// consumes, so launch refuses that rather than letting it sit in a row.
+    pub loop_max_iterations: Option<i64>,
+    /// The exit predicate, as the same object a `task_output` gate takes:
+    /// `{"pointer": "/tests/passed", "equals": true}`.
+    ///
+    /// Deliberately not a second predicate language — conditional steps,
+    /// external gating, and loop exit are one question asked in three places.
+    /// Required on the body's exit step: a loop with no exit condition always
+    /// burns its whole budget.
+    pub loop_until: Option<Value>,
+}
+
+/// What an edge means, now that "the loop finished" is two outcomes.
+///
+/// Converging and giving up are opposite results, and routing both into the
+/// same downstream step is the single-label-two-conditions mistake this
+/// codebase has already paid for three times. A pipeline that merges after
+/// three successful attempts must not also merge after three failed ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepEdgeKind {
+    /// An ordinary wait. Followed when the parent finished, and — for a loop —
+    /// when it converged.
+    Normal,
+    /// Followed only when the loop that ends at the parent ran out of attempts.
+    OnExhausted,
+}
+
+impl StepEdgeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepEdgeKind::Normal => "normal",
+            StepEdgeKind::OnExhausted => "on_exhausted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "normal" => Some(StepEdgeKind::Normal),
+            "on_exhausted" => Some(StepEdgeKind::OnExhausted),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct StepEdge {
+    pub parent_step_key: String,
+    pub child_step_key: String,
+    pub kind: StepEdgeKind,
 }
 
 /// Where a step's input comes from.
@@ -80,6 +139,15 @@ pub enum BindingSource {
     /// `Step` cannot express this: it addresses one upstream task, and a
     /// fan-out produces a number of them that does not exist until it expands.
     FanIn,
+    /// Read a body step's output from the iteration *before* this one.
+    ///
+    /// Binding from the previous pass is the point of looping rather than
+    /// retrying: `Step` inside a body resolves to the current iteration, which
+    /// for the step being fed has not run yet. On iteration 1 there is no
+    /// previous pass, so this resolves to the loop's entry — the single step
+    /// outside the body that feeds it — at the same pointer, which is what
+    /// lets the body need no special first-pass wiring.
+    PreviousIteration,
 }
 
 impl BindingSource {
@@ -89,6 +157,7 @@ impl BindingSource {
             BindingSource::Literal => "literal",
             BindingSource::RunInput => "run_input",
             BindingSource::FanIn => "fan_in",
+            BindingSource::PreviousIteration => "previous_iteration",
         }
     }
 
@@ -98,6 +167,7 @@ impl BindingSource {
             "literal" => Some(BindingSource::Literal),
             "run_input" => Some(BindingSource::RunInput),
             "fan_in" => Some(BindingSource::FanIn),
+            "previous_iteration" => Some(BindingSource::PreviousIteration),
             _ => None,
         }
     }
@@ -213,6 +283,93 @@ pub enum LaunchError {
         input_key: String,
         source_step_key: String,
     },
+    #[error(
+        "loop `{loop_group}` needs exactly one exit step — a body step with nothing after it \
+         inside the body, whose output decides whether to go round again — but {} qualify: [{}]",
+        .candidates.len(),
+        .candidates.join(", ")
+    )]
+    LoopBodyNotSingleExit {
+        loop_group: String,
+        candidates: Vec<String>,
+    },
+    #[error(
+        "step `{step_key}` is in loop `{loop_group}` but is not its exit step `{exit_step_key}`, \
+         so `loop_until` and `loop_max_iterations` set here would never be read — move them to \
+         `{exit_step_key}`"
+    )]
+    LoopSettingOffExitStep {
+        step_key: String,
+        loop_group: String,
+        exit_step_key: String,
+    },
+    #[error(
+        "loop `{loop_group}` has no `loop_until` on its exit step `{step_key}` — a loop with no \
+         exit condition always runs its full budget, which is a retry, not a loop"
+    )]
+    LoopWithoutExitCondition {
+        loop_group: String,
+        step_key: String,
+    },
+    #[error(
+        "loop `{loop_group}` has an unusable `loop_until`: {details} — it takes the same shape as \
+         a task_output gate, e.g. {{\"pointer\": \"/tests/passed\", \"equals\": true}}"
+    )]
+    LoopExitConditionInvalid { loop_group: String, details: String },
+    #[error(
+        "loop `{loop_group}` asks for {max_iterations} iterations; it must be between 1 and {ceiling} \
+         — every pass is a live model call, so the ceiling is enforced here rather than trusted \
+         to a number in a row"
+    )]
+    LoopMaxIterationsOutOfRange {
+        loop_group: String,
+        max_iterations: i64,
+        ceiling: i64,
+    },
+    #[error(
+        "step `{step_key}` is both a loop body step and a fan-out — both grow the run graph after \
+         launch, and one step doing both has no single answer for what an iteration contains"
+    )]
+    LoopStepIsAlsoFanOut { step_key: String },
+    #[error(
+        "edge {parent} -> {child} is an on_exhausted edge, but `{parent}` is not the exit step of \
+         a loop — only a loop can run out of attempts"
+    )]
+    OnExhaustedNotFromLoop { parent: String, child: String },
+    #[error(
+        "step `{child}` waits on the outcome of both loop `{first}` and loop `{second}` — a step \
+         waits on one loop's verdict, and two would silently keep only one of them"
+    )]
+    StepAwaitsTwoLoops {
+        child: String,
+        first: String,
+        second: String,
+    },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to a previous iteration, but is not in a loop body \
+         — outside a loop there is no previous iteration to read"
+    )]
+    PreviousIterationOutsideLoop { step_key: String, input_key: String },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to the previous iteration of `{source_step_key}`, \
+         which is not in the same loop body"
+    )]
+    PreviousIterationOutsideBody {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "loop `{loop_group}` binds from a previous iteration, so iteration 1 needs the loop's \
+         entry step to read instead, and {} qualify: [{}] — a loop entered from more than one \
+         place has no single first value",
+        .entries.len(),
+        .entries.join(", ")
+    )]
+    LoopEntryAmbiguous {
+        loop_group: String,
+        entries: Vec<String>,
+    },
     #[error("workflow storage error: {0}")]
     Storage(String),
 }
@@ -324,8 +481,9 @@ impl WorkflowStore {
             "INSERT INTO workflow_steps \
                  (workflow_id, step_key, title, description, assigned_agent_id, priority, \
                   input_schema, output_schema, system_prompt, repo_id, position, \
-                  for_each_step_key, for_each_pointer, for_each_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  for_each_step_key, for_each_pointer, for_each_key, \
+                  loop_group, loop_max_iterations, loop_until) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workflow_id, step_key) DO UPDATE SET \
                  title = excluded.title, description = excluded.description, \
                  assigned_agent_id = excluded.assigned_agent_id, priority = excluded.priority, \
@@ -334,7 +492,10 @@ impl WorkflowStore {
                  position = excluded.position, \
                  for_each_step_key = excluded.for_each_step_key, \
                  for_each_pointer = excluded.for_each_pointer, \
-                 for_each_key = excluded.for_each_key",
+                 for_each_key = excluded.for_each_key, \
+                 loop_group = excluded.loop_group, \
+                 loop_max_iterations = excluded.loop_max_iterations, \
+                 loop_until = excluded.loop_until",
         )
         .bind(&step.workflow_id)
         .bind(&step.step_key)
@@ -350,6 +511,9 @@ impl WorkflowStore {
         .bind(&step.for_each_step_key)
         .bind(&step.for_each_pointer)
         .bind(&step.for_each_key)
+        .bind(&step.loop_group)
+        .bind(step.loop_max_iterations)
+        .bind(step.loop_until.as_ref().map(|value| value.to_string()))
         .execute(&self.pool)
         .await
         .context("failed to write workflow step")?;
@@ -360,7 +524,8 @@ impl WorkflowStore {
         let rows = sqlx::query(
             "SELECT workflow_id, step_key, title, description, assigned_agent_id, priority, \
                     input_schema, output_schema, system_prompt, repo_id, position, \
-                    for_each_step_key, for_each_pointer, for_each_key \
+                    for_each_step_key, for_each_pointer, for_each_key, \
+                    loop_group, loop_max_iterations, loop_until \
              FROM workflow_steps WHERE workflow_id = ? ORDER BY position ASC, step_key ASC",
         )
         .bind(workflow_id)
@@ -414,14 +579,35 @@ impl WorkflowStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Make one step wait for another, the ordinary way.
     pub async fn link_steps(&self, workflow_id: &str, parent: &str, child: &str) -> Result<()> {
+        self.link_steps_with_kind(workflow_id, parent, child, StepEdgeKind::Normal)
+            .await
+    }
+
+    /// Make one step wait for another, saying which outcome it follows.
+    ///
+    /// Upsert rather than `INSERT OR IGNORE`: two steps have one relationship,
+    /// so re-linking an existing pair changes what that relationship *is*
+    /// rather than silently keeping the old kind. A pair wired both ways is
+    /// exactly the merge the kind exists to prevent.
+    pub async fn link_steps_with_kind(
+        &self,
+        workflow_id: &str,
+        parent: &str,
+        child: &str,
+        kind: StepEdgeKind,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT OR IGNORE INTO workflow_step_edges \
-                 (workflow_id, parent_step_key, child_step_key) VALUES (?, ?, ?)",
+            "INSERT INTO workflow_step_edges \
+                 (workflow_id, parent_step_key, child_step_key, kind) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (workflow_id, parent_step_key, child_step_key) DO UPDATE SET \
+                 kind = excluded.kind",
         )
         .bind(workflow_id)
         .bind(parent)
         .bind(child)
+        .bind(kind.as_str())
         .execute(&self.pool)
         .await
         .context("failed to link workflow steps")?;
@@ -500,9 +686,24 @@ impl WorkflowStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Every edge as a plain pair.
+    ///
+    /// Ordering and reachability do not care which outcome an edge follows — an
+    /// `on_exhausted` child still comes after the loop — so cycle detection and
+    /// the "does this wait for that" checks read the graph through this.
     pub async fn list_edges(&self, workflow_id: &str) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .list_step_edges(workflow_id)
+            .await?
+            .into_iter()
+            .map(|edge| (edge.parent_step_key, edge.child_step_key))
+            .collect())
+    }
+
+    /// Every edge with the outcome it follows.
+    pub async fn list_step_edges(&self, workflow_id: &str) -> Result<Vec<StepEdge>> {
         let rows = sqlx::query(
-            "SELECT parent_step_key, child_step_key FROM workflow_step_edges \
+            "SELECT parent_step_key, child_step_key, kind FROM workflow_step_edges \
              WHERE workflow_id = ? ORDER BY parent_step_key, child_step_key",
         )
         .bind(workflow_id)
@@ -512,12 +713,16 @@ impl WorkflowStore {
 
         rows.into_iter()
             .map(|row| {
-                Ok((
-                    row.try_get("parent_step_key")
+                let kind: String = row.try_get("kind").unwrap_or_else(|_| "normal".into());
+                Ok(StepEdge {
+                    parent_step_key: row
+                        .try_get("parent_step_key")
                         .context("failed to read parent_step_key")?,
-                    row.try_get("child_step_key")
+                    child_step_key: row
+                        .try_get("child_step_key")
                         .context("failed to read child_step_key")?,
-                ))
+                    kind: StepEdgeKind::parse(&kind).unwrap_or(StepEdgeKind::Normal),
+                })
             })
             .collect()
     }
@@ -614,10 +819,15 @@ impl WorkflowStore {
             });
         }
 
-        let edges = self
-            .list_edges(workflow_id)
+        let step_edges = self
+            .list_step_edges(workflow_id)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        // Ordering and reachability do not care which outcome an edge follows.
+        let edges: Vec<(String, String)> = step_edges
+            .iter()
+            .map(|edge| (edge.parent_step_key.clone(), edge.child_step_key.clone()))
+            .collect();
         let bindings = self
             .list_bindings(workflow_id)
             .await
@@ -648,7 +858,10 @@ impl WorkflowStore {
             }
         }
         for binding in &bindings {
-            if matches!(binding.source, BindingSource::Step | BindingSource::FanIn) {
+            if matches!(
+                binding.source,
+                BindingSource::Step | BindingSource::FanIn | BindingSource::PreviousIteration
+            ) {
                 let target = binding.source_step_key.as_deref().unwrap_or("");
                 if !known.contains(target) {
                     return Err(LaunchError::UnknownStepReference {
@@ -730,7 +943,9 @@ impl WorkflowStore {
                         });
                     }
                 }
-                BindingSource::Literal | BindingSource::RunInput => {}
+                BindingSource::Literal
+                | BindingSource::RunInput
+                | BindingSource::PreviousIteration => {}
             }
         }
 
@@ -765,7 +980,16 @@ impl WorkflowStore {
 
         // 4. Acyclic. A cycle here would deadlock silently at run time: every
         //    step waiting on a parent that is itself waiting.
+        //
+        //    Unchanged by loops, and deliberately so: a loop is *declared* by
+        //    steps sharing a `loop_group`, never inferred from an edge pointing
+        //    backwards, so the template stays a DAG and an accidental cycle is
+        //    still an accidental cycle.
         topologically_ordered(&steps, &edges)?;
+
+        // 4b. Loop bodies. After the sort, so a body with an internal cycle is
+        //     reported as the cycle it is rather than as a loop with no exit.
+        let loops = loop_wiring(&steps, &step_edges, &bindings)?;
 
         // 5. Resolve run-input bindings now, while the payload is in hand.
         //    Frozen to literals rather than kept as live references so a step
@@ -814,6 +1038,7 @@ impl WorkflowStore {
                 &edges,
                 &bindings,
                 &frozen,
+                &loops,
                 launched_by,
                 &mut task_numbers,
             )
@@ -845,6 +1070,7 @@ impl WorkflowStore {
         edges: &[(String, String)],
         bindings: &[StepBinding],
         frozen: &HashMap<(String, String), Value>,
+        loops: &LoopWiring,
         launched_by: &str,
         task_numbers: &mut HashMap<String, i64>,
     ) -> std::result::Result<(), LaunchError> {
@@ -929,6 +1155,75 @@ impl WorkflowStore {
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
+        // A loop body becomes iteration 1, and its exit step carries the spec
+        // every later iteration is decided by.
+        //
+        // Frozen onto the task rather than read back from `workflow_steps` when
+        // the body finishes, for the same reason a fan-out spec is: a template
+        // edited mid-run must not change what a run already in flight does, and
+        // a run whose template was deleted still has to finish.
+        for plan in &loops.plans {
+            let spec = crate::tasks::LoopSpec {
+                group: plan.group.clone(),
+                max_iterations: plan.max_iterations,
+                until: plan.until.clone(),
+                previous_iteration: plan.previous_iteration.clone(),
+            };
+
+            for member in &plan.members {
+                let Some(task_number) = task_numbers.get(member) else {
+                    continue;
+                };
+                let is_exit = member == &plan.exit_step_key;
+                sqlx::query(
+                    "UPDATE tasks SET loop_group = ?, loop_iteration = 1, loop_terminal = ?, \
+                     metadata = COALESCE(?, metadata) WHERE task_number = ?",
+                )
+                .bind(&plan.group)
+                .bind(i64::from(is_exit))
+                .bind(is_exit.then(|| spec.to_metadata().to_string()))
+                .bind(task_number)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| LaunchError::Storage(error.to_string()))?;
+            }
+        }
+
+        // Both arms of a loop's exit are emitted held.
+        //
+        // Neither can simply wait on the body — the body finishes whether the
+        // loop converged or gave up, so completion alone would release both.
+        // Nor can either be left parentless, which would have the first sweep
+        // run it before the loop had run at all. So the edges below are wired
+        // exactly as they are for any other step, and these columns are what
+        // the sweep checks; only the iteration boundary clears them.
+        for (step_key, (group, arm)) in &loops.awaiting {
+            let Some(task_number) = task_numbers.get(step_key) else {
+                continue;
+            };
+            let condition = match arm {
+                crate::tasks::LoopArm::Normal => "converges",
+                crate::tasks::LoopArm::OnExhausted => "runs out of attempts",
+            };
+            sqlx::query(
+                "UPDATE tasks SET awaiting_loop_group = ?, awaiting_loop_arm = ?, \
+                 block_kind = 'dependency', block_reason = ? WHERE task_number = ?",
+            )
+            .bind(group)
+            .bind(arm.as_str())
+            .bind(format!(
+                "runs only if loop `{group}` {condition}; waiting to see whether it does"
+            ))
+            .bind(task_number)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        }
+
+        // Every edge becomes a dependency, `on_exhausted` included. The kind
+        // decides *whether* the child runs, not whether it waits — and an edge
+        // left out here would be an edge the canvas draws and the run does not
+        // have.
         for (parent, child) in edges {
             let (Some(parent_number), Some(child_number)) =
                 (task_numbers.get(parent), task_numbers.get(child))
@@ -977,6 +1272,25 @@ impl WorkflowStore {
                     literal_value: frozen
                         .get(&(binding.step_key.clone(), binding.input_key.clone()))
                         .cloned(),
+                    fan_in_step_key: None,
+                },
+                // Iteration 1 has no previous iteration, so it reads the loop's
+                // entry step instead — the single step outside the body that
+                // feeds it, at the same pointer. That is what lets the body
+                // need no special first-pass wiring: every later iteration is
+                // repointed at the pass it is replacing when it is emitted.
+                BindingSource::PreviousIteration => TaskInputBinding {
+                    child_task_number: *child_number,
+                    input_key: binding.input_key.clone(),
+                    source_task_number: loops
+                        .plans
+                        .iter()
+                        .find(|plan| plan.members.iter().any(|key| key == &binding.step_key))
+                        .and_then(|plan| plan.entry_step_key.as_ref())
+                        .and_then(|key| task_numbers.get(key))
+                        .copied(),
+                    source_pointer: binding.source_pointer.clone(),
+                    literal_value: None,
                     fan_in_step_key: None,
                 },
                 // Kept as a step key rather than translated to task numbers:
@@ -1061,6 +1375,271 @@ impl WorkflowStore {
 
         rows.into_iter().map(run_from_row).collect()
     }
+}
+
+/// Everything launch worked out about one loop body.
+///
+/// Computed once, before anything is written, so the emitter never has to
+/// re-derive which step is the exit or where iteration 1 reads from — deriving
+/// it twice is how the two answers drift apart.
+struct LoopPlan {
+    group: String,
+    /// Every step in the body.
+    members: Vec<String>,
+    /// The one step with nothing after it inside the body. Its output is what
+    /// `loop_until` reads, and its completion is the iteration boundary.
+    exit_step_key: String,
+    max_iterations: i64,
+    until: Value,
+    previous_iteration: Vec<crate::tasks::PreviousIterationBinding>,
+    /// The single step outside the body that feeds it, when the body reads a
+    /// previous iteration. `None` when nothing does, because then there is
+    /// nothing for iteration 1 to fall back to and no reason to demand one.
+    entry_step_key: Option<String>,
+}
+
+/// The loop shape of a whole template.
+#[derive(Default)]
+struct LoopWiring {
+    plans: Vec<LoopPlan>,
+    /// Step key -> the loop whose verdict it waits on, and which arm it is on.
+    awaiting: HashMap<String, (String, crate::tasks::LoopArm)>,
+}
+
+/// Work out every loop body, and refuse the templates that cannot be run.
+///
+/// Every refusal here names the step to change. The alternative is a loop that
+/// launches and then behaves in a way nobody declared — a body with two exits
+/// would iterate on whichever step happened to finish last, which is a coin
+/// toss dressed up as a pipeline.
+fn loop_wiring(
+    steps: &[WorkflowStep],
+    edges: &[StepEdge],
+    bindings: &[StepBinding],
+) -> std::result::Result<LoopWiring, LaunchError> {
+    let group_of = |key: &str| -> Option<&str> {
+        steps
+            .iter()
+            .find(|step| step.step_key == key)
+            .and_then(|step| step.loop_group.as_deref())
+            .filter(|group| !group.is_empty())
+    };
+
+    // Checked before the bodies, so a previous-iteration binding on a step that
+    // is in no loop at all is reported as that rather than going unmentioned
+    // because there were no groups to check it against.
+    for binding in bindings
+        .iter()
+        .filter(|binding| binding.source == BindingSource::PreviousIteration)
+    {
+        if group_of(&binding.step_key).is_none() {
+            return Err(LaunchError::PreviousIterationOutsideLoop {
+                step_key: binding.step_key.clone(),
+                input_key: binding.input_key.clone(),
+            });
+        }
+    }
+
+    let mut groups: Vec<(String, Vec<&WorkflowStep>)> = Vec::new();
+    for step in steps {
+        let Some(group) = step.loop_group.as_deref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(name, _)| name == group) {
+            Some((_, members)) => members.push(step),
+            None => groups.push((group.to_string(), vec![step])),
+        }
+    }
+
+    let mut wiring = LoopWiring::default();
+
+    for (group, members) in &groups {
+        let keys: HashSet<&str> = members.iter().map(|step| step.step_key.as_str()).collect();
+
+        // Two mechanisms that both grow the run graph after launch, on one
+        // step. There is no single answer for what an iteration of a body that
+        // is also n branches wide contains, so this is refused rather than
+        // guessed at.
+        for step in members {
+            if step.for_each_step_key.is_some() {
+                return Err(LaunchError::LoopStepIsAlsoFanOut {
+                    step_key: step.step_key.clone(),
+                });
+            }
+        }
+
+        // The exit step is the one nothing inside the body waits on. Ambiguity
+        // here is worse than a refusal: with two exits the loop would turn over
+        // on whichever finished last.
+        let candidates: Vec<String> = members
+            .iter()
+            .filter(|step| {
+                !edges.iter().any(|edge| {
+                    edge.parent_step_key == step.step_key
+                        && keys.contains(edge.child_step_key.as_str())
+                })
+            })
+            .map(|step| step.step_key.clone())
+            .collect();
+        if candidates.len() != 1 {
+            return Err(LaunchError::LoopBodyNotSingleExit {
+                loop_group: group.clone(),
+                candidates,
+            });
+        }
+        let exit_step_key = candidates[0].clone();
+        let exit = members
+            .iter()
+            .find(|step| step.step_key == exit_step_key)
+            .expect("the exit step came from this body");
+
+        // A setting nothing reads is worse than a missing one: it looks
+        // configured.
+        for step in members {
+            if step.step_key != exit_step_key
+                && (step.loop_until.is_some() || step.loop_max_iterations.is_some())
+            {
+                return Err(LaunchError::LoopSettingOffExitStep {
+                    step_key: step.step_key.clone(),
+                    loop_group: group.clone(),
+                    exit_step_key,
+                });
+            }
+        }
+
+        let Some(until) = exit.loop_until.clone() else {
+            return Err(LaunchError::LoopWithoutExitCondition {
+                loop_group: group.clone(),
+                step_key: exit_step_key,
+            });
+        };
+        if !until.is_object() {
+            return Err(LaunchError::LoopExitConditionInvalid {
+                loop_group: group.clone(),
+                details: "it is not an object".to_string(),
+            });
+        }
+        if until.get("pointer").and_then(Value::as_str).is_none() {
+            return Err(LaunchError::LoopExitConditionInvalid {
+                loop_group: group.clone(),
+                details: "it has no `pointer` saying what to read in the exit step's output"
+                    .to_string(),
+            });
+        }
+
+        let max_iterations = exit
+            .loop_max_iterations
+            .unwrap_or(crate::tasks::DEFAULT_LOOP_MAX_ITERATIONS);
+        if !(1..=crate::tasks::MAX_LOOP_ITERATIONS).contains(&max_iterations) {
+            return Err(LaunchError::LoopMaxIterationsOutOfRange {
+                loop_group: group.clone(),
+                max_iterations,
+                ceiling: crate::tasks::MAX_LOOP_ITERATIONS,
+            });
+        }
+
+        let mut previous_iteration = Vec::new();
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.source == BindingSource::PreviousIteration)
+        {
+            if group_of(&binding.step_key) != Some(group.as_str()) {
+                continue;
+            }
+            let target = binding.source_step_key.as_deref().unwrap_or("");
+            if !keys.contains(target) {
+                return Err(LaunchError::PreviousIterationOutsideBody {
+                    step_key: binding.step_key.clone(),
+                    input_key: binding.input_key.clone(),
+                    source_step_key: target.to_string(),
+                });
+            }
+            previous_iteration.push(crate::tasks::PreviousIterationBinding {
+                step_key: binding.step_key.clone(),
+                input_key: binding.input_key.clone(),
+                source_step_key: target.to_string(),
+            });
+        }
+
+        // Only demanded when something actually reads a previous iteration. A
+        // body that does not is free to be entered from anywhere, or from
+        // nowhere at all.
+        let entry_step_key = if previous_iteration.is_empty() {
+            None
+        } else {
+            let mut entries: Vec<String> = edges
+                .iter()
+                .filter(|edge| {
+                    keys.contains(edge.child_step_key.as_str())
+                        && !keys.contains(edge.parent_step_key.as_str())
+                })
+                .map(|edge| edge.parent_step_key.clone())
+                .collect();
+            entries.sort();
+            entries.dedup();
+            if entries.len() != 1 {
+                return Err(LaunchError::LoopEntryAmbiguous {
+                    loop_group: group.clone(),
+                    entries,
+                });
+            }
+            Some(entries[0].clone())
+        };
+
+        wiring.plans.push(LoopPlan {
+            group: group.clone(),
+            members: members.iter().map(|step| step.step_key.clone()).collect(),
+            exit_step_key,
+            max_iterations,
+            until,
+            previous_iteration,
+            entry_step_key,
+        });
+    }
+
+    // Every edge out of a loop's exit is conditional, both arms of it.
+    //
+    // The `on_exhausted` half is obvious. The *normal* half is the one that
+    // gets missed: the body finishes whether the loop converged or gave up, so
+    // a step wired downstream the ordinary way would run after three failed
+    // attempts exactly as it does after three successful ones — which is the
+    // merge the edge kind exists to prevent, arriving by the back door.
+    //
+    // And an `on_exhausted` edge whose parent is not a loop's exit is a promise
+    // the run cannot keep: that step can never run out of attempts.
+    for edge in edges {
+        let plan = wiring
+            .plans
+            .iter()
+            .find(|plan| plan.exit_step_key == edge.parent_step_key);
+
+        let arm = match (plan, edge.kind) {
+            (Some(_), StepEdgeKind::Normal) => crate::tasks::LoopArm::Normal,
+            (Some(_), StepEdgeKind::OnExhausted) => crate::tasks::LoopArm::OnExhausted,
+            (None, StepEdgeKind::OnExhausted) => {
+                return Err(LaunchError::OnExhaustedNotFromLoop {
+                    parent: edge.parent_step_key.clone(),
+                    child: edge.child_step_key.clone(),
+                });
+            }
+            (None, StepEdgeKind::Normal) => continue,
+        };
+        let group = plan.expect("an arm implies a plan").group.clone();
+
+        if let Some((first, _)) = wiring
+            .awaiting
+            .insert(edge.child_step_key.clone(), (group.clone(), arm))
+            && first != group
+        {
+            return Err(LaunchError::StepAwaitsTwoLoops {
+                child: edge.child_step_key.clone(),
+                first,
+                second: group,
+            });
+        }
+    }
+
+    Ok(wiring)
 }
 
 /// Kahn's algorithm. Returns the order, or the steps left over in a cycle.
@@ -1208,6 +1787,9 @@ fn step_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowStep> {
         for_each_step_key: row.try_get("for_each_step_key").ok().flatten(),
         for_each_pointer: row.try_get("for_each_pointer").ok().flatten(),
         for_each_key: row.try_get("for_each_key").ok().flatten(),
+        loop_group: row.try_get("loop_group").ok().flatten(),
+        loop_max_iterations: row.try_get("loop_max_iterations").ok().flatten(),
+        loop_until: read_json(&row, "loop_until"),
     })
 }
 
@@ -1301,6 +1883,9 @@ mod tests {
             for_each_step_key: None,
             for_each_pointer: None,
             for_each_key: None,
+            loop_group: None,
+            loop_max_iterations: None,
+            loop_until: None,
         }
     }
 
@@ -1699,6 +2284,7 @@ mod tests {
                 &workflows.list_edges(&id).await.expect("edges"),
                 &[],
                 &HashMap::new(),
+                &LoopWiring::default(),
                 "agent-1",
                 &mut emitted,
             )
@@ -2226,6 +2812,791 @@ mod tests {
         );
     }
 
+    // -- Bounded loops ------------------------------------------------------
+
+    /// analyze -> [ patch -> test ] -> ship, with `test` the loop's exit step.
+    ///
+    /// The shape every assertion below needs: a body of two steps so the
+    /// degenerate one-step case cannot hide a bug, an entry step outside it, a
+    /// step after it, and a binding of each kind that iteration has to rewire.
+    async fn loop_template(workflows: &WorkflowStore, id: &str, max_iterations: Option<i64>) {
+        workflows
+            .put_step(&step(id, "analyze", 0))
+            .await
+            .expect("step");
+
+        let mut patch = step(id, "patch", 1);
+        patch.loop_group = Some("fix".into());
+        workflows.put_step(&patch).await.expect("step");
+
+        let mut test = step(id, "test", 2);
+        test.loop_group = Some("fix".into());
+        test.loop_max_iterations = max_iterations;
+        test.loop_until = Some(serde_json::json!({"pointer": "/green", "equals": true}));
+        workflows.put_step(&test).await.expect("step");
+
+        workflows
+            .put_step(&step(id, "ship", 3))
+            .await
+            .expect("step");
+
+        for (parent, child) in [("analyze", "patch"), ("patch", "test"), ("test", "ship")] {
+            workflows.link_steps(id, parent, child).await.expect("link");
+        }
+
+        // Reaches back one pass; on iteration 1 there is none, so it reads the
+        // loop's entry step instead.
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.to_string(),
+                step_key: "patch".into(),
+                input_key: "failures".into(),
+                source: BindingSource::PreviousIteration,
+                source_step_key: Some("test".into()),
+                source_pointer: Some("/failures".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+        // Inside the body, an ordinary step binding is the *current* pass.
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.to_string(),
+                step_key: "test".into(),
+                input_key: "patched".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("patch".into()),
+                source_pointer: Some("/patched".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+        // Downstream of the loop: must end up reading whichever pass finished.
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.to_string(),
+                step_key: "ship".into(),
+                input_key: "report".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("test".into()),
+                source_pointer: Some("/report".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+    }
+
+    /// The task a step compiled into on a given pass.
+    async fn pass(
+        tasks: &TaskStore,
+        run_id: &str,
+        step_key: &str,
+        iteration: i64,
+    ) -> crate::tasks::Task {
+        tasks
+            .list_by_workflow_run(run_id)
+            .await
+            .expect("run tasks")
+            .into_iter()
+            .find(|task| {
+                task.workflow_step_key.as_deref() == Some(step_key)
+                    && task.loop_iteration == Some(iteration)
+            })
+            .unwrap_or_else(|| panic!("no `{step_key}` at iteration {iteration}"))
+    }
+
+    /// Sweep, then run one whole pass of the body, ending with the verdict the
+    /// exit step reports.
+    async fn run_pass(tasks: &TaskStore, run_id: &str, iteration: i64, green: bool) {
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let patch = pass(tasks, run_id, "patch", iteration).await;
+        complete(
+            tasks,
+            patch.task_number,
+            serde_json::json!({"patched": format!("pass {iteration}")}),
+        )
+        .await;
+
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let test = pass(tasks, run_id, "test", iteration).await;
+        complete(
+            tasks,
+            test.task_number,
+            serde_json::json!({
+                "green": green,
+                "failures": [format!("failure from pass {iteration}")],
+                "report": format!("report from pass {iteration}"),
+            }),
+        )
+        .await;
+    }
+
+    /// A loop that converges on the first pass is a loop that ran once. Emitting
+    /// a second body anyway is the difference between "iterate until it works"
+    /// and "always do it three times".
+    #[tokio::test]
+    async fn a_body_that_satisfies_loop_until_on_the_first_pass_never_runs_again() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+        run_pass(&tasks, &run_id, 1, true).await;
+
+        let outcomes = tasks.advance_loops("agent-1").await.expect("advance");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [crate::tasks::LoopOutcome::Converged { iteration: 1, .. }]
+            ),
+            "{outcomes:?}"
+        );
+
+        let body: Vec<_> = tasks
+            .list_by_workflow_run(&run_id)
+            .await
+            .expect("tasks")
+            .into_iter()
+            .filter(|task| task.loop_group.is_some())
+            .collect();
+        assert_eq!(body.len(), 2, "the body ran once: {body:?}");
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(
+            sweep.promoted,
+            vec![launched.task_numbers["ship"]],
+            "the step after a converged loop runs: {sweep:?}"
+        );
+    }
+
+    /// The point of looping rather than retrying: pass two reads what pass one
+    /// produced. If this regresses the body re-runs on stale inputs and the loop
+    /// is an expensive way to do the same thing three times.
+    #[tokio::test]
+    async fn a_body_that_fails_loop_until_emits_a_second_pass_reading_the_first() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["from analyze"]}),
+        )
+        .await;
+
+        // Iteration 1 falls back to the loop's entry step, so the body needs no
+        // special first-pass wiring.
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        match tasks
+            .resolve_inputs(launched.task_numbers["patch"])
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Resolved { inputs } => assert_eq!(
+                inputs,
+                serde_json::json!({"failures": ["from analyze"]}),
+                "iteration 1 reads the loop's entry"
+            ),
+            other => panic!("expected the first pass to resolve, got {other:?}"),
+        }
+
+        run_pass(&tasks, &run_id, 1, false).await;
+        let outcomes = tasks.advance_loops("agent-1").await.expect("advance");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [crate::tasks::LoopOutcome::Iterated { iteration: 2, .. }]
+            ),
+            "{outcomes:?}"
+        );
+
+        let first_test = pass(&tasks, &run_id, "test", 1).await;
+        assert_eq!(
+            first_test.loop_resolution,
+            Some(crate::tasks::LoopResolution::Iterated)
+        );
+
+        let second_patch = pass(&tasks, &run_id, "patch", 2).await;
+        assert_eq!(second_patch.status, TaskStatus::Backlog);
+        assert_eq!(second_patch.loop_group.as_deref(), Some("fix"));
+        assert!(
+            second_patch.title.contains("(iteration 2)"),
+            "a second pass must be tellable apart on a board: {}",
+            second_patch.title
+        );
+        assert_eq!(
+            tasks
+                .list_parents(second_patch.task_number)
+                .await
+                .expect("parents"),
+            vec![launched.task_numbers["analyze"]],
+            "the new pass still hangs off the loop's entry"
+        );
+
+        // The rewiring that matters: reading pass one, not itself.
+        match tasks
+            .resolve_inputs(second_patch.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Resolved { inputs } => assert_eq!(
+                inputs,
+                serde_json::json!({"failures": ["failure from pass 1"]}),
+                "the second pass reads what the first produced"
+            ),
+            other => panic!("expected the second pass to resolve, got {other:?}"),
+        }
+
+        // And inside the body, a plain step binding is the *current* pass.
+        let second_test = pass(&tasks, &run_id, "test", 2).await;
+        let bindings = tasks
+            .list_input_bindings(second_test.task_number)
+            .await
+            .expect("bindings");
+        assert_eq!(
+            bindings[0].source_task_number,
+            Some(second_patch.task_number),
+            "`patched` must read pass two's patch, not pass one's"
+        );
+    }
+
+    /// Three passes and no more, from an unset `loop_max_iterations`. The
+    /// default is the whole safety story for a template that never converges.
+    #[tokio::test]
+    async fn an_unset_max_iterations_stops_the_body_after_three_passes() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+
+        for iteration in 1..=3 {
+            run_pass(&tasks, &run_id, iteration, false).await;
+            tasks.advance_loops("agent-1").await.expect("advance");
+        }
+
+        let passes = tasks
+            .list_by_workflow_run(&run_id)
+            .await
+            .expect("tasks")
+            .into_iter()
+            .filter(|task| task.workflow_step_key.as_deref() == Some("test"))
+            .count();
+        assert_eq!(passes, 3, "three passes, and the fourth is never emitted");
+
+        // Nothing is left that a further sweep could turn over.
+        let outcomes = tasks.advance_loops("agent-1").await.expect("advance");
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+    }
+
+    /// Converging and giving up are opposite results. A pipeline that merges
+    /// after three successful attempts must not also merge after three failed
+    /// ones — which is the same bug this codebase has now shipped three times.
+    #[tokio::test]
+    async fn a_loop_that_runs_out_of_attempts_takes_its_on_exhausted_edge_and_not_the_normal_one() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(2)).await;
+        workflows
+            .put_step(&step(&id, "escalate", 4))
+            .await
+            .expect("step");
+        workflows
+            .link_steps_with_kind(&id, "test", "escalate", StepEdgeKind::OnExhausted)
+            .await
+            .expect("link");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        let escalate = launched.task_numbers["escalate"];
+        let ship = launched.task_numbers["ship"];
+
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+
+        // Held from the first sweep. The body finishes either way, so mere
+        // completion cannot be what releases the give-up path.
+        let held = tasks
+            .get_by_number(escalate)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(held.awaiting_loop_group.as_deref(), Some("fix"));
+
+        run_pass(&tasks, &run_id, 1, false).await;
+        tasks.advance_loops("agent-1").await.expect("advance");
+        assert!(
+            !tasks
+                .recompute_ready("agent-1")
+                .await
+                .expect("sweep")
+                .promoted
+                .contains(&escalate),
+            "the give-up path must not run while the loop still has attempts left"
+        );
+
+        run_pass(&tasks, &run_id, 2, false).await;
+        let outcomes = tasks.advance_loops("agent-1").await.expect("advance");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [crate::tasks::LoopOutcome::ExhaustedRouted { iteration: 2, .. }]
+            ),
+            "{outcomes:?}"
+        );
+
+        let released = tasks
+            .get_by_number(escalate)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(released.awaiting_loop_group, None);
+        assert_eq!(
+            tasks.list_parents(escalate).await.expect("parents"),
+            vec![pass(&tasks, &run_id, "test", 2).await.task_number],
+            "released off the pass that actually gave up"
+        );
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(sweep.promoted.contains(&escalate), "{sweep:?}");
+        assert!(
+            !sweep.promoted.contains(&ship),
+            "the whole point: a pipeline that merges after three successful attempts must not \
+             also merge after three failed ones — {sweep:?}"
+        );
+
+        let held = tasks
+            .get_by_number(ship)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(held.awaiting_loop_arm, Some(crate::tasks::LoopArm::Normal));
+        assert!(
+            held.block_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("ran out of attempts")),
+            "the branch that was not taken says which way the loop went: {held:?}"
+        );
+    }
+
+    /// The mirror image, and the half that is easy to forget: a loop that
+    /// converged must not also run the step written for it giving up. Held
+    /// rather than deleted, and told why — a card held with no explanation is
+    /// indistinguishable from a deadlock.
+    #[tokio::test]
+    async fn a_converged_loop_leaves_its_give_up_path_held_and_says_which_way_it_went() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+        workflows
+            .put_step(&step(&id, "escalate", 4))
+            .await
+            .expect("step");
+        workflows
+            .link_steps_with_kind(&id, "test", "escalate", StepEdgeKind::OnExhausted)
+            .await
+            .expect("link");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        let escalate = launched.task_numbers["escalate"];
+
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+        run_pass(&tasks, &run_id, 1, true).await;
+        tasks.advance_loops("agent-1").await.expect("advance");
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(
+            sweep.promoted,
+            vec![launched.task_numbers["ship"]],
+            "the success path runs and nothing else does: {sweep:?}"
+        );
+
+        let held = tasks
+            .get_by_number(escalate)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            held.awaiting_loop_arm,
+            Some(crate::tasks::LoopArm::OnExhausted)
+        );
+        assert!(
+            held.block_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("converged")),
+            "{held:?}"
+        );
+    }
+
+    /// No `on_exhausted` edge is a real state, not an error: the loop has
+    /// nowhere to go and a person has to decide. Sticky, so no sweep resurrects
+    /// it, and off `done`, so the steps after the loop do not proceed as though
+    /// it had succeeded.
+    #[tokio::test]
+    async fn a_loop_with_nowhere_to_go_parks_for_a_person_and_the_sweep_leaves_it_alone() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(1)).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+        run_pass(&tasks, &run_id, 1, false).await;
+
+        let outcomes = tasks.advance_loops("agent-1").await.expect("advance");
+        let [crate::tasks::LoopOutcome::ExhaustedBlocked { reason, .. }] = outcomes.as_slice()
+        else {
+            panic!("expected the loop to park, got {outcomes:?}");
+        };
+        assert!(
+            reason.contains("ran out of attempts"),
+            "the card has to say why: {reason}"
+        );
+
+        let exit = pass(&tasks, &run_id, "test", 1).await;
+        assert_eq!(exit.status, TaskStatus::Blocked);
+        assert_eq!(exit.block_kind, Some(crate::tasks::BlockKind::NeedsInput));
+
+        for _ in 0..3 {
+            let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+            assert!(
+                !sweep.promoted.contains(&launched.task_numbers["ship"]),
+                "a loop that gave up must not release the step after it: {sweep:?}"
+            );
+        }
+        let exit = pass(&tasks, &run_id, "test", 1).await;
+        assert_eq!(
+            exit.status,
+            TaskStatus::Blocked,
+            "a sticky block is not for the sweep to undo"
+        );
+    }
+
+    /// The edge and the binding have to move together. Moved apart, the
+    /// pipeline waits on the newest pass and reads the oldest — a graph that is
+    /// correct and an answer that is stale, which no test of the edges alone
+    /// would catch.
+    #[tokio::test]
+    async fn the_step_after_a_loop_reads_the_pass_that_finished_it_not_a_superseded_one() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        let ship = launched.task_numbers["ship"];
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+
+        run_pass(&tasks, &run_id, 1, false).await;
+        tasks.advance_loops("agent-1").await.expect("advance");
+        run_pass(&tasks, &run_id, 2, true).await;
+        tasks.advance_loops("agent-1").await.expect("advance");
+
+        let second = pass(&tasks, &run_id, "test", 2).await;
+        assert_eq!(
+            tasks.list_parents(ship).await.expect("parents"),
+            vec![second.task_number],
+            "downstream waits on the newest pass only"
+        );
+
+        match tasks.resolve_inputs(ship).await.expect("resolve") {
+            ContractResolution::Resolved { inputs } => assert_eq!(
+                inputs,
+                serde_json::json!({"report": "report from pass 2"}),
+                "and reads it too"
+            ),
+            other => panic!("expected ship to resolve, got {other:?}"),
+        }
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![ship], "{sweep:?}");
+    }
+
+    /// Ambiguity here is worse than a refusal: with two exits the loop would
+    /// turn over on whichever step happened to finish last, which is a coin toss
+    /// dressed up as a pipeline.
+    #[tokio::test]
+    async fn a_body_without_a_single_exit_step_is_refused_and_names_the_candidates() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        // A second step with nothing after it inside the body.
+        let mut lint = step(&id, "lint", 5);
+        lint.loop_group = Some("fix".into());
+        workflows.put_step(&lint).await.expect("step");
+        workflows
+            .link_steps(&id, "patch", "lint")
+            .await
+            .expect("link");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a body with two exits must be refused");
+        match error {
+            LaunchError::LoopBodyNotSingleExit {
+                loop_group,
+                candidates,
+            } => {
+                assert_eq!(loop_group, "fix");
+                assert_eq!(candidates, vec!["test".to_string(), "lint".to_string()]);
+            }
+            other => panic!("expected LoopBodyNotSingleExit, got {other:?}"),
+        }
+        assert!(
+            tasks
+                .list(crate::tasks::TaskListFilter::default())
+                .await
+                .expect("list")
+                .is_empty(),
+            "a refused launch must not leave tasks behind"
+        );
+    }
+
+    /// The most expensive mistake available here. The sweep runs every tick and
+    /// completion fires independently, so an emit path that can fire twice for
+    /// one pass creates bodies without bound against a live model.
+    #[tokio::test]
+    async fn the_emit_path_cannot_fire_twice_for_one_iteration() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let run_id = launched.run.id.clone();
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+        run_pass(&tasks, &run_id, 1, false).await;
+
+        let exit = pass(&tasks, &run_id, "test", 1).await;
+        let first = tasks.advance_loops("agent-1").await.expect("advance");
+        assert_eq!(first.len(), 1, "{first:?}");
+
+        // Both entry points, twice each. Every one of them re-reads a boundary
+        // that has already been decided.
+        for _ in 0..2 {
+            assert!(
+                tasks
+                    .advance_loops("agent-1")
+                    .await
+                    .expect("advance")
+                    .is_empty()
+            );
+            assert!(
+                tasks
+                    .advance_loops_for(exit.task_number)
+                    .await
+                    .expect("advance")
+                    .is_empty()
+            );
+        }
+
+        let second_pass = tasks
+            .list_by_workflow_run(&run_id)
+            .await
+            .expect("tasks")
+            .into_iter()
+            .filter(|task| task.loop_iteration == Some(2))
+            .count();
+        assert_eq!(second_pass, 2, "one body, not two");
+
+        // And the guard underneath the guard: the database itself refuses a
+        // second task for the same step of the same pass.
+        let duplicate = sqlx::query(
+            "INSERT INTO tasks (id, task_number, title, status, priority, owner_agent_id, \
+             assigned_agent_id, created_by, workflow_run_id, workflow_step_key, loop_iteration) \
+             VALUES ('dupe', 9999, 't', 'backlog', 'medium', 'a', 'a', 'a', ?, 'test', 2)",
+        )
+        .bind(&run_id)
+        .execute(tasks.pool())
+        .await;
+        assert!(
+            duplicate.is_err(),
+            "a unique index, not a check-then-act, is what makes double emission impossible"
+        );
+    }
+
+    /// A setting nothing reads is worse than a missing one: it looks configured.
+    #[tokio::test]
+    async fn a_loop_setting_on_a_step_that_is_not_the_exit_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+
+        let mut patch = step(&id, "patch", 1);
+        patch.loop_group = Some("fix".into());
+        patch.loop_max_iterations = Some(9);
+        workflows.put_step(&patch).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a number nothing reads must be refused");
+        match error {
+            LaunchError::LoopSettingOffExitStep {
+                step_key,
+                exit_step_key,
+                ..
+            } => {
+                assert_eq!(step_key, "patch");
+                assert_eq!(exit_step_key, "test");
+            }
+            other => panic!("expected LoopSettingOffExitStep, got {other:?}"),
+        }
+    }
+
+    /// Every pass is a live model call, so the ceiling is enforced where a
+    /// person is still watching rather than trusted to a number in a row.
+    #[tokio::test]
+    async fn a_loop_asking_for_more_iterations_than_the_ceiling_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(crate::tasks::MAX_LOOP_ITERATIONS + 1)).await;
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("an unbounded loop must be refused");
+        assert!(
+            matches!(error, LaunchError::LoopMaxIterationsOutOfRange { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A loop with no exit condition always runs its full budget, which is a
+    /// retry with extra steps rather than a loop.
+    #[tokio::test]
+    async fn a_body_with_no_exit_condition_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+        let mut test = step(&id, "test", 2);
+        test.loop_group = Some("fix".into());
+        test.loop_until = None;
+        workflows.put_step(&test).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a loop with no exit condition must be refused");
+        assert!(
+            matches!(error, LaunchError::LoopWithoutExitCondition { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// An `on_exhausted` edge from a step that cannot run out of attempts is a
+    /// promise the run has no way to keep.
+    #[tokio::test]
+    async fn an_on_exhausted_edge_from_a_step_that_is_not_a_loop_exit_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        workflows
+            .put_step(&step(&id, "build", 0))
+            .await
+            .expect("step");
+        workflows
+            .put_step(&step(&id, "rollback", 1))
+            .await
+            .expect("step");
+        workflows
+            .link_steps_with_kind(&id, "build", "rollback", StepEdgeKind::OnExhausted)
+            .await
+            .expect("link");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("only a loop can give up");
+        assert!(
+            matches!(error, LaunchError::OnExhaustedNotFromLoop { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// Iteration 1 has nothing to reach back to, so it reads the loop's entry.
+    /// A body entered from two places has no single first value, and guessing
+    /// one would make the first pass silently different from the rest.
+    #[tokio::test]
+    async fn a_previous_iteration_binding_with_no_single_loop_entry_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, None).await;
+        workflows
+            .put_step(&step(&id, "survey", 5))
+            .await
+            .expect("step");
+        workflows
+            .link_steps(&id, "survey", "patch")
+            .await
+            .expect("link");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("two entries means no single first value");
+        match error {
+            LaunchError::LoopEntryAmbiguous { entries, .. } => {
+                assert_eq!(entries, vec!["analyze".to_string(), "survey".to_string()]);
+            }
+            other => panic!("expected LoopEntryAmbiguous, got {other:?}"),
+        }
+    }
+
     #[cfg(test)]
     async fn create_workflow_schema(pool: &SqlitePool) {
         for statement in [
@@ -2238,9 +3609,11 @@ mod tests {
              priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
              system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
              for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
+             loop_group TEXT, loop_max_iterations INTEGER, loop_until TEXT, \
              PRIMARY KEY (workflow_id, step_key))",
             "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
              parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
+             kind TEXT NOT NULL DEFAULT 'normal', \
              PRIMARY KEY (workflow_id, parent_step_key, child_step_key))",
             "CREATE TABLE workflow_step_bindings (workflow_id TEXT NOT NULL, \
              step_key TEXT NOT NULL, input_key TEXT NOT NULL, source TEXT NOT NULL, \

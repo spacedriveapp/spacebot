@@ -67,17 +67,40 @@ pub(super) struct SaveStepRequest {
     /// Pointer *within each item* naming its branch. Omit to key by index.
     #[serde(default)]
     for_each_key: Option<String>,
+    /// Set to put this step in a loop body. Every step sharing the name is one
+    /// body, and the whole body runs again until it converges or runs out.
+    #[serde(default)]
+    loop_group: Option<String>,
+    /// How many passes the body may run. Omit for 3.
+    ///
+    /// Only read on the body's **exit step** — the one step with nothing after
+    /// it inside the body. Set anywhere else, launch refuses rather than
+    /// leaving a number that does nothing.
+    #[serde(default)]
+    loop_max_iterations: Option<i64>,
+    /// The exit predicate, in the same shape a `task_output` gate takes:
+    /// `{"pointer": "/tests/passed", "equals": true}`. Required on the exit
+    /// step of a loop body.
+    #[serde(default)]
+    loop_until: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct StepEdgeRequest {
     parent_step_key: String,
     child_step_key: String,
+    /// `normal` (default) or `on_exhausted`.
+    ///
+    /// An `on_exhausted` edge is followed only when the loop ending at the
+    /// parent runs out of attempts. Converging and giving up are opposite
+    /// results, so they get different edges rather than one edge meaning both.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct SaveBindingRequest {
-    /// `step` | `literal` | `run_input`
+    /// `step` | `literal` | `run_input` | `fan_in` | `previous_iteration`
     source: String,
     /// Required when `source` is `step`.
     #[serde(default)]
@@ -109,6 +132,9 @@ pub(super) struct WorkflowListResponse {
 pub(super) struct WorkflowEdge {
     parent_step_key: String,
     child_step_key: String,
+    /// `normal` or `on_exhausted`. An editor that drew both alike would draw a
+    /// pipeline that is not the one that runs.
+    kind: String,
 }
 
 /// A template and everything that references it.
@@ -204,7 +230,18 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::ForEachNotWaiting { .. }
         | LaunchError::FanInNotFanOut { .. }
         | LaunchError::FanInNotWaiting { .. }
-        | LaunchError::StepBindingOnFanOut { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | LaunchError::StepBindingOnFanOut { .. }
+        | LaunchError::LoopBodyNotSingleExit { .. }
+        | LaunchError::LoopSettingOffExitStep { .. }
+        | LaunchError::LoopWithoutExitCondition { .. }
+        | LaunchError::LoopExitConditionInvalid { .. }
+        | LaunchError::LoopMaxIterationsOutOfRange { .. }
+        | LaunchError::LoopStepIsAlsoFanOut { .. }
+        | LaunchError::OnExhaustedNotFromLoop { .. }
+        | LaunchError::StepAwaitsTwoLoops { .. }
+        | LaunchError::PreviousIterationOutsideLoop { .. }
+        | LaunchError::PreviousIterationOutsideBody { .. }
+        | LaunchError::LoopEntryAmbiguous { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -300,7 +337,7 @@ pub(super) async fn get_workflow(
         .ok_or((StatusCode::NOT_FOUND, format!("no workflow {id}")))?;
 
     let steps = store.list_steps(&id).await.map_err(internal)?;
-    let edges = store.list_edges(&id).await.map_err(internal)?;
+    let edges = store.list_step_edges(&id).await.map_err(internal)?;
     let bindings = store.list_bindings(&id).await.map_err(internal)?;
 
     Ok(Json(WorkflowDetailResponse {
@@ -308,9 +345,10 @@ pub(super) async fn get_workflow(
         steps,
         edges: edges
             .into_iter()
-            .map(|(parent_step_key, child_step_key)| WorkflowEdge {
-                parent_step_key,
-                child_step_key,
+            .map(|edge| WorkflowEdge {
+                parent_step_key: edge.parent_step_key,
+                child_step_key: edge.child_step_key,
+                kind: edge.kind.as_str().to_string(),
             })
             .collect(),
         bindings,
@@ -461,6 +499,9 @@ pub(super) async fn put_step(
             for_each_step_key: request.for_each_step_key,
             for_each_pointer: request.for_each_pointer,
             for_each_key: request.for_each_key,
+            loop_group: request.loop_group,
+            loop_max_iterations: request.loop_max_iterations,
+            loop_until: request.loop_until,
         })
         .await
         .map_err(internal)?;
@@ -550,8 +591,16 @@ pub(super) async fn add_edge(
         ));
     }
 
+    let kind = match request.kind.as_deref() {
+        None => crate::workflows::StepEdgeKind::Normal,
+        Some(value) => crate::workflows::StepEdgeKind::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{value}` is not an edge kind — use normal or on_exhausted"),
+        ))?,
+    };
+
     store
-        .link_steps(&id, &request.parent_step_key, &request.child_step_key)
+        .link_steps_with_kind(&id, &request.parent_step_key, &request.child_step_key, kind)
         .await
         .map_err(internal)?;
 
@@ -671,6 +720,37 @@ pub(super) async fn put_binding(
                 return Err((
                     StatusCode::UNPROCESSABLE_ENTITY,
                     format!("step `{target}` is not a fan-out, so it has no branches to collect"),
+                ));
+            }
+        }
+        // Checked here as far as it can be: the step must be in a loop and the
+        // step it reads must be in the same body. Which step is the body's exit
+        // and where iteration 1 falls back to depend on the edges, so those are
+        // launch's job — this is the half the author can see on screen.
+        BindingSource::PreviousIteration => {
+            let target = request.source_step_key.as_deref().unwrap_or("");
+            let Some(owner) = steps.iter().find(|step| step.step_key == step_key) else {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("no step `{step_key}` in this workflow"),
+                ));
+            };
+            let Some(group) = owner.loop_group.as_deref().filter(|name| !name.is_empty()) else {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "step `{step_key}` is not in a loop body, so it has no previous iteration \
+                         to read"
+                    ),
+                ));
+            };
+            let same_body = steps
+                .iter()
+                .any(|step| step.step_key == target && step.loop_group.as_deref() == Some(group));
+            if !same_body {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("step `{target}` is not in loop `{group}`"),
                 ));
             }
         }

@@ -4110,6 +4110,23 @@ async fn handle_detached_completion(
                 "failed to expand fan-outs after a completion; the next sweep will retry"
             ),
         }
+
+        // And turn over any loop body this task just completed, for the same
+        // reason: the steps after a loop are free the instant its body lands,
+        // and a boundary decided a tick later is a tick in which a superseded
+        // iteration can release the rest of the pipeline.
+        match task_store.advance_loops_for(task.task_number).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    log_loop_outcome(logger, &outcome);
+                }
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                "failed to advance loops after a completion; the next sweep will retry"
+            ),
+        }
     }
 
     run_logger.log_worker_completed(worker_id, result_text, success);
@@ -4213,6 +4230,79 @@ fn log_fan_out_outcome(logger: &CortexLogger, outcome: &crate::tasks::FanOutOutc
             &format!("Fan-out #{placeholder_task_number} cannot expand: {reason}"),
             Some(serde_json::json!({
                 "placeholder_task_number": placeholder_task_number,
+                "reason": reason,
+            })),
+        ),
+    }
+}
+
+/// Say what a loop did at the end of an iteration.
+///
+/// Four events rather than one, because "the loop finished" covers outcomes
+/// that need entirely different things from a reader: nothing, patience, a
+/// glance at which branch was taken, and a decision.
+fn log_loop_outcome(logger: &CortexLogger, outcome: &crate::tasks::LoopOutcome) {
+    match outcome {
+        crate::tasks::LoopOutcome::Converged {
+            terminal_task_number,
+            iteration,
+            detail,
+        } => logger.log(
+            "task_loop_converged",
+            &format!(
+                "Loop ending at #{terminal_task_number} converged on iteration {iteration}: \
+                 {detail}"
+            ),
+            Some(serde_json::json!({
+                "terminal_task_number": terminal_task_number,
+                "iteration": iteration,
+                "detail": detail,
+            })),
+        ),
+        crate::tasks::LoopOutcome::Iterated {
+            previous_terminal_task_number,
+            iteration,
+            tasks,
+        } => logger.log(
+            "task_loop_iterated",
+            &format!(
+                "Loop ending at #{previous_terminal_task_number} did not converge — emitted \
+                 iteration {iteration} as {} task(s)",
+                tasks.len()
+            ),
+            Some(serde_json::json!({
+                "previous_terminal_task_number": previous_terminal_task_number,
+                "iteration": iteration,
+                "tasks": tasks,
+            })),
+        ),
+        crate::tasks::LoopOutcome::ExhaustedRouted {
+            terminal_task_number,
+            iteration,
+            released,
+        } => logger.log(
+            "task_loop_exhausted",
+            &format!(
+                "Loop ending at #{terminal_task_number} gave up after {iteration} iteration(s) — \
+                 released {} step(s) on its on_exhausted edge",
+                released.len()
+            ),
+            Some(serde_json::json!({
+                "terminal_task_number": terminal_task_number,
+                "iteration": iteration,
+                "released": released,
+            })),
+        ),
+        crate::tasks::LoopOutcome::ExhaustedBlocked {
+            terminal_task_number,
+            iteration,
+            reason,
+        } => logger.log(
+            "task_loop_needs_input",
+            &format!("Loop ending at #{terminal_task_number} stopped for a person: {reason}"),
+            Some(serde_json::json!({
+                "terminal_task_number": terminal_task_number,
+                "iteration": iteration,
                 "reason": reason,
             })),
         ),

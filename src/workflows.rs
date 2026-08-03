@@ -16,6 +16,6 @@
 pub mod store;
 
 pub use store::{
-    BindingSource, InstantiatedRun, LaunchError, StepBinding, Workflow, WorkflowRun, WorkflowStep,
-    WorkflowStore,
+    BindingSource, InstantiatedRun, LaunchError, StepBinding, StepEdge, StepEdgeKind, Workflow,
+    WorkflowRun, WorkflowStep, WorkflowStore,
 };

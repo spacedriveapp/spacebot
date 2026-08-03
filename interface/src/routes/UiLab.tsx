@@ -64,6 +64,7 @@ function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
 		consecutive_failures: 0,
 		block_recurrences: 0,
 		fan_out_placeholder: false,
+		loop_terminal: false,
 		...overrides,
 	};
 }

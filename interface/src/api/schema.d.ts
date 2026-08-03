@@ -3039,7 +3039,7 @@ export interface components {
          *     indistinguishable from a deliberate one.
          * @enum {string}
          */
-        BindingSource: "step" | "literal" | "run_input" | "fan_in";
+        BindingSource: "step" | "literal" | "run_input" | "fan_in" | "previous_iteration";
         BindingsListResponse: {
             bindings: components["schemas"]["BindingResponse"][];
         };
@@ -3853,6 +3853,25 @@ export interface components {
                 [key: string]: number;
             };
         };
+        /**
+         * @description Which arm of a loop's exit a downstream task is on.
+         *
+         *     A loop's exit is a branch, not a join. Both arms wait on the same body and
+         *     exactly one of them runs, so they are told apart by name rather than by
+         *     which happens to be wired — "the loop finished" is not a condition anything
+         *     can act on.
+         * @enum {string}
+         */
+        LoopArm: "normal" | "on_exhausted";
+        /**
+         * @description What the boundary decided at the end of one iteration.
+         *
+         *     Four values rather than one "handled" flag, because they recover
+         *     differently: a run that gave up must not read like a run that succeeded, and
+         *     a run parked for a person must not read like one that took a branch.
+         * @enum {string}
+         */
+        LoopResolution: "converged" | "iterated" | "exhausted_routed" | "exhausted_blocked";
         McpAgentStatus: {
             agent_id: string;
             servers: components["schemas"]["McpServerInfo"][];
@@ -4452,7 +4471,7 @@ export interface components {
         SaveBindingRequest: {
             /** @description Required when `source` is `literal`. */
             literal_value?: unknown;
-            /** @description `step` | `literal` | `run_input` */
+            /** @description `step` | `literal` | `run_input` | `fan_in` | `previous_iteration` */
             source: string;
             /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
             source_pointer?: string | null;
@@ -4478,6 +4497,26 @@ export interface components {
              */
             for_each_step_key?: string | null;
             input_schema?: unknown;
+            /**
+             * @description Set to put this step in a loop body. Every step sharing the name is one
+             *     body, and the whole body runs again until it converges or runs out.
+             */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description How many passes the body may run. Omit for 3.
+             *
+             *     Only read on the body's **exit step** — the one step with nothing after
+             *     it inside the body. Set anywhere else, launch refuses rather than
+             *     leaving a number that does nothing.
+             */
+            loop_max_iterations?: number | null;
+            /**
+             * @description The exit predicate, in the same shape a `task_output` gate takes:
+             *     `{"pointer": "/tests/passed", "equals": true}`. Required on the exit
+             *     step of a loop body.
+             */
+            loop_until?: unknown;
             output_schema?: unknown;
             /**
              * Format: int64
@@ -4623,6 +4662,14 @@ export interface components {
         };
         StepEdgeRequest: {
             child_step_key: string;
+            /**
+             * @description `normal` (default) or `on_exhausted`.
+             *
+             *     An `on_exhausted` edge is followed only when the loop ending at the
+             *     parent runs out of attempts. Converging and giving up are opposite
+             *     results, so they get different edges rather than one edge meaning both.
+             */
+            kind?: string | null;
             parent_step_key: string;
         };
         StorageStatus: {
@@ -4637,6 +4684,15 @@ export interface components {
             approved_at?: string | null;
             approved_by?: string | null;
             assigned_agent_id: string;
+            awaiting_loop_arm?: null | components["schemas"]["LoopArm"];
+            /**
+             * @description This task is downstream of the named loop and waits on its verdict.
+             *
+             *     The ready sweep skips it while this is set. That is what stops both arms
+             *     of a loop's exit from running: the body finishes whether the loop
+             *     converged or gave up, so completion alone cannot tell them apart.
+             */
+            awaiting_loop_group?: string | null;
             block_kind?: null | components["schemas"]["BlockKind"];
             /** @description Human-readable explanation shown on the card. */
             block_reason?: string | null;
@@ -4685,6 +4741,22 @@ export interface components {
              *     show why it is parked without joining `task_runs`.
              */
             last_error?: string | null;
+            /** @description Which loop body this task belongs to. `None` on every ordinary task. */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description Which pass of that body this task is, 1-based.
+             *
+             *     The pass, not the attempt: a task retried under the failure budget keeps
+             *     its iteration, because retrying is not looping.
+             */
+            loop_iteration?: number | null;
+            loop_resolution?: null | components["schemas"]["LoopResolution"];
+            /**
+             * @description Whether this task is the body's exit point — the one whose outputs
+             *     `loop_until` reads, and the one the iteration boundary is decided on.
+             */
+            loop_terminal: boolean;
             /**
              * Format: int64
              * @description Per-task override of [`DEFAULT_FAILURE_LIMIT`].
@@ -5509,6 +5581,11 @@ export interface components {
         };
         WorkflowEdge: {
             child_step_key: string;
+            /**
+             * @description `normal` or `on_exhausted`. An editor that drew both alike would draw a
+             *     pipeline that is not the one that runs.
+             */
+            kind: string;
             parent_step_key: string;
         };
         WorkflowListResponse: {
@@ -5549,6 +5626,32 @@ export interface components {
              */
             for_each_step_key?: string | null;
             input_schema?: unknown;
+            /**
+             * @description Which loop body this step belongs to.
+             *
+             *     A loop is one or more steps sharing this name. A body of one step is the
+             *     degenerate case and needs no special handling.
+             */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description How many passes the body may run before the loop gives up.
+             *
+             *     `None` means [`crate::tasks::DEFAULT_LOOP_MAX_ITERATIONS`]. Read from the
+             *     body's exit step only; set anywhere else it would be a number nothing
+             *     consumes, so launch refuses that rather than letting it sit in a row.
+             */
+            loop_max_iterations?: number | null;
+            /**
+             * @description The exit predicate, as the same object a `task_output` gate takes:
+             *     `{"pointer": "/tests/passed", "equals": true}`.
+             *
+             *     Deliberately not a second predicate language — conditional steps,
+             *     external gating, and loop exit are one question asked in three places.
+             *     Required on the body's exit step: a loop with no exit condition always
+             *     burns its whole budget.
+             */
+            loop_until?: unknown;
             output_schema?: unknown;
             /** Format: int64 */
             position: number;

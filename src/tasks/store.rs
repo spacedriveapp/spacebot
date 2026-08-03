@@ -319,6 +319,26 @@ pub struct Task {
     /// expansion. It is never promoted and never claimed — expansion replaces
     /// it with one task per item.
     pub fan_out_placeholder: bool,
+    /// Which loop body this task belongs to. `None` on every ordinary task.
+    pub loop_group: Option<String>,
+    /// Which pass of that body this task is, 1-based.
+    ///
+    /// The pass, not the attempt: a task retried under the failure budget keeps
+    /// its iteration, because retrying is not looping.
+    pub loop_iteration: Option<i64>,
+    /// Whether this task is the body's exit point — the one whose outputs
+    /// `loop_until` reads, and the one the iteration boundary is decided on.
+    pub loop_terminal: bool,
+    /// What the boundary decided for this iteration, once it has decided.
+    pub loop_resolution: Option<LoopResolution>,
+    /// This task is downstream of the named loop and waits on its verdict.
+    ///
+    /// The ready sweep skips it while this is set. That is what stops both arms
+    /// of a loop's exit from running: the body finishes whether the loop
+    /// converged or gave up, so completion alone cannot tell them apart.
+    pub awaiting_loop_group: Option<String>,
+    /// Which arm of that branch this task is on.
+    pub awaiting_loop_arm: Option<LoopArm>,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -1669,6 +1689,19 @@ impl TaskStore {
             );
         }
 
+        // Turn over any loop body that finished a pass, for the same reason and
+        // in the same place. The instant a body's last task is done the steps
+        // after the loop have nothing holding them, so a boundary decided after
+        // the promote pass would let a superseded iteration release the rest of
+        // the pipeline.
+        if let Err(error) = self.advance_loops(assigned_agent_id).await {
+            tracing::warn!(
+                %error,
+                assigned_agent_id,
+                "failed to advance loops while sweeping — continuing with the graph as it is"
+            );
+        }
+
         // Promote: eligible and waiting.
         //
         // The last clause decides what "waiting" means, and it turns on who put
@@ -1704,11 +1737,17 @@ impl TaskStore {
         // promotable task — backlog, parents done, run id set — but it is a
         // shape, not work, and promoting it hands a worker a card whose whole
         // job is to be replaced by the branches expansion emits.
+        //
+        // So is the give-up path of a loop, for the opposite reason: it looks
+        // promotable the moment the body finishes, and the body finishes
+        // whether the loop converged or gave up. Only the boundary can tell
+        // those apart, and it clears this column when it does.
         let promoted: Vec<i64> = sqlx::query_scalar(
             "SELECT task_number FROM tasks t \
              WHERE t.assigned_agent_id = ? \
                AND t.status = 'backlog' \
                AND t.fan_out_placeholder = 0 \
+               AND t.awaiting_loop_group IS NULL \
                AND (t.block_kind IS NULL OR t.block_kind = 'dependency') \
                AND NOT EXISTS (\
                  SELECT 1 FROM task_dependencies d \
@@ -2188,6 +2227,663 @@ impl TaskStore {
             .context("failed to commit fan-out expansion")?;
 
         Ok(branches)
+    }
+
+    // -- Bounded loops ------------------------------------------------------
+
+    /// Decide the boundary for every loop body of this agent that has finished
+    /// an iteration.
+    ///
+    /// Ordinary scheduling, run at the top of every sweep for the same reason
+    /// fan-out expansion is: the moment a body's last task is done, the steps
+    /// downstream of the loop have nothing holding them, and if the boundary
+    /// ran after the promote pass a superseded iteration would already have
+    /// released the pipeline.
+    ///
+    /// The candidate query is where the dangerous mistakes would live, so all
+    /// four conditions are stated in SQL: the task is the body's exit point,
+    /// nothing has decided this iteration yet, it is done, and so is every
+    /// other task of the same pass. "All done" read loosely is how a body emits
+    /// its successor while half of it is still running.
+    pub async fn advance_loops(&self, assigned_agent_id: &str) -> Result<Vec<LoopOutcome>> {
+        let ready: Vec<i64> = sqlx::query_scalar(
+            "SELECT t.task_number FROM tasks t \
+             WHERE t.assigned_agent_id = ? \
+               AND t.loop_terminal = 1 \
+               AND t.loop_resolution IS NULL \
+               AND t.status = 'done' \
+               AND t.workflow_run_id IS NOT NULL \
+               AND t.loop_iteration IS NOT NULL \
+               AND NOT EXISTS (\
+                 SELECT 1 FROM tasks b \
+                  WHERE b.workflow_run_id = t.workflow_run_id \
+                    AND b.loop_group = t.loop_group \
+                    AND b.loop_iteration = t.loop_iteration \
+                    AND b.status <> 'done') \
+             ORDER BY t.task_number ASC",
+        )
+        .bind(assigned_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find loop bodies that finished an iteration")?;
+
+        let mut outcomes = Vec::new();
+        for task_number in ready {
+            if let Some(outcome) = self.resolve_loop_boundary(task_number).await? {
+                outcomes.push(outcome);
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Decide the boundary for the body a task that just finished belongs to.
+    ///
+    /// The completion path calls this so a loop turns over the moment its body
+    /// lands rather than on the next tick. The finished task need not be the
+    /// terminal one — two body steps can run in parallel and either may be last
+    /// — so this asks about the whole pass, not about the task it was handed.
+    ///
+    /// The sweep covers the same ground deliberately: this is the optimisation
+    /// and the sweep is the guarantee.
+    pub async fn advance_loops_for(&self, task_number: i64) -> Result<Vec<LoopOutcome>> {
+        let ready: Vec<i64> = sqlx::query_scalar(
+            "SELECT terminal.task_number FROM tasks finished \
+               JOIN tasks terminal \
+                 ON terminal.workflow_run_id = finished.workflow_run_id \
+                AND terminal.loop_group = finished.loop_group \
+                AND terminal.loop_iteration = finished.loop_iteration \
+              WHERE finished.task_number = ? \
+                AND finished.loop_group IS NOT NULL \
+                AND finished.workflow_run_id IS NOT NULL \
+                AND terminal.loop_terminal = 1 \
+                AND terminal.loop_resolution IS NULL \
+                AND terminal.status = 'done' \
+                AND terminal.loop_iteration IS NOT NULL \
+                AND NOT EXISTS (\
+                  SELECT 1 FROM tasks b \
+                   WHERE b.workflow_run_id = terminal.workflow_run_id \
+                     AND b.loop_group = terminal.loop_group \
+                     AND b.loop_iteration = terminal.loop_iteration \
+                     AND b.status <> 'done')",
+        )
+        .bind(task_number)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find a loop body waiting on a finished task")?;
+
+        let mut outcomes = Vec::new();
+        for terminal in ready {
+            if let Some(outcome) = self.resolve_loop_boundary(terminal).await? {
+                outcomes.push(outcome);
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// Ask `loop_until` of one finished iteration and act on the answer.
+    ///
+    /// `None` means the boundary was already decided by somebody else, which is
+    /// the ordinary outcome of the sweep and the completion path racing.
+    async fn resolve_loop_boundary(
+        &self,
+        terminal_task_number: i64,
+    ) -> Result<Option<LoopOutcome>> {
+        let Some(terminal) = self.get_by_number(terminal_task_number).await? else {
+            return Ok(None);
+        };
+        // The candidate queries only offer tasks that have one, which is what
+        // guarantees the body read below contains at least this task — an
+        // "iteration" the emitter cannot find is an iteration it would replace
+        // with nothing while recording that it had iterated.
+        let Some(iteration) = terminal.loop_iteration else {
+            return Ok(None);
+        };
+
+        let Some(spec) = LoopSpec::from_metadata(&terminal.metadata) else {
+            // Only launch writes this, so its absence is our bug rather than
+            // the author's. Parked anyway, and said out loud: a loop nothing
+            // will ever turn over is a deadlock, and a deadlock that explains
+            // itself beats one that looks like an ordinary finished task.
+            let reason = "this task is marked as a loop's exit point but carries no loop spec, \
+                          so nothing can decide whether to iterate — relaunch the workflow";
+            if !self
+                .settle_loop(terminal.task_number, LoopResolution::ExhaustedBlocked)
+                .await?
+            {
+                return Ok(None);
+            }
+            self.block_task(terminal.task_number, BlockKind::NeedsInput, reason)
+                .await?;
+            return Ok(Some(LoopOutcome::ExhaustedBlocked {
+                terminal_task_number: terminal.task_number,
+                iteration,
+                reason: reason.to_string(),
+            }));
+        };
+
+        // The same evaluator conditional steps and external gates use. A loop
+        // exit is that question asked a third time, and a third dialect of it
+        // would be a third set of bugs.
+        let evaluation =
+            crate::tasks::gates::evaluate_task_output(&spec.until, terminal.outputs.as_ref());
+
+        if evaluation.result == crate::tasks::GateResult::Satisfied {
+            // The normal arm runs; the give-up path is told, on the card, that
+            // it will not. A task held with no explanation is indistinguishable
+            // from a deadlock, and this one is a decision.
+            let released = self
+                .settle_loop_arms(
+                    &terminal,
+                    &spec.group,
+                    iteration,
+                    LoopResolution::Converged,
+                    LoopArm::Normal,
+                    "converged",
+                )
+                .await?;
+            if released.is_none() {
+                return Ok(None);
+            }
+            return Ok(Some(LoopOutcome::Converged {
+                terminal_task_number: terminal.task_number,
+                iteration,
+                detail: evaluation.detail,
+            }));
+        }
+
+        if iteration < spec.max_iterations {
+            return self.emit_loop_iteration(&terminal, &spec, iteration).await;
+        }
+
+        self.exhaust_loop(&terminal, &spec, iteration, &evaluation.detail)
+            .await
+    }
+
+    /// Record what the boundary decided, if nobody else has.
+    ///
+    /// `false` means another caller settled this iteration first. This is the
+    /// whole concurrency story: the sweep runs every tick and completion fires
+    /// independently, so the decision is a conditional update rather than a
+    /// read followed by a write, and the emit path performs it *before*
+    /// allocating a single task number.
+    async fn settle_loop(&self, task_number: i64, resolution: LoopResolution) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE tasks SET loop_resolution = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND loop_resolution IS NULL",
+        )
+        .bind(resolution.as_str())
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to record a loop resolution")?;
+        Ok(updated.rows_affected() > 0)
+    }
+
+    /// The tasks on one arm of a loop's exit.
+    async fn loop_arm_tasks(&self, terminal: &Task, group: &str, arm: LoopArm) -> Result<Vec<i64>> {
+        let Some(run_id) = &terminal.workflow_run_id else {
+            return Ok(Vec::new());
+        };
+        sqlx::query_scalar(
+            "SELECT task_number FROM tasks \
+             WHERE workflow_run_id = ? AND awaiting_loop_group = ? AND awaiting_loop_arm = ? \
+             ORDER BY task_number ASC",
+        )
+        .bind(run_id)
+        .bind(group)
+        .bind(arm.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find one arm of a loop's exit")
+        .map_err(Into::into)
+    }
+
+    /// Settle the boundary and route it, in one transaction.
+    ///
+    /// `None` means another caller settled this iteration first — the same
+    /// conditional update the emit path uses, for the same reason: the sweep
+    /// and completion both reach here and neither may act twice.
+    ///
+    /// Recording the verdict and moving the holds is one write or none. Split
+    /// across two, a crash in between leaves a boundary that says it converged
+    /// with both arms still held, which is a pipeline stalled by its own
+    /// bookkeeping and nothing on any card to say so.
+    ///
+    /// Both halves matter. Releasing the taken arm is what continues the
+    /// pipeline; leaving the other held is what keeps "it converged" and "it
+    /// gave up" from arriving at the same downstream step. The untaken arm is
+    /// kept rather than deleted, because a branch that was not taken is part of
+    /// what happened and a run has to be able to explain its own shape.
+    async fn settle_loop_arms(
+        &self,
+        terminal: &Task,
+        group: &str,
+        iteration: i64,
+        resolution: LoopResolution,
+        taken: LoopArm,
+        verdict: &str,
+    ) -> Result<Option<Vec<i64>>> {
+        let run_id = terminal.workflow_run_id.clone().unwrap_or_default();
+        let released = self.loop_arm_tasks(terminal, group, taken).await?;
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open loop boundary transaction")?;
+
+        let claimed = sqlx::query(
+            "UPDATE tasks SET loop_resolution = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND loop_resolution IS NULL",
+        )
+        .bind(resolution.as_str())
+        .bind(terminal.task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to record a loop resolution")?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .context("failed to roll back a boundary somebody else settled")?;
+            return Ok(None);
+        }
+
+        sqlx::query(
+            "UPDATE tasks SET awaiting_loop_group = NULL, awaiting_loop_arm = NULL, \
+             block_kind = NULL, block_reason = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE workflow_run_id = ? AND awaiting_loop_group = ? AND awaiting_loop_arm = ?",
+        )
+        .bind(&run_id)
+        .bind(group)
+        .bind(taken.as_str())
+        .execute(&mut *tx)
+        .await
+        .context("failed to release the arm a loop took")?;
+
+        sqlx::query(
+            "UPDATE tasks SET block_reason = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE workflow_run_id = ? AND awaiting_loop_group = ? AND awaiting_loop_arm = ?",
+        )
+        .bind(format!(
+            "loop `{group}` {verdict} on iteration {iteration}, so this step will not run"
+        ))
+        .bind(&run_id)
+        .bind(group)
+        .bind(taken.other().as_str())
+        .execute(&mut *tx)
+        .await
+        .context("failed to note a loop's verdict on the arm it did not take")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit a loop boundary")?;
+
+        Ok(Some(released))
+    }
+
+    /// The loop ran out of attempts. Take the give-up path, or park.
+    ///
+    /// Two outcomes with opposite meanings, kept apart because they recover
+    /// differently: one continues the pipeline down a branch the author wrote
+    /// for exactly this, the other stops and waits for a person. Merging them
+    /// into "the loop finished" is the mistake this whole split exists to
+    /// prevent.
+    async fn exhaust_loop(
+        &self,
+        terminal: &Task,
+        spec: &LoopSpec,
+        iteration: i64,
+        detail: &str,
+    ) -> Result<Option<LoopOutcome>> {
+        let waiting = self
+            .loop_arm_tasks(terminal, &spec.group, LoopArm::OnExhausted)
+            .await?;
+
+        let resolution = if waiting.is_empty() {
+            LoopResolution::ExhaustedBlocked
+        } else {
+            LoopResolution::ExhaustedRouted
+        };
+
+        // The edges are already there — emitted at launch and moved forward
+        // with every iteration. Only the holds change, and the normal arm stays
+        // held either way: a loop that gave up has not succeeded.
+        let released = self
+            .settle_loop_arms(
+                terminal,
+                &spec.group,
+                iteration,
+                resolution,
+                LoopArm::OnExhausted,
+                "ran out of attempts",
+            )
+            .await?;
+        let Some(released) = released else {
+            return Ok(None);
+        };
+
+        if released.is_empty() {
+            let reason = format!(
+                "loop `{}` ran out of attempts after {iteration} iteration(s) and has no \
+                 on_exhausted edge to follow — {detail}",
+                spec.group
+            );
+            // Sticky, so no sweep resurrects it. It also leaves `done`, which is
+            // the honest state for a body whose result nothing downstream is
+            // allowed to use.
+            self.block_task(terminal.task_number, BlockKind::NeedsInput, &reason)
+                .await?;
+            return Ok(Some(LoopOutcome::ExhaustedBlocked {
+                terminal_task_number: terminal.task_number,
+                iteration,
+                reason,
+            }));
+        }
+
+        Ok(Some(LoopOutcome::ExhaustedRouted {
+            terminal_task_number: terminal.task_number,
+            iteration,
+            released,
+        }))
+    }
+
+    /// Emit the body again, one iteration on, in a single transaction.
+    ///
+    /// The atomicity carries the same weight it does for a fan-out expansion,
+    /// and one thing more: the steps *after* the loop are moved onto the new
+    /// iteration here. A run that emitted half a body and died would leave the
+    /// pipeline hanging off a mix of two passes, which is worse than either.
+    ///
+    /// Three rewirings, and each has a way of going quietly wrong:
+    ///
+    ///   - edges *inside* the body are remapped onto the new copies, so the
+    ///     pass has the same shape as the one before it
+    ///   - edges *out* of the body are moved, so downstream waits on the newest
+    ///     iteration rather than one that has been superseded
+    ///   - bindings that read a body task are repointed, because an edge moved
+    ///     without its binding leaves the pipeline waiting on iteration two and
+    ///     reading iteration one, which no test of the graph alone would catch
+    ///
+    /// New tasks only, so no cycle check is needed: nothing here can point at
+    /// an existing task except the parents and children the old pass already
+    /// had, in a graph that was already acyclic with the old pass in place.
+    async fn emit_loop_iteration(
+        &self,
+        terminal: &Task,
+        spec: &LoopSpec,
+        iteration: i64,
+    ) -> Result<Option<LoopOutcome>> {
+        let Some(run_id) = terminal.workflow_run_id.clone() else {
+            return Ok(None);
+        };
+        let next = iteration + 1;
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open loop iteration transaction")?;
+
+        // Claimed before anything is allocated. Zero rows means another caller
+        // reached this boundary first, and the only safe answer is to emit
+        // nothing at all — a second body running against a live model is the
+        // most expensive mistake available here.
+        let claimed = sqlx::query(
+            "UPDATE tasks SET loop_resolution = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND loop_resolution IS NULL",
+        )
+        .bind(LoopResolution::Iterated.as_str())
+        .bind(terminal.task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to claim a loop iteration boundary")?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .context("failed to roll back a loop iteration somebody else claimed")?;
+            return Ok(None);
+        }
+
+        let body_rows = sqlx::query(
+            "SELECT * FROM tasks \
+             WHERE workflow_run_id = ? AND loop_group = ? AND loop_iteration = ? \
+             ORDER BY task_number ASC",
+        )
+        .bind(&run_id)
+        .bind(&spec.group)
+        .bind(iteration)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to read a loop body")?;
+
+        let body: Vec<Task> = body_rows
+            .into_iter()
+            .map(task_from_row)
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut emitted: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        let mut by_step: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut tasks = Vec::with_capacity(body.len());
+
+        for task in &body {
+            let task_number: i64 = sqlx::query_scalar(
+                "UPDATE task_number_seq SET next_number = next_number + 1 \
+                 WHERE id = 1 RETURNING next_number - 1",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .context("failed to allocate a loop iteration task number")?;
+
+            let subtasks =
+                serde_json::to_string(&task.subtasks).context("failed to serialize subtasks")?;
+
+            sqlx::query(
+                "INSERT INTO tasks (\
+                     id, task_number, title, description, status, priority, \
+                     owner_agent_id, assigned_agent_id, subtasks, metadata, created_by, \
+                     project_id, repo_id, worktree_id, input_schema, output_schema, \
+                     system_prompt, max_retries, workflow_run_id, workflow_step_key, \
+                     loop_group, loop_iteration, loop_terminal) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(task_number)
+            .bind(loop_iteration_title(&task.title, next))
+            .bind(&task.description)
+            // Backlog like everything else the scheduler emits. The sweep
+            // decides what is eligible, and a pass whose inputs will not
+            // resolve should stall visibly rather than be claimed and blocked.
+            .bind(TaskStatus::Backlog.as_str())
+            .bind(task.priority.as_str())
+            .bind(&task.owner_agent_id)
+            .bind(&task.assigned_agent_id)
+            .bind(&subtasks)
+            .bind(task.metadata.to_string())
+            .bind(&task.created_by)
+            .bind(&task.project_id)
+            .bind(&task.repo_id)
+            .bind(&task.worktree_id)
+            .bind(task.input_schema.as_ref().map(|value| value.to_string()))
+            .bind(task.output_schema.as_ref().map(|value| value.to_string()))
+            .bind(&task.system_prompt)
+            .bind(task.max_retries)
+            .bind(&run_id)
+            .bind(&task.workflow_step_key)
+            .bind(&spec.group)
+            .bind(next)
+            .bind(i64::from(task.loop_terminal))
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert a loop iteration task")?;
+
+            emitted.insert(task.task_number, task_number);
+            if let Some(step_key) = &task.workflow_step_key {
+                by_step.insert(step_key.clone(), task.task_number);
+            }
+            tasks.push(task_number);
+        }
+
+        for task in &body {
+            let previous = task.task_number;
+            let current = emitted[&previous];
+
+            let parents: Vec<i64> = sqlx::query_scalar(
+                "SELECT parent_task_number FROM task_dependencies WHERE child_task_number = ?",
+            )
+            .bind(previous)
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to read a loop body task's parents")?;
+
+            for parent in parents {
+                // A parent inside the body becomes the new pass's copy; one
+                // outside is the loop's entry, which is done and holds nothing,
+                // and is kept so the run graph still shows where the loop came
+                // from.
+                let parent = emitted.get(&parent).copied().unwrap_or(parent);
+                sqlx::query(
+                    "INSERT OR IGNORE INTO task_dependencies \
+                         (parent_task_number, child_task_number) VALUES (?, ?)",
+                )
+                .bind(parent)
+                .bind(current)
+                .execute(&mut *tx)
+                .await
+                .context("failed to link a loop iteration task to its parent")?;
+            }
+
+            let children: Vec<i64> = sqlx::query_scalar(
+                "SELECT child_task_number FROM task_dependencies WHERE parent_task_number = ?",
+            )
+            .bind(previous)
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to read a loop body task's children")?;
+
+            for child in children {
+                if let Some(inside) = emitted.get(&child) {
+                    sqlx::query(
+                        "INSERT OR IGNORE INTO task_dependencies \
+                             (parent_task_number, child_task_number) VALUES (?, ?)",
+                    )
+                    .bind(current)
+                    .bind(inside)
+                    .execute(&mut *tx)
+                    .await
+                    .context("failed to link a loop iteration task to its child")?;
+                    continue;
+                }
+
+                // Outside the body: moved, not copied. Left where it was, the
+                // step after the loop would run off a pass that has been
+                // superseded — which is the whole reason this rewiring exists.
+                sqlx::query(
+                    "DELETE FROM task_dependencies \
+                     WHERE parent_task_number = ? AND child_task_number = ?",
+                )
+                .bind(previous)
+                .bind(child)
+                .execute(&mut *tx)
+                .await
+                .context("failed to detach a superseded loop iteration from downstream")?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO task_dependencies \
+                         (parent_task_number, child_task_number) VALUES (?, ?)",
+                )
+                .bind(current)
+                .bind(child)
+                .execute(&mut *tx)
+                .await
+                .context("failed to attach downstream to the newest loop iteration")?;
+            }
+
+            let bindings = sqlx::query(
+                "SELECT input_key, source_task_number, source_pointer, literal_value, \
+                        fan_in_step_key \
+                 FROM task_input_bindings WHERE child_task_number = ?",
+            )
+            .bind(previous)
+            .fetch_all(&mut *tx)
+            .await
+            .context("failed to read a loop body task's input bindings")?;
+
+            let step_key = task.workflow_step_key.clone().unwrap_or_default();
+
+            for binding in bindings {
+                let input_key: String = binding
+                    .try_get("input_key")
+                    .context("failed to read a binding input key")?;
+                let source: Option<i64> = binding.try_get("source_task_number").ok().flatten();
+                let pointer: Option<String> = binding.try_get("source_pointer").ok().flatten();
+                let literal: Option<String> = binding.try_get("literal_value").ok().flatten();
+                let fan_in: Option<String> = binding.try_get("fan_in_step_key").ok().flatten();
+
+                // Reaching back one pass is the point of looping rather than
+                // retrying, so this is checked first: the *previous* iteration's
+                // task is the one being left behind, and remapping it onto the
+                // new copy would make the body read its own unwritten output.
+                let previous_iteration = spec.previous_iteration.iter().find(|declared| {
+                    declared.step_key == step_key && declared.input_key == input_key
+                });
+
+                let source = match previous_iteration {
+                    Some(declared) => by_step.get(&declared.source_step_key).copied().or(source),
+                    None => source.map(|number| emitted.get(&number).copied().unwrap_or(number)),
+                };
+
+                sqlx::query(
+                    "INSERT INTO task_input_bindings \
+                         (child_task_number, input_key, source_task_number, source_pointer, \
+                          literal_value, fan_in_step_key) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(current)
+                .bind(&input_key)
+                .bind(source)
+                .bind(&pointer)
+                .bind(&literal)
+                .bind(&fan_in)
+                .execute(&mut *tx)
+                .await
+                .context("failed to copy an input binding onto a loop iteration")?;
+            }
+        }
+
+        // Everything outside the loop that read the old pass now reads the new
+        // one. An edge moved without its binding is the failure this codebase
+        // would not notice: the graph waits correctly and the value is stale.
+        let inside: Vec<String> = emitted
+            .iter()
+            .flat_map(|(previous, current)| [previous.to_string(), current.to_string()])
+            .collect();
+        let inside = inside.join(",");
+        for (previous, current) in &emitted {
+            sqlx::query(&format!(
+                "UPDATE task_input_bindings SET source_task_number = ? \
+                 WHERE source_task_number = ? AND child_task_number NOT IN ({inside})"
+            ))
+            .bind(current)
+            .bind(previous)
+            .execute(&mut *tx)
+            .await
+            .context("failed to repoint a downstream binding at the newest loop iteration")?;
+        }
+
+        tx.commit()
+            .await
+            .context("failed to commit a loop iteration")?;
+
+        tasks.sort_unstable();
+        Ok(Some(LoopOutcome::Iterated {
+            previous_terminal_task_number: terminal.task_number,
+            iteration: next,
+            tasks,
+        }))
     }
 
     // -- Worker-filed cards -------------------------------------------------
@@ -3158,6 +3854,207 @@ pub enum FanOutOutcome {
     },
 }
 
+// -- Bounded loops ----------------------------------------------------------
+
+/// Metadata key under which a loop's terminal task carries its frozen spec.
+pub const LOOP_METADATA_KEY: &str = "loop";
+
+/// Iterations a loop body runs when the template does not say.
+///
+/// Three, decided rather than derived: enough for "try, look at what broke, try
+/// again", short enough that a body which is not converging stops being
+/// expensive quickly.
+pub const DEFAULT_LOOP_MAX_ITERATIONS: i64 = 3;
+
+/// The most iterations any template may ask for.
+///
+/// Not a preference. This is the only path in the system that creates tasks
+/// because other tasks finished, and every iteration is a live model call — so
+/// the ceiling is enforced at launch, where a person is still watching, rather
+/// than trusted to a number in a row.
+pub const MAX_LOOP_ITERATIONS: i64 = 25;
+
+/// What the boundary decided at the end of one iteration.
+///
+/// Four values rather than one "handled" flag, because they recover
+/// differently: a run that gave up must not read like a run that succeeded, and
+/// a run parked for a person must not read like one that took a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopResolution {
+    /// `loop_until` held. The normal outgoing edges carry on from here.
+    Converged,
+    /// It did not hold, and the next iteration was emitted.
+    Iterated,
+    /// Out of attempts, and an `on_exhausted` edge took it.
+    ExhaustedRouted,
+    /// Out of attempts with nowhere to go. Parked for a person.
+    ExhaustedBlocked,
+}
+
+impl LoopResolution {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoopResolution::Converged => "converged",
+            LoopResolution::Iterated => "iterated",
+            LoopResolution::ExhaustedRouted => "exhausted_routed",
+            LoopResolution::ExhaustedBlocked => "exhausted_blocked",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "converged" => Some(LoopResolution::Converged),
+            "iterated" => Some(LoopResolution::Iterated),
+            "exhausted_routed" => Some(LoopResolution::ExhaustedRouted),
+            "exhausted_blocked" => Some(LoopResolution::ExhaustedBlocked),
+            _ => None,
+        }
+    }
+}
+
+/// Which arm of a loop's exit a downstream task is on.
+///
+/// A loop's exit is a branch, not a join. Both arms wait on the same body and
+/// exactly one of them runs, so they are told apart by name rather than by
+/// which happens to be wired — "the loop finished" is not a condition anything
+/// can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopArm {
+    /// Runs when the loop converged.
+    Normal,
+    /// Runs when the loop ran out of attempts.
+    OnExhausted,
+}
+
+impl LoopArm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoopArm::Normal => "normal",
+            LoopArm::OnExhausted => "on_exhausted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "normal" => Some(LoopArm::Normal),
+            "on_exhausted" => Some(LoopArm::OnExhausted),
+            _ => None,
+        }
+    }
+
+    /// The arm this outcome takes, and the one it leaves behind.
+    pub fn other(self) -> Self {
+        match self {
+            LoopArm::Normal => LoopArm::OnExhausted,
+            LoopArm::OnExhausted => LoopArm::Normal,
+        }
+    }
+}
+
+/// One input that reaches back an iteration.
+///
+/// Frozen onto the spec rather than marked on the binding row, because the emit
+/// path already reads the spec and nothing else needs to know: resolution
+/// follows `source_task_number` exactly as it does for any other binding, and
+/// the only difference is which task number is written there when an iteration
+/// is emitted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviousIterationBinding {
+    /// The body step carrying the input.
+    pub step_key: String,
+    pub input_key: String,
+    /// The body step whose *previous* iteration it reads.
+    pub source_step_key: String,
+}
+
+/// Everything an iteration boundary needs, frozen at launch.
+///
+/// On the body's terminal task only, for the same reason a fan-out spec lives
+/// on the placeholder: a template edited or deleted mid-run must not change
+/// what a run already in flight does. Deleting a workflow deliberately leaves
+/// its runs alone, and a loop that could no longer find its own exit predicate
+/// would make that a lie.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoopSpec {
+    /// The body's name, shared by every step in it.
+    pub group: String,
+    /// How many passes the body may run before the loop gives up.
+    pub max_iterations: i64,
+    /// The exit predicate, as a `task_output` gate config.
+    pub until: Value,
+    /// Inputs that read the previous iteration rather than the current one.
+    #[serde(default)]
+    pub previous_iteration: Vec<PreviousIterationBinding>,
+}
+
+impl LoopSpec {
+    /// The metadata object the terminal task is created with.
+    pub fn to_metadata(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            LOOP_METADATA_KEY.to_string(),
+            serde_json::to_value(self).unwrap_or(Value::Null),
+        );
+        Value::Object(object)
+    }
+
+    pub fn from_metadata(metadata: &Value) -> Option<Self> {
+        serde_json::from_value(metadata.get(LOOP_METADATA_KEY)?.clone()).ok()
+    }
+}
+
+/// What one iteration boundary did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoopOutcome {
+    /// The predicate held. Nothing to emit: the normal downstream edges already
+    /// hang off this iteration, and it is done.
+    Converged {
+        terminal_task_number: i64,
+        iteration: i64,
+        /// Why, in the evaluator's own words.
+        detail: String,
+    },
+    /// The predicate did not hold and there was budget left.
+    Iterated {
+        previous_terminal_task_number: i64,
+        /// The iteration that was just emitted.
+        iteration: i64,
+        tasks: Vec<i64>,
+    },
+    /// Out of attempts, and the give-up path was released.
+    ExhaustedRouted {
+        terminal_task_number: i64,
+        iteration: i64,
+        released: Vec<i64>,
+    },
+    /// Out of attempts with no `on_exhausted` edge. A real state, not an error:
+    /// the loop has nowhere to go and a person has to decide what happens next.
+    ExhaustedBlocked {
+        terminal_task_number: i64,
+        iteration: i64,
+        reason: String,
+    },
+}
+
+/// The title an iteration's copy of a body task carries.
+///
+/// Iteration 1 keeps the plain title — there is nothing to tell it apart from
+/// yet — and every later pass is stamped. The existing stamp is stripped first,
+/// so pass four is "run tests (iteration 4)" rather than four nested suffixes.
+fn loop_iteration_title(title: &str, iteration: i64) -> String {
+    let base = match title.rsplit_once(" (iteration ") {
+        Some((head, tail))
+            if tail.ends_with(')') && tail[..tail.len() - 1].parse::<i64>().is_ok() =>
+        {
+            head
+        }
+        _ => title,
+    };
+    format!("{base} (iteration {iteration})")
+}
+
 /// Read the collection a placeholder iterates, and give every item a name.
 ///
 /// `Err` is a reason already phrased for the card. Every one of them names the
@@ -3463,7 +4360,9 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      block_kind, block_reason, block_recurrences, last_block_kind, \
      input_schema, output_schema, inputs, outputs, \
      workflow_run_id, workflow_step_key, system_prompt, \
-     fan_out_branch_key, fan_out_placeholder";
+     fan_out_branch_key, fan_out_placeholder, \
+     loop_group, loop_iteration, loop_terminal, loop_resolution, \
+     awaiting_loop_group, awaiting_loop_arm";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -3645,6 +4544,22 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .filter(|value| !value.is_empty()),
         fan_out_branch_key: read_optional_id(&row, "fan_out_branch_key"),
         fan_out_placeholder: row.try_get::<i64, _>("fan_out_placeholder").unwrap_or(0) != 0,
+        loop_group: read_optional_id(&row, "loop_group"),
+        loop_iteration: row.try_get("loop_iteration").ok().flatten(),
+        loop_terminal: row.try_get::<i64, _>("loop_terminal").unwrap_or(0) != 0,
+        loop_resolution: row
+            .try_get::<Option<String>, _>("loop_resolution")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(LoopResolution::parse),
+        awaiting_loop_group: read_optional_id(&row, "awaiting_loop_group"),
+        awaiting_loop_arm: row
+            .try_get::<Option<String>, _>("awaiting_loop_arm")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(LoopArm::parse),
     })
 }
 
@@ -3773,13 +4688,31 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             workflow_step_key TEXT,
             system_prompt TEXT,
             fan_out_branch_key TEXT,
-            fan_out_placeholder INTEGER NOT NULL DEFAULT 0
+            fan_out_placeholder INTEGER NOT NULL DEFAULT 0,
+            loop_group TEXT,
+            loop_iteration INTEGER,
+            loop_terminal INTEGER NOT NULL DEFAULT 0,
+            loop_resolution TEXT,
+            awaiting_loop_group TEXT,
+            awaiting_loop_arm TEXT
         )
         "#,
     )
     .execute(pool)
     .await
     .expect("tasks schema should be created");
+
+    // Not decoration: this is the second guard against a loop body being
+    // emitted twice for one iteration, and a test pool without it would pass
+    // while the real database refused.
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_tasks_loop_iteration \
+             ON tasks(workflow_run_id, workflow_step_key, loop_iteration) \
+             WHERE loop_iteration IS NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .expect("loop iteration index should be created");
 
     sqlx::query(
         r#"
@@ -6516,5 +7449,85 @@ mod tests {
             reason.contains("`api`"),
             "must name the colliding key: {reason}"
         );
+    }
+
+    // -- Bounded loops -----------------------------------------------------
+
+    /// The give-up path looks promotable the moment the loop's body finishes,
+    /// and the body finishes whether the loop converged or gave up. Only the
+    /// iteration boundary can tell those apart, so until it has, the sweep must
+    /// leave the task alone — otherwise the rollback runs alongside the success.
+    #[tokio::test]
+    async fn the_sweep_never_promotes_a_step_waiting_on_a_loop_to_give_up() {
+        let store = setup_store().await;
+        let body = task_at(&store, "test", TaskStatus::InProgress).await;
+        finish(&store, body.task_number).await;
+
+        let escalate = task_at(&store, "escalate", TaskStatus::Backlog).await;
+        store
+            .link_tasks(body.task_number, escalate.task_number)
+            .await
+            .expect("link");
+        sqlx::query(
+            "UPDATE tasks SET workflow_run_id = 'run-1', workflow_step_key = 'escalate', \
+             awaiting_loop_group = 'fix', block_kind = 'dependency' WHERE task_number = ?",
+        )
+        .bind(escalate.task_number)
+        .execute(store.pool())
+        .await
+        .expect("mark awaiting");
+
+        for _ in 0..3 {
+            let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+            assert!(
+                !sweep.promoted.contains(&escalate.task_number),
+                "a parent being done is not the loop having given up: {sweep:?}"
+            );
+        }
+
+        // And the moment the boundary clears it, it is ordinary work again.
+        sqlx::query("UPDATE tasks SET awaiting_loop_group = NULL WHERE task_number = ?")
+            .bind(escalate.task_number)
+            .execute(store.pool())
+            .await
+            .expect("release");
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![escalate.task_number], "{sweep:?}");
+    }
+
+    /// Four passes of a body should read "(iteration 4)", not four suffixes
+    /// nested inside each other. The title is the only thing telling otherwise
+    /// identical cards apart on a board.
+    #[test]
+    fn iteration_titles_replace_the_previous_stamp_rather_than_stacking() {
+        let first = loop_iteration_title("run the tests", 2);
+        assert_eq!(first, "run the tests (iteration 2)");
+        assert_eq!(
+            loop_iteration_title(&first, 3),
+            "run the tests (iteration 3)"
+        );
+        assert_eq!(
+            loop_iteration_title("fix (iteration one)", 2),
+            "fix (iteration one) (iteration 2)",
+            "only a stamp this code wrote is stripped"
+        );
+    }
+
+    /// A spec that will not survive the round trip is a loop that cannot decide
+    /// its own boundary, and the task carrying it would park with our bug on it.
+    #[test]
+    fn a_loop_spec_survives_the_metadata_round_trip() {
+        let spec = LoopSpec {
+            group: "fix".into(),
+            max_iterations: 3,
+            until: serde_json::json!({"pointer": "/green", "equals": true}),
+            previous_iteration: vec![PreviousIterationBinding {
+                step_key: "patch".into(),
+                input_key: "failures".into(),
+                source_step_key: "test".into(),
+            }],
+        };
+        assert_eq!(LoopSpec::from_metadata(&spec.to_metadata()), Some(spec));
+        assert_eq!(LoopSpec::from_metadata(&serde_json::json!({})), None);
     }
 }
