@@ -183,6 +183,7 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::UnknownStepReference { .. }
         | LaunchError::UnknownEdgeReference { .. }
         | LaunchError::InvalidInput { .. }
+        | LaunchError::UnboundRequiredInput { .. }
         | LaunchError::MissingRunInput { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -386,6 +387,19 @@ pub(super) async fn put_step(
         return Err((StatusCode::NOT_FOUND, format!("no workflow {id}")));
     }
 
+    // Position is display order, and a caller that omits it means "wherever".
+    // Defaulting to zero made every such step collide at the top, which reads
+    // as the list ignoring the order it was built in. An edit keeps whatever
+    // the step already had; only a genuinely new step takes the next slot.
+    let existing = store.list_steps(&id).await.map_err(internal)?;
+    let position = match request.position {
+        Some(explicit) => explicit,
+        None => match existing.iter().find(|step| step.step_key == step_key) {
+            Some(current) => current.position,
+            None => store.next_step_position(&id).await.map_err(internal)?,
+        },
+    };
+
     let priority = match request.priority.as_deref() {
         None => crate::tasks::TaskPriority::Medium,
         Some(value) => crate::tasks::TaskPriority::parse(value).ok_or((
@@ -406,7 +420,7 @@ pub(super) async fn put_step(
             output_schema: request.output_schema,
             system_prompt: request.system_prompt,
             repo_id: request.repo_id,
-            position: request.position.unwrap_or(0),
+            position,
         })
         .await
         .map_err(internal)?;
@@ -476,6 +490,24 @@ pub(super) async fn add_edge(
                 format!("no step `{key}` in this workflow"),
             ));
         }
+    }
+
+    // Refused here, not only at launch. A template that saves a cycle and
+    // refuses to run is a trap: the author gets a success and finds out much
+    // later, possibly from somebody else.
+    if let Some(cycle) = store
+        .cycle_from_edge(&id, &request.parent_step_key, &request.child_step_key)
+        .await
+        .map_err(internal)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "that edge would close a loop: {} -> {}",
+                cycle.join(" -> "),
+                request.child_step_key
+            ),
+        ));
     }
 
     store

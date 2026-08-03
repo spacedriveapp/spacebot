@@ -156,6 +156,8 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::set_task_binding, tasks::remove_task_binding))
         .routes(routes!(tasks::block_task))
         .routes(routes!(tasks::unblock_task))
+        .routes(routes!(tasks::list_task_gates, tasks::create_task_gate))
+        .routes(routes!(tasks::delete_task_gate))
         // Workflow routes
         .routes(routes!(
             workflows::list_workflows,

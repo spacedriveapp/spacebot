@@ -2295,6 +2295,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/gates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/gates` — what this task is waiting on outside the graph. */
+        get: operations["list_task_gates"];
+        put?: never;
+        /**
+         * `POST /tasks/{number}/gates` — hold this task until something outside says go.
+         * @description The config is validated here rather than at first poll. A malformed gate
+         *     accepted now would error once a minute forever with nobody reading the log,
+         *     so the rejection has to land while a person is still looking at the form.
+         */
+        post: operations["create_task_gate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/gates/{gate_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /tasks/{number}/gates/{gate_id}` — stop waiting on it.
+         * @description Removing a gate is the escape hatch for one that has failed or cannot be
+         *     reached: the task becomes promotable again on the next sweep. It is a
+         *     deliberate act by a person, which is exactly what a `failed` gate is asking
+         *     for.
+         */
+        delete: operations["delete_task_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/provenance": {
         parameters: {
             query?: never;
@@ -3324,6 +3370,19 @@ export interface components {
             /** Format: int64 */
             timeout_secs?: number | null;
         };
+        CreateGateRequest: {
+            /** @description Shape depends on `kind`. See `crate::tasks::gates`. */
+            config: unknown;
+            /** @description `http` | `task_output` */
+            kind: string;
+            /**
+             * @description What the board should call this gate. "waiting for CI on main" beats a
+             *     URL.
+             */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs?: number | null;
+        };
         CreateGroupRequest: {
             agent_ids?: string[];
             color?: string | null;
@@ -3600,6 +3659,22 @@ export interface components {
             updated_at: string;
             value: string;
         };
+        /**
+         * @description What kind of fact a gate waits on.
+         *
+         *     Deliberately no vendor SDKs. `Http` covers GitHub, GitLab, Buildkite, and
+         *     Jenkins without knowing what any of them are.
+         * @enum {string}
+         */
+        GateKind: "http" | "task_output";
+        /**
+         * @description The state of a gate, and the reason the four are not three.
+         *
+         *     See the module docs. Each variant answers a different question: should we
+         *     poll again, should the task run, and whose problem is it?
+         * @enum {string}
+         */
+        GateResult: "pending" | "satisfied" | "failed" | "erroring";
         GlobalSettingsResponse: {
             api_bind: string;
             api_enabled: boolean;
@@ -4647,6 +4722,29 @@ export interface components {
             parents: number;
             /** Format: int64 */
             task_number: number;
+        };
+        TaskGate: {
+            config: unknown;
+            /** Format: int64 */
+            consecutive_errors: number;
+            created_at: string;
+            id: string;
+            kind: components["schemas"]["GateKind"];
+            /**
+             * @description What a person should read on the board. "waiting for CI on main" beats
+             *     a URL.
+             */
+            label?: string | null;
+            last_checked_at?: string | null;
+            last_detail?: string | null;
+            last_result: components["schemas"]["GateResult"];
+            /** Format: int64 */
+            poll_interval_secs: number;
+            /** Format: int64 */
+            task_number: number;
+        };
+        TaskGatesResponse: {
+            gates: components["schemas"]["TaskGate"][];
         };
         /**
          * @description Where one of a task's inputs comes from.
@@ -11019,6 +11117,106 @@ export interface operations {
             };
             /** @description Task store not initialized */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_gates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_task_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Gate config is not usable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_task_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Gate id */
+                gate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description No such gate */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

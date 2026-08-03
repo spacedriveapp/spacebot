@@ -148,6 +148,11 @@ pub enum LaunchError {
         input_key: String,
         pointer: String,
     },
+    #[error(
+        "step `{step_key}` declares `{input_key}` as required but nothing binds it — \
+         add a binding, or drop it from the step's input schema"
+    )]
+    UnboundRequiredInput { step_key: String, input_key: String },
     #[error("workflow storage error: {0}")]
     Storage(String),
 }
@@ -355,6 +360,64 @@ impl WorkflowStore {
         Ok(())
     }
 
+    /// Would adding `parent -> child` close a loop? If so, the path that does.
+    ///
+    /// Checked when the edge is *saved*, not only at launch. A template that
+    /// accepts a cycle and refuses to run is a trap: the author gets a success,
+    /// walks away, and finds out much later — possibly from someone else. The
+    /// path is returned rather than a bare yes so the refusal can name the loop.
+    pub async fn cycle_from_edge(
+        &self,
+        workflow_id: &str,
+        parent: &str,
+        child: &str,
+    ) -> Result<Option<Vec<String>>> {
+        if parent == child {
+            return Ok(Some(vec![parent.to_string(), child.to_string()]));
+        }
+
+        let edges = self.list_edges(workflow_id).await?;
+
+        // Walk forward from `child`. Reaching `parent` means `parent` is
+        // already downstream of `child`, so the new edge would close the ring.
+        // Iterative: the graph is hand-built and a deep chain must not blow the
+        // stack.
+        let mut frontier = vec![vec![child.to_string()]];
+        let mut seen: HashSet<String> = HashSet::from([child.to_string()]);
+
+        while let Some(path) = frontier.pop() {
+            let tip = path.last().expect("a path always has a tip").clone();
+            for (from, to) in &edges {
+                if from != &tip {
+                    continue;
+                }
+                if to == parent {
+                    let mut cycle = path.clone();
+                    cycle.push(to.clone());
+                    return Ok(Some(cycle));
+                }
+                if seen.insert(to.clone()) {
+                    let mut next = path.clone();
+                    next.push(to.clone());
+                    frontier.push(next);
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// The next free display position, so steps added without one do not stack.
+    pub async fn next_step_position(&self, workflow_id: &str) -> Result<i64> {
+        let highest: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(position) FROM workflow_steps WHERE workflow_id = ?")
+                .bind(workflow_id)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to read the highest step position")?;
+        Ok(highest.map(|value| value + 1).unwrap_or(0))
+    }
+
     pub async fn unlink_steps(&self, workflow_id: &str, parent: &str, child: &str) -> Result<bool> {
         let result = sqlx::query(
             "DELETE FROM workflow_step_edges WHERE workflow_id = ? \
@@ -529,11 +592,40 @@ impl WorkflowStore {
             }
         }
 
-        // 3. Acyclic. A cycle here would deadlock silently at run time: every
+        // 3. Every input a step says it needs is actually wired.
+        //
+        //    Without this the mistake surfaces at run time as an unresolvable
+        //    contract, one step into a pipeline someone thought was fine — the
+        //    same class of failure as an unknown step reference, and equally
+        //    knowable at launch. Only `required` keys are checked: an optional
+        //    input with no binding is a deliberate default, not an omission.
+        for step in &steps {
+            let Some(required) = step
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.get("required"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for key in required.iter().filter_map(Value::as_str) {
+                let bound = bindings
+                    .iter()
+                    .any(|binding| binding.step_key == step.step_key && binding.input_key == key);
+                if !bound {
+                    return Err(LaunchError::UnboundRequiredInput {
+                        step_key: step.step_key.clone(),
+                        input_key: key.to_string(),
+                    });
+                }
+            }
+        }
+
+        // 4. Acyclic. A cycle here would deadlock silently at run time: every
         //    step waiting on a parent that is itself waiting.
         topologically_ordered(&steps, &edges)?;
 
-        // 4. Resolve run-input bindings now, while the payload is in hand.
+        // 5. Resolve run-input bindings now, while the payload is in hand.
         //    Frozen to literals rather than kept as live references so a step
         //    retried an hour later sees exactly what the run was launched with.
         let mut frozen: HashMap<(String, String), Value> = HashMap::new();
@@ -558,7 +650,7 @@ impl WorkflowStore {
             );
         }
 
-        // 5. Emit. Everything above passed, so this should not fail on content.
+        // 6. Emit. Everything above passed, so this should not fail on content.
         let run_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow_id, inputs, launched_by) VALUES (?, ?, ?, ?)",
@@ -1401,6 +1493,105 @@ mod tests {
             workflows.get_run(&run_id).await.expect("run").is_none(),
             "the run row goes too"
         );
+    }
+
+    /// A step that says it needs an input, with nothing wired to it, is a
+    /// mistake that is fully knowable at launch. Letting it through means
+    /// finding out one step into a pipeline someone thought was fine.
+    #[tokio::test]
+    async fn a_required_input_with_no_binding_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut deploy = step(&id, "deploy", 0);
+        deploy.input_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["artifact"],
+            "properties": {"artifact": {"type": "string"}},
+        }));
+        workflows.put_step(&deploy).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a declared, unbound input must be refused");
+        match error {
+            LaunchError::UnboundRequiredInput {
+                step_key,
+                input_key,
+            } => {
+                assert_eq!(step_key, "deploy");
+                assert_eq!(input_key, "artifact");
+            }
+            other => panic!("expected UnboundRequiredInput, got {other:?}"),
+        }
+    }
+
+    /// An optional input with no binding is a default, not an omission.
+    #[tokio::test]
+    async fn an_optional_input_needs_no_binding() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut deploy = step(&id, "deploy", 0);
+        deploy.input_schema = Some(serde_json::json!({
+            "type": "object",
+            "properties": {"artifact": {"type": "string"}},
+        }));
+        workflows.put_step(&deploy).await.expect("step");
+
+        workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("an optional input is not a missing one");
+    }
+
+    /// A cycle must be refused when the edge is *saved*, not only at launch.
+    /// A template that accepts one and then refuses to run is a trap.
+    #[tokio::test]
+    async fn an_edge_that_would_close_a_loop_is_detectable_before_it_is_saved() {
+        let (workflows, _tasks, id) = fixture().await;
+        for (index, key) in ["a", "b", "c"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("step");
+        }
+        workflows.link_steps(&id, "a", "b").await.expect("link");
+        workflows.link_steps(&id, "b", "c").await.expect("link");
+
+        let cycle = workflows
+            .cycle_from_edge(&id, "c", "a")
+            .await
+            .expect("check")
+            .expect("c -> a closes the ring a -> b -> c");
+        assert_eq!(cycle, vec!["a", "b", "c"], "the path should name the loop");
+
+        assert!(
+            workflows
+                .cycle_from_edge(&id, "a", "c")
+                .await
+                .expect("check")
+                .is_none(),
+            "a shortcut along the existing direction is not a cycle"
+        );
+        assert!(
+            workflows
+                .cycle_from_edge(&id, "a", "a")
+                .await
+                .expect("check")
+                .is_some(),
+            "a step cannot wait for itself"
+        );
+    }
+
+    /// Steps added without an explicit position must not all land on zero.
+    #[tokio::test]
+    async fn positions_do_not_collide_when_left_unspecified() {
+        let (workflows, _tasks, id) = fixture().await;
+        assert_eq!(workflows.next_step_position(&id).await.expect("next"), 0);
+
+        workflows.put_step(&step(&id, "a", 0)).await.expect("step");
+        assert_eq!(workflows.next_step_position(&id).await.expect("next"), 1);
+
+        workflows.put_step(&step(&id, "b", 1)).await.expect("step");
+        assert_eq!(workflows.next_step_position(&id).await.expect("next"), 2);
     }
 
     /// Two launches must not share tasks. A run is the unit of "this happened".

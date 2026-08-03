@@ -4172,6 +4172,81 @@ const ORPHANED_TASK_GRACE_SECS: i64 = 300;
 /// previously-running task is correctly seen as orphaned. That makes the
 /// restart path the same code as the steady-state path, with no separate
 /// recovery routine to drift out of sync.
+/// Evaluate every gate that is due, and record what it found.
+///
+/// Returns how many were checked. Gates that are satisfied or have failed are
+/// not due and cost nothing: `satisfied` is a latch, and re-asking a settled
+/// negative answer once a minute forever is exactly the waste that typing the
+/// result four ways exists to prevent.
+async fn poll_due_gates(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<usize> {
+    let gates = crate::tasks::GateStore::new(deps.task_store.pool().clone());
+    let now = chrono::Utc::now().timestamp();
+    let due = gates.due_for_poll(now).await?;
+    if due.is_empty() {
+        return Ok(0);
+    }
+
+    let mut checked = 0usize;
+    for gate in due {
+        let previous = gate.last_result;
+        let evaluation = match gate.kind {
+            crate::tasks::GateKind::Http => crate::tasks::evaluate_http(&gate.config).await,
+            crate::tasks::GateKind::TaskOutput => {
+                // Read the upstream task's outputs fresh rather than trusting
+                // anything cached: the whole point of the gate is that it is
+                // waiting for that value to change.
+                let source = gate
+                    .config
+                    .get("task_number")
+                    .and_then(serde_json::Value::as_i64);
+                let outputs = match source {
+                    Some(number) => deps
+                        .task_store
+                        .get_by_number(number)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|task| task.outputs),
+                    None => None,
+                };
+                crate::tasks::evaluate_task_output(&gate.config, outputs.as_ref())
+            }
+        };
+
+        checked += 1;
+        let result = evaluation.result;
+        if let Err(error) = gates.record_evaluation(&gate.id, &evaluation).await {
+            tracing::warn!(%error, gate_id = %gate.id, "failed to record gate evaluation");
+            continue;
+        }
+
+        // Only transitions are logged. A gate polled every minute for an hour
+        // while CI runs has nothing to say until something changes, and a log
+        // that repeats itself is a log nobody reads.
+        if result != previous {
+            logger.log(
+                "task_gate_changed",
+                &format!(
+                    "Gate on task #{} moved from {} to {} — {}",
+                    gate.task_number,
+                    previous.as_str(),
+                    result.as_str(),
+                    evaluation.detail
+                ),
+                Some(serde_json::json!({
+                    "task_number": gate.task_number,
+                    "gate_id": gate.id,
+                    "from": previous.as_str(),
+                    "to": result.as_str(),
+                    "detail": evaluation.detail,
+                })),
+            );
+        }
+    }
+
+    Ok(checked)
+}
+
 async fn reap_orphaned_task_pickups(
     deps: &AgentDeps,
     logger: &CortexLogger,
@@ -4401,6 +4476,16 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
             Err(error) => tracing::warn!(%error, "task reaper pass failed"),
         }
 
+        // Poll external gates before the sweep, so a gate that opened since the
+        // last tick releases its task on this one rather than the next. The
+        // ordering is the same argument as the reaper's: a pass that runs after
+        // the thing it feeds is permanently one tick stale.
+        match poll_due_gates(deps, logger).await {
+            Ok(0) => {}
+            Ok(count) => tracing::debug!(count, "evaluated external task gates"),
+            Err(error) => tracing::warn!(%error, "gate polling pass failed"),
+        }
+
         // Then reconcile the dependency graph. A child whose last parent just
         // finished is still sitting in `backlog`; nothing promotes it except
         // this sweep, so it has to run before the claim or the graph stalls one
@@ -4411,17 +4496,38 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {}, demoted {}, held {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {}, gated {} task(s)",
                         sweep.promoted.len(),
                         sweep.demoted.len(),
-                        sweep.stalled.len()
+                        sweep.stalled.len(),
+                        sweep.gated.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
                         "demoted": sweep.demoted,
                         "stalled": sweep.stalled.iter().map(|s| s.task_number).collect::<Vec<_>>(),
+                        "gated": sweep.gated.iter().map(|g| g.task_number).collect::<Vec<_>>(),
                     })),
                 );
+
+                // A gated task is ready in every other respect and is waiting
+                // on the world. Named with its reason, because "nothing is
+                // happening and nothing says why" is the failure mode a feature
+                // that waits on external state invites.
+                for gated in &sweep.gated {
+                    logger.log(
+                        "task_gate_holding",
+                        &format!(
+                            "Task #{} is ready but held by a gate: {}",
+                            gated.task_number,
+                            gated.reasons.join("; ")
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": gated.task_number,
+                            "reasons": gated.reasons,
+                        })),
+                    );
+                }
 
                 // A task whose parents are done but whose inputs still will not
                 // resolve is not waiting on anything — the graph is wrong and

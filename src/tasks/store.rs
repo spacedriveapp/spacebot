@@ -568,8 +568,13 @@ impl TaskStore {
         Self { pool }
     }
 
-    #[cfg(test)]
-    pub(crate) fn pool(&self) -> &SqlitePool {
+    /// The instance pool this store reads.
+    ///
+    /// Exposed so the gate store can be built alongside it without threading a
+    /// second pool through every construction site: gates live in the same
+    /// database as the tasks they hold, and a gate against a different database
+    /// would be a gate the scheduler could not see.
+    pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
@@ -1440,6 +1445,53 @@ impl TaskStore {
     /// Sticky kinds are never touched. That is the whole point of typing the
     /// block: a human parked those, and a sweep that resurrects them would hand
     /// the worker the same dead end it already reported.
+    /// Which of these tasks have a gate that is not open, and why.
+    ///
+    /// Returns nothing when nothing is gated, which is the overwhelmingly
+    /// common case — the cost of this feature should be zero for the graphs
+    /// that do not use it.
+    async fn gate_holds(&self, candidates: &[i64]) -> Result<Vec<GatedTask>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", candidates.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, task_number, kind, config, label, poll_interval_secs, \
+                    last_checked_at, last_result, last_detail, consecutive_errors, created_at \
+             FROM task_gates \
+             WHERE last_result <> 'satisfied' AND task_number IN ({placeholders}) \
+             ORDER BY task_number, created_at"
+        );
+        let mut query = sqlx::query(&sql);
+        for number in candidates {
+            query = query.bind(number);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to check task gates")?;
+
+        let mut holds: Vec<GatedTask> = Vec::new();
+        for row in rows {
+            let gate = crate::tasks::gates::gate_from_row_public(row)?;
+            match holds
+                .iter_mut()
+                .find(|held| held.task_number == gate.task_number)
+            {
+                Some(held) => held.reasons.push(gate.explain()),
+                None => holds.push(GatedTask {
+                    task_number: gate.task_number,
+                    reasons: vec![gate.explain()],
+                }),
+            }
+        }
+        Ok(holds)
+    }
+
     pub async fn recompute_ready(&self, assigned_agent_id: &str) -> Result<ReadySweep> {
         let mut sweep = ReadySweep::default();
 
@@ -1495,7 +1547,18 @@ impl TaskStore {
         .await
         .context("failed to find promotable tasks")?;
 
+        // An unsatisfied gate holds a task exactly as an unfinished parent
+        // does. Done as one query over the candidates rather than per task,
+        // and phrased as "which of these are held" rather than filtered away in
+        // SQL, so the sweep can say *why* a task did not move. A task held by
+        // something invisible is the failure mode this whole feature invites.
+        let gated = self.gate_holds(&promoted).await?;
+
         for task_number in promoted {
+            if let Some(hold) = gated.iter().find(|held| held.task_number == task_number) {
+                sweep.gated.push(hold.clone());
+                continue;
+            }
             // Parents being done is not the same as the task being runnable.
             //
             // `dependency` covers two conditions that recover differently:
@@ -2391,11 +2454,27 @@ pub struct ReadySweep {
     /// Tasks held back because their inputs do not resolve. Reported rather
     /// than promoted-and-rejected, so the loop never starts.
     pub stalled: Vec<StalledTask>,
+    /// Tasks otherwise ready but held by an external gate, with the reason.
+    ///
+    /// Reported separately from `stalled` because the recovery differs: a
+    /// stalled task needs its graph fixed, a gated one needs the outside world
+    /// to change — or, if the gate has failed or cannot be reached, a person.
+    pub gated: Vec<GatedTask>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GatedTask {
+    pub task_number: i64,
+    /// One line per gate holding it, already phrased for a human.
+    pub reasons: Vec<String>,
 }
 
 impl ReadySweep {
     pub fn is_empty(&self) -> bool {
-        self.promoted.is_empty() && self.demoted.is_empty() && self.stalled.is_empty()
+        self.promoted.is_empty()
+            && self.demoted.is_empty()
+            && self.stalled.is_empty()
+            && self.gated.is_empty()
     }
 }
 
@@ -2828,6 +2907,27 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("task_input_bindings schema should be created");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE task_gates (
+            id TEXT PRIMARY KEY NOT NULL,
+            task_number INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            config TEXT NOT NULL,
+            label TEXT,
+            poll_interval_secs INTEGER NOT NULL DEFAULT 60,
+            last_checked_at TEXT,
+            last_result TEXT NOT NULL DEFAULT 'pending',
+            last_detail TEXT,
+            consecutive_errors INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("task_gates schema should be created");
 
     sqlx::query(
         "CREATE TABLE task_number_seq (
@@ -3874,6 +3974,125 @@ mod tests {
             assert_eq!(after.status, TaskStatus::Blocked);
             assert_eq!(after.block_kind, Some(kind));
         }
+    }
+
+    /// A gate holds a task exactly as an unfinished parent does.
+    ///
+    /// The whole feature is worthless if the sweep does not honour it: a gated
+    /// task would be promoted, claimed, and run while CI was still red.
+    #[tokio::test]
+    async fn an_unsatisfied_gate_holds_a_task_the_sweep_would_otherwise_promote() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "build", TaskStatus::InProgress).await;
+        let child = task_at(&store, "deploy", TaskStatus::Backlog).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+        store
+            .update(
+                parent.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("finish parent");
+
+        let gates = crate::tasks::GateStore::new(store.pool().clone());
+        gates
+            .create(
+                child.task_number,
+                crate::tasks::GateKind::Http,
+                &serde_json::json!({"url": "https://ci.example/status", "expect_status": 200}),
+                Some("CI on main"),
+                60,
+            )
+            .await
+            .expect("create gate");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            sweep.promoted.is_empty(),
+            "every parent is done, but the gate has not opened"
+        );
+        assert_eq!(
+            sweep.gated.len(),
+            1,
+            "the hold must be reported, not silent"
+        );
+        assert_eq!(sweep.gated[0].task_number, child.task_number);
+        assert!(
+            sweep.gated[0].reasons[0].contains("CI on main"),
+            "the reason should name the gate: {:?}",
+            sweep.gated[0].reasons
+        );
+
+        let after = store
+            .get_by_number(child.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Backlog);
+    }
+
+    /// And releases it the moment the gate opens — with no other change.
+    #[tokio::test]
+    async fn a_satisfied_gate_stops_holding() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "build", TaskStatus::InProgress).await;
+        let child = task_at(&store, "deploy", TaskStatus::Backlog).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+        store
+            .update(
+                parent.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("finish parent");
+
+        let gates = crate::tasks::GateStore::new(store.pool().clone());
+        let gate = gates
+            .create(
+                child.task_number,
+                crate::tasks::GateKind::TaskOutput,
+                &serde_json::json!({"task_number": parent.task_number, "pointer": "/state"}),
+                None,
+                60,
+            )
+            .await
+            .expect("create gate");
+
+        assert!(
+            store
+                .recompute_ready("agent-test")
+                .await
+                .expect("sweep")
+                .promoted
+                .is_empty()
+        );
+
+        gates
+            .record_evaluation(
+                &gate.id,
+                &crate::tasks::Evaluation {
+                    result: crate::tasks::GateResult::Satisfied,
+                    detail: "`/state` is success".into(),
+                },
+            )
+            .await
+            .expect("record");
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert_eq!(sweep.promoted, vec![child.task_number]);
+        assert!(sweep.gated.is_empty());
     }
 
     /// A dependency wait is ordinary scheduling, not an incident: it rests in

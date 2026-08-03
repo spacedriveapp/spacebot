@@ -1268,3 +1268,197 @@ pub(super) async fn get_task_provenance(
         remaining_fan_out,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// External gates
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct CreateGateRequest {
+    /// `http` | `task_output`
+    kind: String,
+    /// Shape depends on `kind`. See `crate::tasks::gates`.
+    config: serde_json::Value,
+    /// What the board should call this gate. "waiting for CI on main" beats a
+    /// URL.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    poll_interval_secs: Option<i64>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskGatesResponse {
+    gates: Vec<crate::tasks::TaskGate>,
+}
+
+fn gate_store(state: &ApiState) -> Result<crate::tasks::GateStore, StatusCode> {
+    Ok(crate::tasks::GateStore::new(
+        get_task_store(state)?.pool().clone(),
+    ))
+}
+
+/// `GET /tasks/{number}/gates` — what this task is waiting on outside the graph.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/gates",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_gates(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskGatesResponse>, StatusCode> {
+    let gates = gate_store(&state)?
+        .list_for_task(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to list task gates");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(TaskGatesResponse { gates }))
+}
+
+/// `POST /tasks/{number}/gates` — hold this task until something outside says go.
+///
+/// The config is validated here rather than at first poll. A malformed gate
+/// accepted now would error once a minute forever with nobody reading the log,
+/// so the rejection has to land while a person is still looking at the form.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/gates",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = CreateGateRequest,
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 404, description = "Task not found"),
+        (status = 422, description = "Gate config is not usable"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn create_task_gate(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<CreateGateRequest>,
+) -> Result<Json<TaskGatesResponse>, (StatusCode, String)> {
+    let store =
+        get_task_store(&state).map_err(|code| (code, "task store unavailable".to_string()))?;
+    let gates = gate_store(&state).map_err(|code| (code, "task store unavailable".to_string()))?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for gate");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read task".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, format!("no task #{number}")))?;
+
+    let kind = crate::tasks::GateKind::parse(&request.kind).ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        crate::tasks::GateConfigError::UnknownKind {
+            value: request.kind.clone(),
+        }
+        .to_string(),
+    ))?;
+
+    let interval = request
+        .poll_interval_secs
+        .unwrap_or(crate::tasks::MIN_POLL_INTERVAL_SECS.max(60));
+
+    crate::tasks::validate_config(kind, &request.config, interval)
+        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+
+    gates
+        .create(
+            number,
+            kind,
+            &request.config,
+            request.label.as_deref(),
+            interval,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to create task gate");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to create gate".to_string(),
+            )
+        })?;
+
+    // A gate governs *promotion*, so one added to a task already sitting in
+    // `ready` would hold nothing — the sweep has finished with it and the next
+    // claim would run it regardless. Park it so the same sweep that honours
+    // every other gate honours this one too.
+    //
+    // `Dependency` is the right kind: it rests in the backlog rather than the
+    // blocked column a human triages, and it is one of the signals that marks a
+    // task as parked *by the scheduler*, so the scheduler may release it once
+    // the gate opens. Anything sticky would need a person to undo.
+    if task.status == crate::tasks::TaskStatus::Ready {
+        let reason = format!(
+            "waiting on {}",
+            request.label.as_deref().unwrap_or("an external gate")
+        );
+        if let Err(error) = store
+            .block_task(number, crate::tasks::BlockKind::Dependency, &reason)
+            .await
+        {
+            tracing::warn!(%error, task_number = number, "failed to park a task behind its new gate");
+        }
+    }
+
+    let gates = gates.list_for_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task gates");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to list gates".to_string(),
+        )
+    })?;
+    Ok(Json(TaskGatesResponse { gates }))
+}
+
+/// `DELETE /tasks/{number}/gates/{gate_id}` — stop waiting on it.
+///
+/// Removing a gate is the escape hatch for one that has failed or cannot be
+/// reached: the task becomes promotable again on the next sweep. It is a
+/// deliberate act by a person, which is exactly what a `failed` gate is asking
+/// for.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/gates/{gate_id}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("gate_id" = String, Path, description = "Gate id"),
+    ),
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 404, description = "No such gate"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn delete_task_gate(
+    State(state): State<Arc<ApiState>>,
+    Path((number, gate_id)): Path<(i64, String)>,
+) -> Result<Json<TaskGatesResponse>, StatusCode> {
+    let gates = gate_store(&state)?;
+    if !gates.delete(&gate_id).await.map_err(|error| {
+        tracing::warn!(%error, %gate_id, "failed to delete task gate");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })? {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let gates = gates.list_for_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task gates");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(TaskGatesResponse { gates }))
+}
