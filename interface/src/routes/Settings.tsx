@@ -14,6 +14,7 @@ import {
 import {SettingSidebarButton} from "@/ui/SettingSidebarButton";
 import {useSearch, useNavigate} from "@tanstack/react-router";
 import {ModelSelect} from "@/components/ModelSelect";
+import {copyText} from "@/lib/clipboard";
 import {
 	InstanceSection,
 	AppearanceSection,
@@ -472,18 +473,12 @@ export function Settings() {
 	const handleCopyDeviceCode = async () => {
 		if (!deviceCodeInfo) return;
 		try {
-			if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(deviceCodeInfo.userCode);
-			} else {
-				const textarea = document.createElement("textarea");
-				textarea.value = deviceCodeInfo.userCode;
-				textarea.setAttribute("readonly", "");
-				textarea.style.position = "absolute";
-				textarea.style.left = "-9999px";
-				document.body.appendChild(textarea);
-				textarea.select();
-				document.execCommand("copy");
-				document.body.removeChild(textarea);
+			// `copyText` owns the secure-context fallback that used to be
+			// duplicated here, and reports whether the copy actually landed —
+			// which the old branch could not, so a silent failure looked like a
+			// success and the user pasted nothing.
+			if (!(await copyText(deviceCodeInfo.userCode))) {
+				throw new Error("the browser refused the copy");
 			}
 			setDeviceCodeCopied(true);
 		} catch (error: any) {

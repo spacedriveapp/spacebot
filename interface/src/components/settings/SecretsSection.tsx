@@ -1,5 +1,6 @@
 import {useState} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
+import {copyText} from "@/lib/clipboard";
 import {
 	api,
 	type SecretCategory,
@@ -215,7 +216,7 @@ export function SecretsSection() {
 	const handleCopyKey = async () => {
 		if (!masterKeyDisplay) return;
 		try {
-			await navigator.clipboard.writeText(masterKeyDisplay);
+			await copyText(masterKeyDisplay);
 			setMasterKeyCopied(true);
 		} catch {
 			// Fallback

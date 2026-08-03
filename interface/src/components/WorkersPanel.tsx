@@ -19,6 +19,7 @@ import {formatTimeAgo} from "@/lib/format";
 import {LiveDuration} from "@/components/LiveDuration";
 import {WorkerDetail, type LiveWorker} from "@/routes/AgentWorkers";
 import {cx} from "class-variance-authority";
+import {copyText} from "@/lib/clipboard";
 
 type Tab = "interactive" | "history";
 
@@ -427,7 +428,7 @@ function WorkerDetailInline({
 		}
 		if (detail?.result) lines.push(`\n---\nResult: ${detail.result}`);
 
-		navigator.clipboard.writeText(lines.join("\n")).then(() => {
+		void copyText(lines.join("\n")).then(() => {
 			setCopied(true);
 			setTimeout(() => setCopied(false), 2000);
 		});
