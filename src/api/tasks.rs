@@ -130,6 +130,15 @@ pub(super) struct TaskListResponse {
     /// Edge counts for every task that has any. Tasks with no dependencies are
     /// absent rather than listed with zeroes.
     edges: Vec<crate::tasks::TaskEdgeSummary>,
+    /// How many consecutive failures a task tolerates when it sets no limit of
+    /// its own.
+    ///
+    /// Published because the dashboard has to show what "default" *means* — a
+    /// budget control that says "uses the default" without the number tells a
+    /// reader nothing they can act on. The alternative was hard-coding it in
+    /// TypeScript, which is the same silent-drift bug this codebase has already
+    /// paid for four times over in dead config.
+    default_failure_limit: i64,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -357,7 +366,11 @@ pub(super) async fn list_tasks(
         Vec::new()
     });
 
-    Ok(Json(TaskListResponse { tasks, edges }))
+    Ok(Json(TaskListResponse {
+        tasks,
+        edges,
+        default_failure_limit: crate::tasks::DEFAULT_FAILURE_LIMIT,
+    }))
 }
 
 /// `GET /tasks/transitions` — every legal status move.

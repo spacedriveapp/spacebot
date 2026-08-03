@@ -33,6 +33,7 @@ import {
 	useTaskTransitions,
 } from "@/components/tasks/taskTransitions";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
+import {FailureBudgetSection} from "@/components/tasks/FailureBudgetSection";
 
 const TASK_LIMIT = 200;
 
@@ -128,6 +129,21 @@ export function AgentTasks({agentId}: {agentId: string}) {
 
 	const retryMutation = useMutation({
 		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Its own mutation rather than a field on `updateMutation`: the request
+	// body carries `max_retries` and nothing else, so a status move can never
+	// drag a stale budget along with it, and `null` — the value that hands the
+	// task back to the instance default — stays distinguishable from absent.
+	const failureBudgetMutation = useMutation({
+		mutationFn: ({
+			taskNumber,
+			maxRetries,
+		}: {
+			taskNumber: number;
+			maxRetries: number | null;
+		}) => api.updateTask(taskNumber, {max_retries: maxRetries}),
 		onSuccess: () => void invalidate(),
 	});
 
@@ -372,6 +388,19 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
+					/>
+					{/* Directly above the attempt log: the budget is what that list
+					    is spending, so the two read as one thing. */}
+					<FailureBudgetSection
+						task={activeTask as unknown as TaskItem}
+						defaultLimit={data?.default_failure_limit}
+						busy={failureBudgetMutation.isPending}
+						onChange={(maxRetries) =>
+							failureBudgetMutation.mutate({
+								taskNumber: (activeTask as unknown as TaskItem).task_number,
+								maxRetries,
+							})
+						}
 					/>
 					<div className="border-t border-app-line/40 px-4 py-3">
 						<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">

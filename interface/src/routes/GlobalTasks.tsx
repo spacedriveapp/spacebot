@@ -48,6 +48,7 @@ import {
 	useTaskTransitions,
 } from "@/components/tasks/taskTransitions";
 import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
+import {FailureBudgetSection} from "@/components/tasks/FailureBudgetSection";
 import {RepoChip} from "@/components/tasks/RepoChip";
 import {ALL_REPOS, RepoFilter} from "@/components/tasks/RepoFilter";
 import {useBindingNames} from "@/hooks/useBindingNames";
@@ -101,7 +102,19 @@ function AgentPicker({
 	);
 }
 
-export function GlobalTasks() {
+export function GlobalTasks({
+	initialTaskNumber,
+}: {
+	/**
+	 * Open this task's drawer once the list has loaded.
+	 *
+	 * The drawer keys off the task's uuid, but every other screen refers to a
+	 * task by its number — that is what the run view shows and what a person
+	 * reads in a refusal — so the link carries the number and it is resolved
+	 * here, where the list that maps one to the other already lives.
+	 */
+	initialTaskNumber?: number;
+} = {}) {
 	const queryClient = useQueryClient();
 	const {taskEventVersion} = useLiveContext();
 
@@ -201,6 +214,19 @@ export function GlobalTasks() {
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
 
+	// Resolve `?task=<number>` once the list arrives. Guarded by a ref rather
+	// than by `activeTaskId`, so closing the drawer does not immediately have
+	// the deep link reopen it.
+	const linkedTaskResolved = useRef<number | null>(null);
+	useEffect(() => {
+		if (initialTaskNumber == null) return;
+		if (linkedTaskResolved.current === initialTaskNumber) return;
+		const target = rawTasks.find((t) => t.task_number === initialTaskNumber);
+		if (!target) return;
+		linkedTaskResolved.current = initialTaskNumber;
+		setActiveTaskId(target.id);
+	}, [initialTaskNumber, rawTasks]);
+
 	const invalidate = useCallback(
 		() => queryClient.invalidateQueries({queryKey}),
 		[queryClient, queryKey],
@@ -246,6 +272,21 @@ export function GlobalTasks() {
 
 	const retryMutation = useMutation({
 		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Its own mutation rather than a field on `updateMutation`: the request
+	// body carries `max_retries` and nothing else, so a status move can never
+	// drag a stale budget along with it, and `null` — the value that hands the
+	// task back to the instance default — stays distinguishable from absent.
+	const failureBudgetMutation = useMutation({
+		mutationFn: ({
+			taskNumber,
+			maxRetries,
+		}: {
+			taskNumber: number;
+			maxRetries: number | null;
+		}) => api.updateTask(taskNumber, {max_retries: maxRetries}),
 		onSuccess: () => void invalidate(),
 	});
 
@@ -630,6 +671,19 @@ export function GlobalTasks() {
 					<BindingSection
 						task={activeTask as unknown as TaskItem}
 						names={bindingNames}
+					/>
+					{/* Directly above the attempt log: the budget is what that list
+					    is spending, so the two read as one thing. */}
+					<FailureBudgetSection
+						task={activeTask as unknown as TaskItem}
+						defaultLimit={data?.default_failure_limit}
+						busy={failureBudgetMutation.isPending}
+						onChange={(maxRetries) =>
+							failureBudgetMutation.mutate({
+								taskNumber: (activeTask as unknown as TaskItem).task_number,
+								maxRetries,
+							})
+						}
 					/>
 					<div className="border-t border-app-line/40 px-4 py-3">
 						<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">

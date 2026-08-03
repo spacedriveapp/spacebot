@@ -4674,6 +4674,18 @@ export interface components {
         };
         TaskListResponse: {
             /**
+             * Format: int64
+             * @description How many consecutive failures a task tolerates when it sets no limit of
+             *     its own.
+             *
+             *     Published because the dashboard has to show what "default" *means* — a
+             *     budget control that says "uses the default" without the number tells a
+             *     reader nothing they can act on. The alternative was hard-coding it in
+             *     TypeScript, which is the same silent-drift bug this codebase has already
+             *     paid for four times over in dead config.
+             */
+            default_failure_limit: number;
+            /**
              * @description Edge counts for every task that has any. Tasks with no dependencies are
              *     absent rather than listed with zeroes.
              */

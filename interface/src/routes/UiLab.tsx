@@ -20,6 +20,7 @@ import { ALL_REPOS, RepoFilter } from "@/components/tasks/RepoFilter";
 import { DependencySectionView } from "@/components/tasks/DependencySection";
 import { ContractSectionView } from "@/components/tasks/ContractSection";
 import { ProvenanceSectionView } from "@/components/tasks/ProvenanceSection";
+import { FailureBudgetSectionView } from "@/components/tasks/FailureBudgetSection";
 import { indexEdges } from "@/components/tasks/DependencyBadges";
 
 const BINDING_NAMES: BindingNames = {
@@ -372,6 +373,32 @@ export function UiLab() {
 				</h2>
 				<div className="rounded-md border border-app-line bg-app-box/20">
 					<ProvenanceSectionView data={PROVENANCE} onSelectTask={() => {}} />
+				</div>
+			</section>
+
+			<section className="mb-10 max-w-2xl">
+				<h2 className="mb-2 font-mono text-xs font-semibold tracking-wide text-ink-dull">
+					FailureBudgetSection — default, overridden, spent
+				</h2>
+				<div className="space-y-2">
+					{[
+						{budget: null, failures: 0, parked: false},
+						{budget: 5, failures: 2, parked: false},
+						{budget: 1, failures: 1, parked: true},
+						{budget: 24, failures: 3, parked: false},
+					].map((fixture) => (
+						<div
+							key={`${fixture.budget}-${fixture.failures}`}
+							className="rounded-md border border-app-line bg-app-box/20"
+						>
+							<FailureBudgetSectionView
+								budget={fixture.budget}
+								failures={fixture.failures}
+								parked={fixture.parked}
+								onChange={() => {}}
+							/>
+						</div>
+					))}
 				</div>
 			</section>
 
