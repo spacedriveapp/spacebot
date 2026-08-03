@@ -41,6 +41,7 @@ import {
 	CalendarDots,
 	SlidersHorizontal,
 	BookBookmark,
+	FolderOpen,
 } from "@phosphor-icons/react";
 import {
 	CircleButton,
@@ -178,6 +179,12 @@ const navItems = [
 	// Not `exact`: the editor and the run view live under this section too, and
 	// an exact match would unhighlight the moment you opened a template.
 	{to: "/workflows", icon: FlowArrow, label: "Workflows", exact: false},
+	// In the main nav rather than only in the Projects section below, because
+	// that section is hidden while you have no projects — so the only route to
+	// the page where you create your first one appeared once you already had
+	// one. A fresh instance could not reach it at all, and projects are what
+	// repo and worktree bindings hang off.
+	{to: "/projects", icon: FolderOpen, label: "Projects", exact: false},
 	{to: "/wiki", icon: BookBookmark, label: "Wiki", exact: true},
 ] as const;
 
