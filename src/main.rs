@@ -2993,6 +2993,16 @@ async fn initialize_agents(
             .await,
         );
 
+        // `require_containment` is the fail-closed switch. An operator who sets
+        // it has said that running unconfined is worse than not running, so the
+        // refusal belongs at startup: it happens once, in front of whoever ran
+        // the deploy, before any agent work exists to be run unsafely. Failing
+        // each unit of work instead would scatter the same fact across runtime
+        // logs, which is where it already goes unnoticed today.
+        if let Err(error) = sandbox.verify_required_containment() {
+            anyhow::bail!("agent `{}`: {error}", agent_config.id);
+        }
+
         // Wire the instance-level secrets store into the sandbox for tool secret injection.
         if let Some(secrets_store) = &bootstrapped_store {
             sandbox.set_secrets_store(secrets_store.clone());

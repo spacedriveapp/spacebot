@@ -34,6 +34,49 @@ pub(super) struct StatusResponse {
     version: &'static str,
     pid: u32,
     uptime_seconds: u64,
+    /// Per-agent process containment. One entry per agent with a live sandbox.
+    sandbox: Vec<SandboxContainmentStatus>,
+}
+
+/// Sandbox reporting for one agent, as three separate facts.
+///
+/// `mode` is what the operator asked for and `containment_active` is what the
+/// host is actually doing; they are not the same question, and reporting only
+/// the first is how an instance ends up running unconfined while its config
+/// says `mode = "enabled"`. `backend` names the mechanism so the answer is
+/// checkable rather than trusted.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SandboxContainmentStatus {
+    agent_id: String,
+    /// Configured `sandbox.mode`: "enabled" or "disabled".
+    mode: &'static str,
+    /// Whether OS-level containment is in force right now.
+    containment_active: bool,
+    /// Backend enforcing containment, or null when none was detected.
+    backend: Option<&'static str>,
+    /// Mode is enabled but no backend exists — the config claims containment
+    /// this host is not providing. Reported explicitly rather than left to be
+    /// derived, because deriving it wrong is the failure being fixed.
+    requested_but_inert: bool,
+    /// Whether `sandbox.require_containment` is set for this agent.
+    require_containment: bool,
+}
+
+impl SandboxContainmentStatus {
+    fn new(agent_id: &str, sandbox: &crate::sandbox::Sandbox) -> Self {
+        let status = sandbox.containment_status();
+        Self {
+            agent_id: agent_id.to_string(),
+            mode: match sandbox.mode() {
+                crate::sandbox::SandboxMode::Enabled => "enabled",
+                crate::sandbox::SandboxMode::Disabled => "disabled",
+            },
+            containment_active: status.is_active(),
+            backend: status.backend().map(|backend| backend.as_str()),
+            requested_but_inert: status.is_inert(),
+            require_containment: sandbox.require_containment(),
+        }
+    }
 }
 
 #[utoipa::path(
@@ -86,11 +129,24 @@ pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleRespons
 )]
 pub(super) async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
+
+    // Sandboxes are per-agent, and mode is a per-agent setting, so this reports
+    // each one rather than an aggregate — an aggregate would have to pick a
+    // single answer for a question that can genuinely differ per agent.
+    let mut sandbox: Vec<SandboxContainmentStatus> = state
+        .sandboxes
+        .load()
+        .iter()
+        .map(|(agent_id, sandbox)| SandboxContainmentStatus::new(agent_id, sandbox))
+        .collect();
+    sandbox.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+
     Json(StatusResponse {
         status: "running",
         version: env!("CARGO_PKG_VERSION"),
         pid: std::process::id(),
         uptime_seconds: uptime.as_secs(),
+        sandbox,
     })
 }
 

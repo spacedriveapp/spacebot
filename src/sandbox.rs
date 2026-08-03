@@ -30,6 +30,16 @@ pub struct SandboxConfig {
     /// in the store. The field is additive either way.
     #[serde(default)]
     pub passthrough_env: Vec<String>,
+    /// Refuse to start when `mode` is enabled but no backend can enforce it.
+    ///
+    /// `mode` records an intent; it has never recorded an outcome. Without this
+    /// flag a host with no bubblewrap silently downgrades to unconfined
+    /// execution while the config still reads `mode = "enabled"`. Setting this
+    /// says the operator would rather the instance not come up than come up
+    /// pretending. Defaults to false so upgrading changes no existing
+    /// deployment's behaviour.
+    #[serde(default)]
+    pub require_containment: bool,
     /// Project root paths auto-injected into the sandbox allowlist.
     /// Managed by `refresh_project_paths`, not user-configured.
     #[serde(skip)]
@@ -42,6 +52,7 @@ impl Default for SandboxConfig {
             mode: SandboxMode::Enabled,
             writable_paths: Vec::new(),
             passthrough_env: Vec::new(),
+            require_containment: false,
             project_paths: Vec::new(),
         }
     }
@@ -68,6 +79,80 @@ pub enum SandboxMode {
     Disabled,
 }
 
+/// Whether OS-level containment is actually in force, and if not, why not.
+///
+/// Three states rather than one boolean because "off" and "on but inert" are
+/// different operational facts with different fixes: one is a config decision
+/// somebody made, the other is a missing package nobody noticed. Collapsing
+/// them into `mode_enabled()` is what let this instance run unconfined while
+/// its config file said otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainmentStatus {
+    /// Sandbox mode is off in config. Nothing is contained, and nothing claims
+    /// to be — an honest state, not a fault.
+    Disabled,
+    /// Mode is on and a backend is present: subprocesses are kernel-confined.
+    Active { backend: SandboxBackend },
+    /// Mode is on but no backend was detected. The config asks for containment
+    /// this host cannot provide; subprocesses run with full host access.
+    RequestedButInert,
+}
+
+impl ContainmentStatus {
+    /// True only when a backend is actually confining subprocesses.
+    pub fn is_active(self) -> bool {
+        matches!(self, ContainmentStatus::Active { .. })
+    }
+
+    /// True when the config claims containment the host is not delivering.
+    ///
+    /// Callers that execute stored or unattended code should refuse on this,
+    /// rather than on `!is_active()` — a deliberately disabled sandbox is a
+    /// choice, an inert one is a surprise.
+    pub fn is_inert(self) -> bool {
+        matches!(self, ContainmentStatus::RequestedButInert)
+    }
+
+    /// The backend doing the confining, or `None` when nothing is.
+    pub fn backend(self) -> Option<SandboxBackend> {
+        match self {
+            ContainmentStatus::Active { backend } => Some(backend),
+            _ => None,
+        }
+    }
+}
+
+/// Raised when `require_containment` is set but no backend exists to honour it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainmentUnavailable;
+
+impl std::fmt::Display for ContainmentUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sandbox.require_containment is set and sandbox.mode is \"enabled\", \
+             but no sandbox backend was detected — {}",
+            missing_backend_remediation()
+        )
+    }
+}
+
+impl std::error::Error for ContainmentUnavailable {}
+
+/// What an operator has to do to turn an inert sandbox into a real one.
+///
+/// A warning that reports only "no backend available" leaves the reader to
+/// find out on their own that the missing piece is a one-command install.
+pub fn missing_backend_remediation() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "install the `bubblewrap` package (e.g. `apt install bubblewrap`) and restart the instance"
+    } else if cfg!(target_os = "macos") {
+        "/usr/bin/sandbox-exec is missing, so this host cannot provide containment"
+    } else {
+        "no sandbox backend exists for this platform"
+    }
+}
+
 /// Detected sandbox backend (internal version with proc_supported tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalBackend {
@@ -77,6 +162,17 @@ enum InternalBackend {
     SandboxExec,
     /// No sandbox support detected, or mode = Disabled.
     None,
+}
+
+impl InternalBackend {
+    /// Public view of the detected backend, dropping preflight detail.
+    fn public(self) -> SandboxBackend {
+        match self {
+            InternalBackend::Bubblewrap { .. } => SandboxBackend::Bubblewrap,
+            InternalBackend::SandboxExec => SandboxBackend::SandboxExec,
+            InternalBackend::None => SandboxBackend::None,
+        }
+    }
 }
 
 /// Environment variables always passed through to worker subprocesses.
@@ -225,9 +321,17 @@ impl Sandbox {
                 }
             }
             InternalBackend::None if current_mode == SandboxMode::Enabled => {
+                // The loudest this fact ever gets to be. Nothing downstream
+                // surfaces it: the allowlists come back empty, `wrap` returns a
+                // plain Command, and every log line after this looks normal.
                 tracing::warn!(
-                    "sandbox mode is enabled but no backend available — \
-                     processes will run unsandboxed"
+                    agent = %agent_id,
+                    remediation = missing_backend_remediation(),
+                    "SANDBOX INERT: sandbox.mode is \"enabled\" but no sandbox backend was \
+                     detected. Shell commands run with NO OS-level containment — only the \
+                     file tools' voluntary path checks remain, and a shell command does not \
+                     go through them. Set sandbox.require_containment = true to refuse \
+                     startup instead of running unconfined."
                 );
             }
             InternalBackend::None => {
@@ -269,8 +373,30 @@ impl Sandbox {
     }
 
     /// True when sandbox mode is enabled in config.
+    ///
+    /// This is a statement about configuration, not about enforcement. It is
+    /// true on a host with no backend, where nothing is enforced at all — use
+    /// `containment_status` for anything that depends on the outcome.
     pub fn mode_enabled(&self) -> bool {
         self.config.load().mode == SandboxMode::Enabled
+    }
+
+    /// The configured mode, as written in config.
+    pub fn mode(&self) -> SandboxMode {
+        self.config.load().mode
+    }
+
+    /// Whether this agent is configured to refuse running without containment.
+    pub fn require_containment(&self) -> bool {
+        self.config.load().require_containment
+    }
+
+    /// The backend detected on this host, independent of whether mode is on.
+    ///
+    /// Detection runs regardless of mode so that enabling the sandbox via the
+    /// API does not require a restart; this reports what that probe found.
+    pub fn detected_backend(&self) -> SandboxBackend {
+        self.backend.public()
     }
 
     /// Get the workspace directory path.
@@ -314,12 +440,42 @@ impl Sandbox {
         false
     }
 
+    /// What containment this sandbox is actually providing right now.
+    ///
+    /// The one place that joins the configured intent to the detected backend.
+    /// Anything that needs to *act* on containment — refuse to run stored
+    /// commands, report status to an operator — should ask this rather than
+    /// reconstruct the join from `mode_enabled` and a backend check, which is
+    /// how the two drifted apart in the first place.
+    pub fn containment_status(&self) -> ContainmentStatus {
+        if !self.mode_enabled() {
+            return ContainmentStatus::Disabled;
+        }
+        match self.backend.public() {
+            SandboxBackend::None => ContainmentStatus::RequestedButInert,
+            backend => ContainmentStatus::Active { backend },
+        }
+    }
+
     /// True when OS-level containment is currently active.
     ///
     /// If mode is enabled but no backend is available, this returns false
     /// because subprocesses fall back to passthrough execution.
     pub fn containment_active(&self) -> bool {
-        self.mode_enabled() && !matches!(self.backend, InternalBackend::None)
+        self.containment_status().is_active()
+    }
+
+    /// Fail closed when the config demands containment this host cannot give.
+    ///
+    /// Only the inert case is an error. A sandbox that is off by choice is not
+    /// a broken promise, and one that is genuinely active is the requirement
+    /// being met — refusing on either would make `require_containment` a flag
+    /// nobody could safely leave on.
+    pub fn verify_required_containment(&self) -> Result<(), ContainmentUnavailable> {
+        if self.config.load().require_containment && self.containment_status().is_inert() {
+            return Err(ContainmentUnavailable);
+        }
+        Ok(())
     }
 
     /// Read-allowlisted filesystem paths exposed to shell subprocesses when
@@ -897,6 +1053,9 @@ impl Sandbox {
     }
 
     /// Create a minimal sandbox for unit tests without probing for backends.
+    ///
+    /// Backend is `None`, which is also the state of any host without
+    /// bubblewrap — so this constructor reproduces the inert case by default.
     #[cfg(test)]
     pub fn new_for_test(config: Arc<ArcSwap<SandboxConfig>>, workspace: PathBuf) -> Self {
         Self {
@@ -907,6 +1066,27 @@ impl Sandbox {
             backend: InternalBackend::None,
             agent_id: std::sync::Arc::from("test-agent"),
             secrets_store: ArcSwap::from_pointee(None),
+        }
+    }
+
+    /// Test sandbox pinned to a specific backend, so the active-containment
+    /// cases can be asserted on a host that has no backend installed.
+    #[cfg(test)]
+    pub fn new_for_test_with_backend(
+        config: Arc<ArcSwap<SandboxConfig>>,
+        workspace: PathBuf,
+        backend: SandboxBackend,
+    ) -> Self {
+        let backend = match backend {
+            SandboxBackend::Bubblewrap => InternalBackend::Bubblewrap {
+                proc_supported: true,
+            },
+            SandboxBackend::SandboxExec => InternalBackend::SandboxExec,
+            SandboxBackend::None => InternalBackend::None,
+        };
+        Self {
+            backend,
+            ..Self::new_for_test(config, workspace)
         }
     }
 }
@@ -1005,6 +1185,33 @@ fn detect_sandbox_exec() -> InternalBackend {
 mod tests {
     use super::*;
 
+    /// Build a sandbox over the given mode / requirement, with no backend —
+    /// the state of any host that has not installed bubblewrap.
+    fn sandbox_without_backend(mode: SandboxMode, require_containment: bool) -> Sandbox {
+        Sandbox::new_for_test(
+            Arc::new(ArcSwap::from_pointee(SandboxConfig {
+                mode,
+                require_containment,
+                ..SandboxConfig::default()
+            })),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// Same, but with a backend present, so the genuinely-contained cases can
+    /// be asserted regardless of what the test host has installed.
+    fn sandbox_with_backend(mode: SandboxMode, require_containment: bool) -> Sandbox {
+        Sandbox::new_for_test_with_backend(
+            Arc::new(ArcSwap::from_pointee(SandboxConfig {
+                mode,
+                require_containment,
+                ..SandboxConfig::default()
+            })),
+            PathBuf::from("/tmp"),
+            SandboxBackend::Bubblewrap,
+        )
+    }
+
     #[test]
     fn test_sandbox_config_defaults() {
         let config = SandboxConfig::default();
@@ -1012,6 +1219,147 @@ mod tests {
         assert!(config.writable_paths.is_empty());
         assert!(config.project_paths.is_empty());
         assert!(config.passthrough_env.is_empty());
+    }
+
+    /// `require_containment` must default off, or upgrading Spacebot on a host
+    /// with no bubblewrap turns a running instance into one that will not boot.
+    #[test]
+    fn require_containment_defaults_off_so_upgrades_do_not_change_behaviour() {
+        assert!(!SandboxConfig::default().require_containment);
+
+        let parsed: SandboxConfig =
+            toml::from_str("mode = \"enabled\"").expect("parse a config that omits the field");
+        assert!(!parsed.require_containment);
+    }
+
+    /// The bug this whole change exists for: `mode = "enabled"` with no backend
+    /// installed is not containment. If this ever returns true, every caller
+    /// that gates dangerous work on `containment_active` silently opens up.
+    #[test]
+    fn containment_is_not_active_when_mode_is_enabled_but_no_backend_exists() {
+        let sandbox = sandbox_without_backend(SandboxMode::Enabled, false);
+
+        assert!(sandbox.mode_enabled(), "config asked for a sandbox");
+        assert_eq!(sandbox.detected_backend(), SandboxBackend::None);
+        assert!(
+            !sandbox.containment_active(),
+            "no backend means nothing is confined, whatever the config says"
+        );
+    }
+
+    /// The three states must stay distinguishable. Collapsing "off by choice"
+    /// into "on but inert" would either hide a broken deployment or cry wolf
+    /// on a deliberately unsandboxed one.
+    #[test]
+    fn containment_status_distinguishes_disabled_active_and_inert() {
+        assert_eq!(
+            sandbox_without_backend(SandboxMode::Disabled, false).containment_status(),
+            ContainmentStatus::Disabled
+        );
+        assert_eq!(
+            sandbox_with_backend(SandboxMode::Disabled, false).containment_status(),
+            ContainmentStatus::Disabled,
+            "a present backend does not contain anything while mode is off"
+        );
+        assert_eq!(
+            sandbox_with_backend(SandboxMode::Enabled, false).containment_status(),
+            ContainmentStatus::Active {
+                backend: SandboxBackend::Bubblewrap
+            }
+        );
+        assert_eq!(
+            sandbox_without_backend(SandboxMode::Enabled, false).containment_status(),
+            ContainmentStatus::RequestedButInert
+        );
+    }
+
+    /// `is_inert` is what unattended executors gate on. It must be true only
+    /// for the requested-but-unenforced case — a disabled sandbox is a choice,
+    /// not a broken promise, and an active one is fine.
+    #[test]
+    fn only_the_inert_status_reports_a_broken_containment_promise() {
+        assert!(!ContainmentStatus::Disabled.is_inert());
+        assert!(
+            !ContainmentStatus::Active {
+                backend: SandboxBackend::Bubblewrap
+            }
+            .is_inert()
+        );
+        assert!(ContainmentStatus::RequestedButInert.is_inert());
+
+        assert!(!ContainmentStatus::Disabled.is_active());
+        assert!(
+            ContainmentStatus::Active {
+                backend: SandboxBackend::SandboxExec
+            }
+            .is_active()
+        );
+        assert!(!ContainmentStatus::RequestedButInert.is_active());
+    }
+
+    /// `require_containment` must refuse in exactly one case. Refusing when the
+    /// sandbox is off would make the flag unusable for anyone who disables the
+    /// sandbox deliberately; refusing when containment is real would take down
+    /// correctly configured hosts.
+    #[test]
+    fn require_containment_refuses_only_when_containment_is_requested_but_inert() {
+        assert!(
+            sandbox_without_backend(SandboxMode::Enabled, true)
+                .verify_required_containment()
+                .is_err(),
+            "config demanded containment the host cannot provide"
+        );
+
+        assert!(
+            sandbox_with_backend(SandboxMode::Enabled, true)
+                .verify_required_containment()
+                .is_ok(),
+            "containment is genuinely active; the requirement is met"
+        );
+        assert!(
+            sandbox_without_backend(SandboxMode::Disabled, true)
+                .verify_required_containment()
+                .is_ok(),
+            "mode is off, so nothing was promised to break"
+        );
+        assert!(
+            sandbox_without_backend(SandboxMode::Enabled, false)
+                .verify_required_containment()
+                .is_ok(),
+            "default-off must not change existing deployments"
+        );
+    }
+
+    /// Pins the current honest behaviour of the allowlists. `wrap` builds a
+    /// plain Command when containment is inert, so an allowlist that started
+    /// coming back populated would advertise a boundary nothing enforces.
+    #[test]
+    fn prompt_allowlists_stay_empty_when_containment_is_inert() {
+        let sandbox = sandbox_without_backend(SandboxMode::Enabled, false);
+
+        assert!(sandbox.containment_status().is_inert());
+        assert!(
+            sandbox.prompt_read_allowlist().is_empty(),
+            "an inert sandbox must not advertise read boundaries it cannot enforce"
+        );
+        assert!(
+            sandbox.prompt_write_allowlist().is_empty(),
+            "an inert sandbox must not advertise write boundaries it cannot enforce"
+        );
+    }
+
+    /// The warning is the highest-value part of this change; if it stops naming
+    /// the package, the operator is left to work out the fix themselves.
+    #[test]
+    fn missing_backend_remediation_names_the_thing_to_install() {
+        let remediation = missing_backend_remediation();
+        if cfg!(target_os = "linux") {
+            assert!(remediation.contains("bubblewrap"), "got: {remediation}");
+        }
+        assert!(
+            ContainmentUnavailable.to_string().contains(remediation),
+            "the startup refusal must carry the fix, not just the fault"
+        );
     }
 
     #[test]
