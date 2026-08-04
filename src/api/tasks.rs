@@ -238,6 +238,19 @@ pub(super) struct SetBindingRequest {
     literal_value: Option<serde_json::Value>,
 }
 
+/// An answer to a decision step.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct AnswerDecisionRequest {
+    /// The answer, in whatever shape the step's `output_schema` declares. It
+    /// becomes the task's outputs verbatim, so a binding downstream reads it
+    /// with the pointers it already uses.
+    answer: serde_json::Value,
+    /// Who is answering. Required — an answer with no answerer has no
+    /// provenance, and provenance is the only thing a decision step has that an
+    /// agent step asking in a channel does not.
+    answered_by: String,
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct BlockTaskRequest {
     /// dependency | needs_input | capability | transient
@@ -1047,6 +1060,11 @@ pub(super) async fn block_task(
 /// `POST /tasks/{number}/unblock` — release a parked task.
 ///
 /// Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+///
+/// Refuses an unanswered decision with 409 and a sentence naming the endpoint
+/// that does work. Unblocking says somebody acted, not what they decided —
+/// releasing a decision through it would put the task back in the queue with
+/// nothing in its outputs, which is the exact hole the decision step fills.
 #[utoipa::path(
     post,
     path = "/tasks/{number}/unblock",
@@ -1054,6 +1072,7 @@ pub(super) async fn block_task(
     responses(
         (status = 200, body = TaskResponse),
         (status = 404, description = "Task not found or not blocked"),
+        (status = 409, description = "This is a decision — answer it instead"),
         (status = 503, description = "Task store not initialized"),
     ),
     tag = "tasks",
@@ -1061,17 +1080,160 @@ pub(super) async fn block_task(
 pub(super) async fn unblock_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
-) -> Result<Json<TaskResponse>, StatusCode> {
-    let store = get_task_store(&state)?;
+) -> Result<Json<TaskResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state).map_err(|code| (code, String::new()))?;
 
-    let task = store
-        .unblock_task(number)
+    let outcome = store.unblock_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to unblock task");
+        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+    })?;
+
+    let task = match outcome {
+        crate::tasks::UnblockOutcome::Released(task) => *task,
+        crate::tasks::UnblockOutcome::NotBlocked => {
+            return Err((StatusCode::NOT_FOUND, String::new()));
+        }
+        crate::tasks::UnblockOutcome::RefusedDecision { question } => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "task #{number} is a decision waiting for an answer, not a task waiting to be \
+                     released — unblocking it would put it back in the queue with nothing in its \
+                     outputs, so the steps below it would read an answer that was never given. \
+                     POST /tasks/{number}/decision with the answer to: {question}"
+                ),
+            ));
+        }
+    };
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `POST /tasks/{number}/decision` — answer a decision step.
+///
+/// The only path by which a human-chosen value ever reaches a task's outputs,
+/// and it works on exactly one kind of task. That is the constraint the whole
+/// feature rests on: a person must not be able to set an *arbitrary* task's
+/// outputs, because an agent task's outputs are the record of what that agent
+/// produced. A decision step's outputs are the answer and nothing else, which is
+/// what lets the run record distinguish "the operator approved this" from "a
+/// model believed the operator approved this".
+///
+/// The answer is validated against the step's own `output_schema` by the same
+/// validator that checks an agent's outputs — there is no second contract path.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/decision",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = AnswerDecisionRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Already answered, defaulted, or not yet asked"),
+        (status = 422, description = "Not a decision, or the answer does not match its schema"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn answer_decision(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<AnswerDecisionRequest>,
+) -> Result<Json<TaskResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state).map_err(|code| (code, String::new()))?;
+
+    // Refused rather than defaulted to "someone". An answer with no answerer is
+    // an answer with no provenance, which is the one thing this endpoint exists
+    // to carry.
+    let answered_by = request.answered_by.trim();
+    if answered_by.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an answer has to say who gave it — `answered_by` is what makes this a human \
+             decision rather than an anonymous edit"
+                .to_string(),
+        ));
+    }
+
+    let outcome = store
+        .answer_decision(number, &request.answer, answered_by)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, task_number = number, "failed to unblock task");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+            tracing::warn!(%error, task_number = number, "failed to answer a decision");
+            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+        })?;
+
+    let task = match outcome {
+        crate::tasks::DecisionAnswer::Accepted { task } => *task,
+        crate::tasks::DecisionAnswer::TaskMissing => {
+            return Err((StatusCode::NOT_FOUND, String::new()));
+        }
+        crate::tasks::DecisionAnswer::NotADecision { kind } => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "task #{number} is a {kind} step, and a person may not set its outputs — they \
+                     are the record of what that step produced. Only a decision step's outputs \
+                     are a human answer",
+                    kind = kind.as_str()
+                ),
+            ));
+        }
+        crate::tasks::DecisionAnswer::NotYetAsked => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "decision #{number} has not been asked yet — the steps it depends on have not \
+                     finished, so the work it is about does not exist to be decided on"
+                ),
+            ));
+        }
+        crate::tasks::DecisionAnswer::AlreadySettled {
+            outcome,
+            answered_by,
+        } => {
+            return Err((
+                StatusCode::CONFLICT,
+                match answered_by {
+                    Some(who) => format!("decision #{number} was already {outcome} by {who}"),
+                    None => format!(
+                        "decision #{number} was already settled ({outcome}) — nobody answered it \
+                         in time"
+                    ),
+                },
+            ));
+        }
+        crate::tasks::DecisionAnswer::Rejected { problems } => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "that answer does not match what this decision asked for: {}",
+                    problems
+                        .iter()
+                        .map(|problem| problem.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
+    };
+
+    // The notification that asked for this answer has been answered, so it goes
+    // away — the same cleanup an approved task's notification gets, and for the
+    // same reason: an inbox that keeps asking for something already given is an
+    // inbox people stop reading.
+    if let Some(notifications) = state.notification_store.load().as_ref()
+        && let Err(error) = notifications
+            .dismiss_by_entity(
+                crate::notifications::NotificationKind::DecisionRequested.as_str(),
+                "task",
+                &number.to_string(),
+            )
+            .await
+    {
+        tracing::warn!(%error, task_number = number, "failed to dismiss an answered decision's notification");
+    }
 
     emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))

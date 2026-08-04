@@ -31,12 +31,15 @@ export function isCommandStep(step: {kind?: StepKind | null}): boolean {
 export const STEP_KIND_LABEL: Record<StepKind, string> = {
 	agent: "Agent",
 	command: "Command",
+	decision: "Decision",
 };
 
 export const STEP_KIND_HINT: Record<StepKind, string> = {
 	agent: "A worker with a full tool loop reads the brief and decides what to do.",
 	command:
 		"A process runs, exits, and its exit code and output become the step's outputs. Nothing is asked of a model.",
+	decision:
+		"A person is asked a question and their answer becomes the step's outputs. Nothing else can produce them, which is what makes the answer known to be a person's.",
 };
 
 /**

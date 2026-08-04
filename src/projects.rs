@@ -1,9 +1,13 @@
 //! Project workspace tracking: repos, worktrees, and project-level configuration.
 
+pub mod dependencies;
 pub mod git;
 pub mod migration;
 pub mod store;
 
+pub use dependencies::{
+    DeclareRepoDependencyInput, RepoDependency, RepoDependencyError, RepoDependencySuggestions,
+};
 pub use store::{
     CreateProjectInput, CreateRepoInput, CreateWorktreeInput, Project, ProjectRepo, ProjectStatus,
     ProjectStore, ProjectWorktree, UpdateProjectInput, detect_logo,

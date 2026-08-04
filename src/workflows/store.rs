@@ -44,6 +44,16 @@ pub enum StepKind {
     /// predicates that read step outputs are only as trustworthy as the value
     /// they read.
     Command,
+    /// A question put to a person, whose answer is the step's whole output.
+    ///
+    /// The third kind exists for the same reason the second does. A command step
+    /// keeps a deterministic check from being laundered through a model; this
+    /// keeps a *human decision* from being. An agent step that asks in a channel
+    /// and reports what it heard produces testimony — "I believe the operator
+    /// approved" — and every branch predicate downstream then routes on it. A
+    /// decision step's outputs can only have come from a person, because nothing
+    /// else can write them.
+    Decision,
 }
 
 impl StepKind {
@@ -51,6 +61,7 @@ impl StepKind {
         match self {
             StepKind::Agent => "agent",
             StepKind::Command => "command",
+            StepKind::Decision => "decision",
         }
     }
 
@@ -58,6 +69,7 @@ impl StepKind {
         match value {
             "agent" => Some(StepKind::Agent),
             "command" => Some(StepKind::Command),
+            "decision" => Some(StepKind::Decision),
             _ => None,
         }
     }
@@ -154,6 +166,25 @@ pub struct WorkflowStep {
     pub worktree_mode: WorktreeMode,
     /// What a provisioned worktree forks from. `None` means the repo's HEAD.
     pub worktree_base_ref: Option<String>,
+    /// The question a decision step asks, as the person answering reads it.
+    /// Required on a decision step and refused on every other kind.
+    pub decision_question: Option<String>,
+    /// Who may answer. Empty or `None` means anyone. **Advisory in v1** — see
+    /// [`crate::tasks::Task::decision_asked_of`].
+    #[serde(default)]
+    pub decision_asked_of: Option<Vec<String>>,
+    /// What happens if nobody answers.
+    #[serde(default)]
+    pub decision_timeout_action: crate::tasks::DecisionTimeoutAction,
+    /// How long, in seconds, from the moment the decision is asked. Required by
+    /// `default` and `fail`, refused by `wait`.
+    pub decision_timeout_secs: Option<i64>,
+    /// The answer that applies on a `default` timeout. Validated against this
+    /// step's own `output_schema` at launch, not when the timeout fires.
+    pub decision_default_answer: Option<Value>,
+    /// What a decision inside a loop body does on the second pass.
+    #[serde(default)]
+    pub decision_ask: crate::tasks::DecisionAsk,
 }
 
 /// What an edge means, now that "the loop finished" is two outcomes.
@@ -297,6 +328,130 @@ pub struct StepGate {
     /// `None` means derive it when the gate is polled. See
     /// [`crate::tasks::TaskGate::disposition_for`].
     pub disposition: Option<GateDisposition>,
+}
+
+/// The longest a decision may be left waiting before its timeout policy acts.
+///
+/// A ceiling rather than a default: `wait` is the default and has no deadline at
+/// all. This bounds the other two, because a `default after 90 days` is not a
+/// policy anybody is watching — it is a step that will apply an answer nobody
+/// remembers declaring, long after the run it belongs to has been forgotten.
+/// Thirty days.
+pub const MAX_DECISION_TIMEOUT_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Whether this step carries any field that only a decision step consumes.
+fn decision_fields_set(step: &WorkflowStep) -> bool {
+    step.decision_question
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|question| !question.is_empty())
+        || step
+            .decision_asked_of
+            .as_ref()
+            .is_some_and(|who| !who.is_empty())
+        || step.decision_timeout_action != crate::tasks::DecisionTimeoutAction::Wait
+        || step.decision_timeout_secs.is_some()
+        || step.decision_default_answer.is_some()
+        || step.decision_ask != crate::tasks::DecisionAsk::EachPass
+}
+
+/// Everything about a decision step that is knowable before it runs.
+///
+/// All of it is checked at launch, on the same argument command steps are: a
+/// person is watching now, and the answer can still be a corrected template. The
+/// one that matters most is the default answer, because the alternative is
+/// discovering hours later — unattended, at the moment the timeout fires — that
+/// the pipeline can neither be answered nor defaulted.
+fn validate_decision_step(step: &WorkflowStep) -> std::result::Result<(), LaunchError> {
+    use crate::tasks::DecisionTimeoutAction;
+
+    let question = step
+        .decision_question
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    if question.is_empty() {
+        return Err(LaunchError::DecisionStepWithoutQuestion {
+            step_key: step.step_key.clone(),
+        });
+    }
+
+    // The schema is doing double duty and that is the point: it describes what
+    // is being asked, and it is what refuses a malformed answer. Without one,
+    // `settle_decision` would accept anything a person typed and the "the
+    // person answering fills exactly that and nothing else" property would be a
+    // comment rather than a rule.
+    let Some(schema) = step.output_schema.as_ref() else {
+        return Err(LaunchError::DecisionStepWithoutSchema {
+            step_key: step.step_key.clone(),
+        });
+    };
+
+    // A decision is answered by a person and never claimed by an agent, so a
+    // capability requirement here names an audience it does not have — and
+    // would emit an unassigned task nothing in the fleet can take.
+    if step
+        .required_capabilities
+        .as_ref()
+        .is_some_and(|requires| !requires.is_empty())
+    {
+        return Err(LaunchError::DecisionStepRequiresCapabilities {
+            step_key: step.step_key.clone(),
+        });
+    }
+
+    match step.decision_timeout_action {
+        DecisionTimeoutAction::Wait => {
+            if let Some(timeout_secs) = step.decision_timeout_secs {
+                return Err(LaunchError::DecisionDeadlineWithoutTimeout {
+                    step_key: step.step_key.clone(),
+                    timeout_secs,
+                });
+            }
+        }
+        action => {
+            let Some(timeout_secs) = step.decision_timeout_secs else {
+                return Err(LaunchError::DecisionTimeoutWithoutDeadline {
+                    step_key: step.step_key.clone(),
+                    action: action.as_str().to_string(),
+                });
+            };
+            if !(1..=MAX_DECISION_TIMEOUT_SECS).contains(&timeout_secs) {
+                return Err(LaunchError::DecisionTimeoutOutOfRange {
+                    step_key: step.step_key.clone(),
+                    timeout_secs,
+                    ceiling: MAX_DECISION_TIMEOUT_SECS,
+                });
+            }
+        }
+    }
+
+    match (
+        step.decision_timeout_action,
+        step.decision_default_answer.as_ref(),
+    ) {
+        (DecisionTimeoutAction::Default, None) => Err(LaunchError::DecisionDefaultWithoutAnswer {
+            step_key: step.step_key.clone(),
+        }),
+        (DecisionTimeoutAction::Default, Some(answer)) => {
+            // The same validator the answer path uses, against the same schema.
+            // A default that could not be an answer is not a default.
+            let problems = validate(schema, answer);
+            if problems.is_empty() {
+                Ok(())
+            } else {
+                Err(LaunchError::DecisionDefaultRejected {
+                    step_key: step.step_key.clone(),
+                    details: problems.join("; "),
+                })
+            }
+        }
+        (action, Some(_)) => Err(LaunchError::DecisionAnswerWithoutDefault {
+            step_key: step.step_key.clone(),
+            action: action.as_str().to_string(),
+        }),
+        (_, None) => Ok(()),
+    }
 }
 
 /// Validate a template gate — a task gate with its source still named rather
@@ -723,6 +878,72 @@ pub enum LaunchError {
     #[error("step `{step_key}` cannot be given a worktree: {details}")]
     WorktreeUnavailable { step_key: String, details: String },
     #[error(
+        "decision step `{step_key}` asks no question — a decision with no question is a form with \
+         no label, and whoever is asked would be guessing at what they were approving"
+    )]
+    DecisionStepWithoutQuestion { step_key: String },
+    #[error(
+        "step `{step_key}` is a {kind} step and carries a decision question, which nothing would \
+         ever ask — only a decision step is answered by a person, so change its kind or drop the \
+         question"
+    )]
+    DecisionFieldsOnNonDecision { step_key: String, kind: String },
+    #[error(
+        "decision step `{step_key}` declares no output_schema — the schema *is* the question's \
+         answer format, so without one there is nothing to validate an answer against and the \
+         step's whole product is unconstrained"
+    )]
+    DecisionStepWithoutSchema { step_key: String },
+    #[error(
+        "decision step `{step_key}` has a timeout policy of `{action}` but no timeout — `default` \
+         and `fail` are both \"after N\", and there is no N here"
+    )]
+    DecisionTimeoutWithoutDeadline { step_key: String, action: String },
+    #[error(
+        "decision step `{step_key}` waits indefinitely but sets a {timeout_secs}s timeout, which \
+         nothing would ever act on — set an action of `default` or `fail`, or drop the timeout"
+    )]
+    DecisionDeadlineWithoutTimeout { step_key: String, timeout_secs: i64 },
+    #[error(
+        "decision step `{step_key}` asks for a {timeout_secs}s deadline; it must be between 1 and \
+         {ceiling} (limit: MAX_DECISION_TIMEOUT_SECS) — a deadline longer than that is a decision \
+         nobody is waiting for"
+    )]
+    DecisionTimeoutOutOfRange {
+        step_key: String,
+        timeout_secs: i64,
+        ceiling: i64,
+    },
+    #[error(
+        "decision step `{step_key}` defaults after a timeout but declares no default answer — \
+         there would be nothing to apply, and the step would quietly go back to needing a person \
+         at the moment nobody is watching"
+    )]
+    DecisionDefaultWithoutAnswer { step_key: String },
+    #[error(
+        "decision step `{step_key}` declares a default answer but its timeout policy is \
+         `{action}`, so nothing would ever apply it"
+    )]
+    DecisionAnswerWithoutDefault { step_key: String, action: String },
+    #[error(
+        "decision step `{step_key}` has a default answer that does not satisfy its own \
+         output_schema: {details} — caught here rather than when the timeout fires, which would be \
+         hours later and unattended"
+    )]
+    DecisionDefaultRejected { step_key: String, details: String },
+    #[error(
+        "decision step `{step_key}` states a capability requirement, which nothing would read — a \
+         decision is answered by a person, never claimed by an agent, so pooling it names a \
+         audience it does not have. Use asked_of"
+    )]
+    DecisionStepRequiresCapabilities { step_key: String },
+    #[error(
+        "decision step `{step_key}` asks for its own worktree ({mode}) — a decision runs no code, \
+         so the checkout would be created, held for as long as a person took to answer, and never \
+         used"
+    )]
+    DecisionStepWithWorktree { step_key: String, mode: String },
+    #[error(
         "step `{step_key}` names agent `{assigned_agent_id}` and also requires [{}] — a step is \
          addressed one way or the other, so drop one",
         .requires.join(", ")
@@ -877,8 +1098,11 @@ impl WorkflowStore {
                   for_each_step_key, for_each_pointer, for_each_key, \
                   loop_group, loop_max_iterations, loop_until, \
                   kind, command, command_timeout_secs, expect_exit_code, \
-                  worktree_mode, worktree_base_ref) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  worktree_mode, worktree_base_ref, \
+                  decision_question, decision_asked_of, decision_timeout_action, \
+                  decision_timeout_secs, decision_default_answer, decision_ask) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                     ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workflow_id, step_key) DO UPDATE SET \
                  title = excluded.title, description = excluded.description, \
                  assigned_agent_id = excluded.assigned_agent_id, \
@@ -897,7 +1121,13 @@ impl WorkflowStore {
                  command_timeout_secs = excluded.command_timeout_secs, \
                  expect_exit_code = excluded.expect_exit_code, \
                  worktree_mode = excluded.worktree_mode, \
-                 worktree_base_ref = excluded.worktree_base_ref",
+                 worktree_base_ref = excluded.worktree_base_ref, \
+                 decision_question = excluded.decision_question, \
+                 decision_asked_of = excluded.decision_asked_of, \
+                 decision_timeout_action = excluded.decision_timeout_action, \
+                 decision_timeout_secs = excluded.decision_timeout_secs, \
+                 decision_default_answer = excluded.decision_default_answer, \
+                 decision_ask = excluded.decision_ask",
         )
         .bind(&step.workflow_id)
         .bind(&step.step_key)
@@ -929,6 +1159,22 @@ impl WorkflowStore {
         .bind(step.expect_exit_code)
         .bind(step.worktree_mode.as_str())
         .bind(&step.worktree_base_ref)
+        .bind(&step.decision_question)
+        .bind(
+            step.decision_asked_of
+                .as_ref()
+                .map(|who| serde_json::to_string(&crate::tasks::normalise_capabilities(who)))
+                .transpose()
+                .context("failed to serialize a decision step's audience")?,
+        )
+        .bind(step.decision_timeout_action.as_str())
+        .bind(step.decision_timeout_secs)
+        .bind(
+            step.decision_default_answer
+                .as_ref()
+                .map(|value| value.to_string()),
+        )
+        .bind(step.decision_ask.as_str())
         .execute(&self.pool)
         .await
         .context("failed to write workflow step")?;
@@ -943,7 +1189,9 @@ impl WorkflowStore {
                     for_each_step_key, for_each_pointer, for_each_key, \
                     loop_group, loop_max_iterations, loop_until, \
                     kind, command, command_timeout_secs, expect_exit_code, \
-                    worktree_mode, worktree_base_ref \
+                    worktree_mode, worktree_base_ref, \
+                    decision_question, decision_asked_of, decision_timeout_action, \
+                    decision_timeout_secs, decision_default_answer, decision_ask \
              FROM workflow_steps WHERE workflow_id = ? ORDER BY position ASC, step_key ASC",
         )
         .bind(workflow_id)
@@ -1562,6 +1810,7 @@ impl WorkflowStore {
                         });
                     }
                 }
+                StepKind::Decision => validate_decision_step(step)?,
                 // The dead-config guard, applied to a field this change is
                 // adding rather than only to the one it is deleting.
                 StepKind::Agent => {
@@ -1578,8 +1827,30 @@ impl WorkflowStore {
                 }
             }
 
+            // The dead-config guard for the fields this change is adding,
+            // applied to the kinds that are not decisions. A question on an
+            // agent step is never asked and never answered; it reads on the
+            // canvas as a step that puts something in front of a person and
+            // does not.
+            if step.kind != StepKind::Decision && decision_fields_set(step) {
+                return Err(LaunchError::DecisionFieldsOnNonDecision {
+                    step_key: step.step_key.clone(),
+                    kind: step.kind.to_string(),
+                });
+            }
+
             if !step.worktree_mode.provisions() {
                 continue;
+            }
+            // A decision runs no code, so a checkout provisioned for one would
+            // be created at launch, held for however long a person took to
+            // answer, and never used. Refused rather than degraded to `inherit`,
+            // which would leave the author believing they had isolation.
+            if step.kind == StepKind::Decision {
+                return Err(LaunchError::DecisionStepWithWorktree {
+                    step_key: step.step_key.clone(),
+                    mode: step.worktree_mode.to_string(),
+                });
             }
             // `per_branch` on a step that is not a fan-out is a template error.
             // Silently degrading it to `per_run` gives an author a pipeline that
@@ -1888,7 +2159,10 @@ impl WorkflowStore {
                 "UPDATE tasks SET workflow_run_id = ?, workflow_step_key = ?, \
                  input_schema = ?, output_schema = ?, system_prompt = ?, \
                  kind = ?, command = ?, command_timeout_secs = ?, expect_exit_code = ?, \
-                 worktree_mode = ?, worktree_base_ref = ? WHERE task_number = ?",
+                 worktree_mode = ?, worktree_base_ref = ?, \
+                 decision_question = ?, decision_asked_of = ?, \
+                 decision_timeout_action = ?, decision_timeout_secs = ?, \
+                 decision_default_answer = ?, decision_ask = ? WHERE task_number = ?",
             )
             .bind(run_id)
             .bind(&step.step_key)
@@ -1901,6 +2175,27 @@ impl WorkflowStore {
             .bind(step.expect_exit_code)
             .bind(step.worktree_mode.as_str())
             .bind(&step.worktree_base_ref)
+            // The question travels with everything else, and for the strongest
+            // version of the same reason: the question a person answered has to
+            // be the question on the record afterwards. Read back from a live
+            // template it could be edited between the ask and the answer, and
+            // the run would hold an approval of something nobody was shown.
+            .bind(&step.decision_question)
+            .bind(
+                step.decision_asked_of
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| LaunchError::Storage(error.to_string()))?,
+            )
+            .bind(step.decision_timeout_action.as_str())
+            .bind(step.decision_timeout_secs)
+            .bind(
+                step.decision_default_answer
+                    .as_ref()
+                    .map(|value| value.to_string()),
+            )
+            .bind(step.decision_ask.as_str())
             .bind(task.task_number)
             .execute(&self.pool)
             .await
@@ -2520,6 +2815,38 @@ impl WorkflowStore {
             return Ok(RunAssessment::Advancing);
         }
 
+        // A decision nobody answered, whose author declared that failing is the
+        // answer. The run has failed, definitively and by design.
+        //
+        // Its own branch rather than the budget check below, and the difference
+        // is not cosmetic: nothing ever *attempted* this task, so there is no
+        // budget to have spent and "used its whole failure budget (2/2)" would
+        // be a sentence about attempts that never happened. Placed above the
+        // frontier walk for the same reason the budget check is — a timed-out
+        // decision is also a `blocked` row, and the generic "is blocked and only
+        // a person can release it" reading would report a run that failed as one
+        // that is merely stuck. Those want different things from whoever reads
+        // the board: one is a pipeline that took its failure path, the other is
+        // a pipeline waiting to be unwedged.
+        for task in &unsettled {
+            if task.decision_outcome != Some(crate::tasks::DecisionOutcome::TimedOut) {
+                continue;
+            }
+            return Ok(RunAssessment::Settled {
+                status: RunStatus::Failed,
+                reason: format!(
+                    "decision #{} ({}) was not answered within {}s, and its timeout policy is \
+                     `fail`: {}",
+                    task.task_number,
+                    task.title,
+                    task.decision_timeout_secs.unwrap_or_default(),
+                    task.decision_question
+                        .as_deref()
+                        .unwrap_or("no question recorded")
+                ),
+            });
+        }
+
         // A task that used its whole failure budget is `failed`, not `stuck`,
         // and the difference is the recovery: the pipeline ran, something in it
         // does not work, and retrying it unchanged will not help. Checked
@@ -2850,6 +3177,33 @@ async fn frontier_hold(
     gates: &crate::tasks::GateStore,
     task: &Task,
 ) -> Result<Option<String>> {
+    // A decision that has been asked and is waiting for an answer.
+    //
+    // **This is the interaction most likely to be got wrong, and the one the
+    // design doc singles out.** It is a `blocked` row like any other, so the
+    // check below would report it as a run nothing can advance — and a deploy
+    // gate sitting in somebody's inbox is not a wedged pipeline, it is the
+    // pipeline doing exactly what it was built to do. Reporting it as stuck
+    // would put a false positive on every healthy run that asks a person
+    // anything, and a stuck detector that cries wolf is worse than the silence
+    // it replaced: people stop reading it, and the real wedges go unnoticed.
+    //
+    // Deliberately *before* the blanket `Blocked` branch, and deliberately keyed
+    // on `AwaitingDecision` rather than on the task being a decision. A decision
+    // whose declared default would not validate, or one that timed out, carries
+    // `needs_input` instead and falls through — those really are wedged, and the
+    // whole reason the two kinds exist separately is that they recover
+    // differently.
+    //
+    // The cost of this `None` is a run that stays `running` for as long as
+    // nobody answers, which is correct behaviour and is why the block reason on
+    // the card names who is being waited on and what they were asked.
+    if task.status == TaskStatus::Blocked
+        && task.block_kind == Some(crate::tasks::BlockKind::AwaitingDecision)
+    {
+        return Ok(None);
+    }
+
     // Parked for a person. `dependency` blocks rest in `backlog` rather than
     // here, so this is a sticky kind or a transient one, and neither clears
     // itself — the sweep will not touch it and no upstream event will either.
@@ -3380,6 +3734,31 @@ fn step_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowStep> {
             .and_then(WorktreeMode::parse)
             .unwrap_or(WorktreeMode::Inherit),
         worktree_base_ref: row.try_get("worktree_base_ref").ok().flatten(),
+        decision_question: row.try_get("decision_question").ok().flatten(),
+        decision_asked_of: row
+            .try_get::<Option<String>, _>("decision_asked_of")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
+        // An unreadable action is `wait`: it parks for a person, which is
+        // visible, rather than applying a default or failing a step on the
+        // strength of a corrupt row, which is not.
+        decision_timeout_action: row
+            .try_get::<String, _>("decision_timeout_action")
+            .ok()
+            .as_deref()
+            .and_then(crate::tasks::DecisionTimeoutAction::parse)
+            .unwrap_or_default(),
+        decision_timeout_secs: row.try_get("decision_timeout_secs").ok().flatten(),
+        decision_default_answer: read_json(&row, "decision_default_answer"),
+        // Same argument: an unreadable value asks again, costing at worst a
+        // second prompt. Guessing `once` would silently reuse an answer.
+        decision_ask: row
+            .try_get::<String, _>("decision_ask")
+            .ok()
+            .as_deref()
+            .and_then(crate::tasks::DecisionAsk::parse)
+            .unwrap_or_default(),
     })
 }
 
@@ -3490,6 +3869,10 @@ pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
          kind TEXT NOT NULL DEFAULT 'agent', command TEXT, \
          command_timeout_secs INTEGER, expect_exit_code INTEGER, \
          worktree_mode TEXT NOT NULL DEFAULT 'inherit', worktree_base_ref TEXT, \
+         decision_question TEXT, decision_asked_of TEXT, \
+         decision_timeout_action TEXT NOT NULL DEFAULT 'wait', \
+         decision_timeout_secs INTEGER, decision_default_answer TEXT, \
+         decision_ask TEXT NOT NULL DEFAULT 'each_pass', \
          PRIMARY KEY (workflow_id, step_key))",
         "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
          parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
@@ -3608,6 +3991,12 @@ mod tests {
             expect_exit_code: None,
             worktree_mode: WorktreeMode::Inherit,
             worktree_base_ref: None,
+            decision_question: None,
+            decision_asked_of: None,
+            decision_timeout_action: crate::tasks::DecisionTimeoutAction::Wait,
+            decision_timeout_secs: None,
+            decision_default_answer: None,
+            decision_ask: crate::tasks::DecisionAsk::EachPass,
         }
     }
 
@@ -6311,6 +6700,520 @@ mod tests {
             }
             other => panic!("expected a failed run, got {other:?}"),
         }
+    }
+
+    // -- Human decisions ----------------------------------------------------
+
+    /// A `deploy -> approve -> ship` template whose middle step asks a person.
+    ///
+    /// `ship` binds on the answer, so the whole point of the feature — that
+    /// something downstream can read what was decided — is wired in the fixture
+    /// rather than asserted separately.
+    async fn decision_template(
+        workflows: &WorkflowStore,
+        id: &str,
+        timeout: Option<(crate::tasks::DecisionTimeoutAction, i64, Option<Value>)>,
+    ) {
+        workflows
+            .put_step(&step(id, "build", 0))
+            .await
+            .expect("step");
+
+        let mut approve = step(id, "approve", 1);
+        approve.kind = StepKind::Decision;
+        approve.decision_question = Some("Ship this build to production?".into());
+        approve.decision_asked_of = Some(vec!["pat".into()]);
+        approve.output_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["approved"],
+            "properties": {"approved": {"type": "boolean"}},
+        }));
+        if let Some((action, secs, default)) = timeout {
+            approve.decision_timeout_action = action;
+            approve.decision_timeout_secs = Some(secs);
+            approve.decision_default_answer = default;
+        }
+        workflows.put_step(&approve).await.expect("step");
+
+        workflows
+            .put_step(&step(id, "ship", 2))
+            .await
+            .expect("step");
+        for (parent, child) in [("build", "approve"), ("approve", "ship")] {
+            workflows.link_steps(id, parent, child).await.expect("link");
+        }
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.to_string(),
+                step_key: "ship".into(),
+                input_key: "approved".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("approve".into()),
+                source_pointer: Some("/approved".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+    }
+
+    /// **The interaction the design doc says is most likely to be got wrong.**
+    ///
+    /// A decision waiting on a person is a `blocked` row whose every parent has
+    /// settled — indistinguishable, to the frontier walk, from a task nothing
+    /// can release. But it is the pipeline doing exactly what it was built to
+    /// do, and reporting it as stuck puts a false positive on every healthy run
+    /// that asks anybody anything. A stuck detector that cries wolf is worse
+    /// than the silence it replaced: people stop reading it, and the real wedges
+    /// go unnoticed.
+    ///
+    /// If this regresses, every deploy gate in the system reports its run as
+    /// stuck and raises a `workflow_run_stopped` notification for a run that is
+    /// working perfectly.
+    #[tokio::test]
+    async fn an_unanswered_decision_does_not_make_its_run_stuck() {
+        let (workflows, tasks, id) = fixture().await;
+        decision_template(&workflows, &id, None).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["build"],
+            serde_json::json!({"artifact": "a.tar"}),
+        )
+        .await;
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert_eq!(
+            sweep.asking.len(),
+            1,
+            "the decision became answerable and somebody has to be told: {sweep:?}"
+        );
+        assert_eq!(sweep.asking[0].asked_of, vec!["pat".to_string()]);
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch run")
+            .expect("run exists");
+        assert_eq!(
+            workflows
+                .assess_run(&tasks, &run)
+                .await
+                .expect("assess the run"),
+            RunAssessment::Advancing,
+            "a run waiting on a person is waiting, not wedged — it has already said what it \
+             needs, in the one place a person is looking"
+        );
+
+        // And the same again once the answer arrives: the run continues.
+        tasks
+            .answer_decision(
+                launched.task_numbers["approve"],
+                &serde_json::json!({"approved": true}),
+                "pat",
+            )
+            .await
+            .expect("answer");
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&launched.task_numbers["ship"]),
+            "the step below a decision runs once it is answered: {sweep:?}"
+        );
+    }
+
+    /// The other side of the same distinction, and the reason it is not simply
+    /// "decisions are never stuck".
+    ///
+    /// A decision that timed out under a `fail` policy is not waiting for
+    /// anybody — nothing is coming — and its run has definitively failed. If
+    /// this regresses the run either stays `running` for ever, holding a
+    /// pipeline nobody will ever answer, or reports `stuck`, which sends someone
+    /// to unwedge a run that took a failure path its author wrote for it.
+    #[tokio::test]
+    async fn a_run_whose_only_unfinished_task_is_a_decision_that_timed_out_to_fail_is_terminal() {
+        let (workflows, tasks, id) = fixture().await;
+        decision_template(
+            &workflows,
+            &id,
+            Some((crate::tasks::DecisionTimeoutAction::Fail, 60, None)),
+        )
+        .await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["build"],
+            serde_json::json!({"artifact": "a.tar"}),
+        )
+        .await;
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+
+        // Backdate the ask past the deadline. The anchor is the ask, not the
+        // launch: a decision three steps in may not become answerable for an
+        // hour, and a deadline started at launch would expire before anybody
+        // could have seen it.
+        sqlx::query(
+            "UPDATE tasks SET decision_asked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') \
+             WHERE task_number = ?",
+        )
+        .bind(launched.task_numbers["approve"])
+        .execute(tasks.pool())
+        .await
+        .expect("backdate the ask");
+
+        let settled = tasks
+            .settle_timed_out_decisions("agent-1")
+            .await
+            .expect("timeout sweep");
+        assert_eq!(
+            settled.first().and_then(|d| d.outcome),
+            Some(crate::tasks::DecisionOutcome::TimedOut)
+        );
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch run")
+            .expect("run exists");
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(
+                    status,
+                    RunStatus::Failed,
+                    "nobody answered and the author said that is a failure — not a wedge for \
+                     somebody to come and clear"
+                );
+                assert!(status.is_terminal());
+                assert!(
+                    reason.contains("Ship this build to production?") && reason.contains("`fail`"),
+                    "the reason has to carry the question nobody answered and the policy that \
+                     decided it: {reason}"
+                );
+            }
+            other => panic!("expected a failed run, got {other:?}"),
+        }
+    }
+
+    /// The pairing the design doc names: a human decision is exactly the kind of
+    /// value a condition should route on. Approve → ship. Reject → roll back.
+    ///
+    /// Neither is reachable while the answer has nowhere to live, which is the
+    /// whole problem statement. This asserts an ordinary `task_output` condition
+    /// — no decision-shaped predicate anywhere — reads a person's answer and
+    /// settles the branch that was not taken.
+    #[tokio::test]
+    async fn a_condition_can_route_on_a_decision_s_answer() {
+        let (workflows, tasks, id) = fixture().await;
+
+        let mut approve = step(&id, "approve", 0);
+        approve.kind = StepKind::Decision;
+        approve.decision_question = Some("Ship, or roll back?".into());
+        approve.output_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["state"],
+            "properties": {"state": {"enum": ["green", "red"]}},
+        }));
+        workflows.put_step(&approve).await.expect("step");
+        for (index, key) in ["ship", "rollback"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64 + 1))
+                .await
+                .expect("step");
+        }
+        for child in ["ship", "rollback"] {
+            workflows
+                .link_steps(&id, "approve", child)
+                .await
+                .expect("link");
+        }
+        workflows
+            .put_gate(&condition(&id, "ship", "approve", "green"))
+            .await
+            .expect("gate");
+        workflows
+            .put_gate(&condition(&id, "rollback", "approve", "red"))
+            .await
+            .expect("gate");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+
+        tasks
+            .answer_decision(
+                launched.task_numbers["approve"],
+                &serde_json::json!({"state": "green"}),
+                "pat",
+            )
+            .await
+            .expect("answer");
+
+        let gates = crate::tasks::GateStore::new(tasks.pool().clone());
+        let polled = crate::tasks::poll_gates_once(&tasks, &gates, chrono::Utc::now().timestamp())
+            .await
+            .expect("poll");
+        assert_eq!(polled.len(), 2, "both conditions are asked");
+
+        let rollback = tasks
+            .get_by_number(launched.task_numbers["rollback"])
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            rollback.status,
+            TaskStatus::Skipped,
+            "the branch a person ruled out is settled, not left waiting for ever"
+        );
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&launched.task_numbers["ship"]),
+            "and the branch they chose runs: {sweep:?}"
+        );
+
+        // The provenance that makes this worth having: the value the condition
+        // routed on is *known* to be a person's, not a model's report of one.
+        let answered = tasks
+            .get_by_number(launched.task_numbers["approve"])
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            answered.decision_outcome,
+            Some(crate::tasks::DecisionOutcome::Answered)
+        );
+        assert_eq!(answered.decision_answered_by.as_deref(), Some("pat"));
+    }
+
+    /// A default that cannot satisfy the step's own schema is refused at launch,
+    /// while a person is still watching.
+    ///
+    /// The alternative is discovering it when the timeout fires — hours later,
+    /// unattended — at which point the pipeline can neither be answered nor
+    /// defaulted and simply sits there.
+    #[tokio::test]
+    async fn a_decision_whose_default_answer_does_not_fit_its_own_schema_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        decision_template(
+            &workflows,
+            &id,
+            Some((
+                crate::tasks::DecisionTimeoutAction::Default,
+                60,
+                Some(serde_json::json!({"approved": "probably"})),
+            )),
+        )
+        .await;
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a default that is not a valid answer is not a default");
+        assert!(
+            matches!(error, LaunchError::DecisionDefaultRejected { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("approved"),
+            "the refusal names the field that will not validate: {error}"
+        );
+    }
+
+    /// The dead-config guard for the fields this feature adds.
+    ///
+    /// A question on an agent step is never asked and never answered; it reads
+    /// on the canvas as a step that puts something in front of a person and does
+    /// not. Same shape as the guard on a command line on an agent step.
+    #[tokio::test]
+    async fn an_agent_step_carrying_a_decision_question_is_refused_because_nothing_would_ask_it() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut build = step(&id, "build", 0);
+        build.decision_question = Some("Ship it?".into());
+        workflows.put_step(&build).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a question nothing asks is dead config");
+        assert!(
+            matches!(error, LaunchError::DecisionFieldsOnNonDecision { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A loop body of `approve -> test`, where `approve` asks a person.
+    ///
+    /// The decision is inside the body on purpose: this is where the spec's
+    /// open question lives — does pass 2 ask again, or reuse the answer?
+    async fn looping_decision_template(
+        workflows: &WorkflowStore,
+        id: &str,
+        ask: crate::tasks::DecisionAsk,
+    ) {
+        workflows
+            .put_step(&step(id, "analyze", 0))
+            .await
+            .expect("step");
+
+        let mut approve = step(id, "approve", 1);
+        approve.kind = StepKind::Decision;
+        approve.loop_group = Some("fix".into());
+        approve.decision_question = Some("Authorise this deploy?".into());
+        approve.decision_ask = ask;
+        approve.output_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["approved"],
+            "properties": {"approved": {"type": "boolean"}},
+        }));
+        workflows.put_step(&approve).await.expect("step");
+
+        let mut test = step(id, "test", 2);
+        test.loop_group = Some("fix".into());
+        test.loop_max_iterations = Some(3);
+        test.loop_until = Some(serde_json::json!({"pointer": "/green", "equals": true}));
+        workflows.put_step(&test).await.expect("step");
+
+        for (parent, child) in [("analyze", "approve"), ("approve", "test")] {
+            workflows.link_steps(id, parent, child).await.expect("link");
+        }
+    }
+
+    /// Run pass 1 of the looping-decision body, answering the decision if it is
+    /// asked, and failing `loop_until` so a second pass is emitted.
+    async fn first_pass_of_a_looping_decision(
+        workflows: &WorkflowStore,
+        tasks: &TaskStore,
+        id: &str,
+    ) -> String {
+        let launched = workflows
+            .launch(tasks, id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let approve = pass(tasks, &launched.run.id, "approve", 1).await;
+        tasks
+            .answer_decision(
+                approve.task_number,
+                &serde_json::json!({"approved": true}),
+                "pat",
+            )
+            .await
+            .expect("answer");
+
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let test = pass(tasks, &launched.run.id, "test", 1).await;
+        complete(
+            tasks,
+            test.task_number,
+            serde_json::json!({"green": false, "failures": ["still broken"]}),
+        )
+        .await;
+        tasks.advance_loops("agent-1").await.expect("boundary");
+
+        launched.run.id
+    }
+
+    /// **The default, and the one the spec leaves open.** A decision inside a
+    /// loop asks again on every pass.
+    ///
+    /// Chosen on provenance, not convenience: pass 2 exists precisely because
+    /// the artefact under review changed — that is why the loop ran again — so
+    /// reusing pass 1's answer would credit a person with approving work they
+    /// never looked at. That is the same erosion this whole feature exists to
+    /// stop, arriving through the loop instead of through a model.
+    #[tokio::test]
+    async fn a_decision_inside_a_loop_asks_again_on_the_next_pass_by_default() {
+        let (workflows, tasks, id) = fixture().await;
+        looping_decision_template(&workflows, &id, crate::tasks::DecisionAsk::EachPass).await;
+        let run_id = first_pass_of_a_looping_decision(&workflows, &tasks, &id).await;
+
+        let second = pass(&tasks, &run_id, "approve", 2).await;
+        assert_eq!(
+            second.kind,
+            crate::tasks::TaskKind::Decision,
+            "the second pass must still be a decision — if the kind failed to travel it would be \
+             an agent task, and a worker would answer it"
+        );
+        assert!(second.decision_outcome.is_none(), "and it is unanswered");
+        assert_eq!(second.outputs, None);
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            sweep
+                .asking
+                .iter()
+                .any(|asked| asked.task_number == second.task_number),
+            "the second pass asks the person again: {sweep:?}"
+        );
+        assert!(
+            tasks
+                .claim_next_ready("agent-1")
+                .await
+                .expect("claim")
+                .is_none(),
+            "and it is still nobody's to claim"
+        );
+    }
+
+    /// The opt-out, for the gates that really are a property of the run rather
+    /// than of the pass — "is this deploy authorised at all", where three
+    /// prompts for one deploy is the maddening outcome.
+    ///
+    /// The answer is carried with the *original* answerer and the *original*
+    /// timestamp, and recorded as `carried` rather than `answered`. A carried
+    /// answer that stamped itself with the current time, or claimed the outcome
+    /// `answered`, would read as a fresh approval of work nobody looked at —
+    /// which is precisely the thing the default exists to avoid.
+    #[tokio::test]
+    async fn a_decision_marked_once_carries_its_answer_into_the_next_pass_recorded_as_carried() {
+        let (workflows, tasks, id) = fixture().await;
+        looping_decision_template(&workflows, &id, crate::tasks::DecisionAsk::Once).await;
+        let run_id = first_pass_of_a_looping_decision(&workflows, &tasks, &id).await;
+
+        let first = pass(&tasks, &run_id, "approve", 1).await;
+        let second = pass(&tasks, &run_id, "approve", 2).await;
+
+        assert_eq!(second.status, TaskStatus::Done, "it does not ask again");
+        assert_eq!(second.outputs, first.outputs);
+        assert_eq!(
+            second.decision_outcome,
+            Some(crate::tasks::DecisionOutcome::Carried),
+            "reused, not freshly answered — the record must not claim somebody looked at this \
+             pass"
+        );
+        assert_eq!(second.decision_answered_by.as_deref(), Some("pat"));
+        assert_eq!(
+            second.decision_answered_at, first.decision_answered_at,
+            "the original moment, not the moment it was reused"
+        );
+
+        let sweep = tasks.recompute_ready("agent-1").await.expect("sweep");
+        assert!(
+            !sweep
+                .asking
+                .iter()
+                .any(|asked| asked.task_number == second.task_number),
+            "and nobody is asked a second time: {sweep:?}"
+        );
     }
 
     /// Cancelling settles what has not started and leaves what has.

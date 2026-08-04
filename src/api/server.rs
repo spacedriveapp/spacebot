@@ -156,6 +156,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::set_task_binding, tasks::remove_task_binding))
         .routes(routes!(tasks::block_task))
         .routes(routes!(tasks::unblock_task))
+        .routes(routes!(tasks::answer_decision))
         .routes(routes!(tasks::get_task_graph))
         .routes(routes!(tasks::list_task_gates, tasks::create_task_gate))
         .routes(routes!(tasks::delete_task_gate))
@@ -216,6 +217,15 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(projects::disk_usage))
         .routes(routes!(projects::create_repo))
         .routes(routes!(projects::delete_repo))
+        .routes(routes!(
+            projects::list_repo_dependencies,
+            projects::declare_repo_dependency
+        ))
+        .routes(routes!(
+            projects::update_repo_dependency,
+            projects::delete_repo_dependency
+        ))
+        .routes(routes!(projects::repo_dependency_suggestions))
         .routes(routes!(projects::list_worktree_orphans))
         .routes(routes!(projects::create_worktree))
         .routes(routes!(projects::delete_worktree))

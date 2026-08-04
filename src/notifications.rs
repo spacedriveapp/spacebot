@@ -37,6 +37,15 @@ pub enum NotificationKind {
     /// it back on, and an inbox filter for stopped runs must not drag in
     /// schedules that never started one.
     WorkflowScheduleDisabled,
+    /// A decision step is waiting for a person to answer it.
+    ///
+    /// Its own kind rather than a reuse of `task_approval`, which asks whether a
+    /// task should *run*. This asks a question whose answer the pipeline then
+    /// uses, and the two are answered in different places and mean different
+    /// things if ignored: an unapproved task never starts, an unanswered
+    /// decision holds a run that has already done its work. Filtering an inbox
+    /// for one must not drag in the other.
+    DecisionRequested,
 }
 
 impl NotificationKind {
@@ -47,6 +56,7 @@ impl NotificationKind {
             NotificationKind::CortexObservation => "cortex_observation",
             NotificationKind::WorkflowRunStopped => "workflow_run_stopped",
             NotificationKind::WorkflowScheduleDisabled => "workflow_schedule_disabled",
+            NotificationKind::DecisionRequested => "decision_requested",
         }
     }
 }

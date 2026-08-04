@@ -67,6 +67,8 @@ function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
 		loop_terminal: false,
 		kind: "agent" as const,
 		worktree_mode: "inherit" as const,
+		decision_ask: "each_pass" as const,
+		decision_timeout_action: "wait" as const,
 		...overrides,
 	};
 }

@@ -804,6 +804,272 @@ pub(super) async fn delete_repo(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Repo dependencies (#29) — declared knowledge, never derived action
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct DeclareRepoDependencyRequest {
+    /// The dependent repo — the one that has to change when the other does.
+    repo_id: String,
+    /// The repo depended upon.
+    depends_on_repo_id: String,
+    /// Free-text label (`generated_from`, `consumes`, `vendors`, …).
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct UpdateRepoDependencyRequest {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct RepoDependencyResponse {
+    dependency: crate::projects::RepoDependency,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct RepoDependencyListResponse {
+    dependencies: Vec<crate::projects::RepoDependency>,
+}
+
+/// Map a refusal to the status code that describes it. Kept together so the
+/// same refusal reads the same way from every endpoint.
+fn repo_dependency_status(error: &crate::projects::RepoDependencyError) -> StatusCode {
+    use crate::projects::RepoDependencyError as E;
+    match error {
+        E::SelfDependency { .. } | E::ForeignRepo { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        E::UnknownRepo { .. } => StatusCode::NOT_FOUND,
+        E::Duplicate { .. } => StatusCode::CONFLICT,
+        E::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// GET /agents/projects/{id}/repo-dependencies — declared edges in a project.
+///
+/// The same list travels inside `GET /agents/projects/{id}`; this exists for
+/// callers refreshing only the graph.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{id}/repo-dependencies",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = 200, body = RepoDependencyListResponse),
+        (status = 404, description = "Project not found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn list_repo_dependencies(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<RepoDependencyListResponse>, StatusCode> {
+    let store_guard = state.project_store.load();
+    let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let dependencies = store
+        .list_repo_dependencies(&project_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to list repo dependencies");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(RepoDependencyListResponse { dependencies }))
+}
+
+/// POST /agents/projects/{id}/repo-dependencies — declare that one repo
+/// depends on another.
+///
+/// Refuses a self-dependency, an unknown repo, a repo from another project,
+/// and a duplicate. A cycle is allowed: mutual generation between two repos is
+/// a real arrangement, and nothing derives an execution order from these edges.
+#[utoipa::path(
+    post,
+    path = "/agents/projects/{id}/repo-dependencies",
+    params(("id" = String, Path, description = "Project ID")),
+    request_body = DeclareRepoDependencyRequest,
+    responses(
+        (status = 200, body = RepoDependencyResponse),
+        (status = 404, description = "Project or repo not found"),
+        (status = 409, description = "Already declared"),
+        (status = 422, description = "Self-dependency, or a repo from another project"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn declare_repo_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+    Json(request): Json<DeclareRepoDependencyRequest>,
+) -> Result<Json<RepoDependencyResponse>, (StatusCode, String)> {
+    let store_guard = state.project_store.load();
+    let store = store_guard
+        .as_ref()
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "no project store".to_string()))?;
+
+    let dependency = store
+        .declare_repo_dependency(crate::projects::DeclareRepoDependencyInput {
+            project_id,
+            repo_id: request.repo_id,
+            depends_on_repo_id: request.depends_on_repo_id,
+            kind: request.kind,
+            note: request.note,
+        })
+        .await
+        .map_err(|error| (repo_dependency_status(&error), error.to_string()))?;
+
+    Ok(Json(RepoDependencyResponse { dependency }))
+}
+
+/// PUT /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+/// — relabel or annotate an existing declaration.
+///
+/// Repointing an edge is a different statement about the repos, so it is a
+/// delete and a fresh declaration rather than an update.
+#[utoipa::path(
+    put,
+    path = "/agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("repo_id" = String, Path, description = "Dependent repo ID"),
+        ("depends_on_repo_id" = String, Path, description = "Depended-upon repo ID"),
+    ),
+    request_body = UpdateRepoDependencyRequest,
+    responses(
+        (status = 200, body = RepoDependencyResponse),
+        (status = 404, description = "Declaration not found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn update_repo_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path((project_id, repo_id, depends_on_repo_id)): Path<(String, String, String)>,
+    Json(request): Json<UpdateRepoDependencyRequest>,
+) -> Result<Json<RepoDependencyResponse>, StatusCode> {
+    let store_guard = state.project_store.load();
+    let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let dependency = store
+        .update_repo_dependency(
+            &project_id,
+            &repo_id,
+            &depends_on_repo_id,
+            request.kind.as_deref(),
+            request.note.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to update repo dependency");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(RepoDependencyResponse { dependency }))
+}
+
+/// DELETE /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+/// — withdraw a declaration.
+#[utoipa::path(
+    delete,
+    path = "/agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("repo_id" = String, Path, description = "Dependent repo ID"),
+        ("depends_on_repo_id" = String, Path, description = "Depended-upon repo ID"),
+    ),
+    responses(
+        (status = 200, body = ActionResponse),
+        (status = 404, description = "Declaration not found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn delete_repo_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path((project_id, repo_id, depends_on_repo_id)): Path<(String, String, String)>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let store_guard = state.project_store.load();
+    let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let deleted = store
+        .delete_repo_dependency(&project_id, &repo_id, &depends_on_repo_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to delete repo dependency");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(ActionResponse {
+        success: true,
+        message: "repo dependency withdrawn".into(),
+    }))
+}
+
+/// GET /agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions
+/// — what is declared around this repo, in both directions.
+///
+/// This is the endpoint the workflow step editor calls: you are adding a step
+/// that runs in `api`, and `dependents` is why it can say "`web` is generated
+/// from `api` — add a step there too?".
+///
+/// It answers, and that is all it does. The reason this never becomes "and so
+/// the server added the step for you" is written where the answer is produced,
+/// in `ProjectStore::repo_dependency_suggestions`; read it before adding
+/// anything here that writes.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("repo_id" = String, Path, description = "Repository ID"),
+    ),
+    responses(
+        (status = 200, body = crate::projects::RepoDependencySuggestions),
+        (status = 404, description = "Project or repo not found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn repo_dependency_suggestions(
+    State(state): State<Arc<ApiState>>,
+    Path((project_id, repo_id)): Path<(String, String)>,
+) -> Result<Json<crate::projects::RepoDependencySuggestions>, StatusCode> {
+    let store_guard = state.project_store.load();
+    let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify the repo exists and belongs to this project, so a mistyped id is
+    // a 404 rather than an empty answer that reads as "nothing depends on it".
+    let repo = store
+        .get_repo(&repo_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to get repo for dependency suggestions");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if repo.project_id != project_id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let suggestions = store
+        .repo_dependency_suggestions(&repo_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to compute repo dependency suggestions");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(suggestions))
+}
+
 /// Worktrees found on disk that no live run accounts for.
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OrphanWorktreesResponse {

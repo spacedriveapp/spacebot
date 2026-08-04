@@ -50,12 +50,31 @@ pub enum BlockKind {
     /// Waiting on an upstream task. Cleared automatically by the ready sweep.
     /// Never a human gate, so a task carrying it stays in `Backlog`.
     Dependency,
-    /// Needs a human decision.
+    /// Something went wrong that only a person can repair. The pipeline is
+    /// **wedged**: an agent hit a dead end, a loop has no exit, a declared
+    /// default will not validate. A person investigates and unblocks.
     NeedsInput,
     /// The agent lacks a tool, credential, or permission it needs.
     Capability,
     /// Flaky failure or provider outage. Retried under the F1 failure budget.
     Transient,
+    /// A decision step asked a question and is waiting for an answer.
+    ///
+    /// Its own kind rather than a reuse of [`BlockKind::NeedsInput`], and the
+    /// distinction is the whole of requirement 3. Both park a card in front of a
+    /// person, but they recover differently and mean opposite things about the
+    /// health of the run:
+    ///
+    ///   - `needs_input` is a *fault*. Something cannot proceed and a person has
+    ///     to change something. The run is stuck.
+    ///   - `awaiting_decision` is the pipeline **working as designed**. It asked
+    ///     what it was built to ask, in the one place a person is looking, and
+    ///     it is waiting for the reply. The run is running.
+    ///
+    /// Collapsing them would make `assess_run` report every deploy gate as a
+    /// wedged run, and a false positive there trains people to ignore the signal
+    /// — which is worse than the silence it replaced.
+    AwaitingDecision,
 }
 
 impl BlockKind {
@@ -65,6 +84,7 @@ impl BlockKind {
             BlockKind::NeedsInput => "needs_input",
             BlockKind::Capability => "capability",
             BlockKind::Transient => "transient",
+            BlockKind::AwaitingDecision => "awaiting_decision",
         }
     }
 
@@ -74,6 +94,7 @@ impl BlockKind {
             "needs_input" => Some(BlockKind::NeedsInput),
             "capability" => Some(BlockKind::Capability),
             "transient" => Some(BlockKind::Transient),
+            "awaiting_decision" => Some(BlockKind::AwaitingDecision),
             _ => None,
         }
     }
@@ -83,8 +104,16 @@ impl BlockKind {
     /// The automatic sweep must skip sticky kinds. A human parked the task
     /// knowing it could not proceed; resurrecting it on a timer would throw
     /// that decision away and hand the worker the same dead end again.
+    ///
+    /// `awaiting_decision` is sticky for a stricter reason still: the only thing
+    /// that may release it is an *answer*. A sweep that promoted it would let a
+    /// decision step run without having been decided, which is the feature
+    /// defeating itself.
     pub fn is_sticky(self) -> bool {
-        matches!(self, BlockKind::NeedsInput | BlockKind::Capability)
+        matches!(
+            self,
+            BlockKind::NeedsInput | BlockKind::Capability | BlockKind::AwaitingDecision
+        )
     }
 
     /// The status a task takes when blocked for this reason.
@@ -472,6 +501,36 @@ pub struct Task {
     pub worktree_mode: crate::workflows::WorktreeMode,
     /// What a provisioned worktree forks from. `None` means the repo's HEAD.
     pub worktree_base_ref: Option<String>,
+    /// The question a decision task asks, frozen from the step at launch.
+    ///
+    /// Frozen rather than read back from the template so that the question a
+    /// person answered is the question on the record afterwards — a live read
+    /// could be edited between the ask and the answer.
+    pub decision_question: Option<String>,
+    /// Who may answer. Empty/absent means anyone. **Advisory in v1**: recorded
+    /// alongside `decision_answered_by` so an audit can compare them, but not
+    /// enforced, because this layer has no authenticated caller identity to
+    /// enforce it against.
+    pub decision_asked_of: Option<Vec<String>>,
+    /// What happens if nobody answers.
+    pub decision_timeout_action: DecisionTimeoutAction,
+    /// How long, in seconds, from `decision_asked_at`.
+    pub decision_timeout_secs: Option<i64>,
+    /// The answer that applies on a `default` timeout.
+    pub decision_default_answer: Option<Value>,
+    /// What this decision does on a loop's second pass.
+    pub decision_ask: DecisionAsk,
+    /// When this decision became answerable. `None` means it has not been asked
+    /// yet, and answering it is refused until it has been.
+    pub decision_asked_at: Option<String>,
+    /// How it was settled. `None` while it is still open.
+    pub decision_outcome: Option<DecisionOutcome>,
+    /// Who answered. `None` for a defaulted or timed-out decision, where the
+    /// honest answer is nobody.
+    pub decision_answered_by: Option<String>,
+    /// When it was settled. For a carried answer this is the *original*
+    /// timestamp, not the moment it was reused.
+    pub decision_answered_at: Option<String>,
 }
 
 /// What executes a task.
@@ -488,6 +547,13 @@ pub enum TaskKind {
     Agent,
     /// Executed as a process. The exit code is the answer.
     Command,
+    /// Answered by a person. The answer *is* the output.
+    ///
+    /// Never claimed by a worker — see [`TaskStore::claim_predicates`]. That
+    /// exclusion is what makes the outputs of this kind of task known to have
+    /// come from a person, which is the only reason a decision step is worth
+    /// having over an agent step that asks in a channel.
+    Decision,
 }
 
 impl TaskKind {
@@ -495,6 +561,7 @@ impl TaskKind {
         match self {
             TaskKind::Agent => "agent",
             TaskKind::Command => "command",
+            TaskKind::Decision => "decision",
         }
     }
 
@@ -502,9 +569,152 @@ impl TaskKind {
         match value {
             "agent" => Some(TaskKind::Agent),
             "command" => Some(TaskKind::Command),
+            "decision" => Some(TaskKind::Decision),
             _ => None,
         }
     }
+}
+
+/// What happens to a decision nobody answers.
+///
+/// Three values because they have three recoveries, and the middle one is the
+/// one the design doc says to get right.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionTimeoutAction {
+    /// The default. It parks until answered, and the run is legitimately
+    /// blocked — correct behaviour that must not read as stuck.
+    #[default]
+    Wait,
+    /// A declared answer applies, recorded *as* a default so the record never
+    /// claims a person chose it.
+    Default,
+    /// The decision fails and the failure path routes it.
+    Fail,
+}
+
+impl DecisionTimeoutAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionTimeoutAction::Wait => "wait",
+            DecisionTimeoutAction::Default => "default",
+            DecisionTimeoutAction::Fail => "fail",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "wait" => Some(DecisionTimeoutAction::Wait),
+            "default" => Some(DecisionTimeoutAction::Default),
+            "fail" => Some(DecisionTimeoutAction::Fail),
+            _ => None,
+        }
+    }
+
+    /// Whether this action needs a deadline to act on.
+    pub fn needs_deadline(self) -> bool {
+        !matches!(self, DecisionTimeoutAction::Wait)
+    }
+}
+
+/// What a decision inside a loop does on the second pass.
+///
+/// See the migration for the argument. The short version: `EachPass` is the
+/// default because pass 2 exists precisely because the artefact changed, and
+/// reusing pass 1's answer would credit a person with approving work they never
+/// saw.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAsk {
+    /// Ask again on every pass. The default.
+    #[default]
+    EachPass,
+    /// Ask once per run; later passes carry the first answer forward, recorded
+    /// as [`DecisionOutcome::Carried`].
+    Once,
+}
+
+impl DecisionAsk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionAsk::EachPass => "each_pass",
+            DecisionAsk::Once => "once",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "each_pass" => Some(DecisionAsk::EachPass),
+            "once" => Some(DecisionAsk::Once),
+            _ => None,
+        }
+    }
+}
+
+/// How a decision was settled — the column the whole feature turns on.
+///
+/// A defaulted answer that looks identical to a human one in the run record is
+/// the provenance problem returning through a side door, so these are four
+/// values rather than a nullable `answered_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionOutcome {
+    /// A person answered. `decision_answered_by` names them.
+    Answered,
+    /// Nobody answered; the declared default applied. There are outputs, and
+    /// they are nobody's decision.
+    Defaulted,
+    /// Nobody answered, and the step declared that failing is the answer. There
+    /// are no outputs.
+    TimedOut,
+    /// A `once` decision in a loop, reusing an earlier pass's answer. The
+    /// answerer and the timestamp are the original ones.
+    Carried,
+}
+
+impl DecisionOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionOutcome::Answered => "answered",
+            DecisionOutcome::Defaulted => "defaulted",
+            DecisionOutcome::TimedOut => "timed_out",
+            DecisionOutcome::Carried => "carried",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "answered" => Some(DecisionOutcome::Answered),
+            "defaulted" => Some(DecisionOutcome::Defaulted),
+            "timed_out" => Some(DecisionOutcome::TimedOut),
+            "carried" => Some(DecisionOutcome::Carried),
+            _ => None,
+        }
+    }
+
+    /// Whether a person chose this. `false` for a default — which is the entire
+    /// point of the enum.
+    pub fn is_human(self) -> bool {
+        matches!(self, DecisionOutcome::Answered | DecisionOutcome::Carried)
+    }
+}
+
+impl std::fmt::Display for DecisionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Everything a decision task needs in order to be asked, frozen at launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionSpec {
+    /// The question, as the person answering reads it.
+    pub question: String,
+    /// Who may answer. Empty means anyone. Advisory in v1 — see the migration.
+    pub asked_of: Vec<String>,
+    pub timeout_action: DecisionTimeoutAction,
+    pub timeout_secs: Option<i64>,
+    pub default_answer: Option<Value>,
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -549,6 +759,40 @@ impl Task {
             timeout_secs,
             expect_exit_code: self.expect_exit_code,
         })
+    }
+
+    /// Everything needed to ask this decision, or `None` if it is not one.
+    ///
+    /// Returns `None` for a decision task with no question rather than asking an
+    /// empty one, on the same argument as [`Task::command_spec`]: a row written
+    /// without the fields its kind requires must be *reported*, not run with a
+    /// substituted default. A person cannot answer a question that is not there.
+    pub fn decision_spec(&self) -> Option<DecisionSpec> {
+        if self.kind != TaskKind::Decision {
+            return None;
+        }
+        let question = self
+            .decision_question
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if question.is_empty() {
+            return None;
+        }
+        Some(DecisionSpec {
+            question: question.to_string(),
+            asked_of: self.decision_asked_of.clone().unwrap_or_default(),
+            timeout_action: self.decision_timeout_action,
+            timeout_secs: self.decision_timeout_secs,
+            default_answer: self.decision_default_answer.clone(),
+        })
+    }
+
+    /// Whether this decision has been asked and is still waiting for an answer.
+    pub fn decision_is_open(&self) -> bool {
+        self.kind == TaskKind::Decision
+            && self.decision_asked_at.is_some()
+            && self.decision_outcome.is_none()
     }
 
     /// The codebase this task is bound to, as a single value.
@@ -1236,14 +1480,23 @@ impl TaskStore {
             .unwrap_or(current.assigned_agent_id.clone());
         let reassigned = next_assigned != current.assigned_agent_id;
 
-        // Naming an agent takes a pooled task out of the pool for good.
+        // *Re*assigning a pooled task takes it out of the pool for good.
         //
         // Without this the requirement outlives the decision: the next failure
         // or reap would clear the stamp — that is what returning to the pool
         // means — and the person's assignment would be quietly undone by
         // machinery they never saw. "Assign this to designer" means it is
         // designer's, so the pool membership ends here.
-        let leaves_pool = !next_assigned.is_empty() && current.required_capabilities.is_some();
+        //
+        // `reassigned`, not merely "an agent is named". A claim stamps the
+        // agent, so every later update carries that same id back — status
+        // moves, worker binding, completion. Firing on presence rather than on
+        // change meant the first such update silently ended pool membership,
+        // and the reaper then returned crashed work to the agent that died
+        // instead of to the pool, which is the precise failure this feature
+        // exists to prevent. Found by watching a live claim.
+        let leaves_pool =
+            reassigned && !next_assigned.is_empty() && current.required_capabilities.is_some();
 
         // If the task is being reassigned to a different agent, clear the worker
         // binding so the old worker cannot keep updating it.
@@ -1399,6 +1652,15 @@ impl TaskStore {
             // it there directly, and "never claimed" has to hold however it
             // arrived rather than only on the path we remembered to guard.
             "t.fan_out_placeholder = 0",
+            // A decision is answered by a person, never claimed by a worker,
+            // and this one predicate is what makes that true rather than merely
+            // intended. It is the reason a decision step's outputs are *known*
+            // to have come from a person: no other producer can reach them.
+            //
+            // Here rather than only in the sweep, for the reason above it: the
+            // sweep is not the only way into `ready`, and a decision that
+            // reached it by some other path must still be unclaimable.
+            "t.kind <> 'decision'",
             CLAIMABLE_BY_AGENT,
             &format!(
                 "NOT EXISTS (\
@@ -1879,7 +2141,24 @@ impl TaskStore {
     /// counter exists to notice a task being unblocked and re-blocked in a
     /// loop, and resetting it here would erase the very evidence of that.
     /// A task with unfinished parents goes to `backlog`, not `ready`.
-    pub async fn unblock_task(&self, task_number: i64) -> Result<Option<Task>> {
+    ///
+    /// A decision task is **refused** rather than released. Unblocking is a
+    /// single undifferentiated act — it says somebody acted, not what they
+    /// decided — and letting it release a decision would put the task back in
+    /// the queue with no answer in its outputs, which is the exact failure the
+    /// decision step was built to remove. `answer_decision` is the way through.
+    pub async fn unblock_task(&self, task_number: i64) -> Result<UnblockOutcome> {
+        if let Some(task) = self.get_by_number(task_number).await?
+            && task.kind == TaskKind::Decision
+            && task.decision_outcome.is_none()
+        {
+            return Ok(UnblockOutcome::RefusedDecision {
+                question: task
+                    .decision_question
+                    .unwrap_or_else(|| "no question recorded".to_string()),
+            });
+        }
+
         let unfinished = self.unfinished_parents(task_number).await?;
         let status = if unfinished.is_empty() {
             TaskStatus::Ready
@@ -1899,10 +2178,13 @@ impl TaskStore {
         .context("failed to unblock task")?;
 
         if result.rows_affected() == 0 {
-            return Ok(None);
+            return Ok(UnblockOutcome::NotBlocked);
         }
 
-        self.get_by_number(task_number).await
+        match self.get_by_number(task_number).await? {
+            Some(task) => Ok(UnblockOutcome::Released(Box::new(task))),
+            None => Ok(UnblockOutcome::NotBlocked),
+        }
     }
 
     /// Settle a task that will never run, with the reason on the card.
@@ -1940,6 +2222,425 @@ impl TaskStore {
         .context("failed to skip task")?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    // -- Human decisions ----------------------------------------------------
+
+    /// Park a decision that has just become answerable, and say who is being
+    /// asked.
+    ///
+    /// Called from the promote pass at exactly the point an agent or command
+    /// task would have been made `ready`. That timing is the definition of
+    /// "answerable": every parent has settled, every gate is open, and the
+    /// inputs the question is *about* have resolved. Asking earlier would put a
+    /// question in front of somebody about work that has not happened.
+    ///
+    /// `None` means nothing was asked — either somebody else got there first, or
+    /// the row is not one this can ask (which is parked and reported rather than
+    /// silently skipped).
+    async fn ask_decision(&self, task_number: i64) -> Result<Option<AskedDecision>> {
+        let Some(task) = self.get_by_number(task_number).await? else {
+            return Ok(None);
+        };
+
+        // A decision task with no question is a row that should never have been
+        // written — launch refuses it — so it is *reported*, not asked. Parked as
+        // `needs_input` rather than `awaiting_decision`, and the difference is
+        // the whole point of having two kinds: this is a fault a person must
+        // repair, not a question a person can answer.
+        let Some(spec) = task.decision_spec() else {
+            let reason = "this is a decision step with no question, so there is nothing a person \
+                          could answer — the row was written without the fields a decision \
+                          requires. Fix the template and relaunch."
+                .to_string();
+            self.block_task(task_number, BlockKind::NeedsInput, &reason)
+                .await?;
+            return Ok(None);
+        };
+
+        let audience = if spec.asked_of.is_empty() {
+            "anyone".to_string()
+        } else {
+            spec.asked_of.join(", ")
+        };
+        let deadline = spec
+            .timeout_action
+            .needs_deadline()
+            .then(|| spec.timeout_secs.map(|secs| (spec.timeout_action, secs)))
+            .flatten();
+        let reason = match deadline {
+            Some((DecisionTimeoutAction::Default, secs)) => format!(
+                "waiting for {audience} to answer: {} — if nobody answers within {secs}s the \
+                 declared default applies, and the record will say it was defaulted",
+                spec.question
+            ),
+            Some((DecisionTimeoutAction::Fail, secs)) => format!(
+                "waiting for {audience} to answer: {} — if nobody answers within {secs}s this \
+                 step fails and the run takes its failure path",
+                spec.question
+            ),
+            _ => format!(
+                "waiting for {audience} to answer: {} — this parks until it is answered",
+                spec.question
+            ),
+        };
+
+        // One conditional write, and the `decision_asked_at IS NULL` guard is
+        // what makes the ask happen exactly once. Every agent sweeps, so two
+        // ticks reaching this task at the same moment is normal; without the
+        // latch the same question would be re-notified every tick, which is an
+        // inbox nobody reads dressed up as one somebody might.
+        let updated = sqlx::query(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'awaiting_decision', \
+             last_block_kind = 'awaiting_decision', block_reason = ?, worker_id = NULL, \
+             decision_asked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND status = 'backlog' \
+               AND decision_asked_at IS NULL AND decision_outcome IS NULL",
+        )
+        .bind(&reason)
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to ask a decision")?;
+
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(AskedDecision {
+            task_number,
+            title: task.title.clone(),
+            question: spec.question,
+            asked_of: spec.asked_of,
+            deadline,
+        }))
+    }
+
+    /// Validate an answer and settle the decision, as one conditional write.
+    ///
+    /// The validator is [`validation_problems`] — the same function
+    /// [`TaskStore::submit_outputs`] calls, so a malformed answer is refused
+    /// exactly as a malformed agent output is and there is no second contract
+    /// path to drift.
+    ///
+    /// It is not literally `submit_outputs` followed by a status change, and the
+    /// reason is provenance rather than tidiness. A person answering and a
+    /// `default` timeout firing can reach this on the same second. Written as
+    /// two statements, the loser's outputs would land on a task whose record
+    /// names the winner as the decider — a decision attributed to somebody who
+    /// did not make it, which is the one failure this whole feature exists to
+    /// prevent. One `UPDATE`, guarded on `decision_outcome IS NULL`, makes the
+    /// answer and the account of who gave it the same write.
+    async fn settle_decision(
+        &self,
+        task: &Task,
+        answer: &Value,
+        outcome: DecisionOutcome,
+        answered_by: Option<&str>,
+        answered_at: Option<&str>,
+    ) -> Result<DecisionAnswer> {
+        if let Some(schema) = &task.output_schema {
+            let problems = validation_problems(schema, answer, ContractSide::Output);
+            if !problems.is_empty() {
+                return Ok(DecisionAnswer::Rejected { problems });
+            }
+        }
+
+        let updated = sqlx::query(
+            "UPDATE tasks SET outputs = ?, status = 'done', \
+             completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             block_kind = NULL, block_reason = NULL, worker_id = NULL, \
+             decision_outcome = ?, decision_answered_by = ?, \
+             decision_answered_at = COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND decision_outcome IS NULL \
+               AND status NOT IN ('done', 'skipped')",
+        )
+        .bind(answer.to_string())
+        .bind(outcome.as_str())
+        .bind(answered_by)
+        .bind(answered_at)
+        .bind(task.task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to settle a decision")?;
+
+        if updated.rows_affected() == 0 {
+            // Somebody, or a timeout, got there first. Re-read rather than
+            // guessing: the caller needs to be told *who* decided, and that is
+            // the whole reason this is not a boolean.
+            let current = self.get_by_number(task.task_number).await?;
+            return Ok(match current.as_ref().and_then(|t| t.decision_outcome) {
+                Some(outcome) => DecisionAnswer::AlreadySettled {
+                    outcome,
+                    answered_by: current.and_then(|t| t.decision_answered_by),
+                },
+                None => DecisionAnswer::TaskMissing,
+            });
+        }
+
+        let settled = self
+            .get_by_number(task.task_number)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("decision settled but not readable"))?;
+        Ok(DecisionAnswer::Accepted {
+            task: Box::new(settled),
+        })
+    }
+
+    /// Answer a decision on behalf of a person.
+    ///
+    /// The only way a human-sourced value ever reaches a task's outputs, and it
+    /// works on exactly one kind of task. That restriction is the constraint the
+    /// design doc opens with: a person must not be able to set an arbitrary
+    /// task's outputs, because an agent task's outputs are the record of what
+    /// that agent produced.
+    pub async fn answer_decision(
+        &self,
+        task_number: i64,
+        answer: &Value,
+        answered_by: &str,
+    ) -> Result<DecisionAnswer> {
+        let Some(task) = self.get_by_number(task_number).await? else {
+            return Ok(DecisionAnswer::TaskMissing);
+        };
+
+        if task.kind != TaskKind::Decision {
+            return Ok(DecisionAnswer::NotADecision { kind: task.kind });
+        }
+        if let Some(outcome) = task.decision_outcome {
+            return Ok(DecisionAnswer::AlreadySettled {
+                outcome,
+                answered_by: task.decision_answered_by.clone(),
+            });
+        }
+        // Refused before the ask, not merely discouraged. A decision that has
+        // not been asked is one whose upstream steps have not finished, so its
+        // inputs — the thing being decided *about* — do not exist yet. An answer
+        // given then is an answer about something that has not happened.
+        if task.decision_asked_at.is_none() {
+            return Ok(DecisionAnswer::NotYetAsked);
+        }
+
+        let settlement = self
+            .settle_decision(
+                &task,
+                answer,
+                DecisionOutcome::Answered,
+                Some(answered_by),
+                None,
+            )
+            .await?;
+
+        // The attempt log, written deliberately because nothing else will.
+        //
+        // A worker gets a `task_runs` row for free by being spawned. A decision
+        // has no process, so without this the attempt log would show a task that
+        // went from asked to done with nothing in between — invisible to every
+        // view built on top of it.
+        if matches!(settlement, DecisionAnswer::Accepted { .. }) {
+            match self.start_run(task_number, None).await {
+                Ok(run) => {
+                    let summary = format!("answered by {answered_by}");
+                    if let Err(error) = self
+                        .finish_run(&run.id, TaskRunOutcome::Completed, Some(&summary), None)
+                        .await
+                    {
+                        tracing::warn!(%error, task_number, "failed to close a decision's attempt row");
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_number,
+                    "failed to record an attempt row for an answered decision"
+                ),
+            }
+        }
+
+        Ok(settlement)
+    }
+
+    /// Apply the timeout policy to every decision whose deadline has passed.
+    ///
+    /// Only `default` and `fail` are selected. `wait` has no deadline by
+    /// definition, and a query that swept it would be a query looking for rows
+    /// it has already decided it will not act on.
+    pub async fn settle_timed_out_decisions(
+        &self,
+        assigned_agent_id: &str,
+    ) -> Result<Vec<DecisionTimedOut>> {
+        let due: Vec<i64> = sqlx::query_scalar(&format!(
+            "SELECT task_number FROM tasks t \
+             WHERE {SWEEPABLE_BY_AGENT} \
+               AND t.kind = 'decision' \
+               AND t.decision_outcome IS NULL \
+               AND t.decision_asked_at IS NOT NULL \
+               AND t.decision_timeout_action IN ('default', 'fail') \
+               AND t.decision_timeout_secs IS NOT NULL \
+               AND t.status NOT IN {SETTLED_STATUSES} \
+               AND strftime('%s', 'now') - strftime('%s', t.decision_asked_at) \
+                   >= t.decision_timeout_secs \
+             ORDER BY t.task_number ASC"
+        ))
+        .bind(assigned_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to find decisions whose deadline has passed")?;
+
+        let mut settled = Vec::new();
+        for task_number in due {
+            match self.apply_decision_timeout(task_number).await {
+                Ok(Some(outcome)) => settled.push(outcome),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_number,
+                    "failed to apply a decision's timeout — the next sweep retries"
+                ),
+            }
+        }
+        Ok(settled)
+    }
+
+    /// One decision, past its deadline.
+    async fn apply_decision_timeout(&self, task_number: i64) -> Result<Option<DecisionTimedOut>> {
+        let Some(task) = self.get_by_number(task_number).await? else {
+            return Ok(None);
+        };
+        let Some(spec) = task.decision_spec() else {
+            return Ok(None);
+        };
+        let secs = spec.timeout_secs.unwrap_or_default();
+
+        match spec.timeout_action {
+            // Nothing to do, and reaching here means the query and this match
+            // disagree — which is worth neither a write nor a silence.
+            DecisionTimeoutAction::Wait => Ok(None),
+
+            DecisionTimeoutAction::Fail => {
+                let detail = format!(
+                    "nobody answered within {secs}s, and this decision's timeout policy is \
+                     `fail` — the step failed and the run takes its failure path"
+                );
+                // `needs_input`, not `awaiting_decision`: it is no longer
+                // waiting for anybody. Nothing will answer it, and leaving it
+                // under the waiting kind would have `assess_run` report a run
+                // that has definitively failed as one that is still going.
+                let updated = sqlx::query(
+                    "UPDATE tasks SET status = 'blocked', block_kind = 'needs_input', \
+                     last_block_kind = 'needs_input', block_reason = ?, last_error = ?, \
+                     worker_id = NULL, decision_outcome = 'timed_out', \
+                     decision_answered_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                     WHERE task_number = ? AND decision_outcome IS NULL \
+                       AND status NOT IN ('done', 'skipped')",
+                )
+                .bind(&detail)
+                .bind(&detail)
+                .bind(task_number)
+                .execute(&self.pool)
+                .await
+                .context("failed to fail a decision nobody answered")?;
+
+                if updated.rows_affected() == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(DecisionTimedOut {
+                    task_number,
+                    title: task.title.clone(),
+                    outcome: Some(DecisionOutcome::TimedOut),
+                    detail,
+                }))
+            }
+
+            DecisionTimeoutAction::Default => {
+                // Launch refuses a `default` step with no default, so reaching
+                // here means the row was edited underneath us. Parked for a
+                // person rather than guessed at: inventing an answer is the one
+                // thing a decision step must never do.
+                let Some(answer) = spec.default_answer.clone() else {
+                    let detail = format!(
+                        "nobody answered within {secs}s and this decision's timeout policy is \
+                         `default`, but no default answer is recorded on the task — so there is \
+                         nothing to apply and it still needs a person"
+                    );
+                    return self.park_unusable_default(&task, detail).await;
+                };
+
+                match self
+                    .settle_decision(&task, &answer, DecisionOutcome::Defaulted, None, None)
+                    .await?
+                {
+                    DecisionAnswer::Accepted { .. } => Ok(Some(DecisionTimedOut {
+                        task_number,
+                        title: task.title.clone(),
+                        outcome: Some(DecisionOutcome::Defaulted),
+                        detail: format!(
+                            "nobody answered within {secs}s, so the declared default applied — \
+                             recorded as defaulted, not as a person's decision"
+                        ),
+                    })),
+                    // The declared default does not fit the step's own schema.
+                    // A template bug, caught at launch in every ordinary case;
+                    // if it reaches here the decision goes back to needing a
+                    // person and is deliberately *not* recorded as decided.
+                    DecisionAnswer::Rejected { problems } => {
+                        let detail = format!(
+                            "nobody answered within {secs}s and the declared default does not \
+                             match this step's own output_schema, so it cannot be applied: {} — \
+                             the decision still needs a person",
+                            problems
+                                .iter()
+                                .map(|problem| problem.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        );
+                        self.park_unusable_default(&task, detail).await
+                    }
+                    // Somebody answered between the query and the write. Their
+                    // answer stands, which is the outcome we want.
+                    _ => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Park a decision whose declared default cannot be applied.
+    ///
+    /// `needs_input` and **no** `decision_outcome`. Both halves matter: the kind
+    /// says a person must repair something (so the run reads as stuck, which it
+    /// is), and the absent outcome says nothing has been decided — a decision
+    /// recorded as settled by a default that never applied would be a lie in
+    /// exactly the place this feature promises not to tell one.
+    async fn park_unusable_default(
+        &self,
+        task: &Task,
+        detail: String,
+    ) -> Result<Option<DecisionTimedOut>> {
+        let updated = sqlx::query(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'needs_input', \
+             last_block_kind = 'needs_input', block_reason = ?, last_error = ?, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND decision_outcome IS NULL \
+               AND status NOT IN ('done', 'skipped')",
+        )
+        .bind(&detail)
+        .bind(&detail)
+        .bind(task.task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to park a decision whose default cannot be applied")?;
+
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(DecisionTimedOut {
+            task_number: task.task_number,
+            title: task.title.clone(),
+            outcome: None,
+            detail,
+        }))
     }
 
     // -- Ready sweep --------------------------------------------------------
@@ -2039,6 +2740,19 @@ impl TaskStore {
             );
         }
 
+        // Then settle any decision whose deadline has passed, before the promote
+        // pass reads the graph. Same argument again: a decision that defaults on
+        // this tick frees the steps below it on this tick, and a timeout applied
+        // after the promote pass is permanently one tick late.
+        match self.settle_timed_out_decisions(assigned_agent_id).await {
+            Ok(settled) => sweep.decided = settled,
+            Err(error) => tracing::warn!(
+                %error,
+                assigned_agent_id,
+                "failed to apply decision timeouts while sweeping — continuing with the graph as it is"
+            ),
+        }
+
         // Promote: eligible and waiting.
         //
         // The last clause decides what "waiting" means, and it turns on who put
@@ -2079,8 +2793,8 @@ impl TaskStore {
         // promotable the moment the body finishes, and the body finishes
         // whether the loop converged or gave up. Only the boundary can tell
         // those apart, and it clears this column when it does.
-        let promoted: Vec<i64> = sqlx::query_scalar(&format!(
-            "SELECT task_number FROM tasks t \
+        let promoted: Vec<(i64, String)> = sqlx::query_as(&format!(
+            "SELECT task_number, kind FROM tasks t \
              WHERE {SWEEPABLE_BY_AGENT} \
                AND t.status = 'backlog' \
                AND t.fan_out_placeholder = 0 \
@@ -2109,9 +2823,10 @@ impl TaskStore {
         // and phrased as "which of these are held" rather than filtered away in
         // SQL, so the sweep can say *why* a task did not move. A task held by
         // something invisible is the failure mode this whole feature invites.
-        let gated = self.gate_holds(&promoted).await?;
+        let candidates: Vec<i64> = promoted.iter().map(|(number, _)| *number).collect();
+        let gated = self.gate_holds(&candidates).await?;
 
-        for task_number in promoted {
+        for (task_number, kind) in promoted {
             if let Some(hold) = gated.iter().find(|held| held.task_number == task_number) {
                 sweep.gated.push(hold.clone());
                 continue;
@@ -2182,6 +2897,29 @@ impl TaskStore {
                         "failed to check inputs while sweeping — promoting anyway"
                     );
                 }
+            }
+
+            // The fork in the road, and the only scheduling change a decision
+            // step needs.
+            //
+            // Everything above this line — parents settled, gates open, inputs
+            // resolved, skips propagated — decided that this task is ready to
+            // happen. For an agent or a command that means `ready`, and a worker
+            // takes it. For a decision it means the question has become
+            // answerable, which is precisely when a person should be asked. So
+            // it is parked for a person here instead, and the notification goes
+            // out on the same pass.
+            if TaskKind::parse(&kind) == Some(TaskKind::Decision) {
+                match self.ask_decision(task_number).await {
+                    Ok(Some(asked)) => sweep.asking.push(asked),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        task_number,
+                        "failed to ask a decision that became answerable — the next sweep retries"
+                    ),
+                }
+                continue;
             }
 
             let updated = sqlx::query(
@@ -2762,9 +3500,11 @@ impl TaskStore {
                      project_id, repo_id, worktree_id, input_schema, output_schema, \
                      system_prompt, workflow_run_id, workflow_step_key, fan_out_branch_key, \
                      kind, command, command_timeout_secs, expect_exit_code, \
-                     worktree_mode, worktree_base_ref) \
+                     worktree_mode, worktree_base_ref, \
+                     decision_question, decision_asked_of, decision_timeout_action, \
+                     decision_timeout_secs, decision_default_answer, decision_ask) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                         ?, ?, ?, ?, ?, ?)",
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(task_number)
@@ -2813,6 +3553,28 @@ impl TaskStore {
             .bind(placeholder.expect_exit_code)
             .bind(placeholder.worktree_mode.as_str())
             .bind(&placeholder.worktree_base_ref)
+            // A fan-out of decisions — "approve each of these five repos" —
+            // travels the same way, and for the same reason: a branch that lost
+            // its question would be a decision task nobody could answer, and a
+            // branch that lost its `kind` would be handed to a worker.
+            .bind(&placeholder.decision_question)
+            .bind(
+                placeholder
+                    .decision_asked_of
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .context("failed to serialize a decision's audience")?,
+            )
+            .bind(placeholder.decision_timeout_action.as_str())
+            .bind(placeholder.decision_timeout_secs)
+            .bind(
+                placeholder
+                    .decision_default_answer
+                    .as_ref()
+                    .map(|value| value.to_string()),
+            )
+            .bind(placeholder.decision_ask.as_str())
             .execute(&mut *tx)
             .await
             .context("failed to insert a fan-out branch")?;
@@ -3471,14 +4233,39 @@ impl TaskStore {
             let subtasks =
                 serde_json::to_string(&task.subtasks).context("failed to serialize subtasks")?;
 
+            // A decision the author marked `once`, which has already been
+            // settled, is carried into this pass rather than asked again.
+            //
+            // The default is the opposite — every pass asks — because pass 2
+            // exists precisely because the artefact under review changed, and
+            // reusing pass 1's answer would credit a person with approving work
+            // they never saw. `once` is the opt-in for the gates that really are
+            // a property of the run ("is this deploy authorised at all"), where
+            // three prompts for one deploy is the maddening outcome.
+            //
+            // Recorded as `carried`, keeping the original answerer and the
+            // original timestamp: a carried answer that stamped itself with the
+            // current time would read as a fresh approval.
+            let carried = (task.kind == TaskKind::Decision
+                && task.decision_ask == DecisionAsk::Once
+                && task.decision_outcome.is_some())
+            .then_some(task);
+
             sqlx::query(
                 "INSERT INTO tasks (\
                      id, task_number, title, description, status, priority, \
                      owner_agent_id, assigned_agent_id, subtasks, metadata, created_by, \
                      project_id, repo_id, worktree_id, input_schema, output_schema, \
                      system_prompt, max_retries, workflow_run_id, workflow_step_key, \
-                     loop_group, loop_iteration, loop_terminal) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     loop_group, loop_iteration, loop_terminal, \
+                     kind, command, command_timeout_secs, expect_exit_code, \
+                     worktree_mode, worktree_base_ref, \
+                     decision_question, decision_asked_of, decision_timeout_action, \
+                     decision_timeout_secs, decision_default_answer, decision_ask, \
+                     decision_asked_at, decision_outcome, decision_answered_by, \
+                     decision_answered_at, outputs, completed_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(task_number)
@@ -3487,7 +4274,13 @@ impl TaskStore {
             // Backlog like everything else the scheduler emits. The sweep
             // decides what is eligible, and a pass whose inputs will not
             // resolve should stall visibly rather than be claimed and blocked.
-            .bind(TaskStatus::Backlog.as_str())
+            //
+            // A carried decision is the one exception: it was already answered,
+            // so it lands settled and holds nothing back.
+            .bind(match carried {
+                Some(_) => TaskStatus::Done.as_str(),
+                None => TaskStatus::Backlog.as_str(),
+            })
             .bind(task.priority.as_str())
             .bind(&task.owner_agent_id)
             .bind(&task.assigned_agent_id)
@@ -3506,6 +4299,46 @@ impl TaskStore {
             .bind(&spec.group)
             .bind(next)
             .bind(i64::from(task.loop_terminal))
+            // What the step *is*, and everything frozen onto it at launch.
+            //
+            // These used not to travel, which made iteration 2 of any body
+            // containing a command step an `agent` task running a model against
+            // an empty instruction. For a decision the same omission would be
+            // worse: the second pass would be an agent task claimed by a worker,
+            // and the answer it produced would be a model's, presented in the
+            // run record as a person's.
+            .bind(task.kind.as_str())
+            .bind(&task.command)
+            .bind(task.command_timeout_secs)
+            .bind(task.expect_exit_code)
+            .bind(task.worktree_mode.as_str())
+            .bind(&task.worktree_base_ref)
+            .bind(&task.decision_question)
+            .bind(
+                task.decision_asked_of
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .context("failed to serialize a decision's audience")?,
+            )
+            .bind(task.decision_timeout_action.as_str())
+            .bind(task.decision_timeout_secs)
+            .bind(
+                task.decision_default_answer
+                    .as_ref()
+                    .map(|value| value.to_string()),
+            )
+            .bind(task.decision_ask.as_str())
+            .bind(carried.and_then(|source| source.decision_asked_at.clone()))
+            .bind(carried.map(|_| DecisionOutcome::Carried.as_str()))
+            .bind(carried.and_then(|source| source.decision_answered_by.clone()))
+            .bind(carried.and_then(|source| source.decision_answered_at.clone()))
+            .bind(
+                carried
+                    .and_then(|source| source.outputs.as_ref())
+                    .map(|value| value.to_string()),
+            )
+            .bind(carried.and_then(|source| source.completed_at.clone()))
             .execute(&mut *tx)
             .await
             .context("failed to insert a loop iteration task")?;
@@ -5102,6 +5935,62 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
+/// What answering a decision did.
+///
+/// Six outcomes rather than an `Option`, because five of them are refusals with
+/// five different repairs, and a caller that could only say "no" would send
+/// whoever is holding the answer hunting for which of them it was.
+#[derive(Debug, Clone)]
+pub enum DecisionAnswer {
+    /// Settled. The task is `done` and its outputs are the answer.
+    ///
+    /// Boxed because `Task` is by far the largest thing here and the five
+    /// refusals below carry a string or two — unboxed, every refusal would drag
+    /// a task-sized hole around with it.
+    Accepted {
+        task: Box<Task>,
+    },
+    /// The answer does not fit the step's declared `output_schema`. Refused with
+    /// the problems named, exactly as a malformed agent output is — a person can
+    /// correct it and answer again, and nothing was spent.
+    Rejected {
+        problems: Vec<ContractProblem>,
+    },
+    /// Not a decision task. The whole point of the feature: a person may not set
+    /// the outputs of an agent or command task, because those are the record of
+    /// what that agent or process produced.
+    NotADecision {
+        kind: TaskKind,
+    },
+    /// The decision has not been asked yet — its upstream steps have not
+    /// finished, so the thing being decided about does not exist.
+    NotYetAsked,
+    /// A person, or a timeout, got there first. Names which, so "somebody
+    /// already approved this" and "it defaulted while you were typing" do not
+    /// read the same.
+    AlreadySettled {
+        outcome: DecisionOutcome,
+        answered_by: Option<String>,
+    },
+    TaskMissing,
+}
+
+/// What releasing a parked task did.
+#[derive(Debug, Clone)]
+pub enum UnblockOutcome {
+    /// Boxed for the reason [`DecisionAnswer::Accepted`] is.
+    Released(Box<Task>),
+    /// Nothing to release — no such task, or it was not parked.
+    NotBlocked,
+    /// A decision, refused.
+    ///
+    /// Releasing one without an answer is precisely the undifferentiated unblock
+    /// this feature exists to replace: the task would resume and nothing
+    /// downstream would learn what was decided, so a binding on its outputs
+    /// would find nothing there. The refusal names the endpoint that does work.
+    RefusedDecision { question: String },
+}
+
 /// The result of a worker submitting outputs for its own task.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkerOutputSubmission {
@@ -5251,6 +6140,19 @@ pub struct ReadySweep {
     /// pool is not either. Every agent's sweep reports the same list, which is
     /// the point: a pool nobody owns must not become a pool nobody watches.
     pub unclaimable: Vec<UnclaimableTask>,
+    /// Decisions that became answerable on this pass and are now waiting for a
+    /// person.
+    ///
+    /// A sixth kind of "did not move", and its own list for the reason the other
+    /// five have theirs: the repair is different. `stalled` wants the graph
+    /// fixed, `pending` wants nothing yet, `gated` wants the world to change,
+    /// `skipped` wants nothing ever, `unclaimable` wants the fleet changed, and
+    /// this wants **an answer from a named person**. It is also the only one
+    /// that raises a notification, because it is the only one where somebody
+    /// specific is being waited on.
+    pub asking: Vec<AskedDecision>,
+    /// Decisions whose deadline passed on this pass, and what became of them.
+    pub decided: Vec<DecisionTimedOut>,
 }
 
 /// A pooled task no agent in the fleet can claim.
@@ -5322,7 +6224,44 @@ impl ReadySweep {
             && self.gated.is_empty()
             && self.skipped.is_empty()
             && self.unclaimable.is_empty()
+            && self.asking.is_empty()
+            && self.decided.is_empty()
     }
+}
+
+/// A decision that just became answerable and is now waiting for a person.
+///
+/// Its own report rather than an entry in `promoted`, because the recovery is
+/// different in the only way that matters: a promoted task needs nobody, and
+/// this one needs somebody told. It is what the notification is built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedDecision {
+    pub task_number: i64,
+    pub title: String,
+    /// The question, as the person answering will read it.
+    pub question: String,
+    /// Who was asked. Empty means anyone. Advisory — see [`Task::decision_asked_of`].
+    pub asked_of: Vec<String>,
+    /// When it stops waiting, and what happens then. `None` for `wait`, which
+    /// is the default and parks indefinitely.
+    pub deadline: Option<(DecisionTimeoutAction, i64)>,
+}
+
+/// A decision the timeout sweep settled, and how.
+///
+/// Carries the outcome rather than a boolean so the log and the board can say
+/// which of the three things happened — a defaulted answer and a failed one are
+/// not the same event, and neither is a default that would not validate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionTimedOut {
+    pub task_number: i64,
+    pub title: String,
+    /// `Some` when the timeout settled it. `None` means the declared default
+    /// would not validate, so the decision is back to needing a person and is
+    /// deliberately *not* recorded as decided by one.
+    pub outcome: Option<DecisionOutcome>,
+    /// One line, already phrased for a human.
+    pub detail: String,
 }
 
 /// Walk the edges downward from `start`, looking for `target`.
@@ -5396,7 +6335,10 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      loop_group, loop_iteration, loop_terminal, loop_resolution, \
      awaiting_loop_group, awaiting_loop_arm, skip_reason, \
      kind, command, command_timeout_secs, expect_exit_code, \
-     worktree_mode, worktree_base_ref";
+     worktree_mode, worktree_base_ref, \
+     decision_question, decision_asked_of, decision_timeout_action, \
+     decision_timeout_secs, decision_default_answer, decision_ask, \
+     decision_asked_at, decision_outcome, decision_answered_by, decision_answered_at";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -5663,6 +6605,47 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .and_then(crate::workflows::WorktreeMode::parse)
             .unwrap_or(crate::workflows::WorktreeMode::Inherit),
         worktree_base_ref: read_optional_id(&row, "worktree_base_ref"),
+        decision_question: read_optional_id(&row, "decision_question"),
+        decision_asked_of: row
+            .try_get::<Option<String>, _>("decision_asked_of")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
+        // An unreadable action reads as `wait`, which is the conservative
+        // direction in the only sense that matters here: it parks for a person
+        // rather than applying a default or failing a step on the strength of a
+        // corrupt row. Waiting is visible; a spurious default is not.
+        decision_timeout_action: row
+            .try_get::<Option<String>, _>("decision_timeout_action")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(DecisionTimeoutAction::parse)
+            .unwrap_or(DecisionTimeoutAction::Wait),
+        decision_timeout_secs: row.try_get("decision_timeout_secs").ok().flatten(),
+        decision_default_answer: read_optional_json(&row, "decision_default_answer"),
+        // Same argument: an unreadable value asks again, which at worst costs a
+        // person a second prompt. Guessing `once` would silently reuse an answer
+        // for work nobody looked at.
+        decision_ask: row
+            .try_get::<Option<String>, _>("decision_ask")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(DecisionAsk::parse)
+            .unwrap_or(DecisionAsk::EachPass),
+        decision_asked_at: read_optional_timestamp(&row, "decision_asked_at"),
+        // An unreadable outcome reads as *unsettled*. That keeps the decision on
+        // somebody's board instead of quietly claiming it was decided, and an
+        // unsettled decision cannot be mistaken for a human one.
+        decision_outcome: row
+            .try_get::<Option<String>, _>("decision_outcome")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(DecisionOutcome::parse),
+        decision_answered_by: read_optional_id(&row, "decision_answered_by"),
+        decision_answered_at: read_optional_timestamp(&row, "decision_answered_at"),
     })
 }
 
@@ -5805,7 +6788,17 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             command_timeout_secs INTEGER,
             expect_exit_code INTEGER,
             worktree_mode TEXT NOT NULL DEFAULT 'inherit',
-            worktree_base_ref TEXT
+            worktree_base_ref TEXT,
+            decision_question TEXT,
+            decision_asked_of TEXT,
+            decision_timeout_action TEXT NOT NULL DEFAULT 'wait',
+            decision_timeout_secs INTEGER,
+            decision_default_answer TEXT,
+            decision_ask TEXT NOT NULL DEFAULT 'each_pass',
+            decision_asked_at TEXT,
+            decision_outcome TEXT,
+            decision_answered_by TEXT,
+            decision_answered_at TEXT
         )
         "#,
     )
@@ -7195,6 +8188,89 @@ mod tests {
         }
     }
 
+    /// An update that merely carries the current assignee must not end pool
+    /// membership.
+    ///
+    /// A claim stamps the agent, so every later update — a status move, a
+    /// worker binding, completion — passes that same id back in. Ending
+    /// membership on *presence* rather than on *change* meant the first such
+    /// update silently unpooled the task, and the reaper then returned crashed
+    /// work to the agent that died rather than to the pool. That is the exact
+    /// failure capability assignment exists to prevent.
+    #[tokio::test]
+    async fn an_update_echoing_the_current_agent_leaves_a_task_in_its_pool() {
+        let store = setup_store().await;
+        let task = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-1".into(),
+                assigned_agent_id: String::new(),
+                title: "pooled work".into(),
+                created_by: "agent-1".into(),
+                required_capabilities: vec!["rust".into()],
+                status: TaskStatus::Ready,
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+
+        // Claimed for real, because the claim is a direct UPDATE that never
+        // goes through `update` — simulating it with `update` would look like
+        // a reassignment from nobody, which legitimately does end membership.
+        store
+            .set_agent_capabilities("agent-1", &["rust".to_string()])
+            .await
+            .expect("declare capabilities");
+        let claimed = store
+            .claim_next_ready("agent-1")
+            .await
+            .expect("claim")
+            .expect("a capable agent claims pooled work");
+        assert_eq!(claimed.task_number, task.task_number);
+        assert_eq!(
+            claimed.required_capabilities,
+            Some(vec!["rust".to_string()]),
+            "claiming alone must not end pool membership"
+        );
+
+        // An ordinary later update that happens to carry the same agent.
+        let after = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    assigned_agent_id: Some("agent-1".into()),
+                    status: Some(TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("exists");
+
+        assert_eq!(
+            after.required_capabilities,
+            Some(vec!["rust".to_string()]),
+            "the task must still belong to its pool so a reap can return it there"
+        );
+
+        // Reassigning to a *different* agent is a person's decision and does
+        // end membership — the other half of the rule.
+        let moved = store
+            .update(
+                task.task_number,
+                UpdateTaskInput {
+                    assigned_agent_id: Some("agent-2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("reassign")
+            .expect("exists");
+        assert_eq!(
+            moved.required_capabilities, None,
+            "naming a different agent takes it out of the pool for good"
+        );
+    }
+
     /// A dependency wait is ordinary scheduling, not an incident: it rests in
     /// the backlog rather than the blocked column a human is meant to triage.
     #[tokio::test]
@@ -7292,11 +8368,11 @@ mod tests {
             .await
             .expect("block")
             .expect("exists");
-        let released = store
-            .unblock_task(free.task_number)
-            .await
-            .expect("unblock")
-            .expect("exists");
+        let UnblockOutcome::Released(released) =
+            store.unblock_task(free.task_number).await.expect("unblock")
+        else {
+            panic!("a parked agent task is released by unblocking it");
+        };
         assert_eq!(released.status, TaskStatus::Ready);
         assert!(released.block_kind.is_none());
 
@@ -7311,11 +8387,13 @@ mod tests {
             .await
             .expect("block")
             .expect("exists");
-        let released = store
+        let UnblockOutcome::Released(released) = store
             .unblock_task(gated.task_number)
             .await
             .expect("unblock")
-            .expect("exists");
+        else {
+            panic!("a parked agent task is released by unblocking it");
+        };
         assert_eq!(
             released.status,
             TaskStatus::Backlog,
@@ -9650,5 +10728,460 @@ mod tests {
                 .is_none(),
             "the dropped capability stops matching immediately"
         );
+    }
+    // -- Human decisions ----------------------------------------------------
+    //
+    // The constraint every test below is protecting: a person may set the
+    // outputs of a decision task and of nothing else, and the record must always
+    // be able to say whether a person set them.
+
+    /// A decision task, wired the way `emit_graph` writes one.
+    ///
+    /// `workflow_run_id` is set because the promote pass needs one signal that
+    /// something automatic decided this should run; without it a parentless card
+    /// is treated as one a person parked, and never considered.
+    async fn decision_task(store: &TaskStore, question: &str, schema: serde_json::Value) -> Task {
+        let task = task_at(store, question, TaskStatus::Backlog).await;
+        sqlx::query(
+            "UPDATE tasks SET kind = 'decision', decision_question = ?, output_schema = ?, \
+             workflow_run_id = 'run-decisions' WHERE task_number = ?",
+        )
+        .bind(question)
+        .bind(schema.to_string())
+        .bind(task.task_number)
+        .execute(store.pool())
+        .await
+        .expect("make it a decision task");
+
+        store
+            .get_by_number(task.task_number)
+            .await
+            .expect("read back")
+            .expect("task exists")
+    }
+
+    fn approval_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["approved"],
+            "properties": {"approved": {"type": "boolean"}},
+            "additionalProperties": false,
+        })
+    }
+
+    /// **The load-bearing test.** A decision is answered by a person and claimed
+    /// by nobody.
+    ///
+    /// If this regresses, a worker picks up the card and produces the answer
+    /// itself — which is precisely the agent-step-that-asks-in-a-channel this
+    /// feature exists to replace, except now it wears the label that says a
+    /// person decided. Every branch predicate downstream then routes on a
+    /// model's belief while the run record calls it an operator's decision.
+    ///
+    /// Asserted twice on purpose: once through the sweep, which must park it
+    /// rather than promote it, and once against a decision forced to `ready` by
+    /// hand, which proves the claim predicate holds however the task arrived.
+    #[tokio::test]
+    async fn a_decision_step_parks_for_a_person_rather_than_being_claimed_by_a_worker() {
+        let store = setup_store().await;
+        let decision = decision_task(&store, "Ship v1?", approval_schema()).await;
+
+        let sweep = store.recompute_ready("agent-test").await.expect("sweep");
+        assert!(
+            !sweep.promoted.contains(&decision.task_number),
+            "a decision must never be promoted to ready — ready means claimable"
+        );
+        let asked = sweep
+            .asking
+            .iter()
+            .find(|asked| asked.task_number == decision.task_number)
+            .expect("the sweep has to report the decision it just asked, or nobody is ever told");
+        assert_eq!(asked.question, "Ship v1?");
+
+        let parked = store
+            .get_by_number(decision.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(parked.status, TaskStatus::Blocked);
+        assert_eq!(
+            parked.block_kind,
+            Some(BlockKind::AwaitingDecision),
+            "waiting for a person to answer is not the same condition as needing a person to \
+             repair something, and the run assessor reads exactly this to tell them apart"
+        );
+        assert!(
+            parked.decision_asked_at.is_some(),
+            "the ask has to be stamped, or the timeout has no anchor and the notification \
+             repeats every tick"
+        );
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "there is nothing here a worker may take"
+        );
+
+        // And the same again against the claim path directly, because the sweep
+        // is not the only way into `ready`.
+        sqlx::query("UPDATE tasks SET status = 'ready' WHERE task_number = ?")
+            .bind(decision.task_number)
+            .execute(store.pool())
+            .await
+            .expect("force it ready");
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a decision sitting in `ready` is still not a worker's to take — otherwise the \
+             guarantee is only as good as the paths we remembered to guard"
+        );
+    }
+
+    /// The other half of the feature: the answer has to be *usable*.
+    ///
+    /// A decision whose answer nothing downstream can read is the same dead end
+    /// as `unblock` — somebody acted, and the pipeline learned nothing. This
+    /// asserts the answer lands in ordinary `outputs` and resolves through an
+    /// ordinary binding, with no decision-shaped plumbing anywhere below it.
+    #[tokio::test]
+    async fn an_answer_matching_the_schema_settles_the_decision_and_is_read_by_an_ordinary_binding()
+    {
+        let store = setup_store().await;
+        let decision = decision_task(&store, "Ship v1?", approval_schema()).await;
+        let ship = task_at(&store, "ship", TaskStatus::Backlog).await;
+        store
+            .link_tasks(decision.task_number, ship.task_number)
+            .await
+            .expect("link");
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: ship.task_number,
+                input_key: "approved".into(),
+                source_task_number: Some(decision.task_number),
+                source_pointer: Some("/approved".into()),
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("bind");
+
+        store.recompute_ready("agent-test").await.expect("sweep");
+
+        let answer = serde_json::json!({"approved": true});
+        let settled = match store
+            .answer_decision(decision.task_number, &answer, "pat")
+            .await
+            .expect("answer")
+        {
+            DecisionAnswer::Accepted { task } => task,
+            other => panic!("a well-formed answer settles the decision, got {other:?}"),
+        };
+
+        assert_eq!(settled.status, TaskStatus::Done);
+        assert_eq!(settled.outputs, Some(answer.clone()));
+        assert_eq!(settled.decision_outcome, Some(DecisionOutcome::Answered));
+        assert_eq!(settled.decision_answered_by.as_deref(), Some("pat"));
+        assert!(settled.block_kind.is_none());
+        assert!(
+            !store
+                .list_runs(decision.task_number)
+                .await
+                .expect("attempts")
+                .is_empty(),
+            "a decision has no process, so its attempt row has to be written deliberately — \
+             without it the log shows a task that went from asked to done with nothing between"
+        );
+
+        match store
+            .resolve_inputs(ship.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Resolved { inputs } => assert_eq!(
+                inputs,
+                serde_json::json!({"approved": true}),
+                "the step below reads a decision exactly as it reads any other task's outputs"
+            ),
+            other => panic!("the answer must resolve through an ordinary binding, got {other:?}"),
+        }
+    }
+
+    /// The schema is doing double duty: it describes the question *and* refuses
+    /// a malformed answer, through the same validator that checks an agent's
+    /// outputs.
+    ///
+    /// If this regresses, "approve this deploy" accepts the string `"yes"` and
+    /// the condition downstream comparing it to `true` silently takes the wrong
+    /// branch. The refusal has to name what is wrong, because the person
+    /// answering is the one who has to correct it.
+    #[tokio::test]
+    async fn an_answer_that_does_not_match_the_schema_is_refused_naming_what_is_wrong() {
+        let store = setup_store().await;
+        let decision = decision_task(&store, "Ship v1?", approval_schema()).await;
+        store.recompute_ready("agent-test").await.expect("sweep");
+
+        let problems = match store
+            .answer_decision(
+                decision.task_number,
+                &serde_json::json!({"approved": "yes"}),
+                "pat",
+            )
+            .await
+            .expect("answer")
+        {
+            DecisionAnswer::Rejected { problems } => problems,
+            other => panic!("a string is not a boolean, got {other:?}"),
+        };
+        let text = problems
+            .iter()
+            .map(|problem| problem.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(
+            text.contains("/approved"),
+            "the refusal has to name the field that is wrong: {text}"
+        );
+        assert!(
+            text.contains("boolean"),
+            "and what it should have been: {text}"
+        );
+
+        let still_open = store
+            .get_by_number(decision.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert!(
+            still_open.outputs.is_none(),
+            "a refused answer must leave nothing behind — a half-written answer is worse than none"
+        );
+        assert!(
+            still_open.decision_outcome.is_none(),
+            "and the decision is still open, so the person can correct it and answer again"
+        );
+        assert_eq!(still_open.status, TaskStatus::Blocked);
+    }
+
+    /// **The provenance test.** A defaulted answer and a human answer are the
+    /// same bytes in `outputs`, and must not be the same thing in the record.
+    ///
+    /// This is the design doc's named risk: a default that looks identical to an
+    /// answer is the provenance problem coming back through a side door. If it
+    /// regresses, a deploy that nobody approved is indistinguishable, forever
+    /// afterwards, from one an operator signed off — which is the entire reason
+    /// a decision step exists rather than an agent step that asks.
+    #[tokio::test]
+    async fn a_defaulted_answer_is_distinguishable_from_a_human_one_in_the_record() {
+        let store = setup_store().await;
+        let by_hand = decision_task(&store, "Ship A?", approval_schema()).await;
+        let by_timeout = decision_task(&store, "Ship B?", approval_schema()).await;
+
+        sqlx::query(
+            "UPDATE tasks SET decision_timeout_action = 'default', decision_timeout_secs = 60, \
+             decision_default_answer = ? WHERE task_number = ?",
+        )
+        .bind(serde_json::json!({"approved": true}).to_string())
+        .bind(by_timeout.task_number)
+        .execute(store.pool())
+        .await
+        .expect("declare a default");
+
+        store.recompute_ready("agent-test").await.expect("sweep");
+
+        store
+            .answer_decision(
+                by_hand.task_number,
+                &serde_json::json!({"approved": true}),
+                "pat",
+            )
+            .await
+            .expect("answer");
+
+        // Backdate the ask so the deadline has passed. The anchor is the ask,
+        // not the launch, which is why this is the column that moves.
+        sqlx::query(
+            "UPDATE tasks SET decision_asked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') \
+             WHERE task_number = ?",
+        )
+        .bind(by_timeout.task_number)
+        .execute(store.pool())
+        .await
+        .expect("backdate the ask");
+
+        let settled = store
+            .settle_timed_out_decisions("agent-test")
+            .await
+            .expect("timeout sweep");
+        assert_eq!(
+            settled.len(),
+            1,
+            "only the one past its deadline: {settled:?}"
+        );
+        assert_eq!(settled[0].outcome, Some(DecisionOutcome::Defaulted));
+
+        let human = store
+            .get_by_number(by_hand.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        let defaulted = store
+            .get_by_number(by_timeout.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+
+        assert_eq!(
+            human.outputs, defaulted.outputs,
+            "the two answers are byte-identical, which is exactly why the outputs cannot be what \
+             tells them apart"
+        );
+        assert_eq!(human.status, defaulted.status, "and both are done");
+
+        assert_eq!(human.decision_outcome, Some(DecisionOutcome::Answered));
+        assert_eq!(human.decision_answered_by.as_deref(), Some("pat"));
+        assert!(
+            human
+                .decision_outcome
+                .is_some_and(DecisionOutcome::is_human)
+        );
+
+        assert_eq!(defaulted.decision_outcome, Some(DecisionOutcome::Defaulted));
+        assert!(
+            defaulted.decision_answered_by.is_none(),
+            "nobody chose it, so naming somebody would be a lie in the one place this feature \
+             promises not to tell one"
+        );
+        assert!(
+            !defaulted
+                .decision_outcome
+                .is_some_and(DecisionOutcome::is_human)
+        );
+    }
+
+    /// A `default` timeout whose declared answer will not validate must leave
+    /// the decision *unanswered*, not record it as decided.
+    ///
+    /// Launch refuses this case, so reaching it means somebody edited the row —
+    /// but the failure mode if it regressed is the worst one available: outputs
+    /// that do not satisfy the step's own contract, stamped `defaulted`, read by
+    /// every binding below as if they were an answer.
+    #[tokio::test]
+    async fn a_default_answer_that_does_not_fit_the_schema_leaves_the_decision_needing_a_person() {
+        let store = setup_store().await;
+        let decision = decision_task(&store, "Ship?", approval_schema()).await;
+        sqlx::query(
+            "UPDATE tasks SET decision_timeout_action = 'default', decision_timeout_secs = 1, \
+             decision_default_answer = ? WHERE task_number = ?",
+        )
+        .bind(serde_json::json!({"approved": "maybe"}).to_string())
+        .bind(decision.task_number)
+        .execute(store.pool())
+        .await
+        .expect("declare a bad default");
+
+        store.recompute_ready("agent-test").await.expect("sweep");
+        sqlx::query(
+            "UPDATE tasks SET decision_asked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour') \
+             WHERE task_number = ?",
+        )
+        .bind(decision.task_number)
+        .execute(store.pool())
+        .await
+        .expect("backdate the ask");
+
+        let settled = store
+            .settle_timed_out_decisions("agent-test")
+            .await
+            .expect("timeout sweep");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(
+            settled[0].outcome, None,
+            "nothing was decided, so nothing may be recorded as decided"
+        );
+
+        let parked = store
+            .get_by_number(decision.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert!(parked.outputs.is_none());
+        assert!(parked.decision_outcome.is_none());
+        assert_eq!(
+            parked.block_kind,
+            Some(BlockKind::NeedsInput),
+            "this one really is wedged — a person has to fix the template — so it must not keep \
+             the kind that means the run is healthily waiting"
+        );
+    }
+
+    /// Unblocking a decision is refused, and the refusal names the way through.
+    ///
+    /// `unblock` is a single undifferentiated act: it says somebody acted, never
+    /// what they decided. Letting it release a decision would put the task back
+    /// in the queue with empty outputs, and the binding below it would resolve
+    /// to nothing — the exact hole the decision step was built to fill,
+    /// reopened by the endpoint it was built to replace.
+    #[tokio::test]
+    async fn unblocking_a_decision_is_refused_because_it_would_release_it_without_an_answer() {
+        let store = setup_store().await;
+        let decision = decision_task(&store, "Ship v1?", approval_schema()).await;
+        store.recompute_ready("agent-test").await.expect("sweep");
+
+        match store
+            .unblock_task(decision.task_number)
+            .await
+            .expect("unblock")
+        {
+            UnblockOutcome::RefusedDecision { question } => assert_eq!(question, "Ship v1?"),
+            other => panic!("a decision is answered, never merely released: {other:?}"),
+        }
+
+        let still_parked = store
+            .get_by_number(decision.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(still_parked.status, TaskStatus::Blocked);
+        assert_eq!(
+            still_parked.block_kind,
+            Some(BlockKind::AwaitingDecision),
+            "a refused unblock changes nothing"
+        );
+    }
+
+    /// A person may not set an ordinary task's outputs through this door.
+    ///
+    /// The constraint the whole design opens with. An agent task's outputs are
+    /// the record of what that agent produced, and a person editing them
+    /// destroys the only honest account of what happened.
+    #[tokio::test]
+    async fn answering_a_task_that_is_not_a_decision_is_refused_whatever_the_answer_looks_like() {
+        let store = setup_store().await;
+        let agent_task = task_at(&store, "write the report", TaskStatus::InProgress).await;
+
+        match store
+            .answer_decision(
+                agent_task.task_number,
+                &serde_json::json!({"done": true}),
+                "pat",
+            )
+            .await
+            .expect("answer")
+        {
+            DecisionAnswer::NotADecision { kind } => assert_eq!(kind, TaskKind::Agent),
+            other => panic!("only a decision step's outputs are a human answer: {other:?}"),
+        }
+
+        let untouched = store
+            .get_by_number(agent_task.task_number)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert!(untouched.outputs.is_none());
     }
 }

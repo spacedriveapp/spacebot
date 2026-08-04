@@ -168,6 +168,17 @@ impl ProjectManageTool {
                 .list_worktrees_with_repos(&project.id)
                 .await
                 .unwrap_or_default();
+            // Declared repo-to-repo relationships (#29). Listed alongside the
+            // repos because an agent about to wire a workflow across two of
+            // them is the reader most likely to need it, and because a
+            // relationship nobody is shown is a relationship nobody uses.
+            // These are statements about the repos, not instructions: nothing
+            // here creates a step or an edge on their account.
+            let repo_dependencies = self
+                .project_store
+                .list_repo_dependencies(&project.id)
+                .await
+                .unwrap_or_default();
 
             results.push(serde_json::json!({
                 "id": project.id,
@@ -190,6 +201,12 @@ impl ProjectManageTool {
                     "path": worktree.worktree.path,
                     "branch": worktree.worktree.branch,
                     "repo_name": worktree.repo_name,
+                })).collect::<Vec<_>>(),
+                "repo_dependencies": repo_dependencies.iter().map(|dependency| serde_json::json!({
+                    "repo": dependency.repo_name,
+                    "depends_on": dependency.depends_on_repo_name,
+                    "kind": dependency.kind,
+                    "note": dependency.note,
                 })).collect::<Vec<_>>(),
             }));
         }

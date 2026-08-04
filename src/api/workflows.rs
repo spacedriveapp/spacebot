@@ -119,6 +119,43 @@ pub(super) struct SaveStepRequest {
     /// the repo's current HEAD.
     #[serde(default)]
     worktree_base_ref: Option<String>,
+    /// The question a decision step asks, as the person answering reads it.
+    /// Required on a decision step; refused on every other kind.
+    #[serde(default)]
+    decision_question: Option<String>,
+    /// Who may answer. Omit for anyone.
+    ///
+    /// **Advisory in v1.** It is recorded on the task and shown alongside the
+    /// answerer, so an audit can compare them — but it is not enforced, because
+    /// this layer has no authenticated caller identity to enforce it against and
+    /// checking a self-declared name would be enforcement in name only.
+    #[serde(default)]
+    decision_asked_of: Option<Vec<String>>,
+    /// `wait` (default), `default`, or `fail`.
+    ///
+    /// `wait` parks until answered — the run is legitimately blocked and is not
+    /// reported as stuck. `default` applies `decision_default_answer` after
+    /// `decision_timeout_secs`, recorded *as* a default. `fail` fails the step
+    /// and lets the failure path route it.
+    #[serde(default)]
+    decision_timeout_action: Option<String>,
+    /// How long to wait, in seconds, from the moment the decision is asked —
+    /// not from launch. Required by `default` and `fail`, refused by `wait`.
+    #[serde(default)]
+    decision_timeout_secs: Option<i64>,
+    /// The answer that applies on a `default` timeout. Validated against this
+    /// step's own `output_schema` at launch.
+    #[serde(default)]
+    decision_default_answer: Option<serde_json::Value>,
+    /// `each_pass` (default) or `once`, for a decision inside a loop body.
+    ///
+    /// `each_pass` re-asks on every pass, because pass 2 exists precisely
+    /// because the artefact changed and reusing pass 1's answer would credit a
+    /// person with approving work they never saw. `once` carries the first
+    /// answer forward, recorded as `carried` with the original answerer and
+    /// timestamp, for gates that are a property of the run rather than the pass.
+    #[serde(default)]
+    decision_ask: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -349,6 +386,20 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::CommandTimeoutOutOfRange { .. }
         | LaunchError::CommandStepWithoutBinding { .. }
         | LaunchError::PerBranchWithoutFanOut { .. }
+        // So are decision declarations. Every one of these names the field to
+        // change, including the default answer — checked here rather than when
+        // the timeout fires, which would be hours later and unattended.
+        | LaunchError::DecisionStepWithoutQuestion { .. }
+        | LaunchError::DecisionFieldsOnNonDecision { .. }
+        | LaunchError::DecisionStepWithoutSchema { .. }
+        | LaunchError::DecisionTimeoutWithoutDeadline { .. }
+        | LaunchError::DecisionDeadlineWithoutTimeout { .. }
+        | LaunchError::DecisionTimeoutOutOfRange { .. }
+        | LaunchError::DecisionDefaultWithoutAnswer { .. }
+        | LaunchError::DecisionAnswerWithoutDefault { .. }
+        | LaunchError::DecisionDefaultRejected { .. }
+        | LaunchError::DecisionStepRequiresCapabilities { .. }
+        | LaunchError::DecisionStepWithWorktree { .. }
         // A step that says both who and what, or neither usefully, is a
         // template fact and the message names the field.
         | LaunchError::StepAssignedAndRequires { .. }
@@ -612,7 +663,21 @@ pub(super) async fn put_step(
         None => crate::workflows::StepKind::Agent,
         Some(value) => crate::workflows::StepKind::parse(value).ok_or((
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("`{value}` is not a step kind — use `agent` or `command`"),
+            format!("`{value}` is not a step kind — use `agent`, `command` or `decision`"),
+        ))?,
+    };
+    let decision_timeout_action = match request.decision_timeout_action.as_deref() {
+        None => crate::tasks::DecisionTimeoutAction::default(),
+        Some(value) => crate::tasks::DecisionTimeoutAction::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{value}` is not a decision timeout policy — use `wait`, `default` or `fail`"),
+        ))?,
+    };
+    let decision_ask = match request.decision_ask.as_deref() {
+        None => crate::tasks::DecisionAsk::default(),
+        Some(value) => crate::tasks::DecisionAsk::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{value}` is not a decision repeat policy — use `each_pass` or `once`"),
         ))?,
     };
     let worktree_mode = match request.worktree_mode.as_deref() {
@@ -649,6 +714,12 @@ pub(super) async fn put_step(
             expect_exit_code: request.expect_exit_code,
             worktree_mode,
             worktree_base_ref: request.worktree_base_ref,
+            decision_question: request.decision_question,
+            decision_asked_of: request.decision_asked_of,
+            decision_timeout_action,
+            decision_timeout_secs: request.decision_timeout_secs,
+            decision_default_answer: request.decision_default_answer,
+            decision_ask,
         })
         .await
         .map_err(internal)?;

@@ -4864,14 +4864,15 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {}, skipped {}, unclaimable {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {}, skipped {}, unclaimable {}, asking {} task(s)",
                         sweep.promoted.len(),
                         sweep.demoted.len(),
                         sweep.stalled.len(),
                         sweep.pending.len(),
                         sweep.gated.len(),
                         sweep.skipped.len(),
-                        sweep.unclaimable.len()
+                        sweep.unclaimable.len(),
+                        sweep.asking.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
@@ -4881,8 +4882,115 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                         "gated": sweep.gated.iter().map(|g| g.task_number).collect::<Vec<_>>(),
                         "skipped": sweep.skipped.iter().map(|s| s.task_number).collect::<Vec<_>>(),
                         "unclaimable": sweep.unclaimable.iter().map(|u| u.task_number).collect::<Vec<_>>(),
+                        "asking": sweep.asking.iter().map(|a| a.task_number).collect::<Vec<_>>(),
+                        "decided": sweep.decided.iter().map(|d| d.task_number).collect::<Vec<_>>(),
                     })),
                 );
+
+                // A decision that just became answerable. This is the one entry
+                // in the sweep that reaches out to a person rather than only
+                // being reported, because it is the one where somebody specific
+                // is being waited on — and a run blocked indefinitely on a
+                // question nobody was told about is indistinguishable, on any
+                // dashboard, from a run that is simply broken.
+                for asked in &sweep.asking {
+                    let audience = if asked.asked_of.is_empty() {
+                        "anyone".to_string()
+                    } else {
+                        asked.asked_of.join(", ")
+                    };
+                    logger.log(
+                        "task_decision_asked",
+                        &format!(
+                            "Task #{} is waiting for {audience} to answer: {}",
+                            asked.task_number, asked.question
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": asked.task_number,
+                            "question": asked.question,
+                            "asked_of": asked.asked_of,
+                            "timeout_action": asked.deadline.map(|(action, _)| action.as_str()),
+                            "timeout_secs": asked.deadline.map(|(_, secs)| secs),
+                        })),
+                    );
+
+                    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: deps.agent_id.clone(),
+                        task_number: asked.task_number,
+                        status: TaskStatus::Blocked.as_str().to_string(),
+                        action: "updated".to_string(),
+                    });
+
+                    let Some(api_state) = &deps.api_state else {
+                        continue;
+                    };
+                    api_state.emit_notification(crate::notifications::NewNotification {
+                        kind: crate::notifications::NotificationKind::DecisionRequested,
+                        severity: crate::notifications::NotificationSeverity::Warn,
+                        title: asked.title.clone(),
+                        // The question, not a pointer to where the question
+                        // lives. Somebody reading an inbox should be able to see
+                        // what they are being asked before deciding to open it.
+                        body: Some(match asked.deadline {
+                            Some((action, secs)) => format!(
+                                "{}\n\nIf nobody answers within {secs}s: {}.",
+                                asked.question,
+                                match action {
+                                    crate::tasks::DecisionTimeoutAction::Default =>
+                                        "the declared default applies, recorded as a default",
+                                    crate::tasks::DecisionTimeoutAction::Fail =>
+                                        "this step fails and the run takes its failure path",
+                                    crate::tasks::DecisionTimeoutAction::Wait => "it keeps waiting",
+                                }
+                            ),
+                            None => asked.question.clone(),
+                        }),
+                        agent_id: Some(deps.agent_id.to_string()),
+                        related_entity_type: Some("task".to_string()),
+                        related_entity_id: Some(asked.task_number.to_string()),
+                        action_url: Some(format!("/tasks/{}", asked.task_number)),
+                        metadata: Some(serde_json::json!({
+                            "asked_of": asked.asked_of,
+                            "timeout_action": asked.deadline.map(|(action, _)| action.as_str()),
+                            "timeout_secs": asked.deadline.map(|(_, secs)| secs),
+                        })),
+                    });
+                }
+
+                // A decision whose deadline passed. Logged with what became of
+                // it, because "defaulted" and "failed for want of an answer" are
+                // different events, and a default that could not be applied is a
+                // third — one that still needs a person.
+                for decided in &sweep.decided {
+                    logger.log(
+                        match decided.outcome {
+                            Some(crate::tasks::DecisionOutcome::Defaulted) => {
+                                "task_decision_defaulted"
+                            }
+                            Some(crate::tasks::DecisionOutcome::TimedOut) => {
+                                "task_decision_timed_out"
+                            }
+                            _ => "task_decision_default_unusable",
+                        },
+                        &format!("Task #{} — {}", decided.task_number, decided.detail),
+                        Some(serde_json::json!({
+                            "task_number": decided.task_number,
+                            "outcome": decided.outcome.map(|outcome| outcome.as_str()),
+                            "detail": decided.detail,
+                        })),
+                    );
+                    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: deps.agent_id.clone(),
+                        task_number: decided.task_number,
+                        status: match decided.outcome {
+                            Some(crate::tasks::DecisionOutcome::Defaulted) => TaskStatus::Done,
+                            _ => TaskStatus::Blocked,
+                        }
+                        .as_str()
+                        .to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
 
                 // Ready, unclaimed, and beyond the fleet. Nothing owns these —
                 // that is what being pooled means — so nothing else will ever

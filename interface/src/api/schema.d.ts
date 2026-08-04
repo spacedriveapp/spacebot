@@ -438,6 +438,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{id}/repo-dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{id}/repo-dependencies — declared edges in a project.
+         * @description The same list travels inside `GET /agents/projects/{id}`; this exists for
+         *     callers refreshing only the graph.
+         */
+        get: operations["list_repo_dependencies"];
+        put?: never;
+        /**
+         * POST /agents/projects/{id}/repo-dependencies — declare that one repo
+         *     depends on another.
+         * @description Refuses a self-dependency, an unknown repo, a repo from another project,
+         *     and a duplicate. A cycle is allowed: mutual generation between two repos is
+         *     a real arrangement, and nothing derives an execution order from these edges.
+         */
+        post: operations["declare_repo_dependency"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{id}/repos": {
         parameters: {
             query?: never;
@@ -513,6 +541,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * PUT /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+         *     — relabel or annotate an existing declaration.
+         * @description Repointing an edge is a different statement about the repos, so it is a
+         *     delete and a fresh declaration rather than an update.
+         */
+        put: operations["update_repo_dependency"];
+        post?: never;
+        /**
+         * DELETE /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+         *     — withdraw a declaration.
+         */
+        delete: operations["delete_repo_dependency"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{project_id}/repos/{repo_id}": {
         parameters: {
             query?: never;
@@ -525,6 +579,34 @@ export interface paths {
         post?: never;
         /** DELETE /agents/projects/{project_id}/repos/{repo_id} — remove a repo. */
         delete: operations["delete_repo"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions
+         *     — what is declared around this repo, in both directions.
+         * @description This is the endpoint the workflow step editor calls: you are adding a step
+         *     that runs in `api`, and `dependents` is why it can say "`web` is generated
+         *     from `api` — add a step there too?".
+         *
+         *     It answers, and that is all it does. The reason this never becomes "and so
+         *     the server added the step for you" is written where the answer is produced,
+         *     in `ProjectStore::repo_dependency_suggestions`; read it before adding
+         *     anything here that writes.
+         */
+        get: operations["repo_dependency_suggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2259,6 +2341,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/decision` — answer a decision step.
+         * @description The only path by which a human-chosen value ever reaches a task's outputs,
+         *     and it works on exactly one kind of task. That is the constraint the whole
+         *     feature rests on: a person must not be able to set an *arbitrary* task's
+         *     outputs, because an agent task's outputs are the record of what that agent
+         *     produced. A decision step's outputs are the answer and nothing else, which is
+         *     what lets the run record distinguish "the operator approved this" from "a
+         *     model believed the operator approved this".
+         *
+         *     The answer is validated against the step's own `output_schema` by the same
+         *     validator that checks an agent's outputs — there is no second contract path.
+         */
+        post: operations["answer_decision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/dependencies": {
         parameters: {
             query?: never;
@@ -2462,6 +2573,11 @@ export interface paths {
         /**
          * `POST /tasks/{number}/unblock` — release a parked task.
          * @description Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+         *
+         *     Refuses an unanswered decision with 409 and a sentence naming the endpoint
+         *     that does work. Unblocking says somebody acted, not what they decided —
+         *     releasing a decision through it would put the task back in the queue with
+         *     nothing in its outputs, which is the exact hole the decision step fills.
          */
         post: operations["unblock_task"];
         delete?: never;
@@ -3160,6 +3276,21 @@ export interface components {
         AgentsResponse: {
             agents: components["schemas"]["AgentInfo"][];
         };
+        /** @description An answer to a decision step. */
+        AnswerDecisionRequest: {
+            /**
+             * @description The answer, in whatever shape the step's `output_schema` declares. It
+             *     becomes the task's outputs verbatim, so a binding downstream reads it
+             *     with the pointers it already uses.
+             */
+            answer: unknown;
+            /**
+             * @description Who is answering. Required — an answer with no answerer has no
+             *     provenance, and provenance is the only thing a decision step has that an
+             *     agent step asking in a channel does not.
+             */
+            answered_by: string;
+        };
         ApproveRequest: {
             approved_by?: string | null;
         };
@@ -3241,7 +3372,7 @@ export interface components {
          *     `capability` are sticky and only an explicit unblock releases them.
          * @enum {string}
          */
-        BlockKind: "dependency" | "needs_input" | "capability" | "transient";
+        BlockKind: "dependency" | "needs_input" | "capability" | "transient" | "awaiting_decision";
         BlockTaskRequest: {
             /** @description dependency | needs_input | capability | transient */
             kind: string;
@@ -3838,6 +3969,42 @@ export interface components {
             /** Format: int64 */
             count: number;
             date: string;
+        };
+        /**
+         * @description What a decision inside a loop does on the second pass.
+         *
+         *     See the migration for the argument. The short version: `EachPass` is the
+         *     default because pass 2 exists precisely because the artefact changed, and
+         *     reusing pass 1's answer would credit a person with approving work they never
+         *     saw.
+         * @enum {string}
+         */
+        DecisionAsk: "each_pass" | "once";
+        /**
+         * @description How a decision was settled — the column the whole feature turns on.
+         *
+         *     A defaulted answer that looks identical to a human one in the run record is
+         *     the provenance problem returning through a side door, so these are four
+         *     values rather than a nullable `answered_by`.
+         * @enum {string}
+         */
+        DecisionOutcome: "answered" | "defaulted" | "timed_out" | "carried";
+        /**
+         * @description What happens to a decision nobody answers.
+         *
+         *     Three values because they have three recoveries, and the middle one is the
+         *     one the design doc says to get right.
+         * @enum {string}
+         */
+        DecisionTimeoutAction: "wait" | "default" | "fail";
+        DeclareRepoDependencyRequest: {
+            /** @description The repo depended upon. */
+            depends_on_repo_id: string;
+            /** @description Free-text label (`generated_from`, `consumes`, `vendors`, …). */
+            kind?: string | null;
+            note?: string | null;
+            /** @description The dependent repo — the one that has to change when the other does. */
+            repo_id: string;
         };
         /**
          * @description Delegation mode controls how the conversation handles tools.
@@ -4519,6 +4686,13 @@ export interface components {
         ProjectStatus: "active" | "archived";
         /** @description Full project with nested repos and worktrees for API responses. */
         ProjectWithRelations: components["schemas"]["Project"] & {
+            /**
+             * @description Declared repo-to-repo relationships (#29). Travels with the repos it
+             *     describes so the project view can draw the arrows without a second
+             *     request, and so a relationship is never something you have to know to
+             *     go and ask for.
+             */
+            repo_dependencies: components["schemas"]["RepoDependency"][];
             repos: components["schemas"]["ProjectRepo"][];
             worktrees: components["schemas"]["ProjectWorktreeWithRepo"][];
         };
@@ -4680,6 +4854,52 @@ export interface components {
         ReorderProjectsRequest: {
             /** @description Project IDs in the desired display order (first = sort_order 0). */
             ids: string[];
+        };
+        /**
+         * @description One declared edge, with both repo names resolved so a caller can render it
+         *     without a second query.
+         */
+        RepoDependency: {
+            created_at: string;
+            /** @description The repo depended upon. */
+            depends_on_repo_id: string;
+            depends_on_repo_name: string;
+            /**
+             * @description Free-text label (`generated_from`, `consumes`, `vendors`, …). Nothing
+             *     branches on it; it is shown to people.
+             */
+            kind?: string | null;
+            /** @description Why the dependency exists, in the author's words. */
+            note?: string | null;
+            project_id: string;
+            /** @description The dependent repo — the one that has to change when the other does. */
+            repo_id: string;
+            repo_name: string;
+        };
+        RepoDependencyListResponse: {
+            dependencies: components["schemas"]["RepoDependency"][];
+        };
+        RepoDependencyResponse: {
+            dependency: components["schemas"]["RepoDependency"];
+        };
+        /**
+         * @description The declared neighbourhood of one repo, in both directions.
+         *
+         *     Returned by the suggestion query. The step editor holds a repo and needs
+         *     both halves: "you are editing a step in `api`; `web` depends on it" comes
+         *     from `dependents`, and "this step is in `web`, which is generated from
+         *     `api`" comes from `dependencies`.
+         */
+        RepoDependencySuggestions: {
+            /** @description Repos this one declares a dependency **on** — upstream. */
+            dependencies: components["schemas"]["RepoDependency"][];
+            /**
+             * @description Repos that declare a dependency **on** this one — downstream. Editing
+             *     this repo is a reason to offer a step in each of these.
+             */
+            dependents: components["schemas"]["RepoDependency"][];
+            /** @description The repo the question was asked about. */
+            repo_id: string;
         };
         RepoResponse: {
             repo: components["schemas"]["ProjectRepo"];
@@ -4858,6 +5078,50 @@ export interface components {
              * @description Hard timeout for a command step, in seconds. Required on one.
              */
             command_timeout_secs?: number | null;
+            /**
+             * @description `each_pass` (default) or `once`, for a decision inside a loop body.
+             *
+             *     `each_pass` re-asks on every pass, because pass 2 exists precisely
+             *     because the artefact changed and reusing pass 1's answer would credit a
+             *     person with approving work they never saw. `once` carries the first
+             *     answer forward, recorded as `carried` with the original answerer and
+             *     timestamp, for gates that are a property of the run rather than the pass.
+             */
+            decision_ask?: string | null;
+            /**
+             * @description Who may answer. Omit for anyone.
+             *
+             *     **Advisory in v1.** It is recorded on the task and shown alongside the
+             *     answerer, so an audit can compare them — but it is not enforced, because
+             *     this layer has no authenticated caller identity to enforce it against and
+             *     checking a self-declared name would be enforcement in name only.
+             */
+            decision_asked_of?: string[] | null;
+            /**
+             * @description The answer that applies on a `default` timeout. Validated against this
+             *     step's own `output_schema` at launch.
+             */
+            decision_default_answer?: unknown;
+            /**
+             * @description The question a decision step asks, as the person answering reads it.
+             *     Required on a decision step; refused on every other kind.
+             */
+            decision_question?: string | null;
+            /**
+             * @description `wait` (default), `default`, or `fail`.
+             *
+             *     `wait` parks until answered — the run is legitimately blocked and is not
+             *     reported as stuck. `default` applies `decision_default_answer` after
+             *     `decision_timeout_secs`, recorded *as* a default. `fail` fails the step
+             *     and lets the failure path route it.
+             */
+            decision_timeout_action?: string | null;
+            /**
+             * Format: int64
+             * @description How long to wait, in seconds, from the moment the decision is asked —
+             *     not from launch. Required by `default` and `fail`, refused by `wait`.
+             */
+            decision_timeout_secs?: number | null;
             description?: string | null;
             /**
              * Format: int64
@@ -5166,7 +5430,7 @@ export interface components {
          *     reports. With an explicit kind, launch refuses and names the missing field.
          * @enum {string}
          */
-        StepKind: "agent" | "command";
+        StepKind: "agent" | "command" | "decision";
         StorageStatus: {
             /** Format: int64 */
             available_bytes: number;
@@ -5212,6 +5476,48 @@ export interface components {
             consecutive_failures: number;
             created_at: string;
             created_by: string;
+            /**
+             * @description When it was settled. For a carried answer this is the *original*
+             *     timestamp, not the moment it was reused.
+             */
+            decision_answered_at?: string | null;
+            /**
+             * @description Who answered. `None` for a defaulted or timed-out decision, where the
+             *     honest answer is nobody.
+             */
+            decision_answered_by?: string | null;
+            /** @description What this decision does on a loop's second pass. */
+            decision_ask: components["schemas"]["DecisionAsk"];
+            /**
+             * @description When this decision became answerable. `None` means it has not been asked
+             *     yet, and answering it is refused until it has been.
+             */
+            decision_asked_at?: string | null;
+            /**
+             * @description Who may answer. Empty/absent means anyone. **Advisory in v1**: recorded
+             *     alongside `decision_answered_by` so an audit can compare them, but not
+             *     enforced, because this layer has no authenticated caller identity to
+             *     enforce it against.
+             */
+            decision_asked_of?: string[] | null;
+            /** @description The answer that applies on a `default` timeout. */
+            decision_default_answer?: unknown;
+            decision_outcome?: null | components["schemas"]["DecisionOutcome"];
+            /**
+             * @description The question a decision task asks, frozen from the step at launch.
+             *
+             *     Frozen rather than read back from the template so that the question a
+             *     person answered is the question on the record afterwards — a live read
+             *     could be edited between the ask and the answer.
+             */
+            decision_question?: string | null;
+            /** @description What happens if nobody answers. */
+            decision_timeout_action: components["schemas"]["DecisionTimeoutAction"];
+            /**
+             * Format: int64
+             * @description How long, in seconds, from `decision_asked_at`.
+             */
+            decision_timeout_secs?: number | null;
             description?: string | null;
             /**
              * Format: int64
@@ -5504,7 +5810,7 @@ export interface components {
          *     quietly run as an agent task against an empty instruction.
          * @enum {string}
          */
-        TaskKind: "agent" | "command";
+        TaskKind: "agent" | "command" | "decision";
         TaskListResponse: {
             /**
              * Format: int64
@@ -5807,6 +6113,10 @@ export interface components {
             settings?: unknown;
             status?: string | null;
             tags?: string[] | null;
+        };
+        UpdateRepoDependencyRequest: {
+            kind?: string | null;
+            note?: string | null;
         };
         /** @description Result of an update check. */
         UpdateStatus: {
@@ -6243,6 +6553,31 @@ export interface components {
              *     whether this is a two-second linter or a four-minute build.
              */
             command_timeout_secs?: number | null;
+            /** @description What a decision inside a loop body does on the second pass. */
+            decision_ask?: components["schemas"]["DecisionAsk"];
+            /**
+             * @description Who may answer. Empty or `None` means anyone. **Advisory in v1** — see
+             *     [`crate::tasks::Task::decision_asked_of`].
+             */
+            decision_asked_of?: string[] | null;
+            /**
+             * @description The answer that applies on a `default` timeout. Validated against this
+             *     step's own `output_schema` at launch, not when the timeout fires.
+             */
+            decision_default_answer?: unknown;
+            /**
+             * @description The question a decision step asks, as the person answering reads it.
+             *     Required on a decision step and refused on every other kind.
+             */
+            decision_question?: string | null;
+            /** @description What happens if nobody answers. */
+            decision_timeout_action?: components["schemas"]["DecisionTimeoutAction"];
+            /**
+             * Format: int64
+             * @description How long, in seconds, from the moment the decision is asked. Required by
+             *     `default` and `fail`, refused by `wait`.
+             */
+            decision_timeout_secs?: number | null;
             description?: string | null;
             /**
              * Format: int64
@@ -7690,6 +8025,82 @@ export interface operations {
             };
         };
     };
+    list_repo_dependencies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyListResponse"];
+                };
+            };
+            /** @description Project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    declare_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeclareRepoDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyResponse"];
+                };
+            };
+            /** @description Project or repo not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Already declared */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Self-dependency, or a repo from another project */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     create_repo: {
         parameters: {
             query?: never;
@@ -7814,6 +8225,76 @@ export interface operations {
             };
         };
     };
+    update_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Dependent repo ID */
+                repo_id: string;
+                /** @description Depended-upon repo ID */
+                depends_on_repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRepoDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyResponse"];
+                };
+            };
+            /** @description Declaration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Dependent repo ID */
+                repo_id: string;
+                /** @description Depended-upon repo ID */
+                depends_on_repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResponse"];
+                };
+            };
+            /** @description Declaration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     delete_repo: {
         parameters: {
             query?: never;
@@ -7834,6 +8315,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActionResponse"];
+                };
+            };
+            /** @description Project or repo not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    repo_dependency_suggestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Repository ID */
+                repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencySuggestions"];
                 };
             };
             /** @description Project or repo not found */
@@ -11902,6 +12414,60 @@ export interface operations {
             };
         };
     };
+    answer_decision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerDecisionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Already answered, defaulted, or not yet asked */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a decision, or the answer does not match its schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_task_dependencies: {
         parameters: {
             query?: never;
@@ -12329,6 +12895,13 @@ export interface operations {
             };
             /** @description Task not found or not blocked */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This is a decision — answer it instead */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

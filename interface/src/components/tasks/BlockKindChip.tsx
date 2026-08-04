@@ -20,6 +20,16 @@ const STYLES: Record<
 	BlockKind,
 	{ label: string; icon: typeof faKey; className: string; actionable: boolean }
 > = {
+	// Deliberately not styled like the sticky kinds it sits beside. A decision
+	// waiting on a person is the pipeline doing exactly what it was built to
+	// do, not a fault someone must repair — and dressing it as trouble is how
+	// a board teaches people to ignore the entries that are.
+	awaiting_decision: {
+		label: "Awaiting a decision",
+		icon: faKey,
+		className: "border-status-info/40 bg-status-info/10 text-status-info",
+		actionable: true,
+	},
 	needs_input: {
 		label: "Needs input",
 		icon: faArrowRightToBracket,

@@ -120,6 +120,11 @@ pub struct ProjectWithRelations {
     pub project: Project,
     pub repos: Vec<ProjectRepo>,
     pub worktrees: Vec<ProjectWorktreeWithRepo>,
+    /// Declared repo-to-repo relationships (#29). Travels with the repos it
+    /// describes so the project view can draw the arrows without a second
+    /// request, and so a relationship is never something you have to know to
+    /// go and ask for.
+    pub repo_dependencies: Vec<super::dependencies::RepoDependency>,
 }
 
 /// Worktree with the source repo name resolved.
@@ -339,10 +344,12 @@ impl ProjectStore {
         };
         let repos = self.list_repos(project_id).await?;
         let worktrees = self.list_worktrees_with_repos(project_id).await?;
+        let repo_dependencies = self.list_repo_dependencies(project_id).await?;
         Ok(Some(ProjectWithRelations {
             project,
             repos,
             worktrees,
+            repo_dependencies,
         }))
     }
 

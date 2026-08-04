@@ -725,6 +725,12 @@ mod tests {
             expect_exit_code: None,
             worktree_mode: WorktreeMode::Inherit,
             worktree_base_ref: None,
+            decision_question: None,
+            decision_asked_of: None,
+            decision_timeout_action: crate::tasks::DecisionTimeoutAction::Wait,
+            decision_timeout_secs: None,
+            decision_default_answer: None,
+            decision_ask: crate::tasks::DecisionAsk::EachPass,
         }
     }
 
