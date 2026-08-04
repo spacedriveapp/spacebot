@@ -738,8 +738,18 @@ export type WorkflowResponse = Types.WorkflowResponse;
 export type WorkflowDetailResponse = Types.WorkflowDetailResponse;
 export type WorkflowActionResponse = Types.WorkflowActionResponse;
 export type WorkflowRun = Types.WorkflowRun;
+/**
+ * How a run is going: `running | succeeded | failed | stuck | cancelled`.
+ *
+ * A property of the run, not a reduction over its tasks. `stuck` in particular
+ * is not derivable from any single task — every card in a wedged run looks
+ * individually reasonable — which is why the run carries a status of its own.
+ */
+export type RunStatus = Types.RunStatus;
 export type RunDetailResponse = Types.RunDetailResponse;
 export type RunListResponse = Types.RunListResponse;
+export type CancelRunRequest = Types.CancelRunRequest;
+export type CancelRunResponse = Types.CancelRunResponse;
 
 export type SaveWorkflowRequest = Types.SaveWorkflowRequest;
 export type SaveStepRequest = Types.SaveStepRequest;
@@ -751,7 +761,19 @@ export type LaunchResponse = Types.LaunchResponse;
 
 // -- Notification Types --
 
-export type NotificationKind = "task_approval" | "worker_failed" | "cortex_observation";
+/**
+ * The kinds the inbox can style.
+ *
+ * `workflow_run_stopped` is its own kind rather than a `worker_failed`: that one
+ * is about a process dying and is answered by looking at the process, while this
+ * is a pipeline that will not continue on its own and is answered by looking at
+ * the run. Filtering the inbox for one must not drag in the other.
+ */
+export type NotificationKind =
+	| "task_approval"
+	| "worker_failed"
+	| "cortex_observation"
+	| "workflow_run_stopped";
 export type NotificationSeverity = "info" | "warn" | "error";
 
 export type NotificationItem = Types.Notification;
@@ -2043,6 +2065,33 @@ export const api = {
 	// Not nested under the workflow: a run outlives the template it came from.
 	getWorkflowRun: (runId: string) =>
 		fetchJson<RunDetailResponse>(`/workflow-runs/${encodeURIComponent(runId)}`),
+	/**
+	 * Stop a run.
+	 *
+	 * Settles the tasks it never started; anything already in flight is left to
+	 * finish, because killing work mid-flight loses whatever it had done — which
+	 * is why the response reports `settled` and `left_running` separately rather
+	 * than one number the caller would have to interpret.
+	 */
+	cancelWorkflowRun: (runId: string, cancelledBy: string) =>
+		mutateJson<CancelRunResponse>(
+			`/workflow-runs/${encodeURIComponent(runId)}/cancel`,
+			"POST",
+			{cancelled_by: cancelledBy} satisfies CancelRunRequest,
+		),
+	/**
+	 * Remove a run and every task it emitted.
+	 *
+	 * Refused with a `409` while the run is live or a worker still holds one of
+	 * its cards. The body of that refusal is the whole diagnosis, and `mutateJson`
+	 * throws it verbatim — so callers surface the server's sentence rather than
+	 * re-deriving the rule and getting it subtly wrong.
+	 */
+	deleteWorkflowRun: (runId: string) =>
+		mutateJson<WorkflowActionResponse>(
+			`/workflow-runs/${encodeURIComponent(runId)}`,
+			"DELETE",
+		),
 
 	// Secrets API
 	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),

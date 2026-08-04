@@ -1,15 +1,27 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Link} from "@tanstack/react-router";
-import {useQuery, useQueryClient} from "@tanstack/react-query";
+import {Link, useNavigate} from "@tanstack/react-router";
+import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {Button} from "@spacedrive/primitives";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
 	faArrowLeft,
 	faHandPaper,
 	faRotate,
 } from "@fortawesome/free-solid-svg-icons";
-import {api, type TaskItem} from "@/api/client";
+import {
+	api,
+	type RunDetailResponse,
+	type TaskItem,
+	type WorkflowRun,
+} from "@/api/client";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {TaskStatusPill} from "@/components/workflows/TaskStatusPill";
+import {
+	RunReasonBanner,
+	RunStatusPill,
+	isRunFinished,
+	runStatusOf,
+} from "@/components/workflows/runStatus";
 import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
 import {useWorkflowView, ViewToggle} from "@/components/workflows/ViewToggle";
 import {orderSteps, runNodes} from "@/components/workflows/graph";
@@ -45,8 +57,14 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	const {data, isLoading, error} = useQuery({
 		queryKey: runKey,
 		queryFn: () => api.getWorkflowRun(runId),
-		// A run in flight changes without anyone clicking anything.
-		refetchInterval: 10_000,
+		// A run in flight changes without anyone clicking anything. A settled one
+		// does not — a terminal status stamps `finished_at` and retires the run —
+		// so the poll stops once there is nothing left to see. The sweep that
+		// settles a run is what would otherwise be polled for forever.
+		refetchInterval: (query) => {
+			const run = query.state.data?.run;
+			return run && isRunFinished(runStatusOf(run)) ? false : 10_000;
+		},
 	});
 
 	// Same SSE-driven invalidation the board uses, so a task finishing shows up
@@ -176,17 +194,25 @@ export function WorkflowRunView({runId}: {runId: string}) {
 	}
 
 	const run = data.run;
+	const status = runStatusOf(run);
 	// Settled, not done. A run whose rollback branch skipped is finished, and a
 	// counter stuck at "3/5 done" would say otherwise forever — there is no
 	// un-skip, so those two tasks are never going to move. `skipped` is counted
 	// and named separately rather than folded in, because "5/5 done" over two
 	// tasks that never ran is the overstatement this feature exists to avoid.
+	//
+	// And it is now detail rather than the headline. The counts alone cannot say
+	// whether a run is over: `release-train` ends at twelve done, one skipped and
+	// one held on a loop arm that was never taken, and "12/14 done" describes
+	// that finished run as two thirteenths short forever. The status leads; these
+	// answer "of what" once the status has said what happened.
 	const done = orderedTasks.filter((task) => task.status === "done").length;
 	const skipped = orderedTasks.filter((task) => task.status === "skipped").length;
+	const unfinished = orderedTasks.length - done - skipped;
 
 	return (
 		<div className="flex h-full min-h-0 w-full flex-col">
-			<div className="flex items-center gap-3 border-b border-app-line px-4 py-2">
+			<div className="relative flex items-center gap-3 border-b border-app-line px-4 py-2">
 				<Link
 					to="/workflows/$workflowId"
 					params={{workflowId: run.workflow_id}}
@@ -200,26 +226,44 @@ export function WorkflowRunView({runId}: {runId: string}) {
 						<h1 className="truncate font-mono text-sm text-ink">
 							{workflow?.workflow.name ?? "Run"}
 						</h1>
-						<span className="shrink-0 text-xs text-ink-dull">
-							{done}/{orderedTasks.length} done
-						{skipped > 0 && (
-							<span
-								className="text-ink-faint"
-								title={`${skipped} task${skipped === 1 ? "" : "s"} a condition ruled out. They will never run, so they will never be done.`}
-							>
-								{" "}
-								· {skipped} skipped
-							</span>
-						)}
-						</span>
+						<RunStatusPill status={status} className="self-center" />
 					</div>
 					<p className="truncate text-[11px] text-ink-faint">
+						<span
+							title={`${orderedTasks.length} task${orderedTasks.length === 1 ? "" : "s"} were compiled from this template.${skipped > 0 ? ` ${skipped} of them a condition ruled out — they will never run, so they will never be done.` : ""}`}
+						>
+							{orderedTasks.length} task
+							{orderedTasks.length === 1 ? "" : "s"}
+							{orderedTasks.length > 0 && ": "}
+							{[
+								orderedTasks.length > 0 ? `${done} done` : null,
+								skipped > 0 ? `${skipped} skipped` : null,
+								unfinished > 0 ? `${unfinished} unfinished` : null,
+							]
+								.filter(Boolean)
+								.join(", ")}
+						</span>
+						{" · "}
 						Launched by {run.launched_by} ·{" "}
 						{new Date(run.created_at).toLocaleString()}
+						{run.finished_at && (
+							<span title="When the run reached a terminal status.">
+								{" "}
+								· finished {new Date(run.finished_at).toLocaleString()}
+							</span>
+						)}
 					</p>
 				</div>
 				{canDrawGraph && <ViewToggle value={view} onChange={setView} />}
+				<RunControls run={run} taskCount={orderedTasks.length} />
 			</div>
+
+			{/* The reason, directly under the header that names the status. A
+			    `running` run has nothing to explain; the other four all do, and the
+			    sentence names which task and why. */}
+			{isRunFinished(status) && run.status_reason && (
+				<RunReasonBanner status={status} reason={run.status_reason} />
+			)}
 
 			{showCanvas ? (
 				<div className="flex min-h-0 flex-1">
@@ -276,6 +320,190 @@ export function WorkflowRunView({runId}: {runId: string}) {
 				</div>
 			)}
 		</div>
+	);
+}
+
+/**
+ * Stop a run, or remove it.
+ *
+ * Both are confirmed, and for different reasons. Cancelling settles every card
+ * the run had not started — those tasks disappear off the board, and there is
+ * no un-skip — so it is destructive to work that had not happened yet. Deleting
+ * removes the run and every task it emitted, which is destructive to work that
+ * did.
+ *
+ * The delete button is offered whatever the run's status, including while it is
+ * running. That is deliberate: the server refuses a live delete with a sentence
+ * saying to cancel it first, and reproducing that rule here would mean two
+ * copies of it — one of which is a bundle that ships separately from the binary
+ * and will eventually be wrong. It also has a second condition this screen
+ * cannot see, since a run can read `stuck` while a worker still holds one of its
+ * cards. So the refusal is asked for and shown verbatim rather than guessed.
+ *
+ * Cancel is the exception, and only for the two statuses where there is
+ * provably nothing to cancel: a `succeeded` run has no unstarted cards left and
+ * a `cancelled` one has already been through here. Offering a button whose only
+ * possible outcome is a `409` is not caution, it is noise.
+ */
+function RunControls({run, taskCount}: {run: WorkflowRun; taskCount: number}) {
+	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const [confirming, setConfirming] = useState<"cancel" | "delete" | null>(null);
+	const [outcome, setOutcome] = useState<string | null>(null);
+
+	const status = runStatusOf(run);
+	const runKey = ["workflow-run", run.id];
+
+	const settleCaches = () => {
+		void queryClient.invalidateQueries({queryKey: runKey});
+		void queryClient.invalidateQueries({
+			queryKey: ["workflow-runs", run.workflow_id],
+		});
+		// Cancelling settles cards and deleting removes them; the board is showing
+		// both either way.
+		void queryClient.invalidateQueries({queryKey: ["tasks"]});
+	};
+
+	const cancel = useMutation({
+		mutationFn: () => api.cancelWorkflowRun(run.id, "human"),
+		onSuccess: (result) => {
+			setConfirming(null);
+			// Both numbers, because they are different facts. `left_running` is the
+			// work that was *not* stopped, and a cancel that silently left three
+			// workers writing would be the surprise this line exists to prevent.
+			setOutcome(
+				`Cancelled. ${result.settled} unstarted task${
+					result.settled === 1 ? "" : "s"
+				} settled as skipped; ${result.left_running} left running to finish.`,
+			);
+			queryClient.setQueryData<RunDetailResponse>(runKey, (old) =>
+				old ? {...old, run: result.run} : old,
+			);
+			settleCaches();
+		},
+	});
+
+	const remove = useMutation({
+		mutationFn: () => api.deleteWorkflowRun(run.id),
+		onSuccess: () => {
+			settleCaches();
+			// There is no run left to look at, so staying here would show a 404.
+			void navigate({
+				to: "/workflows/$workflowId",
+				params: {workflowId: run.workflow_id},
+			});
+		},
+	});
+
+	const canCancel = status !== "succeeded" && status !== "cancelled";
+	const busy = cancel.isPending || remove.isPending;
+	const error =
+		(cancel.error ?? remove.error) instanceof Error
+			? ((cancel.error ?? remove.error) as Error).message
+			: null;
+
+	const ask = (which: "cancel" | "delete") => {
+		cancel.reset();
+		remove.reset();
+		setOutcome(null);
+		setConfirming((open) => (open === which ? null : which));
+	};
+
+	return (
+		<>
+			<div className="flex shrink-0 items-center gap-3">
+				{canCancel && (
+					<button
+						type="button"
+						onClick={() => ask("cancel")}
+						title="Stop this run. Unstarted tasks are settled; anything in flight is left to finish."
+						className="text-[11px] text-ink-faint hover:text-ink-dull hover:underline"
+					>
+						{confirming === "cancel" ? "Keep running" : "Cancel run…"}
+					</button>
+				)}
+				<button
+					type="button"
+					onClick={() => ask("delete")}
+					title="Remove this run and every task it emitted."
+					className="text-[11px] text-ink-faint hover:text-status-error hover:underline"
+				>
+					{confirming === "delete" ? "Keep" : "Delete…"}
+				</button>
+			</div>
+
+			{/* Below the header rather than inside it: these are sentences, and a
+			    header that has to hold one is a header that truncates it. */}
+			{(confirming || error || outcome) && (
+				<div className="absolute inset-x-0 top-full z-20 border-b border-app-line bg-app-box px-4 py-2.5 shadow-lg">
+					{confirming === "cancel" && (
+						<div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+							<p className="min-w-0 flex-1 text-[11px] text-ink-dull">
+								Stop this run? Every task it has not started is settled as{" "}
+								<span className="font-mono">skipped</span> and will never run —
+								there is no un-skip. Anything a worker already holds is left to
+								finish, because killing work mid-flight loses whatever it had
+								done.
+							</p>
+							<Button
+								size="sm"
+								variant="colored"
+								className="border-status-warning bg-status-warning"
+								disabled={busy}
+								onClick={() => cancel.mutate()}
+							>
+								{cancel.isPending ? "Cancelling…" : "Cancel the run"}
+							</Button>
+							<Button size="sm" variant="gray" onClick={() => setConfirming(null)}>
+								Keep running
+							</Button>
+						</div>
+					)}
+
+					{confirming === "delete" && (
+						<div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+							<p className="min-w-0 flex-1 text-[11px] text-ink-dull">
+								Delete this run and all {taskCount} task
+								{taskCount === 1 ? "" : "s"} it produced? This cannot be undone,
+								and it takes the outputs with it. The server refuses while the
+								run is live or a worker still holds one of its cards.
+							</p>
+							<Button
+								size="sm"
+								variant="colored"
+								className="border-status-error bg-status-error"
+								disabled={busy}
+								onClick={() => remove.mutate()}
+							>
+								{remove.isPending ? "Deleting…" : "Delete the run"}
+							</Button>
+							<Button size="sm" variant="gray" onClick={() => setConfirming(null)}>
+								Keep
+							</Button>
+						</div>
+					)}
+
+					{/* The server's sentence, not ours. */}
+					{error && (
+						<p className="mt-2 break-words rounded border border-status-error/30 bg-status-error/5 px-2 py-1 font-mono text-[11px] text-status-error first:mt-0">
+							{error}
+						</p>
+					)}
+					{outcome && !error && (
+						<p className="mt-2 flex items-center justify-between gap-3 text-[11px] text-ink-dull first:mt-0">
+							<span className="min-w-0 break-words">{outcome}</span>
+							<button
+								type="button"
+								onClick={() => setOutcome(null)}
+								className="shrink-0 text-ink-faint hover:text-ink-dull hover:underline"
+							>
+								Dismiss
+							</button>
+						</p>
+					)}
+				</div>
+			)}
+		</>
 	);
 }
 

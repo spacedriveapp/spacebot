@@ -417,10 +417,15 @@ export type WorkflowDetailResponse =
 export type WorkflowActionResponse =
 	components["schemas"]["WorkflowActionResponse"];
 export type WorkflowRun = components["schemas"]["WorkflowRun"];
+// How a run is going, as a property of the run rather than a reduction over its
+// tasks. `stuck` is the value the enum exists for: no single task can report it.
+export type RunStatus = components["schemas"]["RunStatus"];
 export type RunDetailResponse = components["schemas"]["RunDetailResponse"];
 export type RunListResponse = components["schemas"]["RunListResponse"];
+export type CancelRunResponse = components["schemas"]["CancelRunResponse"];
 
 // Requests
+export type CancelRunRequest = components["schemas"]["CancelRunRequest"];
 export type SaveWorkflowRequest = components["schemas"]["SaveWorkflowRequest"];
 export type SaveStepRequest = components["schemas"]["SaveStepRequest"];
 export type SaveBindingRequest = components["schemas"]["SaveBindingRequest"];

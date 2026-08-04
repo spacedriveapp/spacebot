@@ -13,8 +13,14 @@ import {
 	type SaveWorkflowRequest,
 	type StepEdgeRequest,
 	type WorkflowDetailResponse,
+	type WorkflowRun,
 	type WorkflowStep,
 } from "@/api/client";
+import {
+	RunStatusPill,
+	runStatusOf,
+	runWantsAttention,
+} from "@/components/workflows/runStatus";
 import {StepDetail} from "@/components/workflows/StepDetail";
 import {LaunchPanel} from "@/components/workflows/LaunchPanel";
 import {WorkflowCanvas} from "@/components/workflows/WorkflowCanvas";
@@ -60,6 +66,10 @@ export function WorkflowDetail({workflowId}: {workflowId: string}) {
 	const {data: runsData} = useQuery({
 		queryKey: ["workflow-runs", workflowId],
 		queryFn: () => api.listWorkflowRuns(workflowId),
+		// A run's status is decided by a sweep on the server, not by anything this
+		// screen does — so without a poll a run settles and the list keeps saying
+		// "Running" until somebody reloads.
+		refetchInterval: 30_000,
 	});
 
 	const [view, setView] = useWorkflowView();
@@ -576,38 +586,72 @@ function StepRow({
 	);
 }
 
-/** Every launch of this template, newest first. */
-function RunsSection({
-	runs,
-}: {
-	runs: {id: string; created_at: string; launched_by: string; inputs: unknown}[];
-}) {
+/**
+ * Every launch of this template, newest first.
+ *
+ * A row leads with how the run went, because that is the only reason to be
+ * looking at this list: a timestamp and a launcher say which run, not whether
+ * it needs anybody. The rows that do — `stuck` and `failed` — carry the
+ * server's reason underneath, so a wedged pipeline is diagnosable from here
+ * without opening it.
+ */
+function RunsSection({runs}: {runs: WorkflowRun[]}) {
 	if (runs.length === 0) return null;
+	const wantsAttention = runs.filter(runWantsAttention).length;
 	return (
-		<div className="max-h-48 shrink-0 overflow-y-auto border-t border-app-line">
-			<h3 className="sticky top-0 bg-app px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-ink-dull">
+		<div className="max-h-56 shrink-0 overflow-y-auto border-t border-app-line">
+			<h3 className="sticky top-0 flex items-baseline gap-2 bg-app px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-ink-dull">
 				Runs
+				<span className="text-[10px] normal-case tracking-normal text-ink-faint">
+					{runs.length}
+				</span>
+				{wantsAttention > 0 && (
+					<span className="rounded-full border border-status-warning/60 bg-status-warning/10 px-1.5 text-[10px] normal-case tracking-normal text-status-warning">
+						{wantsAttention} need
+						{wantsAttention === 1 ? "s" : ""} a look
+					</span>
+				)}
 			</h3>
 			<ul>
-				{runs.map((run) => (
-					<li key={run.id}>
-						<Link
-							to="/workflow-runs/$runId"
-							params={{runId: run.id}}
-							className="flex items-baseline gap-2 border-t border-app-line/40 px-4 py-1.5 text-xs hover:bg-app-box/40"
-						>
-							<span className="shrink-0 text-ink-dull">
-								{new Date(run.created_at).toLocaleString()}
-							</span>
-							<span className="shrink-0 text-[10px] text-ink-faint">
-								by {run.launched_by}
-							</span>
-							<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint">
-								{JSON.stringify(run.inputs)}
-							</span>
-						</Link>
-					</li>
-				))}
+				{runs.map((run) => {
+					const status = runStatusOf(run);
+					return (
+						<li key={run.id}>
+							<Link
+								to="/workflow-runs/$runId"
+								params={{runId: run.id}}
+								className="block border-t border-app-line/40 px-4 py-1.5 text-xs hover:bg-app-box/40"
+							>
+								<div className="flex items-baseline gap-2">
+									<RunStatusPill status={status} className="self-center" />
+									<span className="shrink-0 text-ink-dull">
+										{new Date(run.created_at).toLocaleString()}
+									</span>
+									<span className="shrink-0 text-[10px] text-ink-faint">
+										by {run.launched_by}
+									</span>
+									<span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint">
+										{JSON.stringify(run.inputs)}
+									</span>
+								</div>
+								{/* Only where the reason is news. A succeeded run's reason is
+								    "all 9 task(s) finished", which the pill already said. */}
+								{run.status_reason && runWantsAttention(run) && (
+									<p
+										className={`mt-1 truncate text-[10px] ${
+											status === "stuck"
+												? "text-status-warning"
+												: "text-status-error"
+										}`}
+										title={run.status_reason}
+									>
+										{run.status_reason}
+									</p>
+								)}
+							</Link>
+						</li>
+					);
+				})}
 			</ul>
 		</div>
 	);

@@ -1,11 +1,22 @@
-import {useCallback, useState} from "react";
+import {useCallback, useMemo, useState} from "react";
 import {Link} from "@tanstack/react-router";
-import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {
+	useMutation,
+	useQueries,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import {Button} from "@spacedrive/primitives";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
-import {faTrash} from "@fortawesome/free-solid-svg-icons";
-import {api, type SaveWorkflowRequest, type Workflow} from "@/api/client";
+import {faTrash, faTriangleExclamation} from "@fortawesome/free-solid-svg-icons";
+import {
+	api,
+	type SaveWorkflowRequest,
+	type Workflow,
+	type WorkflowRun,
+} from "@/api/client";
 import {parseJson} from "@/components/workflows/schemaForm";
+import {RunStatusPill, runStatusOf} from "@/components/workflows/runStatus";
 
 /**
  * The templates, and the two things you can do to the set of them.
@@ -45,7 +56,55 @@ export function Workflows() {
 		},
 	});
 
-	const workflows = data?.workflows ?? [];
+	const workflows = useMemo(() => data?.workflows ?? [], [data]);
+
+	/**
+	 * Every template's runs, so a stuck one is findable from here.
+	 *
+	 * This is the screen a person is on when they have not already decided which
+	 * pipeline to worry about, and a stuck run announces itself nowhere else that
+	 * is reachable without opening each template in turn — which is the silence
+	 * run state was added to end. So the list asks.
+	 *
+	 * One request per template rather than one for the instance, because there is
+	 * no endpoint for the latter: runs are listed under their workflow. The keys
+	 * are exactly the ones the template editor uses, so opening a template reuses
+	 * what this already fetched rather than refetching it.
+	 */
+	const runQueries = useQueries({
+		queries: workflows.map((workflow) => ({
+			queryKey: ["workflow-runs", workflow.id],
+			queryFn: () => api.listWorkflowRuns(workflow.id),
+			staleTime: 15_000,
+			refetchInterval: 30_000,
+		})),
+	});
+
+	/** template id → its runs, for the row badges. */
+	const runsByWorkflow = useMemo(() => {
+		const map = new Map<string, WorkflowRun[]>();
+		workflows.forEach((workflow, index) => {
+			map.set(workflow.id, runQueries[index]?.data?.runs ?? []);
+		});
+		return map;
+	}, [workflows, runQueries]);
+
+	// Stuck only, and deliberately not "everything that went wrong". A failed run
+	// is a report — the pipeline ran and said no — and it is already visible on
+	// the template it belongs to. A stuck run is the one nobody is going to find
+	// on their own, because it produced no report at all; it simply stopped. A
+	// banner that also carried failures would be permanently non-empty on an
+	// instance with one flaky template, and a banner nobody can clear is a banner
+	// nobody reads.
+	const stuck = useMemo(
+		() =>
+			workflows.flatMap((workflow) =>
+				(runsByWorkflow.get(workflow.id) ?? [])
+					.filter((run) => runStatusOf(run) === "stuck")
+					.map((run) => ({workflow, run})),
+			),
+		[workflows, runsByWorkflow],
+	);
 
 	return (
 		<div className="flex h-full min-h-0 w-full flex-col">
@@ -85,6 +144,8 @@ export function Workflows() {
 				</p>
 			)}
 
+			<StuckRunsBanner stuck={stuck} />
+
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				{isLoading ? (
 					<p className="py-8 text-center text-sm text-ink-faint">
@@ -110,6 +171,7 @@ export function Workflows() {
 							<WorkflowRow
 								key={workflow.id}
 								workflow={workflow}
+								runs={runsByWorkflow.get(workflow.id) ?? []}
 								confirming={pendingDelete === workflow.id}
 								busy={remove.isPending && remove.variables === workflow.id}
 								onAskDelete={() => {
@@ -127,8 +189,72 @@ export function Workflows() {
 	);
 }
 
+/**
+ * The wedged runs on this instance, at the top of the page that lists pipelines.
+ *
+ * A stuck run has, by definition, nothing left that will announce it: no task
+ * is failing, no worker is dying, nothing is being retried. It stops, quietly,
+ * and stays stopped. The inbox catches the transition once, and an inbox entry
+ * is read once and then dismissed — so a run that is *still* stuck a day later
+ * needs somewhere standing to be seen, and this is the only screen a person
+ * reaches without having already guessed which template to suspect.
+ *
+ * Each entry links straight to the run rather than to its template, because the
+ * reason is on the run and the two actions it wants — cancel, delete — are
+ * there too.
+ */
+function StuckRunsBanner({
+	stuck,
+}: {
+	stuck: {workflow: Workflow; run: WorkflowRun}[];
+}) {
+	if (stuck.length === 0) return null;
+	return (
+		<div className="border-b border-status-warning/60 bg-status-warning/10 px-4 py-2">
+			<div className="flex items-center gap-2 text-xs font-medium text-status-warning">
+				<FontAwesomeIcon icon={faTriangleExclamation} className="text-[11px]" />
+				{stuck.length} run{stuck.length === 1 ? " is" : "s are"} stuck
+				<span className="font-normal opacity-80">
+					— nothing in {stuck.length === 1 ? "it" : "them"} can advance, and
+					nothing will change that on its own.
+				</span>
+			</div>
+			<ul className="mt-1.5 space-y-1">
+				{stuck.map(({workflow, run}) => (
+					<li key={run.id}>
+						<Link
+							to="/workflow-runs/$runId"
+							params={{runId: run.id}}
+							className="block rounded border border-status-warning/30 bg-app/40 px-2 py-1 hover:border-status-warning/60"
+						>
+							<div className="flex items-baseline gap-2">
+								<span className="truncate font-mono text-[11px] text-ink">
+									{workflow.name}
+								</span>
+								<span className="shrink-0 text-[10px] text-ink-faint">
+									{new Date(run.created_at).toLocaleString()} · by{" "}
+									{run.launched_by}
+								</span>
+							</div>
+							{run.status_reason && (
+								<p
+									className="truncate text-[10px] text-status-warning"
+									title={run.status_reason}
+								>
+									{run.status_reason}
+								</p>
+							)}
+						</Link>
+					</li>
+				))}
+			</ul>
+		</div>
+	);
+}
+
 function WorkflowRow({
 	workflow,
+	runs,
 	confirming,
 	busy,
 	onAskDelete,
@@ -136,12 +262,20 @@ function WorkflowRow({
 	onConfirmDelete,
 }: {
 	workflow: Workflow;
+	runs: WorkflowRun[];
 	confirming: boolean;
 	busy: boolean;
 	onAskDelete: () => void;
 	onCancelDelete: () => void;
 	onConfirmDelete: () => void;
 }) {
+	// The worst thing this template's runs are currently doing, and nothing else.
+	// A row is a template; enumerating its five run statuses here would make the
+	// list a dashboard, and the one status worth interrupting a scan for is the
+	// one that will not resolve itself.
+	const stuck = runs.filter((run) => runStatusOf(run) === "stuck").length;
+	const running = runs.filter((run) => runStatusOf(run) === "running").length;
+
 	return (
 		<li className="group border-b border-app-line/40">
 			<div className="flex items-center gap-3 px-4 py-2.5 hover:bg-app-box/40">
@@ -154,6 +288,25 @@ function WorkflowRow({
 						<span className="truncate font-mono text-sm text-ink">
 							{workflow.name}
 						</span>
+						{stuck > 0 ? (
+							<span
+								className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-warning bg-status-warning/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-status-warning"
+								title={`${stuck} run${stuck === 1 ? "" : "s"} of this template cannot advance. Nothing is in flight and nothing at the frontier can move.`}
+							>
+								<FontAwesomeIcon
+									icon={faTriangleExclamation}
+									className="text-[9px]"
+								/>
+								{stuck} stuck
+							</span>
+						) : (
+							running > 0 && (
+								<RunStatusPill
+									status="running"
+									className="self-center"
+								/>
+							)
+						)}
 						{workflow.input_schema != null && (
 							<span
 								className="shrink-0 rounded border border-app-line px-1 text-[9px] uppercase tracking-wide text-ink-faint"

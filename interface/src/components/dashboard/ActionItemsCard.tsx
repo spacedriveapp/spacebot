@@ -1,7 +1,9 @@
 import {useState} from "react";
+import {Link} from "@tanstack/react-router";
 import {
 	CheckCircle,
 	Clock,
+	Warning,
 	WarningCircle,
 	XCircle,
 } from "@phosphor-icons/react";
@@ -47,6 +49,18 @@ const TYPE_CONFIG: Record<
 		label: "Alert",
 		action: "Review",
 	},
+	// A pipeline that will not continue on its own. Its own row style rather than
+	// the generic `cortex_observation` fallback it used to land in, because that
+	// one is an agent's remark and this is a stopped run: the triangle separates
+	// it from the circle every other alert wears, and the action goes to the run
+	// rather than to a modal, because the run is where the recovery is.
+	workflow_run_stopped: {
+		icon: Warning,
+		iconClass: "text-status-warning",
+		badgeVariant: "warning",
+		label: "Run stopped",
+		action: "Open run",
+	},
 };
 
 function timeAgo(isoString: string): string {
@@ -59,8 +73,21 @@ function timeAgo(isoString: string): string {
 	return `${Math.floor(hours / 24)}d ago`;
 }
 
+/**
+ * The run a notification is about, when it is about one.
+ *
+ * Read from `related_entity_*` rather than by parsing `action_url`: the pair is
+ * what the server sets deliberately, and a URL is a string that a route rename
+ * would quietly turn into a dead link.
+ */
+function stoppedRunId(item: NotificationItem): string | null {
+	return item.related_entity_type === "workflow_run"
+		? (item.related_entity_id ?? null)
+		: null;
+}
+
 export function ActionItemsCard() {
-	const {notifications} = useNotifications("unread");
+	const {notifications, dismiss} = useNotifications("unread");
 	const [activeNotification, setActiveNotification] =
 		useState<NotificationItem | null>(null);
 	const [atBottom, setAtBottom] = useState(false);
@@ -105,10 +132,16 @@ export function ActionItemsCard() {
 							) as NotificationKind;
 							const config = TYPE_CONFIG[kind];
 							const Icon = config.icon;
+							const runId =
+								kind === "workflow_run_stopped" ? stoppedRunId(item) : null;
 							return (
 								<div
 									key={item.id}
-									className="flex items-start gap-3 rounded-lg border border-app-line/50 bg-app-hover/20 px-3 py-2.5 transition-colors hover:bg-app-hover/40"
+									className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+										kind === "workflow_run_stopped"
+											? "border-status-warning/40 bg-status-warning/5 hover:bg-status-warning/10"
+											: "border-app-line/50 bg-app-hover/20 hover:bg-app-hover/40"
+									}`}
 								>
 									<Icon
 										weight="fill"
@@ -116,6 +149,21 @@ export function ActionItemsCard() {
 									/>
 									<div className="min-w-0 flex-1">
 										<p className="truncate text-sm text-ink">{item.title}</p>
+										{/* The reason, on the card. "Stuck" alone is what sends
+										    somebody reading rows, and the whole point of putting a
+										    reason on the transition was to stop that. Clipped to two
+										    lines because these name a task and a hold and run long;
+										    it opens the modal, which shows the whole sentence. */}
+										{kind === "workflow_run_stopped" && item.body && (
+											<button
+												type="button"
+												onClick={() => setActiveNotification(item)}
+												title="See the whole reason"
+												className="mt-0.5 line-clamp-2 text-left text-tiny text-ink-dull hover:text-ink"
+											>
+												{item.body}
+											</button>
+										)}
 										<div className="mt-1 flex items-center gap-2">
 											<Badge size="sm">{config.label}</Badge>
 											{item.agent_id && (
@@ -131,14 +179,36 @@ export function ActionItemsCard() {
 											</span>
 										</div>
 									</div>
-									<Button
-										size="xs"
-										variant="subtle"
-										className="shrink-0"
-										onClick={() => setActiveNotification(item)}
-									>
-										{config.action}
-									</Button>
+									{/* A stopped run is answered by looking at the run, so the
+									    primary action goes straight there. Dismiss sits beside it
+									    rather than inside the modal, because this row already shows
+									    everything the modal would have been opened to read. */}
+									{runId ? (
+										<div className="flex shrink-0 items-center gap-1">
+											<Link to="/workflow-runs/$runId" params={{runId}}>
+												<Button size="xs" variant="subtle">
+													{config.action}
+												</Button>
+											</Link>
+											<Button
+												size="xs"
+												variant="subtle"
+												onClick={() => dismiss(item.id)}
+												title="Dismiss without opening the run"
+											>
+												Dismiss
+											</Button>
+										</div>
+									) : (
+										<Button
+											size="xs"
+											variant="subtle"
+											className="shrink-0"
+											onClick={() => setActiveNotification(item)}
+										>
+											{config.action}
+										</Button>
+									)}
 								</div>
 							);
 						})
