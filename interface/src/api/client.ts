@@ -576,6 +576,14 @@ export type BrowserSection = Types.BrowserSection;
 export type ChannelSection = Types.ChannelSection;
 
 export type SandboxSection = Types.SandboxSection;
+/**
+ * What containment the host is actually providing, per agent.
+ *
+ * Three separate facts on purpose. `mode` is what the operator asked for and
+ * `containment_active` is what is in force; `requested_but_inert` is the state
+ * where those two disagree, and it is the one a command step refuses to run in.
+ */
+export type SandboxContainmentStatus = Types.SandboxContainmentStatus;
 
 export type ProjectsSection = Types.ProjectsSection;
 
@@ -730,6 +738,19 @@ export type StepBinding = Types.StepBinding;
 /** A condition declared on a step, compiled into a `TaskGate` at launch. */
 export type StepGate = Types.StepGate;
 export type BindingSource = Types.BindingSource;
+/**
+ * Whether a step runs a model or a process: `agent | command`.
+ *
+ * `agent` is the default and describes every step that predates command steps,
+ * which is why it is optional on the wire.
+ */
+export type StepKind = Types.StepKind;
+/**
+ * Where a step gets its working directory: `inherit | per_run | per_branch`.
+ *
+ * `inherit` is today's behaviour — whatever the task binding already says.
+ */
+export type WorktreeMode = Types.WorktreeMode;
 /** Which way out of a loop an edge — and the task behind it — is on. */
 export type LoopArm = Types.LoopArm;
 export type LoopResolution = Types.LoopResolution;
@@ -851,6 +872,17 @@ export type ProjectRepo = Types.ProjectRepo;
 export type ProjectWorktree = Types.ProjectWorktree;
 
 export type ProjectWorktreeWithRepo = Types.ProjectWorktreeWithRepo;
+
+/**
+ * A checkout under `.worktrees/` that nothing alive owns.
+ *
+ * A report, not a sweep. There is deliberately no endpoint that deletes one —
+ * the one thing worse than a stale worktree is a background process that
+ * removes directories — so nothing here should offer to clean them up.
+ */
+export type OrphanWorktree = Types.OrphanWorktree;
+
+export type OrphanWorktreesResponse = Types.OrphanWorktreesResponse;
 
 /** GET /agents/projects response */
 export type ProjectListResponse = Types.ProjectListResponse;
@@ -2222,6 +2254,18 @@ export const api = {
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 	},
+
+	/**
+	 * Checkouts under `.worktrees/` that no live run accounts for.
+	 *
+	 * Read-only by design. There is no companion endpoint that removes one, and
+	 * there should not be: the deterministic naming scheme exists so a person
+	 * can find these and decide, not so a sweeper can delete them.
+	 */
+	projectWorktreeOrphans: (projectId: string) =>
+		fetchJson<OrphanWorktreesResponse>(
+			`/agents/projects/${encodeURIComponent(projectId)}/worktree-orphans`,
+		),
 
 	projectDiskUsage: (projectId: string) =>
 		fetchJson<DiskUsageResponse>(

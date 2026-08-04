@@ -5,8 +5,10 @@ import {Button} from "@spacedrive/primitives";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
 	faArrowLeft,
+	faFolderTree,
 	faHandPaper,
 	faRotate,
+	faSliders,
 } from "@fortawesome/free-solid-svg-icons";
 import {
 	api,
@@ -14,6 +16,18 @@ import {
 	type TaskItem,
 	type WorkflowRun,
 } from "@/api/client";
+import {
+	CommandResult,
+	commandOutputsOf,
+} from "@/components/workflows/CommandResult";
+import {
+	WORKTREE_MODE_HINT,
+	WORKTREE_MODE_LABEL,
+	isContainmentRefusal,
+	provisionsWorktree,
+	worktreeModeOf,
+} from "@/components/workflows/commands";
+import {ContainmentStatusList} from "@/components/SandboxContainment";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {TaskStatusPill} from "@/components/workflows/TaskStatusPill";
 import {
@@ -288,9 +302,13 @@ export function WorkflowRunView({runId}: {runId: string}) {
 									<LoopPasses
 										stepKey={selectedNode.stepKey}
 										passes={selectedNode.passes}
+										runFinished={isRunFinished(status)}
 									/>
 								) : (
-									<RunTaskBody task={selectedTask} />
+									<RunTaskBody
+										task={selectedTask}
+										runFinished={isRunFinished(status)}
+									/>
 								)}
 							</div>
 						) : (
@@ -313,7 +331,12 @@ export function WorkflowRunView({runId}: {runId: string}) {
 					) : (
 						<ol>
 							{orderedTasks.map((task, index) => (
-								<RunTaskRow key={task.id} task={task} index={index} />
+								<RunTaskRow
+									key={task.id}
+									task={task}
+									index={index}
+									runFinished={isRunFinished(status)}
+								/>
 							))}
 						</ol>
 					)}
@@ -530,7 +553,15 @@ function LaunchInput({inputs}: {inputs: unknown}) {
  * with each pass's inputs and outputs: pass 2's input is visibly pass 1's
  * output, which is the entire mechanism of a loop shown rather than described.
  */
-function LoopPasses({stepKey, passes}: {stepKey: string; passes: TaskItem[]}) {
+function LoopPasses({
+	stepKey,
+	passes,
+	runFinished,
+}: {
+	stepKey: string;
+	passes: TaskItem[];
+	runFinished: boolean;
+}) {
 	const ordered = sortPasses(passes);
 	const resolution = finalResolution(ordered);
 	const group = ordered[0]?.loop_group;
@@ -597,7 +628,7 @@ function LoopPasses({stepKey, passes}: {stepKey: string; passes: TaskItem[]}) {
 								</span>
 							)}
 						</div>
-						<RunTaskBody task={task} hideStepKey />
+						<RunTaskBody task={task} hideStepKey runFinished={runFinished} />
 					</li>
 				))}
 			</ol>
@@ -650,7 +681,15 @@ function LoopHoldNotice({task}: {task: TaskItem}) {
 	);
 }
 
-function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
+function RunTaskRow({
+	task,
+	index,
+	runFinished,
+}: {
+	task: TaskItem;
+	index: number;
+	runFinished: boolean;
+}) {
 	return (
 		<li className="border-b border-app-line/40 px-4 py-3">
 			<div className="flex items-start gap-3">
@@ -658,7 +697,7 @@ function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 					{index + 1}
 				</span>
 				<div className="min-w-0 flex-1">
-					<RunTaskBody task={task} />
+					<RunTaskBody task={task} runFinished={runFinished} />
 				</div>
 			</div>
 		</li>
@@ -669,11 +708,24 @@ function RunTaskRow({task, index}: {task: TaskItem; index: number}) {
 function RunTaskBody({
 	task,
 	hideStepKey,
+	runFinished,
 }: {
 	task: TaskItem;
 	/** The pass list already names the step once, at the top. */
 	hideStepKey?: boolean;
+	/**
+	 * Whether the run has settled.
+	 *
+	 * Only the finished case can say a missing checkout was *reaped* rather than
+	 * still to come, and guessing wrong either way tells somebody their evidence
+	 * was deleted when it was not.
+	 */
+	runFinished?: boolean;
 }) {
+	// Shape-checked rather than trusted: a command task that was cancelled or
+	// timed out has no outputs at all, and an agent task's outputs must never be
+	// rendered as an exit code.
+	const commandOutputs = commandOutputsOf(task);
 	// The compiler appends the branch to the title so a task is identifiable on
 	// the board. Here the branch is a badge of its own, so showing both would
 	// print `[sigil]` twice on one line. A later pass is suffixed `(iteration 2)`
@@ -747,12 +799,15 @@ function RunTaskBody({
 			{held ? (
 				<LoopHoldNotice task={task} />
 			) : (
-				task.block_reason && (
+				task.block_reason &&
+				(isContainmentRefusal(task.block_reason) ? (
+					<ContainmentRefusal reason={task.block_reason} />
+				) : (
 					<p className="mt-1 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[11px] text-status-error">
 						{task.block_kind ? `${task.block_kind}: ` : ""}
 						{task.block_reason}
 					</p>
-				)
+				))
 			)}
 			{!task.block_reason && task.last_error && (
 				<p className="mt-1 break-words font-mono text-[10px] text-status-warning">
@@ -760,20 +815,146 @@ function RunTaskBody({
 				</p>
 			)}
 
+			<TaskCheckout task={task} runFinished={runFinished ?? false} />
+
 			{task.inputs != null && (
 				<JsonBlock label="Inputs" value={task.inputs} muted />
 			)}
-			{task.outputs != null ? (
+			{commandOutputs ? (
+				<CommandResult task={task} outputs={commandOutputs} />
+			) : task.outputs != null ? (
 				<JsonBlock label="Outputs" value={task.outputs} />
 			) : (
 				<p className="mt-1 text-[11px] text-ink-faint">
 					No output yet.
-					{task.output_schema != null &&
-						" It must match the step's declared output schema."}
+					{task.kind === "command"
+						? " A command step produces its exit code, stdout and stderr once it has run."
+						: task.output_schema != null &&
+							" It must match the step's declared output schema."}
 				</p>
 			)}
 		</>
 	);
+}
+
+/**
+ * A command step refused because containment is only nominal.
+ *
+ * Rendered as a *configuration* problem, not a failure. Nothing about the
+ * pipeline is wrong: `sandbox.mode` says `enabled`, no backend exists on the
+ * host, and a stored shell line would therefore run with full host access. The
+ * task spends no failure budget and retrying changes nothing, so the useful
+ * thing on screen is the fix and the current state of the machine — not a red
+ * box that reads like a crash.
+ */
+function ContainmentRefusal({reason}: {reason: string}) {
+	return (
+		<div className="mt-1 rounded border border-status-warning/40 bg-status-warning/5 px-2 py-1.5 text-[11px]">
+			<div className="mb-1 flex items-center gap-1.5 text-status-warning">
+				<FontAwesomeIcon icon={faSliders} className="text-[10px]" />
+				<span className="font-medium">
+					Configuration — this instance, not this pipeline
+				</span>
+			</div>
+			<p className="text-[10px] text-ink-dull">{reason}</p>
+			<p className="mt-1 text-[10px] text-ink-faint">
+				Nothing here retries into working: the task is parked, no failure budget
+				was spent, and it will run as soon as the host can contain it. What the
+				instance reports right now:
+			</p>
+			<div className="mt-1.5">
+				<ContainmentStatusList />
+			</div>
+		</div>
+	);
+}
+
+/**
+ * Which checkout this task actually ran in.
+ *
+ * "Which directory did this happen in" is the first question anybody asks of a
+ * run that provisioned worktrees, and until now the answer was nowhere on
+ * screen. The `project_worktrees` row is the evidence: reaping deletes it only
+ * when git actually removed the directory, so a row that is still here means a
+ * checkout that is still on disk — and its absence after a finished run means
+ * the checkout was clean and went.
+ */
+function TaskCheckout({
+	task,
+	runFinished,
+}: {
+	task: TaskItem;
+	runFinished: boolean;
+}) {
+	const mode = worktreeModeOf(task);
+	const provisions = provisionsWorktree(mode);
+	// Nothing to say about a step that ran where its binding already pointed and
+	// named no worktree — that is every step written before this feature.
+	const relevant = provisions || task.worktree_id != null;
+
+	const {data: project} = useQuery({
+		queryKey: ["project", task.project_id],
+		queryFn: () => api.getProject(task.project_id as string),
+		enabled: relevant && task.project_id != null,
+		staleTime: 60_000,
+		retry: false,
+	});
+
+	if (!relevant) return null;
+
+	const worktree =
+		task.worktree_id != null
+			? (project?.worktrees ?? []).find((entry) => entry.id === task.worktree_id)
+			: undefined;
+	const absolute =
+		project && worktree ? joinPath(project.root_path, worktree.path) : null;
+
+	return (
+		<div className="mt-1.5 rounded border border-app-line bg-app-box/40 px-2 py-1.5">
+			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px]">
+				<FontAwesomeIcon icon={faFolderTree} className="text-[9px] text-ink-faint" />
+				<span className="text-ink-dull" title={WORKTREE_MODE_HINT[mode]}>
+					{WORKTREE_MODE_LABEL[mode]}
+				</span>
+				{task.worktree_base_ref && (
+					<span className="text-ink-faint">
+						· forked from{" "}
+						<span className="font-mono text-ink-dull">
+							{task.worktree_base_ref}
+						</span>
+					</span>
+				)}
+			</div>
+
+			{worktree ? (
+				<p className="mt-1 break-all font-mono text-[10px] text-ink-dull">
+					{absolute ?? worktree.path}
+					<span className="text-ink-faint"> · branch {worktree.branch}</span>
+				</p>
+			) : task.worktree_id != null ? (
+				<p className="mt-1 font-mono text-[10px] text-ink-faint">
+					{task.worktree_id}
+				</p>
+			) : provisions && runFinished ? (
+				<p className="mt-1 text-[10px] text-ink-faint">
+					The checkout is gone: the run finished, git accepted its removal, and
+					git only accepts a clean one. Any branch and commits it made survive
+					in the repo — <span className="font-mono">git worktree remove</span>{" "}
+					deletes the checkout, not the branch.
+				</p>
+			) : (
+				<p className="mt-1 text-[10px] text-ink-faint">
+					No checkout recorded against this task yet.
+				</p>
+			)}
+		</div>
+	);
+}
+
+function joinPath(root: string, relative: string): string {
+	if (relative === "" || relative === ".") return root;
+	if (relative.startsWith("/")) return relative;
+	return `${root.replace(/\/+$/, "")}/${relative}`;
 }
 
 function JsonBlock({

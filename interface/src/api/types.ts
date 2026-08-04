@@ -231,6 +231,12 @@ export type MemoryPersistenceSection =
 export type BrowserSection = components["schemas"]["BrowserSection"];
 export type ChannelSection = components["schemas"]["ChannelSection"];
 export type SandboxSection = components["schemas"]["SandboxSection"];
+// What the host is *actually* doing, as opposed to what `sandbox.mode` asked
+// for. The two read alike from the config surface and are not the same
+// question — reporting only the first is how an instance ends up running
+// unconfined while its config says `enabled`.
+export type SandboxContainmentStatus =
+  components["schemas"]["SandboxContainmentStatus"];
 export type ProjectsSection = components["schemas"]["ProjectsSection"];
 export type DiscordSection = components["schemas"]["DiscordSection"];
 
@@ -408,6 +414,12 @@ export type StepBinding = components["schemas"]["StepBinding"];
 // compiled into a real `TaskGate` at launch.
 export type StepGate = components["schemas"]["StepGate"];
 export type BindingSource = components["schemas"]["BindingSource"];
+// Whether a step runs a model or a process. `agent` is the default and is every
+// step that predates command steps.
+export type StepKind = components["schemas"]["StepKind"];
+// Where a step gets its working directory from: the task binding it already
+// has, a checkout of its own, or one per fan-out branch.
+export type WorktreeMode = components["schemas"]["WorktreeMode"];
 export type LoopArm = components["schemas"]["LoopArm"];
 export type LoopResolution = components["schemas"]["LoopResolution"];
 export type WorkflowListResponse = components["schemas"]["WorkflowListResponse"];
@@ -513,6 +525,12 @@ export type ProjectWithRelations =
   components["schemas"]["ProjectWithRelations"];
 export type ProjectListResponse = components["schemas"]["ProjectListResponse"];
 export type ProjectResponse = components["schemas"]["ProjectResponse"];
+
+// A checkout under `.worktrees/` that no live run accounts for. Listed for a
+// person to look at — there is deliberately no endpoint that removes one.
+export type OrphanWorktree = components["schemas"]["OrphanWorktree"];
+export type OrphanWorktreesResponse =
+  components["schemas"]["OrphanWorktreesResponse"];
 
 // Disk usage
 export type DiskUsageEntry = components["schemas"]["DiskUsageEntry"];

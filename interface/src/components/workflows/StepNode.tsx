@@ -5,11 +5,13 @@ import {
 	faCheck,
 	faCircleNodes,
 	faCodeBranch,
+	faFolderTree,
 	faHandPaper,
 	faHourglassHalf,
 	faQuoteLeft,
 	faRightToBracket,
 	faRotate,
+	faTerminal,
 	faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
@@ -23,6 +25,16 @@ import {styleFor} from "@/components/tasks/boardColumns";
 import {STATUS_LABEL} from "@/components/tasks/taskTransitions";
 import {NODE_HEIGHT, NODE_WIDTH} from "./layout";
 import {RESOLUTION_HINT, RESOLUTION_SHORT} from "./loops";
+import {
+	EXPECT_EXIT_UNSET,
+	WORKTREE_MODE_HINT,
+	WORKTREE_MODE_LABEL,
+	expectExitCodeMeaning,
+	formatTimeout,
+	isCommandStep,
+	provisionsWorktree,
+	worktreeModeOf,
+} from "./commands";
 
 /**
  * One step, as a box on the canvas.
@@ -177,6 +189,20 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 	const gaveUp =
 		resolution === "exhausted_routed" || resolution === "exhausted_blocked";
 
+	/**
+	 * A shell command is not a model step and must not be drawn as one.
+	 *
+	 * Same argument that got loops and conditions their own treatment: a graph
+	 * that renders `rm -rf build && bun run lint` identically to "summarise the
+	 * findings" is lying about what it does, and the thing a reader most needs
+	 * from a canvas is to know which boxes are deterministic. So the command
+	 * line itself is on the box — it is the step's whole behaviour, in a way a
+	 * title never is.
+	 */
+	const command = isCommandStep(step);
+	const worktreeMode = worktreeModeOf(step);
+	const provisions = provisionsWorktree(worktreeMode);
+
 	// The border carries the one fact that matters most on that canvas: on the
 	// editor, whether this is the step being edited; on a run, how its task is
 	// doing. Selection still wins, because the panel on the right has to be
@@ -255,10 +281,59 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 				</div>
 			</div>
 
+			{/* The command line, on the box. A shell command is what the step *is*,
+			    the way a brief is what an agent step is — and unlike a brief it is
+			    short enough to read at a glance. Drawn `$`-prefixed and monospaced
+			    so a command node is identifiable across the viewport without
+			    reading a word of it. */}
+			{command && (
+				<div className="flex min-w-0 items-center gap-1">
+					<FontAwesomeIcon
+						icon={faTerminal}
+						className="shrink-0 text-[8px] text-status-info"
+					/>
+					<span
+						className="min-w-0 flex-1 truncate rounded border border-status-info/25 bg-status-info/5 px-1 py-px font-mono text-[9px] text-status-info"
+						title={
+							step.command
+								? `${step.command}\n\n${
+										step.command_timeout_secs != null
+											? `Timeout ${formatTimeout(step.command_timeout_secs)}. `
+											: ""
+									}${
+										step.expect_exit_code != null
+											? expectExitCodeMeaning(step.expect_exit_code)
+											: EXPECT_EXIT_UNSET
+									}`
+								: "A command step with no command line. Launch refuses this."
+						}
+					>
+						{step.command ?? "no command line"}
+					</span>
+				</div>
+			)}
+
 			{/* The loop line. Present only for a body step, because for anything else
 			    it would be a blank row of reserved space. */}
-			{(loopGroup || heldArm) && (
+			{(loopGroup || heldArm || provisions) && (
 				<div className="flex min-w-0 items-center gap-1">
+					{/* Which checkout this runs in. A step that provisions one is doing
+					    something the graph otherwise cannot show: two boxes over the
+					    same repo that do not share a working tree. */}
+					{provisions && (
+						<span
+							className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-app-line bg-app-box/60 px-1.5 py-px text-[9px] text-ink-dull"
+							title={`${WORKTREE_MODE_LABEL[worktreeMode]} — ${WORKTREE_MODE_HINT[worktreeMode]}`}
+						>
+							<FontAwesomeIcon
+								icon={faFolderTree}
+								className="shrink-0 text-[7px]"
+							/>
+							<span className="truncate">
+								{worktreeMode === "per_branch" ? "worktree/branch" : "own worktree"}
+							</span>
+						</span>
+					)}
 					{/* The region drawn behind the body already names the loop, so the
 					    node says only what the region cannot: which of its steps is
 					    the exit, and therefore where both ways out leave from. */}
@@ -379,6 +454,17 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 							{status ? (STATUS_LABEL[status] ?? status) : ""}
 						</span>
 					</span>
+				) : command ? (
+					// A command step has no priority worth reading at this size — what
+					// decides whether it does the right thing is the timeout and the
+					// exit-code rule, and only one of those is ever non-default.
+					<span
+						className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-info/40 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info"
+						title="Runs a process instead of a model. Its exit code, stdout and stderr are the step's outputs."
+					>
+						<FontAwesomeIcon icon={faTerminal} className="shrink-0 text-[7px]" />
+						command
+					</span>
 				) : (
 					<span className="shrink-0 rounded border border-app-line bg-app-box/50 px-1 py-px text-[9px] text-ink-faint">
 						{step.priority}
@@ -403,7 +489,21 @@ function StepNodeImpl({data, selected}: NodeProps<StepFlowNode>) {
 					</span>
 				) : (
 					<>
-						{step.output_schema != null && (
+						{command && step.command_timeout_secs != null && (
+							<Badge
+								icon={faHourglassHalf}
+								label={formatTimeout(step.command_timeout_secs)}
+								hint={`Killed after ${step.command_timeout_secs}s, and a command that never reported is a task failure.`}
+							/>
+						)}
+						{command && step.expect_exit_code != null && (
+							<Badge
+								icon={faCheck}
+								label={`exit ${step.expect_exit_code}`}
+								hint={expectExitCodeMeaning(step.expect_exit_code)}
+							/>
+						)}
+						{!command && step.output_schema != null && (
 							<Badge icon={faCircleNodes} label="output" hint="Declares an output schema, so a later step can bind to it." />
 						)}
 						{step.system_prompt && (

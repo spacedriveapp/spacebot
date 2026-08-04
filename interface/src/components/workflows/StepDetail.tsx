@@ -4,10 +4,13 @@ import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {
 	faArrowRightLong,
 	faCodeBranch,
+	faFolderTree,
 	faHourglassHalf,
 	faPen,
 	faQuoteLeft,
+	faRobot,
 	faRotate,
+	faTerminal,
 	faTriangleExclamation,
 	faXmark,
 } from "@fortawesome/free-solid-svg-icons";
@@ -18,10 +21,13 @@ import type {
 	SaveStepRequest,
 	StepBinding,
 	StepGate,
+	StepKind,
 	TaskPriority,
 	WorkflowEdge,
 	WorkflowStep,
+	WorktreeMode,
 } from "@/api/client";
+import {useRepoChoices} from "@/hooks/useRepoChoices";
 import {ancestorsOf, parentsByStep, wouldCycle} from "./graph";
 import {
 	DEFAULT_LOOP_MAX_ITERATIONS,
@@ -41,8 +47,24 @@ import {
 	type DispositionChoice,
 } from "./conditions";
 import {parseJson} from "./schemaForm";
+import {
+	EXPECT_EXIT_UNSET,
+	MAX_COMMAND_TIMEOUT_SECS,
+	STEP_KIND_HINT,
+	STEP_KIND_LABEL,
+	WORKTREE_MODE_HINT,
+	WORKTREE_MODE_LABEL,
+	expectExitCodeMeaning,
+	formatTimeout,
+	isFanOut,
+	provisionsWorktree,
+	stepKindOf,
+	worktreeModeOf,
+} from "./commands";
 
 const PRIORITIES: TaskPriority[] = ["critical", "high", "medium", "low"];
+const STEP_KINDS: StepKind[] = ["agent", "command"];
+const WORKTREE_MODES: WorktreeMode[] = ["inherit", "per_run", "per_branch"];
 
 export interface StepDetailProps {
 	step: WorkflowStep;
@@ -228,6 +250,22 @@ function StepFields({
 	const [localError, setLocalError] = useState<string | null>(null);
 	const [confirmDelete, setConfirmDelete] = useState(false);
 
+	// A command step is a different thing from an agent step, not an agent step
+	// with extra fields, so `kind` sits above everything the two do not share.
+	const [kind, setKind] = useState<StepKind>(() => stepKindOf(step));
+	const [command, setCommand] = useState(step.command ?? "");
+	const [timeoutSecs, setTimeoutSecs] = useState(() =>
+		step.command_timeout_secs == null ? "" : String(step.command_timeout_secs),
+	);
+	const [expectExit, setExpectExit] = useState(() =>
+		step.expect_exit_code == null ? "" : String(step.expect_exit_code),
+	);
+	const [repoId, setRepoId] = useState(step.repo_id ?? "");
+	const [worktreeMode, setWorktreeMode] = useState<WorktreeMode>(() =>
+		worktreeModeOf(step),
+	);
+	const [baseRef, setBaseRef] = useState(step.worktree_base_ref ?? "");
+
 	const [loopGroup, setLoopGroup] = useState(step.loop_group ?? "");
 	const [maxIterations, setMaxIterations] = useState(() =>
 		step.loop_max_iterations == null ? "" : String(step.loop_max_iterations),
@@ -256,6 +294,17 @@ function StepFields({
 		setAgentId(step.assigned_agent_id ?? "");
 		setInputSchema(format(step.input_schema));
 		setOutputSchema(format(step.output_schema));
+		setKind(stepKindOf(step));
+		setCommand(step.command ?? "");
+		setTimeoutSecs(
+			step.command_timeout_secs == null ? "" : String(step.command_timeout_secs),
+		);
+		setExpectExit(
+			step.expect_exit_code == null ? "" : String(step.expect_exit_code),
+		);
+		setRepoId(step.repo_id ?? "");
+		setWorktreeMode(worktreeModeOf(step));
+		setBaseRef(step.worktree_base_ref ?? "");
 		setLoopGroup(step.loop_group ?? "");
 		setMaxIterations(
 			step.loop_max_iterations == null ? "" : String(step.loop_max_iterations),
@@ -303,6 +352,22 @@ function StepFields({
 		[steps],
 	);
 
+	/**
+	 * Whether this step fans out, which is what makes `per_branch` legal.
+	 *
+	 * Read from the stored step rather than from a control here, because there
+	 * is no fan-out control in this panel — but the editor already *knows* the
+	 * answer, so refusing `per_branch` locally is the same move the loop fields
+	 * make for a body with no exit: an invalid shape is refused where it is
+	 * authored, not at launch three screens later.
+	 */
+	const fanOut = isFanOut(step);
+	const provisioning = provisionsWorktree(worktreeMode);
+	const perBranchWithoutFanOut = worktreeMode === "per_branch" && !fanOut;
+	const isCommand = kind === "command";
+	const parsedExpectExit =
+		expectExit.trim() === "" ? null : Number(expectExit.trim());
+
 	const submit = () => {
 		const trimmed = title.trim();
 		if (trimmed === "") {
@@ -318,6 +383,76 @@ function StepFields({
 		if ("error" in output) {
 			setLocalError(`Output schema: ${output.error}`);
 			return;
+		}
+
+		// Command fields. Everything checked here is checked again at launch —
+		// the point of checking it now is that the person who can fix it is
+		// looking at the field.
+		let commandLine: string | null = null;
+		let timeout: number | null = null;
+		let expectedExit: number | null = null;
+		if (isCommand) {
+			commandLine = command.trim();
+			if (commandLine === "") {
+				setLocalError(
+					"A command step needs a command line. There is nothing else for it to run.",
+				);
+				return;
+			}
+			if (timeoutSecs.trim() === "") {
+				setLocalError(
+					"A command step needs a timeout. It is required rather than inherited from a default because only the author knows whether this is a two-second linter or a four-minute build.",
+				);
+				return;
+			}
+			const parsedTimeout = Number(timeoutSecs.trim());
+			if (!Number.isInteger(parsedTimeout)) {
+				setLocalError("The timeout must be a whole number of seconds.");
+				return;
+			}
+			if (parsedTimeout < 1 || parsedTimeout > MAX_COMMAND_TIMEOUT_SECS) {
+				setLocalError(
+					`The timeout must be between 1 and ${MAX_COMMAND_TIMEOUT_SECS} seconds (${formatTimeout(
+						MAX_COMMAND_TIMEOUT_SECS,
+					)}). A command step is not a daemon.`,
+				);
+				return;
+			}
+			timeout = parsedTimeout;
+
+			if (expectExit.trim() !== "") {
+				const parsedExpected = Number(expectExit.trim());
+				if (!Number.isInteger(parsedExpected)) {
+					setLocalError("The expected exit code must be a whole number.");
+					return;
+				}
+				expectedExit = parsedExpected;
+			}
+
+			// A command step runs in exactly the directory its binding names.
+			// With no repo there is no directory, and defaulting to the workspace
+			// would run a stored shell line against whatever happened to be there.
+			if (repoId === "" && !provisioning) {
+				setLocalError(
+					"A command step needs a repo. It runs in exactly the directory its binding resolves to, and a step with no binding has no directory — launch refuses it rather than falling back to the workspace.",
+				);
+				return;
+			}
+		}
+
+		if (provisioning) {
+			if (repoId === "") {
+				setLocalError(
+					`\`${WORKTREE_MODE_LABEL[worktreeMode]}\` creates a checkout, so it needs a repo to fork from.`,
+				);
+				return;
+			}
+			if (perBranchWithoutFanOut) {
+				setLocalError(
+					"One checkout per branch needs a fan-out to have branches, and this step is not one. Degrading it to a single shared checkout would give you a pipeline that looks isolated and is not, so launch refuses it — and so does this form.",
+				);
+				return;
+			}
 		}
 
 		// Loop settings are read from the exit step and nowhere else — the server
@@ -381,6 +516,21 @@ function StepFields({
 		}
 
 		setLocalError(null);
+		// `PUT /steps/{key}` replaces the step **wholesale**. Every field
+		// `SaveStepRequest` accepts is therefore sent on every save, whether or
+		// not this panel renders a control for it — a field omitted here is a
+		// field cleared on the server, and the two data-loss bugs this rule was
+		// written for both looked exactly like "fixed a typo in the title".
+		//
+		// The full list, and where each value comes from:
+		//   title, description, priority, system_prompt, assigned_agent_id,
+		//   input_schema, output_schema, position       — edited above
+		//   repo_id, kind, command, command_timeout_secs,
+		//   expect_exit_code, worktree_mode, worktree_base_ref
+		//                                              — edited below
+		//   loop_group, loop_until, loop_max_iterations — edited, exit step only
+		//   for_each_step_key, for_each_pointer, for_each_key
+		//                                              — carried through untouched
 		onSave({
 			title: trimmed,
 			description: description.trim() || null,
@@ -390,6 +540,23 @@ function StepFields({
 			input_schema: input.value,
 			output_schema: output.value,
 			position: step.position,
+			// Which directory the step's task binds to. Never rendered before
+			// this change and never sent either, so every save through this
+			// panel silently unbound the step from its repo.
+			repo_id: repoId || null,
+			// An agent step must not carry a command line — launch refuses one —
+			// so switching back to `agent` clears the three command fields
+			// rather than leaving rows the server would reject. The form says so
+			// before the button is pressed.
+			kind,
+			command: isCommand ? commandLine : null,
+			command_timeout_secs: isCommand ? timeout : null,
+			expect_exit_code: isCommand ? expectedExit : null,
+			worktree_mode: worktreeMode,
+			// Only meaningful when something is being created. `inherit` uses a
+			// checkout that already exists, and a base ref against it would be a
+			// value nothing reads.
+			worktree_base_ref: provisioning ? baseRef.trim() || null : null,
 			// Sent on every save because `PUT /steps/{key}` replaces the step
 			// wholesale: omitting these would quietly un-loop a body the moment
 			// somebody fixed a typo in its title.
@@ -434,6 +601,8 @@ function StepFields({
 				</select>
 			</div>
 
+			<KindPicker value={kind} onChange={setKind} />
+
 			<Field label="Title">
 				<input
 					value={title}
@@ -442,35 +611,53 @@ function StepFields({
 				/>
 			</Field>
 
-			<Field
-				label="Description"
-				hint="The brief the worker is given. This is the task's body."
-			>
-				<textarea
-					value={description}
-					onChange={(event) => setDescription(event.target.value)}
-					rows={4}
-					className="w-full rounded border border-app-line bg-app px-2 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
+			{isCommand ? (
+				<CommandFields
+					command={command}
+					onCommandChange={setCommand}
+					timeoutSecs={timeoutSecs}
+					onTimeoutChange={setTimeoutSecs}
+					expectExit={expectExit}
+					onExpectExitChange={setExpectExit}
+					parsedExpectExit={parsedExpectExit}
 				/>
-			</Field>
+			) : (
+				<>
+					<Field
+						label="Description"
+						hint="The brief the worker is given. This is the task's body."
+					>
+						<textarea
+							value={description}
+							onChange={(event) => setDescription(event.target.value)}
+							rows={4}
+							className="w-full rounded border border-app-line bg-app px-2 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
 
-			<Field
-				label="System prompt"
-				hint="Appended to the worker prompt when this step runs. Standing instructions, not the task itself."
-			>
-				<textarea
-					value={systemPrompt}
-					onChange={(event) => setSystemPrompt(event.target.value)}
-					rows={3}
-					spellCheck={false}
-					placeholder="Always answer in British English."
-					className="w-full rounded border border-app-line bg-app px-2 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
-				/>
-			</Field>
+					<Field
+						label="System prompt"
+						hint="Appended to the worker prompt when this step runs. Standing instructions, not the task itself."
+					>
+						<textarea
+							value={systemPrompt}
+							onChange={(event) => setSystemPrompt(event.target.value)}
+							rows={3}
+							spellCheck={false}
+							placeholder="Always answer in British English."
+							className="w-full rounded border border-app-line bg-app px-2 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+				</>
+			)}
 
 			<Field
 				label="Assigned agent"
-				hint="Blank runs the step as whoever launched the run."
+				hint={
+					isCommand
+						? "Blank runs the step as whoever launched the run. The command runs under that agent's sandbox."
+						: "Blank runs the step as whoever launched the run."
+				}
 			>
 				<select
 					value={agentId}
@@ -489,35 +676,62 @@ function StepFields({
 				</select>
 			</Field>
 
-			<Field
-				label="Input schema"
-				hint="What this step needs before it runs. Each key here wants a binding below."
-			>
-				<textarea
-					value={inputSchema}
-					onChange={(event) => setInputSchema(event.target.value)}
-					rows={5}
-					spellCheck={false}
-					placeholder={'{\n  "type": "object",\n  "required": ["headline"]\n}'}
-					className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+			{isCommand ? (
+				<AgentOnlyLeftovers
+					description={description}
+					systemPrompt={systemPrompt}
+					inputSchema={inputSchema}
+					outputSchema={outputSchema}
+					onClearSchemas={() => {
+						setInputSchema("");
+						setOutputSchema("");
+					}}
 				/>
-			</Field>
+			) : (
+				<>
+					<Field
+						label="Input schema"
+						hint="What this step needs before it runs. Each key here wants a binding below."
+					>
+						<textarea
+							value={inputSchema}
+							onChange={(event) => setInputSchema(event.target.value)}
+							rows={5}
+							spellCheck={false}
+							placeholder={'{\n  "type": "object",\n  "required": ["headline"]\n}'}
+							className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
 
-			<Field
-				label="Output schema"
-				hint="What it must produce. Enforced when the worker calls task_complete."
-			>
-				<textarea
-					value={outputSchema}
-					onChange={(event) => setOutputSchema(event.target.value)}
-					rows={5}
-					spellCheck={false}
-					placeholder={
-						'{\n  "type": "object",\n  "properties": {"headline": {"type": "string"}}\n}'
-					}
-					className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
-				/>
-			</Field>
+					<Field
+						label="Output schema"
+						hint="What it must produce. Enforced when the worker calls task_complete."
+					>
+						<textarea
+							value={outputSchema}
+							onChange={(event) => setOutputSchema(event.target.value)}
+							rows={5}
+							spellCheck={false}
+							placeholder={
+								'{\n  "type": "object",\n  "properties": {"headline": {"type": "string"}}\n}'
+							}
+							className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+				</>
+			)}
+
+			<WhereItRuns
+				stepKey={step.step_key}
+				repoId={repoId}
+				onRepoChange={setRepoId}
+				mode={worktreeMode}
+				onModeChange={setWorktreeMode}
+				baseRef={baseRef}
+				onBaseRefChange={setBaseRef}
+				fanOut={fanOut}
+				isCommand={isCommand}
+			/>
 
 			<div className="mb-2 mt-3 border-t border-app-line/40 pt-2">
 				<div className="mb-1 flex items-center gap-1.5">
@@ -630,6 +844,25 @@ function StepFields({
 					))}
 			</div>
 
+			{/* Switching away from a command step throws the command line away, and
+			    it has to: launch refuses an agent step that still carries one, so
+			    there is nowhere for the text to live. Said before the button
+			    rather than after the save. */}
+			{!isCommand && command.trim() !== "" && (
+				<p className="mb-2 flex items-start gap-1.5 rounded border border-status-warning/30 bg-status-warning/5 px-2 py-1 text-[10px] text-status-warning">
+					<FontAwesomeIcon
+						icon={faTriangleExclamation}
+						className="mt-0.5 shrink-0 text-[9px]"
+					/>
+					<span>
+						Saving this as an agent step clears its command line{" "}
+						<span className="font-mono">{command.trim()}</span> and its timeout.
+						An agent step must not carry a command — nothing would run it, and
+						launch refuses one that does.
+					</span>
+				</p>
+			)}
+
 			{(localError || error) && (
 				<p className="mb-2 break-words rounded border border-status-error/30 bg-status-error/5 px-2 py-1 font-mono text-[11px] text-status-error">
 					{localError ?? error}
@@ -679,6 +912,404 @@ function StepFields({
 				)}
 			</div>
 		</Section>
+	);
+}
+
+/**
+ * Agent or command, as two things a step can be rather than a dropdown.
+ *
+ * Segmented rather than a `<select>` because the choice changes what the rest
+ * of the panel *is*, and a control that reshapes the form should not look like
+ * one that sets a value. The hint under it is the difference in one sentence:
+ * one asks a model, the other runs a process and reports what it did.
+ */
+function KindPicker({
+	value,
+	onChange,
+}: {
+	value: StepKind;
+	onChange: (next: StepKind) => void;
+}) {
+	return (
+		<Field label="Kind">
+			<div className="flex gap-1 rounded border border-app-line bg-app p-0.5">
+				{STEP_KINDS.map((option) => {
+					const active = option === value;
+					return (
+						<button
+							key={option}
+							type="button"
+							onClick={() => onChange(option)}
+							title={STEP_KIND_HINT[option]}
+							className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-[11px] transition-colors ${
+								active
+									? "bg-accent/15 text-accent"
+									: "text-ink-faint hover:text-ink-dull"
+							}`}
+						>
+							<FontAwesomeIcon
+								icon={option === "command" ? faTerminal : faRobot}
+								className="text-[9px]"
+							/>
+							{STEP_KIND_LABEL[option]}
+						</button>
+					);
+				})}
+			</div>
+			<p className="mt-1 text-[10px] text-ink-faint">{STEP_KIND_HINT[value]}</p>
+		</Field>
+	);
+}
+
+/**
+ * The three fields that make a command step.
+ *
+ * `expect_exit_code` gets the most words on the panel, and deliberately. It is
+ * the one field here whose default is counter-intuitive — a non-zero exit is a
+ * *successful* task with the code as data — and getting it backwards makes a
+ * lint step charge its failure budget for working correctly. So the form states
+ * the rule in force right now, in a sentence, and changes that sentence as the
+ * field changes rather than leaving the reader to infer it from a field name.
+ */
+function CommandFields({
+	command,
+	onCommandChange,
+	timeoutSecs,
+	onTimeoutChange,
+	expectExit,
+	onExpectExitChange,
+	parsedExpectExit,
+}: {
+	command: string;
+	onCommandChange: (next: string) => void;
+	timeoutSecs: string;
+	onTimeoutChange: (next: string) => void;
+	expectExit: string;
+	onExpectExitChange: (next: string) => void;
+	parsedExpectExit: number | null;
+}) {
+	const expectSet = expectExit.trim() !== "";
+	const expectValid = parsedExpectExit != null && Number.isInteger(parsedExpectExit);
+
+	return (
+		<>
+			<Field
+				label="Command"
+				hint="Run through `sh -c` in the directory this step binds to. Its exit code, stdout and stderr become the step's outputs — no output schema to declare."
+			>
+				<textarea
+					value={command}
+					onChange={(event) => onCommandChange(event.target.value)}
+					rows={3}
+					spellCheck={false}
+					placeholder="bun run lint"
+					className="w-full rounded border border-app-line bg-app px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+				/>
+			</Field>
+
+			<Field
+				label="Timeout"
+				hint={`Required — there is no default. Only the author knows whether this is a two-second linter or a four-minute build. Ceiling ${MAX_COMMAND_TIMEOUT_SECS}s (${formatTimeout(MAX_COMMAND_TIMEOUT_SECS)}).`}
+			>
+				<div className="flex items-center gap-2">
+					<input
+						value={timeoutSecs}
+						onChange={(event) => onTimeoutChange(event.target.value)}
+						inputMode="numeric"
+						spellCheck={false}
+						placeholder="60"
+						className="w-20 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+					/>
+					<span className="text-[10px] text-ink-faint">seconds</span>
+				</div>
+				<p className="mt-1 text-[10px] text-ink-faint">
+					When it fires the process tree is killed and the{" "}
+					<strong className="font-medium text-ink-dull">task fails</strong> — a
+					command that never reported has nothing to report, so there is no exit
+					code to treat as data.
+				</p>
+			</Field>
+
+			<Field label="Expected exit code" hint="Optional. Leave blank unless a non-zero code really is a failure.">
+				<div className="flex items-center gap-2">
+					<input
+						value={expectExit}
+						onChange={(event) => onExpectExitChange(event.target.value)}
+						inputMode="numeric"
+						spellCheck={false}
+						placeholder="any"
+						className="w-20 rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+					/>
+					{expectSet && (
+						<button
+							type="button"
+							onClick={() => onExpectExitChange("")}
+							className="text-[10px] text-ink-faint hover:text-ink-dull hover:underline"
+						>
+							Clear
+						</button>
+					)}
+				</div>
+				{/* The rule as it currently stands, not the field's name. Somebody
+				    reading this form should not have to have read the design doc to
+				    know which way round it is. */}
+				<p
+					className={`mt-1 rounded border px-2 py-1 text-[10px] ${
+						expectSet
+							? "border-status-warning/30 bg-status-warning/5 text-status-warning"
+							: "border-app-line bg-app-box/40 text-ink-dull"
+					}`}
+				>
+					{expectSet
+						? expectValid
+							? expectExitCodeMeaning(parsedExpectExit as number)
+							: "That is not a whole number, so it is not an exit code."
+						: EXPECT_EXIT_UNSET}
+					{!expectSet && (
+						<>
+							{" "}
+							A linter reporting <span className="font-mono">exit 1</span> is a
+							step that worked and found problems — the loop or condition
+							downstream reads the code and decides.
+						</>
+					)}
+				</p>
+			</Field>
+		</>
+	);
+}
+
+/**
+ * What a command step is carrying that belongs to an agent step.
+ *
+ * Not dropped on save — this panel never silently discards a field — but two of
+ * these are live hazards rather than dead weight, so they are named and offered
+ * a way out. A leftover `output_schema` is validated against the command's
+ * outputs and **fails the task** when it does not match; a leftover
+ * `input_schema` with required keys makes launch refuse until every one of them
+ * is bound.
+ */
+function AgentOnlyLeftovers({
+	description,
+	systemPrompt,
+	inputSchema,
+	outputSchema,
+	onClearSchemas,
+}: {
+	description: string;
+	systemPrompt: string;
+	inputSchema: string;
+	outputSchema: string;
+	onClearSchemas: () => void;
+}) {
+	const hasSchemas = inputSchema.trim() !== "" || outputSchema.trim() !== "";
+	const hasProse = description.trim() !== "" || systemPrompt.trim() !== "";
+	if (!hasSchemas && !hasProse) return null;
+
+	return (
+		<div
+			className={`mb-2 rounded border px-2 py-1.5 text-[10px] ${
+				hasSchemas
+					? "border-status-warning/30 bg-status-warning/5 text-status-warning"
+					: "border-app-line bg-app-box/40 text-ink-faint"
+			}`}
+		>
+			{hasSchemas ? (
+				<>
+					<p>
+						This step still declares{" "}
+						{[
+							inputSchema.trim() !== "" ? "an input schema" : null,
+							outputSchema.trim() !== "" ? "an output schema" : null,
+						]
+							.filter(Boolean)
+							.join(" and ")}
+						. A command step produces a fixed output shape, so a declared output
+						schema is checked against it and fails the task when it does not
+						match; required inputs with no binding make launch refuse.
+					</p>
+					<button
+						type="button"
+						onClick={onClearSchemas}
+						className="mt-1 text-[10px] underline hover:text-ink"
+					>
+						Clear both schemas
+					</button>
+				</>
+			) : (
+				<p>
+					A brief and a system prompt are kept on this step but nothing reads
+					them while it is a command. Switch it back to an agent step to edit
+					them.
+				</p>
+			)}
+		</div>
+	);
+}
+
+/**
+ * The directory the step runs in, and whether it gets one of its own.
+ *
+ * One block rather than two fields, because they are one decision: a command
+ * step has no directory without a repo and is refused at launch, and every
+ * provisioning mode forks from a repo too. Splitting them apart is how somebody
+ * ends up with a `per_run` step and nothing to fork.
+ */
+function WhereItRuns({
+	stepKey,
+	repoId,
+	onRepoChange,
+	mode,
+	onModeChange,
+	baseRef,
+	onBaseRefChange,
+	fanOut,
+	isCommand,
+}: {
+	stepKey: string;
+	repoId: string;
+	onRepoChange: (next: string) => void;
+	mode: WorktreeMode;
+	onModeChange: (next: WorktreeMode) => void;
+	baseRef: string;
+	onBaseRefChange: (next: string) => void;
+	fanOut: boolean;
+	isCommand: boolean;
+}) {
+	const {choices, isLoading} = useRepoChoices();
+	const selected = choices.find((choice) => choice.repoId === repoId) ?? null;
+	const provisioning = provisionsWorktree(mode);
+	const perBranchWithoutFanOut = mode === "per_branch" && !fanOut;
+
+	return (
+		<div className="mb-2 mt-3 border-t border-app-line/40 pt-2">
+			<div className="mb-1 flex items-center gap-1.5">
+				<FontAwesomeIcon icon={faFolderTree} className="text-[9px] text-accent" />
+				<span className="text-[11px] font-medium text-ink-dull">Where it runs</span>
+			</div>
+
+			<Field
+				label="Repo"
+				hint={
+					isCommand
+						? "Required for a command step: it runs in exactly the directory this resolves to. With no binding there is no directory, and launch refuses rather than falling back to the workspace."
+						: "Which checkout the step's task binds to. Blank leaves the task unbound."
+				}
+			>
+				<select
+					value={repoId}
+					onChange={(event) => onRepoChange(event.target.value)}
+					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+				>
+					<option value="">
+						{isLoading ? "Loading repos…" : "Not bound to a repo"}
+					</option>
+					{choices.map((choice) => (
+						<option key={choice.repoId} value={choice.repoId}>
+							{choice.projectName} · {choice.repoName}
+						</option>
+					))}
+					{/* A repo this build cannot see must still round-trip rather than
+					    silently unbinding the step on the next save. */}
+					{repoId !== "" && !selected && (
+						<option value={repoId}>{repoId} (unknown repo)</option>
+					)}
+				</select>
+				{selected && (
+					<p className="mt-1 truncate font-mono text-[10px] text-ink-faint">
+						{selected.path} · {selected.defaultBranch}
+					</p>
+				)}
+			</Field>
+
+			<Field label="Checkout" hint={WORKTREE_MODE_HINT[mode]}>
+				<select
+					value={mode}
+					onChange={(event) => onModeChange(event.target.value as WorktreeMode)}
+					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+				>
+					{WORKTREE_MODES.map((option) => (
+						<option key={option} value={option}>
+							{WORKTREE_MODE_LABEL[option]}
+							{option === "per_branch" && !fanOut ? " (needs a fan-out)" : ""}
+						</option>
+					))}
+				</select>
+			</Field>
+
+			{/* Nothing creates a checkout, so a base ref is a value nothing reads —
+			    and this codebase has a standing objection to leaving those in rows.
+			    Cleared on save, said before the button rather than after it. */}
+			{!provisioning && baseRef.trim() !== "" && (
+				<p className="mb-2 flex items-start gap-1.5 rounded border border-status-warning/30 bg-status-warning/5 px-2 py-1 text-[10px] text-status-warning">
+					<FontAwesomeIcon
+						icon={faTriangleExclamation}
+						className="mt-0.5 shrink-0 text-[9px]"
+					/>
+					<span>
+						Saving clears the base ref{" "}
+						<span className="font-mono">{baseRef.trim()}</span>. Nothing forks a
+						checkout when the binding is inherited, so it would be a value
+						nothing reads.
+					</span>
+				</p>
+			)}
+
+			{/* Refused here rather than at launch. The editor already knows which
+			    steps fan out, and a pipeline that looks isolated and is not is the
+			    failure this mode exists to prevent — two agents editing one working
+			    tree does not produce a bad result, it produces an incoherent one. */}
+			{perBranchWithoutFanOut && (
+				<p className="mb-2 flex items-start gap-1.5 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[10px] text-status-error">
+					<FontAwesomeIcon
+						icon={faTriangleExclamation}
+						className="mt-0.5 shrink-0 text-[9px]"
+					/>
+					<span>
+						<span className="font-mono">{stepKey}</span> is not a fan-out, so it
+						has no branches to give a checkout each. Launch refuses this, and so
+						does Save — a step silently degraded to one shared checkout would
+						look isolated and not be.
+					</span>
+				</p>
+			)}
+
+			{provisioning && !perBranchWithoutFanOut && (
+				<>
+					{repoId === "" && (
+						<p className="mb-2 flex items-start gap-1.5 rounded border border-status-error/30 bg-status-error/5 px-2 py-1 text-[10px] text-status-error">
+							<FontAwesomeIcon
+								icon={faTriangleExclamation}
+								className="mt-0.5 shrink-0 text-[9px]"
+							/>
+							<span>Pick a repo above — a checkout has to be forked from one.</span>
+						</p>
+					)}
+					<Field
+						label="Base ref"
+						hint="A branch, tag or sha to fork from. Blank uses the repo's current HEAD, which is not reproducible — a pipeline whose starting point drifts under it is one whose failures cannot be explained afterwards."
+					>
+						<input
+							value={baseRef}
+							onChange={(event) => onBaseRefChange(event.target.value)}
+							spellCheck={false}
+							placeholder={selected?.defaultBranch ?? "main"}
+							className="w-full rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+						/>
+					</Field>
+					<p className="mb-2 rounded border border-app-line bg-app-box/40 px-2 py-1 text-[10px] text-ink-faint">
+						Created under{" "}
+						<span className="font-mono text-ink-dull">
+							&lt;project&gt;/.worktrees/&lt;run&gt;-{stepKey}
+							{mode === "per_branch" ? "-<branch>" : ""}
+						</span>{" "}
+						and offered for removal when the run finishes. Git refuses to remove
+						a dirty one, and that refusal stands: uncommitted work from a failed
+						run is evidence, not garbage.
+					</p>
+				</>
+			)}
+		</div>
 	);
 }
 

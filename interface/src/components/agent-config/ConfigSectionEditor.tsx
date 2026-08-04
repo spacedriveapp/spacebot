@@ -10,6 +10,7 @@ import {
 	Switch,
 } from "@spacedrive/primitives";
 import {ModelSelect} from "@/components/ModelSelect";
+import {ContainmentStatusList} from "@/components/SandboxContainment";
 import {TagInput} from "@/components/TagInput";
 import {supportsAdaptiveThinking} from "./utils";
 import {SANDBOX_DEFAULTS} from "./constants";
@@ -553,6 +554,23 @@ export function ConfigSectionEditor({
 									<SelectItem value="disabled">Disabled</SelectItem>
 								</SelectContent>
 							</SelectRoot>
+						</div>
+						{/* What the host is *actually* doing, next to what was asked for.
+						    `mode` and `containment_active` are two questions that read
+						    alike from this form, and showing only the first is how an
+						    instance ends up running unconfined while this control says
+						    "Enabled". It is also the explanation for a command step
+						    parked as `capability` with nothing else visibly wrong. */}
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">
+								What this host enforces
+							</label>
+							<p className="text-tiny text-ink-faint">
+								The mode above is the request. This is the answer — and the two
+								can differ, because containment needs a backend the host may
+								not have.
+							</p>
+							<ContainmentStatusList />
 						</div>
 						<div className="flex flex-col gap-1.5">
 							<label className="text-sm font-medium text-ink">
