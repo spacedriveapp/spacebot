@@ -1,4 +1,8 @@
-import type {AgentConfigResponse, AgentConfigUpdateRequest} from "@/api/client";
+import type {
+	AgentConfigResponse,
+	AgentConfigUpdateRequest,
+	AgentInfo,
+} from "@/api/client";
 
 export type SectionId =
 	| "general"
@@ -35,6 +39,10 @@ export interface GeneralEditorProps {
 	role: string;
 	gradientStart: string;
 	gradientEnd: string;
+	/** What this agent currently declares it can do. */
+	capabilities: string[];
+	/** The whole fleet, so the picker can offer labels that already exist. */
+	agents: readonly AgentInfo[];
 	detail: string;
 	onDirtyChange: (dirty: boolean) => void;
 	saveHandlerRef: React.MutableRefObject<SaveHandlerRef>;
@@ -43,6 +51,7 @@ export interface GeneralEditorProps {
 		role?: string;
 		gradient_start?: string;
 		gradient_end?: string;
+		capabilities?: string[];
 	}) => void;
 }
 

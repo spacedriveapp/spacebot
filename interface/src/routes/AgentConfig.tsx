@@ -76,6 +76,7 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 			role?: string;
 			gradient_start?: string;
 			gradient_end?: string;
+			capabilities?: string[];
 		}) => api.updateAgent(agentId, update),
 		onMutate: () => setSaving(true),
 		onSuccess: () => {
@@ -204,6 +205,8 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 						role={currentAgent?.role ?? ""}
 						gradientStart={currentAgent?.gradient_start ?? ""}
 						gradientEnd={currentAgent?.gradient_end ?? ""}
+						capabilities={currentAgent?.capabilities ?? []}
+						agents={agentsQuery.data?.agents ?? []}
 						detail={active.detail}
 						onDirtyChange={setDirty}
 						saveHandlerRef={saveHandlerRef}

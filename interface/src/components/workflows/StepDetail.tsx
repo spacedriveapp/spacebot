@@ -11,10 +11,12 @@ import {
 	faRobot,
 	faRotate,
 	faTerminal,
+	faUsersGear,
 	faTriangleExclamation,
 	faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
+	AgentInfo,
 	GateDisposition,
 	SaveBindingRequest,
 	SaveStepGateRequest,
@@ -28,6 +30,8 @@ import type {
 	WorktreeMode,
 } from "@/api/client";
 import {useRepoChoices} from "@/hooks/useRepoChoices";
+import {CapabilityPicker} from "@/components/CapabilityPicker";
+import {agentsSatisfying, fleetCapabilities} from "@/lib/capabilities";
 import {ancestorsOf, parentsByStep, wouldCycle} from "./graph";
 import {
 	DEFAULT_LOOP_MAX_ITERATIONS,
@@ -75,7 +79,7 @@ export interface StepDetailProps {
 	gates: StepGate[];
 	/** Whether the template declares a launch input at all. */
 	hasRunInput: boolean;
-	agents: {id: string; display_name?: string | null}[];
+	agents: AgentInfo[];
 	onSave: (stepKey: string, body: SaveStepRequest) => void;
 	onDelete: (stepKey: string) => void;
 	onAddEdge: (
@@ -232,7 +236,7 @@ function StepFields({
 	step: WorkflowStep;
 	steps: WorkflowStep[];
 	edges: WorkflowEdge[];
-	agents: {id: string; display_name?: string | null}[];
+	agents: AgentInfo[];
 	busy?: boolean;
 	error: string | null;
 	onSave: (body: SaveStepRequest) => void;
@@ -243,6 +247,15 @@ function StepFields({
 	const [priority, setPriority] = useState<string>(step.priority);
 	const [systemPrompt, setSystemPrompt] = useState(step.system_prompt ?? "");
 	const [agentId, setAgentId] = useState(step.assigned_agent_id ?? "");
+	// Push or pull, as one choice rather than two fields. The server refuses a
+	// step that names an agent *and* requires capabilities with a 422, so
+	// offering both at once would only let someone build a save that bounces.
+	const [assignMode, setAssignMode] = useState<AssignMode>(() =>
+		step.required_capabilities == null ? "agent" : "capabilities",
+	);
+	const [requiredCapabilities, setRequiredCapabilities] = useState<string[]>(
+		() => step.required_capabilities ?? [],
+	);
 	const [inputSchema, setInputSchema] = useState(() => format(step.input_schema));
 	const [outputSchema, setOutputSchema] = useState(() =>
 		format(step.output_schema),
@@ -292,6 +305,8 @@ function StepFields({
 		setPriority(step.priority);
 		setSystemPrompt(step.system_prompt ?? "");
 		setAgentId(step.assigned_agent_id ?? "");
+		setAssignMode(step.required_capabilities == null ? "agent" : "capabilities");
+		setRequiredCapabilities(step.required_capabilities ?? []);
 		setInputSchema(format(step.input_schema));
 		setOutputSchema(format(step.output_schema));
 		setKind(stepKindOf(step));
@@ -365,6 +380,12 @@ function StepFields({
 	const provisioning = provisionsWorktree(worktreeMode);
 	const perBranchWithoutFanOut = worktreeMode === "per_branch" && !fanOut;
 	const isCommand = kind === "command";
+	const pooled = assignMode === "capabilities";
+	// Who could claim this step's task as the requirement stands. Learning
+	// "nothing in the fleet can do this" here costs one glance; learning it at
+	// launch costs a refused run, and learning it after launch costs a task
+	// that sits `ready` until somebody goes looking.
+	const eligibleAgents = agentsSatisfying(requiredCapabilities, agents);
 	const parsedExpectExit =
 		expectExit.trim() === "" ? null : Number(expectExit.trim());
 
@@ -515,6 +536,18 @@ function StepFields({
 			}
 		}
 
+		// A pooled step with an empty requirement is claimable by any agent at
+		// all, which is almost certainly not what someone who switched to
+		// "Require capabilities" and then saved an empty box meant. Refused
+		// here rather than at launch, where it would already have emitted a task
+		// that the first agent to ask sweeps up.
+		if (pooled && requiredCapabilities.length === 0) {
+			setLocalError(
+				"This step states a requirement but lists nothing, so any agent could claim it — which is what naming no agent already does. Add a capability, or switch back to naming an agent.",
+			);
+			return;
+		}
+
 		setLocalError(null);
 		// `PUT /steps/{key}` replaces the step **wholesale**. Every field
 		// `SaveStepRequest` accepts is therefore sent on every save, whether or
@@ -524,6 +557,7 @@ function StepFields({
 		//
 		// The full list, and where each value comes from:
 		//   title, description, priority, system_prompt, assigned_agent_id,
+		//   required_capabilities,
 		//   input_schema, output_schema, position       — edited above
 		//   repo_id, kind, command, command_timeout_secs,
 		//   expect_exit_code, worktree_mode, worktree_base_ref
@@ -536,7 +570,15 @@ function StepFields({
 			description: description.trim() || null,
 			priority,
 			system_prompt: systemPrompt.trim() || null,
-			assigned_agent_id: agentId || null,
+			// Push and pull are exclusive on the server — sending both is a 422 —
+			// so exactly one of these carries a value and the other is explicitly
+			// null. Null is not the same as omitted here: `required_capabilities`
+			// must be sent on *every* save, because this endpoint replaces the
+			// step wholesale and leaving it out would unpool a pooled step the
+			// next time somebody fixed a typo in its title. That is precisely the
+			// bug `repo_id` caused, and it is why it is in the list above.
+			assigned_agent_id: pooled ? null : agentId || null,
+			required_capabilities: pooled ? requiredCapabilities : null,
 			input_schema: input.value,
 			output_schema: output.value,
 			position: step.position,
@@ -651,30 +693,17 @@ function StepFields({
 				</>
 			)}
 
-			<Field
-				label="Assigned agent"
-				hint={
-					isCommand
-						? "Blank runs the step as whoever launched the run. The command runs under that agent's sandbox."
-						: "Blank runs the step as whoever launched the run."
-				}
-			>
-				<select
-					value={agentId}
-					onChange={(event) => setAgentId(event.target.value)}
-					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
-				>
-					<option value="">Whoever launches the run</option>
-					{agents.map((agent) => (
-						<option key={agent.id} value={agent.id}>
-							{agent.display_name ?? agent.id}
-						</option>
-					))}
-					{agentId && !agents.some((a) => a.id === agentId) && (
-						<option value={agentId}>{agentId} (unknown agent)</option>
-					)}
-				</select>
-			</Field>
+			<AssignmentFields
+				mode={assignMode}
+				onModeChange={setAssignMode}
+				agentId={agentId}
+				onAgentIdChange={setAgentId}
+				requiredCapabilities={requiredCapabilities}
+				onRequiredCapabilitiesChange={setRequiredCapabilities}
+				agents={agents}
+				eligibleAgents={eligibleAgents}
+				isCommand={isCommand}
+			/>
 
 			{isCommand ? (
 				<AgentOnlyLeftovers
@@ -923,6 +952,149 @@ function StepFields({
  * one that sets a value. The hint under it is the difference in one sentence:
  * one asks a model, the other runs a process and reports what it did.
  */
+/** Push or pull. Named so the two are one decision, not two fields. */
+type AssignMode = "agent" | "capabilities";
+
+/**
+ * Who runs this step — by name, or by what it needs.
+ *
+ * Presented as an either/or because it *is* one: the server rejects a step
+ * carrying both `assigned_agent_id` and `required_capabilities` with a 422, so
+ * two independent controls would exist mainly to let someone assemble a save
+ * that bounces. Switching mode is what clears the other side, and the payload
+ * always sends exactly one of them.
+ *
+ * The eligibility line under the picker is the cheap half of the feature. A
+ * requirement nothing can satisfy is refused at launch and, if an agent goes
+ * away mid-run, shows up on the board as an unclaimable task — but both of
+ * those are found by somebody who has stopped editing. Here the person who can
+ * fix it is looking straight at it.
+ */
+function AssignmentFields({
+	mode,
+	onModeChange,
+	agentId,
+	onAgentIdChange,
+	requiredCapabilities,
+	onRequiredCapabilitiesChange,
+	agents,
+	eligibleAgents,
+	isCommand,
+}: {
+	mode: AssignMode;
+	onModeChange: (next: AssignMode) => void;
+	agentId: string;
+	onAgentIdChange: (next: string) => void;
+	requiredCapabilities: string[];
+	onRequiredCapabilitiesChange: (next: string[]) => void;
+	agents: AgentInfo[];
+	eligibleAgents: AgentInfo[];
+	isCommand: boolean;
+}) {
+	const suggestions = fleetCapabilities(agents);
+	const describeLabel = (label: string) => {
+		const holders = agents
+			.filter((agent) => (agent.capabilities ?? []).includes(label))
+			.map((agent) => agent.display_name ?? agent.id);
+		return holders.length > 0 ? `Declared by ${holders.join(", ")}` : undefined;
+	};
+
+	const options: {value: AssignMode; label: string; icon: typeof faRobot}[] = [
+		{value: "agent", label: "Name an agent", icon: faRobot},
+		{value: "capabilities", label: "Require capabilities", icon: faUsersGear},
+	];
+
+	return (
+		<Field label="Who runs this">
+			<div className="mb-1.5 flex gap-1 rounded border border-app-line bg-app p-0.5">
+				{options.map((option) => {
+					const active = option.value === mode;
+					return (
+						<button
+							key={option.value}
+							type="button"
+							onClick={() => onModeChange(option.value)}
+							className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-[11px] transition-colors ${
+								active
+									? "bg-accent/15 text-accent"
+									: "text-ink-faint hover:text-ink-dull"
+							}`}
+						>
+							<FontAwesomeIcon icon={option.icon} className="text-[9px]" />
+							{option.label}
+						</button>
+					);
+				})}
+			</div>
+
+			{mode === "agent" ? (
+				<>
+					<select
+						value={agentId}
+						onChange={(event) => onAgentIdChange(event.target.value)}
+						className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
+					>
+						<option value="">Whoever launches the run</option>
+						{agents.map((agent) => (
+							<option key={agent.id} value={agent.id}>
+								{agent.display_name ?? agent.id}
+							</option>
+						))}
+						{agentId && !agents.some((a) => a.id === agentId) && (
+							<option value={agentId}>{agentId} (unknown agent)</option>
+						)}
+					</select>
+					<p className="mt-1 text-[10px] text-ink-faint">
+						{isCommand
+							? "Blank runs the step as whoever launched the run. The command runs under that agent's sandbox."
+							: "Blank runs the step as whoever launched the run."}
+					</p>
+				</>
+			) : (
+				<>
+					<CapabilityPicker
+						value={requiredCapabilities}
+						onChange={onRequiredCapabilitiesChange}
+						suggestions={suggestions}
+						describeSuggestion={describeLabel}
+						placeholder="e.g. rust, review"
+					/>
+					<p className="mt-1 text-[10px] text-ink-faint">
+						Nobody is named. The task goes into a pool and the first agent
+						declaring <em>every</em> one of these claims it — after which it
+						belongs to that agent like any other.
+					</p>
+
+					{requiredCapabilities.length === 0 ? (
+						<p className="mt-1.5 rounded border border-app-line bg-app-box/60 px-2 py-1.5 text-[10px] text-ink-dull">
+							No requirement yet. An empty requirement is claimable by
+							anybody, so add at least one label.
+						</p>
+					) : eligibleAgents.length === 0 ? (
+						<p className="mt-1.5 rounded border border-status-error/30 bg-status-error/5 px-2 py-1.5 text-[10px] text-status-error">
+							<FontAwesomeIcon
+								icon={faTriangleExclamation}
+								className="mr-1 text-[9px]"
+							/>
+							Nothing in the fleet can do this — no single agent declares all
+							of these. Launch will refuse the run. Give an agent the missing
+							labels, or split the step.
+						</p>
+					) : (
+						<p className="mt-1.5 rounded border border-status-success/30 bg-status-success/5 px-2 py-1.5 text-[10px] text-status-success">
+							Claimable by{" "}
+							{eligibleAgents
+								.map((agent) => agent.display_name ?? agent.id)
+								.join(", ")}
+							.
+						</p>
+					)}
+				</>
+			)}
+		</Field>
+	);
+}
+
 function KindPicker({
 	value,
 	onChange,

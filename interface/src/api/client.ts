@@ -1079,7 +1079,7 @@ export const api = {
 		return response.json() as Promise<{ success: boolean; agent_id: string; message: string }>;
 	},
 
-	updateAgent: async (agentId: string, update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string }) => {
+	updateAgent: async (agentId: string, update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string; capabilities?: string[] }) => {
 		const response = await fetch(`${getApiBase()}/agents`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },

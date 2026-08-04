@@ -27,6 +27,8 @@ import {
 	getGithubReferences,
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {UnclaimablePoolSection} from "@/components/tasks/UnclaimablePoolSection";
+import {UnclaimableBanner} from "@/components/tasks/UnclaimableBanner";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {TaskBoard} from "@/components/tasks/TaskBoard";
 import {
@@ -212,6 +214,9 @@ export function GlobalTasks({
 		() => new Set(),
 	);
 	const [blockedCollapsed, setBlockedCollapsed] = useState(false);
+	// Starts open: it only appears when something is wrong, and a report that
+	// hides itself is the failure it exists to fix.
+	const [unclaimableCollapsed, setUnclaimableCollapsed] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
@@ -538,6 +543,19 @@ export function GlobalTasks({
 					</div>
 				)}
 
+				{/* A pooled task nothing can claim is `ready` forever and looks
+				    exactly like work about to start, so it goes above both views
+				    rather than inside a column — the repair is to the fleet, not
+				    to the task, and it is the one hold no status can express. */}
+				<UnclaimablePoolSection
+					tasks={boardTasks}
+					agents={agents}
+					collapsed={unclaimableCollapsed}
+					onToggle={() => setUnclaimableCollapsed((v) => !v)}
+					onTaskClick={(task) => setActiveTaskId(task.id)}
+					activeTaskId={activeTaskId}
+				/>
+
 				{/* Task list */}
 				{isLoading ? (
 					<div className="py-8 text-center text-sm text-ink-faint">
@@ -574,6 +592,7 @@ export function GlobalTasks({
 							onMove={handleMove}
 							onRefuse={refuseMove}
 							resolveAgentName={resolveAgentName}
+							agents={agents}
 						/>
 					</div>
 				) : (
@@ -623,6 +642,14 @@ export function GlobalTasks({
 						busy={unblockMutation.isPending || retryMutation.isPending}
 					/>
 					<SkippedBanner task={activeTask as unknown as TaskItem} />
+					{/* Only renders for a pooled task nobody has claimed. Says who
+					    could take it, or — when nothing can — which of the two
+					    repairs this one needs. The panel below shows no assignee
+					    for such a task and cannot explain why. */}
+					<UnclaimableBanner
+						task={activeTask as unknown as TaskItem}
+						agents={agents}
+					/>
 					{/* No onStatusChange: TaskDetail would render a <select> of all
 					    five statuses it knows and offer moves the store refuses.
 					    StatusMoves below shows the legal ones and nothing else. */}

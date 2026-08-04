@@ -21,6 +21,8 @@ import {
 	getGithubReferences,
 } from "@/components/TaskUtils";
 import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {UnclaimablePoolSection} from "@/components/tasks/UnclaimablePoolSection";
+import {UnclaimableBanner} from "@/components/tasks/UnclaimableBanner";
 import {indexEdges} from "@/components/tasks/DependencyBadges";
 import {ContractSection} from "@/components/tasks/ContractSection";
 import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
@@ -60,6 +62,18 @@ export function AgentTasks({agentId}: {agentId: string}) {
 		refetchInterval: 15_000,
 	});
 
+	// This list filters on `owner_agent_id OR assigned_agent_id`, so a pooled
+	// task this agent *created* shows up here while still belonging to nobody.
+	// Without the fleet there is no way to say whether anything can claim it,
+	// and the agent-scoped board is exactly where somebody goes to ask why
+	// their work is not moving.
+	const {data: agentsData} = useQuery({
+		queryKey: ["agents"],
+		queryFn: api.agents,
+		staleTime: 10_000,
+	});
+	const agents = agentsData?.agents ?? [];
+
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
 	const rawTasks = (data?.tasks ?? []) as TaskItem[];
 
@@ -82,6 +96,7 @@ export function AgentTasks({agentId}: {agentId: string}) {
 		() => new Set(),
 	);
 	const [blockedCollapsed, setBlockedCollapsed] = useState(false);
+	const [unclaimableCollapsed, setUnclaimableCollapsed] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
@@ -316,6 +331,14 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					</div>
 				) : (
 					<div className="flex-1 overflow-y-auto">
+						<UnclaimablePoolSection
+							tasks={rawTasks}
+							agents={agents}
+							collapsed={unclaimableCollapsed}
+							onToggle={() => setUnclaimableCollapsed((v) => !v)}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							activeTaskId={activeTaskId}
+						/>
 						{/* TaskList drops any status outside TASK_STATUS_ORDER,
 						    so blocked tasks are rendered separately. */}
 						<BlockedTasksSection
@@ -356,6 +379,10 @@ export function AgentTasks({agentId}: {agentId: string}) {
 						busy={unblockMutation.isPending || retryMutation.isPending}
 					/>
 					<SkippedBanner task={activeTask as unknown as TaskItem} />
+					<UnclaimableBanner
+						task={activeTask as unknown as TaskItem}
+						agents={agents}
+					/>
 					{/* No onStatusChange: TaskDetail would render a <select> of all
 					    five statuses it knows and offer moves the store refuses.
 					    StatusMoves below shows the legal ones and nothing else. */}

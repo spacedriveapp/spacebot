@@ -21,11 +21,14 @@ import {
 import {CSS} from "@dnd-kit/utilities";
 import {Badge} from "@spacedrive/primitives";
 import type {
+	AgentInfo,
 	TaskEdgeSummary,
 	TaskItem,
 	TaskPriority,
 	TaskStatus,
 } from "@/api/client";
+import {agentsSatisfying, isPooled, isUnclaimed} from "@/lib/capabilities";
+import {CapabilityChips} from "./CapabilityChips";
 import {BlockKindChip} from "./BlockKindChip";
 import {LoopChips} from "./LoopChips";
 import {DependencyBadges} from "./DependencyBadges";
@@ -73,6 +76,14 @@ export interface TaskBoardProps {
 	 */
 	onRefuse: (task: TaskItem, status: TaskStatus, reason: string) => void;
 	resolveAgentName?: (agentId: string) => string;
+	/**
+	 * The fleet, so a pooled card can say whether anything can actually take it.
+	 *
+	 * Optional because two callers render this board without an agents query at
+	 * all; without it a pooled card still reads as pooled and lists what it
+	 * wants, it just cannot mark which labels are the problem.
+	 */
+	agents?: readonly AgentInfo[];
 }
 
 /** Droppable ids are namespaced so a column is never mistaken for a card id. */
@@ -129,6 +140,7 @@ export function TaskBoard({
 	onMove,
 	onRefuse,
 	resolveAgentName,
+	agents,
 }: TaskBoardProps) {
 	const columns = useMemo(() => columnsFor(tasks), [tasks]);
 	const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -197,6 +209,7 @@ export function TaskBoard({
 						activeTaskId={activeTaskId}
 						onTaskClick={onTaskClick}
 						resolveAgentName={resolveAgentName}
+						agents={agents}
 						// Only meaningful mid-drag: says whether this column would
 						// accept the card currently in the air.
 						rejects={
@@ -219,6 +232,7 @@ export function TaskBoard({
 						edge={edges.get(draggingTask.task_number)}
 						bindingNames={bindingNames}
 						resolveAgentName={resolveAgentName}
+						agents={agents}
 						className="rotate-1 shadow-lg"
 					/>
 				)}
@@ -266,6 +280,7 @@ function Column({
 	activeTaskId,
 	onTaskClick,
 	resolveAgentName,
+	agents,
 	rejects,
 	dragging,
 }: {
@@ -275,6 +290,7 @@ function Column({
 	activeTaskId?: string | null;
 	onTaskClick: (task: TaskItem) => void;
 	resolveAgentName?: (agentId: string) => string;
+	agents?: readonly AgentInfo[];
 	rejects: string | null;
 	dragging: boolean;
 }) {
@@ -324,6 +340,7 @@ function Column({
 							active={activeTaskId === task.id}
 							onClick={() => onTaskClick(task)}
 							resolveAgentName={resolveAgentName}
+							agents={agents}
 						/>
 					))}
 					{column.tasks.length === 0 && (
@@ -342,6 +359,7 @@ function Card({
 	active,
 	onClick,
 	resolveAgentName,
+	agents,
 }: {
 	task: TaskItem;
 	edge?: TaskEdgeSummary;
@@ -349,6 +367,7 @@ function Card({
 	active: boolean;
 	onClick: () => void;
 	resolveAgentName?: (agentId: string) => string;
+	agents?: readonly AgentInfo[];
 }) {
 	const {attributes, listeners, setNodeRef, transform, transition, isDragging} =
 		useSortable({id: task.id});
@@ -360,6 +379,7 @@ function Card({
 			edge={edge}
 			bindingNames={bindingNames}
 			resolveAgentName={resolveAgentName}
+			agents={agents}
 			onClick={onClick}
 			style={{transform: CSS.Transform.toString(transform), transition}}
 			// The original stays in place as a ghost while the overlay copy moves,
@@ -383,6 +403,7 @@ function CardBody({
 	edge,
 	bindingNames,
 	resolveAgentName,
+	agents,
 	className,
 	...rest
 }: {
@@ -391,9 +412,27 @@ function CardBody({
 	edge?: TaskEdgeSummary;
 	bindingNames?: BindingNames;
 	resolveAgentName?: (agentId: string) => string;
+	agents?: readonly AgentInfo[];
 	className?: string;
 } & React.HTMLAttributes<HTMLDivElement>) {
 	const priority = PRIORITY_STYLE[task.priority];
+
+	// Pooled and unclaimed is the only state with no assignee to show. Pooled
+	// and *claimed* is ordinary work belonging to whoever took it — the pool is
+	// how it arrived, not what it is now — so it renders exactly like a pushed
+	// task and the provenance is left to the drawer.
+	const awaitingClaim = isPooled(task) && isUnclaimed(task);
+	const requires = task.required_capabilities ?? [];
+	// Marked only when the fleet is actually known. With no agents prop, or
+	// none loaded, every label would look undeclared and every pooled card
+	// would turn red during a refetch.
+	const undeclared =
+		agents && agents.length > 0 && agentsSatisfying(requires, agents).length === 0
+			? requires.filter(
+					(label) =>
+						!agents.some((agent) => (agent.capabilities ?? []).includes(label)),
+				)
+			: undefined;
 
 	return (
 		<div
@@ -454,10 +493,28 @@ function CardBody({
 						</p>
 					)}
 
-					{resolveAgentName && (
-						<p className="mt-1 truncate text-[10px] text-ink-faint">
-							{resolveAgentName(task.assigned_agent_id)}
-						</p>
+					{/* Who this belongs to — or, for a pooled task nobody has taken,
+					    what it asked for instead. Until capabilities existed the line
+					    below simply rendered an empty string for an unassigned task,
+					    so a card addressed to a capability and a card whose agent had
+					    been deleted looked identical: a blank line. Both now say which
+					    they are. */}
+					{awaitingClaim ? (
+						<CapabilityChips
+							requires={requires}
+							unsatisfied={undeclared}
+							className="mt-1"
+						/>
+					) : (
+						resolveAgentName && (
+							<p className="mt-1 truncate text-[10px] text-ink-faint">
+								{task.assigned_agent_id === "" ? (
+									<span className="italic">Unassigned</span>
+								) : (
+									resolveAgentName(task.assigned_agent_id)
+								)}
+							</p>
+						)
 					)}
 				</div>
 			</div>
