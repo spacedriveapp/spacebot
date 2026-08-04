@@ -4,8 +4,8 @@ use super::state::ApiState;
 use super::{
     activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
     links, mcp, memories, messaging, models, notifications, opencode_proxy, portal, projects,
-    providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki, workers,
-    workflows,
+    providers, secrets, settings, skills, ssh, system, tasks, tools, triggers, usage, wiki,
+    workers, workflows,
 };
 
 use axum::Json;
@@ -177,6 +177,22 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
             workflows::delete_step_gate
         ))
         .routes(routes!(workflows::launch_workflow))
+        // Trigger configuration. Bearer-protected like everything else here;
+        // the one trigger route that is not is mounted separately below.
+        .routes(routes!(triggers::list_schedules, triggers::put_schedule))
+        .routes(routes!(triggers::delete_schedule))
+        // The one inbound route a stranger is expected to reach. It is
+        // registered here so it appears in the OpenAPI document like every
+        // other endpoint, and exempted from the bearer token in
+        // `api_auth_middleware` — its authentication is the per-workflow shared
+        // secret, which is the whole reason it exists: CI cannot be handed a
+        // token that grants the entire API.
+        .routes(routes!(triggers::workflow_webhook_delivery))
+        .routes(routes!(
+            triggers::get_webhook,
+            triggers::put_webhook,
+            triggers::delete_webhook
+        ))
         .routes(routes!(workflows::list_runs))
         .routes(routes!(workflows::get_run, workflows::delete_run))
         .routes(routes!(workflows::cancel_run))
@@ -379,6 +395,32 @@ pub async fn start_http_server(
     Ok(handle)
 }
 
+/// Whether a request path is the inbound workflow webhook delivery route.
+///
+/// The only route in this process reachable without the instance bearer token,
+/// and the exemption is written as an exact shape rather than a prefix on
+/// purpose. A prefix test says "anything under here is open", which is a
+/// standing invitation for the next handler mounted nearby to become open
+/// without anybody deciding that it should; matching the five segments of the
+/// one route that is meant to be open cannot acquire a second member by
+/// accident.
+///
+/// No normalisation happens here and none is wanted. Axum matches the raw path
+/// against its router, so a `..` segment is a literal segment that routes
+/// nowhere rather than an escape — and a path this function accepts is a path
+/// the router will hand to the webhook handler, which authenticates it.
+fn is_webhook_delivery_path(path: &str) -> bool {
+    let mut segments = path.split('/');
+    segments.next() == Some("")
+        && segments.next() == Some("api")
+        && segments.next() == Some("webhooks")
+        && segments.next() == Some("workflow")
+        && segments
+            .next()
+            .is_some_and(|id| !id.is_empty() && id != "." && id != "..")
+        && segments.next().is_none()
+}
+
 async fn api_auth_middleware(
     State(state): State<Arc<ApiState>>,
     request: Request,
@@ -390,6 +432,21 @@ async fn api_auth_middleware(
 
     let path = request.uri().path();
     if path == "/api/health" || path == "/health" {
+        return next.run(request).await;
+    }
+
+    // Inbound webhook deliveries carry a per-workflow shared secret instead of
+    // the instance token, and are verified against it in the handler before any
+    // work happens. They have to: a webhook exists so CI can start a pipeline,
+    // and CI cannot be handed a token that grants the whole API.
+    //
+    // This is less a hole in the auth model than an admission of one. The
+    // instance authentication this trigger was supposed to ship behind does not
+    // exist yet, which is exactly why the handler behind here refuses unless
+    // somebody has explicitly configured *and* enabled a secret for that one
+    // workflow — no row, no delivery, and no row is the state every workflow
+    // starts in.
+    if is_webhook_delivery_path(path) {
         return next.run(request).await;
     }
 
@@ -519,4 +576,41 @@ async fn static_handler(uri: Uri) -> Response {
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_webhook_delivery_path;
+
+    /// The unauthenticated surface is exactly one route shape and nothing else.
+    ///
+    /// If this ever widens, every handler that happens to sit near it becomes
+    /// reachable without the instance token — which on this instance means
+    /// reachable by anyone who can make an HTTP request. The cases below are
+    /// the ones a prefix test would have let through.
+    #[test]
+    fn only_the_workflow_webhook_delivery_route_skips_the_bearer_token() {
+        assert!(is_webhook_delivery_path("/api/webhooks/workflow/abc-123"));
+
+        // Anything else under the same prefix, including a route somebody adds
+        // later without thinking about this function.
+        assert!(!is_webhook_delivery_path("/api/webhooks/secrets"));
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow"));
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow/"));
+        assert!(!is_webhook_delivery_path(
+            "/api/webhooks/workflow/abc/extra"
+        ));
+
+        // Traversal-shaped ids. Axum routes these nowhere, but the exemption
+        // must not depend on that being true of every future router.
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow/.."));
+        assert!(!is_webhook_delivery_path(
+            "/api/webhooks/workflow/../agents"
+        ));
+
+        // And the rest of the API, which is the point.
+        assert!(!is_webhook_delivery_path("/api/agents"));
+        assert!(!is_webhook_delivery_path("/api/secrets"));
+        assert!(!is_webhook_delivery_path("/api/workflows/abc/webhook"));
+    }
 }

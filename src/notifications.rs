@@ -29,6 +29,14 @@ pub enum NotificationKind {
     /// the run, the recovery is usually a template or a limit, and filtering
     /// the inbox for one must not drag in the other.
     WorkflowRunStopped,
+    /// A workflow schedule switched itself off after a refused fire.
+    ///
+    /// Its own kind rather than a reuse of `workflow_run_stopped`, because no
+    /// run exists to look at: the launch never happened. The thing to open is
+    /// the schedule, the recovery is a template or a stored input plus turning
+    /// it back on, and an inbox filter for stopped runs must not drag in
+    /// schedules that never started one.
+    WorkflowScheduleDisabled,
 }
 
 impl NotificationKind {
@@ -38,6 +46,7 @@ impl NotificationKind {
             NotificationKind::WorkerFailed => "worker_failed",
             NotificationKind::CortexObservation => "cortex_observation",
             NotificationKind::WorkflowRunStopped => "workflow_run_stopped",
+            NotificationKind::WorkflowScheduleDisabled => "workflow_schedule_disabled",
         }
     }
 }

@@ -346,6 +346,52 @@ pub struct WorkflowRun {
     pub created_at: String,
 }
 
+/// Who asked for a run, and who runs it.
+///
+/// These were one string, which was fine while the only caller was a person
+/// pressing a button — the agent that owns the emitted tasks and the identity
+/// recorded on the run were the same agent either way. A trigger separates
+/// them, and it has to: a schedule, a webhook, and a filing task can all *ask*
+/// for a run and none of them can pick a card up.
+///
+/// - `agent_id` answers "who executes this". It must name something that can
+///   claim a task, because it becomes each emitted task's `owner_agent_id` and,
+///   where the step does not name a specialist, its `assigned_agent_id`.
+/// - `launched_by` answers "what asked for this". It lands on
+///   `workflow_runs.launched_by` and on every emitted task's `created_by`.
+///
+/// That second placement is the whole recursion guard. `created_by` is the
+/// column [`TaskStore::filing_depth`] walks, so a run launched by task 12 with
+/// `launched_by = "task:12"` produces tasks one filing hop deeper than task 12
+/// — and a worker executing one of *those* that launches again is two hops
+/// deep. The chain is bounded by `MAX_FILING_DEPTH` with no new column and no
+/// second notion of depth to keep in step with the first.
+#[derive(Debug, Clone)]
+pub struct LaunchIdentity {
+    pub agent_id: String,
+    pub launched_by: String,
+}
+
+impl LaunchIdentity {
+    /// An agent launching on its own behalf: it runs the tasks and it is what
+    /// asked for them. The shape every launch had before triggers existed.
+    pub fn agent(agent_id: impl Into<String>) -> Self {
+        let agent_id = agent_id.into();
+        Self {
+            launched_by: agent_id.clone(),
+            agent_id,
+        }
+    }
+
+    /// An agent running a pipeline that something else asked for.
+    pub fn triggered_by(agent_id: impl Into<String>, launched_by: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            launched_by: launched_by.into(),
+        }
+    }
+}
+
 /// The result of a successful launch.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InstantiatedRun {
@@ -1056,12 +1102,34 @@ impl WorkflowStore {
     /// writing spans two stores and can still fail on its own (a closed pool, a
     /// disk error), so a failure part-way through unwinds what it emitted
     /// before returning. See `rollback_run`.
+    /// Launch on behalf of an agent, which is also what asked for the run.
+    ///
+    /// The shape every caller wanted before triggers existed, kept as its own
+    /// entry point so the common case does not have to say the same name twice.
     pub async fn launch(
         &self,
         task_store: &TaskStore,
         workflow_id: &str,
         inputs: &Value,
         launched_by: &str,
+    ) -> std::result::Result<InstantiatedRun, LaunchError> {
+        self.launch_as(
+            task_store,
+            workflow_id,
+            inputs,
+            &LaunchIdentity::agent(launched_by),
+        )
+        .await
+    }
+
+    /// Launch with an explicit identity: one agent to run it, one name for
+    /// whatever asked. See [`LaunchIdentity`].
+    pub async fn launch_as(
+        &self,
+        task_store: &TaskStore,
+        workflow_id: &str,
+        inputs: &Value,
+        identity: &LaunchIdentity,
     ) -> std::result::Result<InstantiatedRun, LaunchError> {
         let workflow = self
             .get_workflow(workflow_id)
@@ -1340,7 +1408,7 @@ impl WorkflowStore {
         .bind(&run_id)
         .bind(workflow_id)
         .bind(inputs.to_string())
-        .bind(launched_by)
+        .bind(&identity.launched_by)
         .execute(&self.pool)
         .await
         .map_err(|error| LaunchError::Storage(error.to_string()))?;
@@ -1356,7 +1424,7 @@ impl WorkflowStore {
                 &gates,
                 &frozen,
                 &loops,
-                launched_by,
+                identity,
                 &mut task_numbers,
             )
             .await
@@ -1389,17 +1457,17 @@ impl WorkflowStore {
         gates: &[StepGate],
         frozen: &HashMap<(String, String), Value>,
         loops: &LoopWiring,
-        launched_by: &str,
+        identity: &LaunchIdentity,
         task_numbers: &mut HashMap<String, i64>,
     ) -> std::result::Result<(), LaunchError> {
         for step in steps {
             let task = task_store
                 .create(CreateTaskInput {
-                    owner_agent_id: launched_by.to_string(),
+                    owner_agent_id: identity.agent_id.clone(),
                     assigned_agent_id: step
                         .assigned_agent_id
                         .clone()
-                        .unwrap_or_else(|| launched_by.to_string()),
+                        .unwrap_or_else(|| identity.agent_id.clone()),
                     title: step.title.clone(),
                     description: step.description.clone(),
                     // Every step starts in backlog, entry steps included. The
@@ -1410,7 +1478,11 @@ impl WorkflowStore {
                     // of being claimed and immediately blocked.
                     status: TaskStatus::Backlog,
                     priority: step.priority,
-                    created_by: launched_by.to_string(),
+                    // Provenance, not ownership. When a filing task launched
+                    // this run the value is `task:<n>`, which is exactly what
+                    // `filing_depth` walks — so the depth chain crosses the
+                    // launch boundary without a column that only launches use.
+                    created_by: identity.launched_by.clone(),
                     binding: TaskProjectBinding {
                         repo_id: step.repo_id.clone(),
                         ..Default::default()
@@ -2886,6 +2958,74 @@ fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     })
 }
 
+/// Create the workflow tables in a test pool.
+///
+/// The counterpart to `tasks::store::create_task_schema`, and at module scope
+/// for the same reason: it is the single definition of the workflow test
+/// schema, and every module that needs a bare pool with workflow tables — the
+/// `launch_workflow` tool, the trigger store, the API handlers — calls this
+/// rather than hand-rolling its own `CREATE TABLE`. Keep it in step with
+/// `migrations/global/`; when a migration adds a column, add it here too and
+/// every test site picks it up at once.
+#[cfg(test)]
+pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
+    for statement in [
+        "CREATE TABLE workflows (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, \
+         description TEXT, input_schema TEXT, \
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
+         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+        "CREATE TABLE workflow_steps (workflow_id TEXT NOT NULL, step_key TEXT NOT NULL, \
+         title TEXT NOT NULL, description TEXT, assigned_agent_id TEXT, \
+         priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
+         system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
+         for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
+         loop_group TEXT, loop_max_iterations INTEGER, loop_until TEXT, \
+         PRIMARY KEY (workflow_id, step_key))",
+        "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
+         parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
+         kind TEXT NOT NULL DEFAULT 'normal', \
+         PRIMARY KEY (workflow_id, parent_step_key, child_step_key))",
+        "CREATE TABLE workflow_step_bindings (workflow_id TEXT NOT NULL, \
+         step_key TEXT NOT NULL, input_key TEXT NOT NULL, source TEXT NOT NULL, \
+         source_step_key TEXT, source_pointer TEXT, literal_value TEXT, \
+         PRIMARY KEY (workflow_id, step_key, input_key))",
+        "CREATE TABLE workflow_step_gates (workflow_id TEXT NOT NULL, \
+         step_key TEXT NOT NULL, gate_key TEXT NOT NULL, kind TEXT NOT NULL, \
+         source_step_key TEXT, config TEXT NOT NULL, label TEXT, \
+         poll_interval_secs INTEGER NOT NULL DEFAULT 60, disposition TEXT, \
+         PRIMARY KEY (workflow_id, step_key, gate_key))",
+        // `status`, `finished_at` and `status_reason` are as much a part of
+        // this table as the columns it was created with — a pool without
+        // them passes tests the real database would refuse.
+        "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY NOT NULL, workflow_id TEXT NOT NULL, \
+         inputs TEXT NOT NULL, launched_by TEXT NOT NULL, \
+         status TEXT NOT NULL DEFAULT 'running', finished_at TEXT, status_reason TEXT, \
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+        // Triggers. `enabled` defaults to 1 for a schedule and **0** for a
+        // webhook, and that asymmetry is the security posture rather than an
+        // oversight: a schedule is written by somebody who wants it to run, and
+        // a webhook is an unauthenticated inbound trigger that has to be turned
+        // on deliberately. A test pool that defaulted it to 1 would let the
+        // fail-closed tests pass against a database that fails open.
+        "CREATE TABLE workflow_schedules (id TEXT PRIMARY KEY NOT NULL, \
+         workflow_id TEXT NOT NULL, name TEXT NOT NULL, cron_expr TEXT, \
+         interval_secs INTEGER NOT NULL DEFAULT 3600, inputs TEXT NOT NULL DEFAULT '{}', \
+         agent_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, \
+         last_fired_at TEXT, last_outcome TEXT, last_detail TEXT, last_run_id TEXT, \
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+        "CREATE TABLE workflow_webhooks (workflow_id TEXT PRIMARY KEY NOT NULL, \
+         secret_hash TEXT NOT NULL, input_pointers TEXT NOT NULL DEFAULT '{}', \
+         agent_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, \
+         last_delivery_at TEXT, last_outcome TEXT, last_detail TEXT, last_run_id TEXT, \
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .expect("workflow schema should be created");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3342,7 +3482,7 @@ mod tests {
                 &[],
                 &HashMap::new(),
                 &LoopWiring::default(),
-                "agent-1",
+                &LaunchIdentity::agent("agent-1"),
                 &mut emitted,
             )
             .await
@@ -4253,14 +4393,22 @@ mod tests {
              also merge after three failed ones — {sweep:?}"
         );
 
-        let held = tasks
+        // Mirror of the converged case: the arm not taken is settled, so a run
+        // that gave up can still reach a terminal status.
+        let untaken = tasks
             .get_by_number(ship)
             .await
             .expect("fetch")
             .expect("exists");
-        assert_eq!(held.awaiting_loop_arm, Some(crate::tasks::LoopArm::Normal));
+        assert_eq!(
+            untaken.status,
+            TaskStatus::Skipped,
+            "the success path was ruled out, not parked: {untaken:?}"
+        );
+        assert_eq!(untaken.awaiting_loop_arm, None, "the hold is spent");
         assert!(
-            held.block_reason
+            untaken
+                .skip_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("ran out of attempts")),
             "the branch that was not taken says which way the loop went: {held:?}"
@@ -4307,20 +4455,27 @@ mod tests {
             "the success path runs and nothing else does: {sweep:?}"
         );
 
-        let held = tasks
+        // The arm not taken is *settled*, not still waiting. Left unsettled it
+        // reads as a step that might yet run, and a finished run reports itself
+        // `running` for ever because the frontier sees an unsettled task whose
+        // parent is done.
+        let untaken = tasks
             .get_by_number(escalate)
             .await
             .expect("fetch")
             .expect("exists");
         assert_eq!(
-            held.awaiting_loop_arm,
-            Some(crate::tasks::LoopArm::OnExhausted)
+            untaken.status,
+            TaskStatus::Skipped,
+            "the give-up path was ruled out, not parked: {untaken:?}"
         );
+        assert_eq!(untaken.awaiting_loop_arm, None, "the hold is spent");
         assert!(
-            held.block_reason
+            untaken
+                .skip_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("converged")),
-            "{held:?}"
+            "it must say which way the loop went: {untaken:?}"
         );
     }
 
@@ -4651,48 +4806,6 @@ mod tests {
                 assert_eq!(entries, vec!["analyze".to_string(), "survey".to_string()]);
             }
             other => panic!("expected LoopEntryAmbiguous, got {other:?}"),
-        }
-    }
-
-    #[cfg(test)]
-    async fn create_workflow_schema(pool: &SqlitePool) {
-        for statement in [
-            "CREATE TABLE workflows (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, \
-             description TEXT, input_schema TEXT, \
-             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
-             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-            "CREATE TABLE workflow_steps (workflow_id TEXT NOT NULL, step_key TEXT NOT NULL, \
-             title TEXT NOT NULL, description TEXT, assigned_agent_id TEXT, \
-             priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
-             system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
-             for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
-             loop_group TEXT, loop_max_iterations INTEGER, loop_until TEXT, \
-             PRIMARY KEY (workflow_id, step_key))",
-            "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
-             parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
-             kind TEXT NOT NULL DEFAULT 'normal', \
-             PRIMARY KEY (workflow_id, parent_step_key, child_step_key))",
-            "CREATE TABLE workflow_step_bindings (workflow_id TEXT NOT NULL, \
-             step_key TEXT NOT NULL, input_key TEXT NOT NULL, source TEXT NOT NULL, \
-             source_step_key TEXT, source_pointer TEXT, literal_value TEXT, \
-             PRIMARY KEY (workflow_id, step_key, input_key))",
-            "CREATE TABLE workflow_step_gates (workflow_id TEXT NOT NULL, \
-             step_key TEXT NOT NULL, gate_key TEXT NOT NULL, kind TEXT NOT NULL, \
-             source_step_key TEXT, config TEXT NOT NULL, label TEXT, \
-             poll_interval_secs INTEGER NOT NULL DEFAULT 60, disposition TEXT, \
-             PRIMARY KEY (workflow_id, step_key, gate_key))",
-            // `status`, `finished_at` and `status_reason` are as much a part of
-            // this table as the columns it was created with — a pool without
-            // them passes tests the real database would refuse.
-            "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY NOT NULL, workflow_id TEXT NOT NULL, \
-             inputs TEXT NOT NULL, launched_by TEXT NOT NULL, \
-             status TEXT NOT NULL DEFAULT 'running', finished_at TEXT, status_reason TEXT, \
-             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-        ] {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("workflow schema should be created");
         }
     }
 

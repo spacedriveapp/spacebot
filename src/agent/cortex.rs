@@ -4477,6 +4477,85 @@ async fn assess_workflow_runs(deps: &AgentDeps, logger: &CortexLogger) -> anyhow
     Ok(transitions.len())
 }
 
+/// Fire every workflow schedule that is due, and say what came of each.
+///
+/// Reuses the supervisor tick rather than starting a second fleet of per-job
+/// timers. The per-agent cron scheduler owns a tokio task per job because a
+/// cron job's period can be a minute and its work is a whole model turn; a
+/// workflow schedule's work is a compile step measured in milliseconds, and the
+/// tick that already sweeps runs is the natural place for it.
+///
+/// Every agent sweeps every schedule, exactly as every agent assesses every
+/// run, and for the same reason: a schedule is instance-level and no single
+/// agent owns it. Two ticks reaching the same due schedule is normal and
+/// harmless — claiming a fire is a conditional UPDATE on the cursor, so exactly
+/// one of them launches.
+async fn fire_due_workflow_schedules(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+) -> anyhow::Result<usize> {
+    let workflows = crate::workflows::WorkflowStore::new(deps.task_store.pool().clone());
+    let triggers = crate::workflows::WorkflowTriggerStore::new(deps.task_store.pool().clone());
+
+    let fires = triggers
+        .sweep_schedules(&workflows, deps.task_store.as_ref(), chrono::Utc::now())
+        .await?;
+
+    for fire in &fires {
+        logger.log(
+            "workflow_schedule_fired",
+            &format!(
+                "Schedule `{}` {} — {}",
+                fire.schedule_name, fire.outcome, fire.detail
+            ),
+            Some(serde_json::json!({
+                "schedule_id": fire.schedule_id,
+                "workflow_id": fire.workflow_id,
+                // Which agent the run was launched for, not which one swept it.
+                // Every agent sweeps every schedule, so the sweeper is noise and
+                // this is the answer to "why has nothing picked it up".
+                "agent_id": fire.agent_id,
+                "outcome": fire.outcome.as_str(),
+                "detail": fire.detail,
+                "run_id": fire.run_id,
+                "disabled": fire.disabled,
+            })),
+        );
+
+        // Only the outcome that stopped the schedule. A fire that launched is
+        // what was asked for, and an errored one will be retried on the next
+        // period without anybody needing to know — telling somebody about
+        // either would bury the one that actually needs them.
+        if !fire.disabled {
+            continue;
+        }
+        let Some(api_state) = &deps.api_state else {
+            continue;
+        };
+
+        api_state.emit_notification(crate::notifications::NewNotification {
+            kind: crate::notifications::NotificationKind::WorkflowScheduleDisabled,
+            severity: crate::notifications::NotificationSeverity::Warn,
+            title: format!("Schedule `{}` switched off", fire.schedule_name),
+            // The reason, not a pointer to go and find it. A schedule that
+            // stopped without saying why sends someone reading rows, which is
+            // the failure the whole outcome split exists to remove.
+            body: Some(fire.detail.clone()),
+            agent_id: Some(deps.agent_id.to_string()),
+            related_entity_type: Some("workflow_schedule".to_string()),
+            related_entity_id: Some(fire.schedule_id.clone()),
+            action_url: Some(format!("/workflows/{}", fire.workflow_id)),
+            metadata: Some(serde_json::json!({
+                "workflow_id": fire.workflow_id,
+                "schedule_id": fire.schedule_id,
+                "outcome": fire.outcome.as_str(),
+            })),
+        });
+    }
+
+    Ok(fires.len())
+}
+
 async fn reap_orphaned_task_pickups(
     deps: &AgentDeps,
     logger: &CortexLogger,
@@ -4704,6 +4783,17 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "reaped abandoned task pickups"),
             Err(error) => tracing::warn!(%error, "task reaper pass failed"),
+        }
+
+        // Fire due schedules before the gate poll and the ready sweep, so a run
+        // a schedule starts on this tick is promoted by the same tick rather
+        // than sitting in the backlog until the next one. Same argument as the
+        // reaper's: a pass that runs after the thing it feeds is permanently
+        // one tick stale.
+        match fire_due_workflow_schedules(deps, logger).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "workflow schedules fired"),
+            Err(error) => tracing::warn!(%error, "workflow schedule sweep failed"),
         }
 
         // Poll external gates before the sweep, so a gate that opened since the

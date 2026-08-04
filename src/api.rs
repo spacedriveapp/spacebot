@@ -33,6 +33,7 @@ mod state;
 mod system;
 mod tasks;
 mod tools;
+mod triggers;
 mod usage;
 mod wiki;
 mod workers;

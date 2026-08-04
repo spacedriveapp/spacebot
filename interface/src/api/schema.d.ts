@@ -2549,6 +2549,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/webhooks/workflow/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /webhooks/workflow/{id}` — an inbound trigger firing.
+         * @description **The one route here that is not behind the instance bearer token.** It has
+         *     to be: a webhook exists so that CI — which cannot be handed a token that
+         *     grants the whole API — can start a pipeline, and that is the loop the gate
+         *     machinery was built for and has never been able to close.
+         *
+         *     So the authentication is the per-workflow shared secret and nothing else,
+         *     and every part of this is arranged to fail closed:
+         *
+         *     - No row for the workflow means no. That is the default state of every
+         *       workflow that has ever existed, and it is not a check that can be
+         *       forgotten — it is the absence of the thing that would allow it.
+         *     - A configured webhook is off unless somebody set `enabled`.
+         *     - The secret is compared as a digest, in constant time, before the payload
+         *       is looked at, before the workflow is loaded, and before anything is
+         *       written. A delivery that does not authenticate causes no work.
+         *     - All three refusals render identically. See [`rejection_response`].
+         */
+        post: operations["workflow_webhook_delivery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/wiki": {
         parameters: {
             query?: never;
@@ -2704,6 +2739,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workflow-schedules/{schedule_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /workflow-schedules/{schedule_id}` — remove a schedule.
+         * @description Not nested under the workflow, matching the run routes: a caller holding a
+         *     schedule id from a listing should not have to also know which template it
+         *     belongs to in order to delete it.
+         */
+        delete: operations["delete_schedule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/workflows": {
         parameters: {
             query?: never;
@@ -2798,6 +2855,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workflows/{id}/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/schedules` — the schedules attached to one template. */
+        get: operations["list_schedules"];
+        put?: never;
+        /** `POST /workflows/{id}/schedules` — create or replace a schedule. */
+        post: operations["put_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/workflows/{id}/steps/{step_key}": {
         parameters: {
             query?: never;
@@ -2859,6 +2934,31 @@ export interface paths {
          *     unconditionally again.
          */
         delete: operations["delete_step_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/webhook` — the webhook config, without its secret. */
+        get: operations["get_webhook"];
+        /**
+         * `PUT /workflows/{id}/webhook` — configure the inbound trigger.
+         * @description The one place a secret is accepted, and the only way this endpoint can ever
+         *     start accepting deliveries. Both halves are deliberate: there is no global
+         *     enable, no default row, and no way to end up with a live webhook without
+         *     having chosen a secret and set `enabled` in the same call.
+         */
+        put: operations["put_webhook"];
+        post?: never;
+        /** `DELETE /workflows/{id}/webhook` — remove the inbound trigger entirely. */
+        delete: operations["delete_webhook"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3712,6 +3812,19 @@ export interface components {
         DeleteSecretResponse: {
             deleted: string;
             warning?: string | null;
+        };
+        /**
+         * @description What came of one accepted webhook delivery.
+         *
+         *     Only ever written for a delivery that authenticated. A rejected delivery
+         *     writes nothing at all — see [`WorkflowTriggerStore::authenticate_webhook`].
+         * @enum {string}
+         */
+        DeliveryOutcome: "launched" | "unmapped" | "refused" | "errored";
+        DeliveryResponse: {
+            detail: string;
+            outcome: string;
+            run_id?: string | null;
         };
         /**
          * @description Deployment environment, detected from SPACEBOT_DEPLOYMENT env var.
@@ -4618,6 +4731,20 @@ export interface components {
             /** @description Required when `source` is `step`. */
             source_step_key?: string | null;
         };
+        SaveScheduleRequest: {
+            /** @description The agent that owns and, absent a step assignment, executes the run. */
+            agent_id: string;
+            /** @description 5-field cron expression, read in UTC. Omit to use `interval_secs`. */
+            cron_expr?: string | null;
+            enabled?: boolean;
+            /** @description Omit to create. Supplying an existing id replaces that schedule. */
+            id?: string | null;
+            /** @description The launch payload. A literal, because a schedule cannot prompt. */
+            inputs?: unknown;
+            /** Format: int64 */
+            interval_secs?: number;
+            name: string;
+        };
         /** @description A condition on a step: the predicate, and what a false answer means. */
         SaveStepGateRequest: {
             /**
@@ -4704,6 +4831,25 @@ export interface components {
             system_prompt?: string | null;
             title: string;
         };
+        SaveWebhookRequest: {
+            /** @description The agent that owns and executes the run. */
+            agent_id: string;
+            /**
+             * @description Off by default. An inbound trigger that turns itself on when configured
+             *     would make "I set this up to test it" and "I want strangers able to run
+             *     this pipeline" the same action.
+             */
+            enabled?: boolean;
+            /** @description `{ "<run input key>": "<JSON Pointer into the payload>" }`. */
+            input_pointers?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description The shared secret, in plaintext, once. It is hashed before storage and
+             *     there is no endpoint that reads it back.
+             */
+            secret: string;
+        };
         SaveWorkflowRequest: {
             description?: string | null;
             /** @description JSON Schema for the input a whole run is launched with. */
@@ -4718,6 +4864,19 @@ export interface components {
             saved_filename: string;
             /** Format: int64 */
             size_bytes: number;
+        };
+        ScheduleListResponse: {
+            schedules: components["schemas"]["WorkflowSchedule"][];
+        };
+        /**
+         * @description What came of one schedule fire.
+         *
+         *     Three values because there are three recoveries. See the module docs.
+         * @enum {string}
+         */
+        ScheduleOutcome: "launched" | "refused" | "errored";
+        ScheduleResponse: {
+            schedule: components["schemas"]["WorkflowSchedule"];
         };
         /**
          * @description Secret category determines subprocess exposure.
@@ -5639,6 +5798,23 @@ export interface components {
             /** Format: int64 */
             startup_delay_secs?: number | null;
         };
+        /**
+         * @description A webhook as it is safe to describe.
+         *
+         *     There is no `secret` field, and that is structural rather than a matter of
+         *     remembering: the type the store hands back does not carry the secret either,
+         *     so there is nothing here that a future edit could accidentally serialise.
+         */
+        WebhookResponse: {
+            /**
+             * @description Where deliveries go, so an operator can paste it into a CI config
+             *     without reconstructing it from the route table.
+             */
+            delivery_path: string;
+            /** @description The header the shared secret goes in. */
+            secret_header: string;
+            webhook: components["schemas"]["WorkflowWebhook"];
+        };
         WikiActionResponse: {
             message: string;
             success: boolean;
@@ -5841,6 +6017,27 @@ export interface components {
             status_reason?: string | null;
             workflow_id: string;
         };
+        /** @description A schedule attached to a workflow, launching with a stored input. */
+        WorkflowSchedule: {
+            /** @description Which agent owns and executes the emitted tasks. */
+            agent_id: string;
+            created_at: string;
+            /** @description 5-field cron expression, read in UTC. `None` uses `interval_secs`. */
+            cron_expr?: string | null;
+            enabled: boolean;
+            id: string;
+            /** @description The launch payload. A literal, because a schedule cannot prompt. */
+            inputs: unknown;
+            /** Format: int64 */
+            interval_secs: number;
+            last_detail?: string | null;
+            last_fired_at?: string | null;
+            last_outcome?: null | components["schemas"]["ScheduleOutcome"];
+            last_run_id?: string | null;
+            name: string;
+            next_run_at?: string | null;
+            workflow_id: string;
+        };
         /** @description One step of a pipeline. Becomes exactly one task per launch. */
         WorkflowStep: {
             /** @description `None` means the agent that launched the run. */
@@ -5901,6 +6098,27 @@ export interface components {
             /** @description Per-step instructions appended to the worker prompt at pickup. */
             system_prompt?: string | null;
             title: string;
+            workflow_id: string;
+        };
+        /**
+         * @description An inbound endpoint mapping a payload to a run input.
+         *
+         *     Note what is *not* on this struct: the secret. It goes in as plaintext once,
+         *     is hashed immediately, and is never read back out — there is no field here
+         *     that could be serialised into a response by accident.
+         */
+        WorkflowWebhook: {
+            agent_id: string;
+            created_at: string;
+            enabled: boolean;
+            /** @description `{ "<run input key>": "<JSON Pointer into the payload>" }`. */
+            input_pointers: {
+                [key: string]: unknown;
+            };
+            last_delivery_at?: string | null;
+            last_detail?: string | null;
+            last_outcome?: null | components["schemas"]["DeliveryOutcome"];
+            last_run_id?: string | null;
             workflow_id: string;
         };
         WorktreeResponse: {
@@ -12035,6 +12253,46 @@ export interface operations {
             };
         };
     };
+    workflow_webhook_delivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryResponse"];
+                };
+            };
+            /** @description No usable webhook, or no valid shared secret */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated, and the payload or the template was unusable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_pages: {
         parameters: {
             query?: {
@@ -12419,6 +12677,34 @@ export interface operations {
             };
         };
     };
+    delete_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow schedule id */
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such schedule */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_workflows: {
         parameters: {
             query?: never;
@@ -12701,6 +12987,68 @@ export interface operations {
             };
         };
     };
+    list_schedules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleListResponse"];
+                };
+            };
+        };
+    };
+    put_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveScheduleRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unusable schedule */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     put_step: {
         parameters: {
             query?: never;
@@ -12913,6 +13261,103 @@ export interface operations {
                 };
             };
             /** @description No such condition */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookResponse"];
+                };
+            };
+            /** @description No webhook is configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWebhookRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unusable webhook configuration */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No webhook is configured */
             404: {
                 headers: {
                     [name: string]: unknown;

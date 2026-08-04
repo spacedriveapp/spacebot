@@ -110,42 +110,77 @@ impl TaskCreateTool {
 
     /// Refuse to file another card once this task has fanned out far enough,
     /// or once the filing chain is deep enough.
-    ///
-    /// Both bounds are needed: a per-task cap with unbounded depth still
-    /// permits `cap^depth` tasks, and a depth bound alone permits one task to
-    /// file thousands of siblings. The error text names the limit so the worker
-    /// can adapt rather than retrying into the same wall.
     async fn enforce_filing_limits(&self, filing_task_number: i64) -> Result<(), TaskCreateError> {
-        let filer = crate::tasks::filer_id(filing_task_number);
-
-        let already = self
-            .task_store
-            .count_tasks_filed_by(&filer)
-            .await
-            .map_err(|error| TaskCreateError(format!("{error}")))?;
-        if already >= crate::tasks::MAX_TASKS_FILED_PER_TASK {
-            return Err(TaskCreateError(format!(
-                "task #{filing_task_number} has already filed {already} cards, the limit is {}. \
-                 Do the remaining work yourself, or file one card that decomposes further.",
-                crate::tasks::MAX_TASKS_FILED_PER_TASK
-            )));
+        match check_filing_limits(&self.task_store, filing_task_number).await {
+            Ok(()) => Ok(()),
+            Err(FilingRefusal::Storage(error)) => Err(TaskCreateError(error)),
+            Err(FilingRefusal::FanOut { filed, limit }) => Err(TaskCreateError(format!(
+                "task #{filing_task_number} has already filed {filed} cards, the limit is {limit}. \
+                 Do the remaining work yourself, or file one card that decomposes further."
+            ))),
+            Err(FilingRefusal::Depth { depth, limit }) => Err(TaskCreateError(format!(
+                "task #{filing_task_number} is {depth} filing hops deep and the limit is {limit}. \
+                 Do this work directly rather than filing another card."
+            ))),
         }
-
-        let depth = self
-            .task_store
-            .filing_depth(filing_task_number)
-            .await
-            .map_err(|error| TaskCreateError(format!("{error}")))?;
-        if depth >= crate::tasks::MAX_FILING_DEPTH {
-            return Err(TaskCreateError(format!(
-                "task #{filing_task_number} is {depth} filing hops deep and the limit is {}. \
-                 Do this work directly rather than filing another card.",
-                crate::tasks::MAX_FILING_DEPTH
-            )));
-        }
-
-        Ok(())
     }
+}
+
+/// Why a task may not generate more work.
+///
+/// Structured rather than a formatted string because the two bounds have
+/// different remediations for different callers: a worker that cannot file
+/// another card should do the work itself, and a worker that cannot launch
+/// another workflow should run the steps itself. Same policy, different advice,
+/// and the advice belongs with the tool that gives it.
+#[derive(Debug, Clone)]
+pub(crate) enum FilingRefusal {
+    /// This task has already caused this many cards to exist.
+    FanOut { filed: i64, limit: i64 },
+    /// This task is this many filing hops from a human or an agent.
+    Depth { depth: i64, limit: i64 },
+    /// The bounds could not be read, which is not the task's fault — but a
+    /// bound that cannot be checked must not be assumed satisfied.
+    Storage(String),
+}
+
+/// The shared bound on work a task may generate, whether by filing a card or by
+/// launching a pipeline.
+///
+/// Both halves are needed and neither substitutes for the other: a per-task cap
+/// with unbounded depth still permits `cap^depth` tasks, and a depth bound alone
+/// permits one task to generate thousands of siblings. One definition, because
+/// two tools enforcing "the same" limit separately is how they stop being the
+/// same limit.
+pub(crate) async fn check_filing_limits(
+    task_store: &TaskStore,
+    filing_task_number: i64,
+) -> Result<(), FilingRefusal> {
+    let filer = crate::tasks::filer_id(filing_task_number);
+
+    let filed = task_store
+        .count_tasks_filed_by(&filer)
+        .await
+        .map_err(|error| FilingRefusal::Storage(format!("{error}")))?;
+    if filed >= crate::tasks::MAX_TASKS_FILED_PER_TASK {
+        return Err(FilingRefusal::FanOut {
+            filed,
+            limit: crate::tasks::MAX_TASKS_FILED_PER_TASK,
+        });
+    }
+
+    let depth = task_store
+        .filing_depth(filing_task_number)
+        .await
+        .map_err(|error| FilingRefusal::Storage(format!("{error}")))?;
+    if depth >= crate::tasks::MAX_FILING_DEPTH {
+        return Err(FilingRefusal::Depth {
+            depth,
+            limit: crate::tasks::MAX_FILING_DEPTH,
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

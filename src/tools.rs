@@ -41,6 +41,7 @@ pub mod cron;
 pub mod email_search;
 pub mod file;
 pub mod install_skill;
+pub mod launch_workflow;
 pub mod mcp;
 pub mod memory_delete;
 pub mod memory_persistence_complete;
@@ -106,6 +107,9 @@ pub use file::{
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
+};
+pub use launch_workflow::{
+    LaunchWorkflowArgs, LaunchWorkflowError, LaunchWorkflowOutput, LaunchWorkflowTool,
 };
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
@@ -989,12 +993,34 @@ pub fn create_worker_tool_server(
     // already schedules, observes, and recovers those, so decomposition reuses
     // machinery instead of adding a second execution path. Gated because it is
     // the one tool that lets a worker generate work for the whole instance.
+    //
+    // `launch_workflow` is behind the same switch and not a second one, because
+    // it is the same capability: both make cards the whole instance will then
+    // execute, both are bounded by the same fan-out and depth caps, and an
+    // operator who has turned off "this worker may generate work" has not asked
+    // a question that a second flag would answer differently. A separate switch
+    // would be one an operator could set to the safe value on one and the unsafe
+    // value on the other while believing they had locked the worker down.
     if runtime_config.cortex.load().worker_task_create {
-        server = server.tool(TaskCreateTool::for_task_worker(
-            task_store,
-            agent_id.to_string(),
-            worker_id,
-        ));
+        server = server
+            .tool(TaskCreateTool::for_task_worker(
+                task_store.clone(),
+                agent_id.to_string(),
+                worker_id,
+            ))
+            .tool(LaunchWorkflowTool::for_task_worker(
+                // Same pool as the task store, exactly as `cortex.rs` builds
+                // its `WorkflowStore` and `GateStore`: the workflow tables live
+                // in the instance database, and threading another store through
+                // every construction site to reach them would be ceremony
+                // around a clone.
+                Arc::new(crate::workflows::WorkflowStore::new(
+                    task_store.pool().clone(),
+                )),
+                task_store,
+                agent_id.to_string(),
+                worker_id,
+            ));
     }
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
@@ -1144,7 +1170,22 @@ pub fn create_cortex_chat_tool_server(
         .tool(spawn_tool)
         .tool(
             TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "cortex")
-                .with_api_state(api_state),
+                .with_api_state(api_state.clone()),
+        )
+        // The sharpest gap the design doc named: workflows were reusable
+        // procedures that the autonomous path could not reuse, so an agent
+        // deciding "this needs the full release process" re-derived the steps
+        // by hand. Not depth-bounded here and it does not need to be — this
+        // construction is not part of a filing chain, so it is a root.
+        .tool(
+            LaunchWorkflowTool::new(
+                Arc::new(crate::workflows::WorkflowStore::new(
+                    task_store.pool().clone(),
+                )),
+                task_store.clone(),
+                agent_id.to_string(),
+            )
+            .with_api_state(api_state),
         )
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))

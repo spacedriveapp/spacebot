@@ -2740,20 +2740,46 @@ impl TaskStore {
         .await
         .context("failed to release the arm a loop took")?;
 
-        sqlx::query(
-            "UPDATE tasks SET block_reason = ?, \
-             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+        // The arm the loop did not take is settled, not waiting.
+        //
+        // It used to be left in `backlog` carrying only a reason, because when
+        // loops were written there was no status meaning "will never run".
+        // Branching added one, and this is the same condition: a step the graph
+        // has ruled out. Leaving it unsettled made a finished run report itself
+        // `running` for ever — the frontier sees an unsettled task whose parent
+        // is done and concludes the run can still advance.
+        //
+        // `skip_task` is conditional on the task not already being settled, so
+        // a race with the sweep or a condition simply loses.
+        let untaken: Vec<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks \
              WHERE workflow_run_id = ? AND awaiting_loop_group = ? AND awaiting_loop_arm = ?",
         )
-        .bind(format!(
-            "loop `{group}` {verdict} on iteration {iteration}, so this step will not run"
-        ))
         .bind(&run_id)
         .bind(group)
         .bind(taken.other().as_str())
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
-        .context("failed to note a loop's verdict on the arm it did not take")?;
+        .context("failed to find the arm a loop did not take")?;
+
+        let reason =
+            format!("loop `{group}` {verdict} on iteration {iteration}, so this step will not run");
+        for task_number in untaken {
+            sqlx::query(
+                "UPDATE tasks SET status = ?, skip_reason = ?, \
+                 awaiting_loop_group = NULL, awaiting_loop_arm = NULL, \
+                 block_kind = NULL, block_reason = NULL, \
+                 completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                 WHERE task_number = ? AND status NOT IN ('done', 'skipped')",
+            )
+            .bind(TaskStatus::Skipped.as_str())
+            .bind(&reason)
+            .bind(task_number)
+            .execute(&mut *tx)
+            .await
+            .context("failed to settle the arm a loop did not take")?;
+        }
 
         tx.commit()
             .await
