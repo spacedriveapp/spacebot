@@ -559,7 +559,38 @@ fn normalize_api_path(path: &str) -> String {
     normalized.join("/")
 }
 
+/// Whether a path belongs to the API rather than to the dashboard.
+///
+/// `/api` itself counts, so a request one segment short of a real route is not
+/// answered with a web page either.
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
 async fn static_handler(uri: Uri) -> Response {
+    // An unmatched `/api` path is a wrong URL, not a page request.
+    //
+    // This is the router's fallback, so it catches every path no handler
+    // claimed — including API paths. Serving `index.html` for those answered
+    // "200 OK" to requests nothing understood: a client probing for an endpoint
+    // its server does not have got a success, and a *mutating* call to a
+    // mistyped route reported that it had worked while doing nothing. That last
+    // one cost real time three separate occasions before it was fixed.
+    //
+    // Checked here rather than by giving the nested `/api` router its own
+    // fallback, because `/api/docs` and `/api/openapi.json` are merged in
+    // separately at the top level and a nested fallback would shadow them.
+    if is_api_path(uri.path()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "not found",
+                "detail": format!("no API route matches {}", uri.path()),
+            })),
+        )
+            .into_response();
+    }
+
     let path = uri.path().trim_start_matches('/');
 
     if let Some(content) = InterfaceAssets::get(path) {
@@ -581,7 +612,47 @@ async fn static_handler(uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use super::is_api_path;
     use super::is_webhook_delivery_path;
+
+    /// An unmatched API path must not be answered with the dashboard.
+    ///
+    /// Serving `index.html` there returns 200 for a request nothing
+    /// understood. A read looks like an empty result, and a mutating call to a
+    /// mistyped route looks like it succeeded — which is how a capability
+    /// update once silently did nothing while reporting 200.
+    #[test]
+    fn an_api_path_is_never_answered_with_the_dashboard() {
+        for path in [
+            "/api",
+            "/api/",
+            "/api/status",
+            "/api/agents/main",
+            "/api/tasks/38/graph",
+            "/api/definitely/not/a/route",
+        ] {
+            assert!(is_api_path(path), "{path} should be treated as an API path");
+        }
+    }
+
+    /// ...and a dashboard route must still reach the dashboard, including one
+    /// that merely starts with the same letters.
+    #[test]
+    fn a_dashboard_route_is_still_served_the_dashboard() {
+        for path in [
+            "/",
+            "/tasks",
+            "/workflows",
+            "/apiary",
+            "/api-docs",
+            "/assets/index.js",
+        ] {
+            assert!(
+                !is_api_path(path),
+                "{path} is a page route and must not 404 as an API path"
+            );
+        }
+    }
 
     /// The unauthenticated surface is exactly one route shape and nothing else.
     ///
