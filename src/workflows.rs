@@ -15,13 +15,17 @@
 
 pub mod store;
 pub mod triggers;
+pub mod worktrees;
 
 pub use store::{
     BindingSource, CancelOutcome, DeleteRunOutcome, InstantiatedRun, LaunchError, LaunchIdentity,
     RunAssessment, RunStatus, RunTransition, StepBinding, StepEdge, StepEdgeKind, StepGate,
-    Workflow, WorkflowRun, WorkflowStep, WorkflowStore, validate_step_gate,
+    StepKind, Workflow, WorkflowRun, WorkflowStep, WorkflowStore, validate_step_gate,
 };
 pub use triggers::{
     DeliveryOutcome, ScheduleFire, ScheduleOutcome, WEBHOOK_SECRET_HEADER, WebhookRejection,
     WorkflowSchedule, WorkflowTriggerStore, WorkflowWebhook,
+};
+pub use worktrees::{
+    MAX_RUN_WORKTREES, OrphanWorktree, ReapOutcome, ReapedWorktree, WorktreeError, WorktreeMode,
 };

@@ -804,6 +804,51 @@ pub(super) async fn delete_repo(
     }))
 }
 
+/// Worktrees found on disk that no live run accounts for.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct OrphanWorktreesResponse {
+    pub orphans: Vec<crate::workflows::OrphanWorktree>,
+}
+
+/// GET /agents/projects/{id}/worktree-orphans — list, and only list.
+///
+/// Deliberately a report rather than a sweep. The one thing worse than a stale
+/// worktree is a background process that deletes directories, so this endpoint
+/// has no counterpart that removes anything: a person reads the list, looks at
+/// the diff, and decides. Most entries will be checkouts a failed run left
+/// behind with uncommitted changes, which is exactly the work you want back.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{id}/worktree-orphans",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = 200, body = OrphanWorktreesResponse),
+        (status = 404, description = "Project not found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn list_worktree_orphans(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<OrphanWorktreesResponse>, StatusCode> {
+    let store_guard = state.project_store.load();
+    let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    if store
+        .get_project(&project_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to get project");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let orphans = crate::workflows::worktrees::list_orphans(store.pool(), &project_id).await;
+    Ok(Json(OrphanWorktreesResponse { orphans }))
+}
+
 /// POST /agents/projects/{id}/worktrees — create a worktree.
 #[utoipa::path(
     post,

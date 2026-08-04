@@ -83,6 +83,35 @@ pub(super) struct SaveStepRequest {
     /// step of a loop body.
     #[serde(default)]
     loop_until: Option<serde_json::Value>,
+    /// `agent` (default) or `command`.
+    ///
+    /// A command step runs a process instead of a model. Its outputs are
+    /// `{"exit_code", "stdout", "stderr", "duration_ms"}`, which bindings,
+    /// gates, `loop_until` and conditions read with the pointers they already
+    /// use.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The command line for a command step. Refused on an agent step, where
+    /// nothing would run it.
+    #[serde(default)]
+    command: Option<String>,
+    /// Hard timeout for a command step, in seconds. Required on one.
+    #[serde(default)]
+    command_timeout_secs: Option<i64>,
+    /// The exit code that means success, for steps where non-zero really is a
+    /// failure. Omit — the usual case — to treat the exit code as data: a
+    /// command that ran and reported a problem is a step that succeeded.
+    #[serde(default)]
+    expect_exit_code: Option<i64>,
+    /// `inherit` (default), `per_run`, or `per_branch`.
+    ///
+    /// `per_branch` requires a fan-out and is refused at launch otherwise.
+    #[serde(default)]
+    worktree_mode: Option<String>,
+    /// What a provisioned worktree forks from — a branch, tag or sha. Omit for
+    /// the repo's current HEAD.
+    #[serde(default)]
+    worktree_base_ref: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -304,7 +333,20 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::GateConfigInvalid { .. }
         // A template bigger than one run may hold. `422` with the rest: the
         // template is what has to change, and the message says by how much.
-        | LaunchError::RunTaskCeiling { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | LaunchError::RunTaskCeiling { .. }
+        // Command and worktree declarations are template facts too, and every
+        // one of them names the field to change.
+        | LaunchError::CommandStepWithoutCommand { .. }
+        | LaunchError::AgentStepWithCommand { .. }
+        | LaunchError::CommandStepWithoutTimeout { .. }
+        | LaunchError::CommandTimeoutOutOfRange { .. }
+        | LaunchError::CommandStepWithoutBinding { .. }
+        | LaunchError::PerBranchWithoutFanOut { .. }
+        | LaunchError::WorktreeWithoutRepo { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        // Not the template's fault and not the input's: the repo, its base ref,
+        // or the disk would not cooperate. A person has to go and look at the
+        // checkout, which is a different job from editing a step.
+        LaunchError::WorktreeUnavailable { .. } => StatusCode::CONFLICT,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -548,6 +590,21 @@ pub(super) async fn put_step(
         }
     }
 
+    let kind = match request.kind.as_deref() {
+        None => crate::workflows::StepKind::Agent,
+        Some(value) => crate::workflows::StepKind::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{value}` is not a step kind — use `agent` or `command`"),
+        ))?,
+    };
+    let worktree_mode = match request.worktree_mode.as_deref() {
+        None => crate::workflows::WorktreeMode::Inherit,
+        Some(value) => crate::workflows::WorktreeMode::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{value}` is not a worktree mode — use `inherit`, `per_run` or `per_branch`"),
+        ))?,
+    };
+
     store
         .put_step(&WorkflowStep {
             workflow_id: id.clone(),
@@ -567,6 +624,12 @@ pub(super) async fn put_step(
             loop_group: request.loop_group,
             loop_max_iterations: request.loop_max_iterations,
             loop_until: request.loop_until,
+            kind,
+            command: request.command,
+            command_timeout_secs: request.command_timeout_secs,
+            expect_exit_code: request.expect_exit_code,
+            worktree_mode,
+            worktree_base_ref: request.worktree_base_ref,
         })
         .await
         .map_err(internal)?;

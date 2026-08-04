@@ -599,12 +599,6 @@ export function ConfigSectionEditor({
 							/>
 						</div>
 						<ConfigToggleField
-							label="Auto-Create Worktrees"
-							description="Automatically create a worktree when spawning a worker on a new branch."
-							value={localValues.auto_create_worktrees as boolean}
-							onChange={(v) => handleChange("auto_create_worktrees", v)}
-						/>
-						<ConfigToggleField
 							label="Auto-Discover Repos"
 							description="Scan the project root for git repositories when a project is created."
 							value={localValues.auto_discover_repos as boolean}

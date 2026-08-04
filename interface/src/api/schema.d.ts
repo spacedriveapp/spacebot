@@ -472,6 +472,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{id}/worktree-orphans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{id}/worktree-orphans — list, and only list.
+         * @description Deliberately a report rather than a sweep. The one thing worse than a stale
+         *     worktree is a background process that deletes directories, so this endpoint
+         *     has no counterpart that removes anything: a person reads the list, looks at
+         *     the diff, and decides. Most entries will be checkouts a failed run left
+         *     behind with uncommitted changes, which is exactly the work you want back.
+         */
+        get: operations["list_worktree_orphans"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{id}/worktrees": {
         parameters: {
             query?: never;
@@ -4294,6 +4318,21 @@ export interface components {
             /** Format: int64 */
             server_startup_timeout_secs?: number | null;
         };
+        /** @description A directory under `.worktrees/` that nothing alive accounts for. */
+        OrphanWorktree: {
+            branch: string;
+            path: string;
+            project_id: string;
+            /** @description Why we think nobody owns it, in words. */
+            reason: string;
+            repo_id: string;
+            /** @description The run it appears to have belonged to, when the name still says so. */
+            run_id?: string | null;
+        };
+        /** @description Worktrees found on disk that no live run accounts for. */
+        OrphanWorktreesResponse: {
+            orphans: components["schemas"]["OrphanWorktree"][];
+        };
         PlatformCredentials: {
             discord_token?: string | null;
             email_from_address?: string | null;
@@ -4473,7 +4512,6 @@ export interface components {
             repo_name: string;
         };
         ProjectsSection: {
-            auto_create_worktrees: boolean;
             auto_discover_repos: boolean;
             auto_discover_worktrees: boolean;
             /** Format: int64 */
@@ -4482,7 +4520,6 @@ export interface components {
             worktree_name_template: string;
         };
         ProjectsUpdate: {
-            auto_create_worktrees?: boolean | null;
             auto_discover_repos?: boolean | null;
             auto_discover_worktrees?: boolean | null;
             /** Format: int64 */
@@ -4783,7 +4820,24 @@ export interface components {
         SaveStepRequest: {
             /** @description Omit to run the step as whoever launched the run. */
             assigned_agent_id?: string | null;
+            /**
+             * @description The command line for a command step. Refused on an agent step, where
+             *     nothing would run it.
+             */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard timeout for a command step, in seconds. Required on one.
+             */
+            command_timeout_secs?: number | null;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success, for steps where non-zero really is a
+             *     failure. Omit — the usual case — to treat the exit code as data: a
+             *     command that ran and reported a problem is a step that succeeded.
+             */
+            expect_exit_code?: number | null;
             /** @description Pointer *within each item* naming its branch. Omit to key by index. */
             for_each_key?: string | null;
             /** @description RFC 6901 pointer into that step's outputs. Must select an array. */
@@ -4799,6 +4853,15 @@ export interface components {
              */
             for_each_step_key?: string | null;
             input_schema?: unknown;
+            /**
+             * @description `agent` (default) or `command`.
+             *
+             *     A command step runs a process instead of a model. Its outputs are
+             *     `{"exit_code", "stdout", "stderr", "duration_ms"}`, which bindings,
+             *     gates, `loop_until` and conditions read with the pointers they already
+             *     use.
+             */
+            kind?: string | null;
             /**
              * @description Set to put this step in a loop body. Every step sharing the name is one
              *     body, and the whole body runs again until it converges or runs out.
@@ -4830,6 +4893,17 @@ export interface components {
             /** @description Extra instructions appended to the worker prompt when this step runs. */
             system_prompt?: string | null;
             title: string;
+            /**
+             * @description What a provisioned worktree forks from — a branch, tag or sha. Omit for
+             *     the repo's current HEAD.
+             */
+            worktree_base_ref?: string | null;
+            /**
+             * @description `inherit` (default), `per_run`, or `per_branch`.
+             *
+             *     `per_branch` requires a fan-out and is refused at launch otherwise.
+             */
+            worktree_mode?: string | null;
         };
         SaveWebhookRequest: {
             /** @description The agent that owns and executes the run. */
@@ -5046,6 +5120,17 @@ export interface components {
             step_key: string;
             workflow_id: string;
         };
+        /**
+         * @description What a step *is*: something a model does, or something a process does.
+         *
+         *     Named rather than inferred from "does `command` have a value". A NULL command
+         *     on a step somebody meant to be a command step is a template bug, and
+         *     inferring the kind would silently turn it into an agent step running a model
+         *     against an empty instruction — expensive, slow, and wrong in a way nothing
+         *     reports. With an explicit kind, launch refuses and names the missing field.
+         * @enum {string}
+         */
+        StepKind: "agent" | "command";
         StorageStatus: {
             /** Format: int64 */
             available_bytes: number;
@@ -5075,6 +5160,13 @@ export interface components {
              * @description Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
              */
             block_recurrences: number;
+            /** @description The command line, frozen from the step at launch. See [`TaskKind`]. */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard wall-clock ceiling for that command, in seconds.
+             */
+            command_timeout_secs?: number | null;
             completed_at?: string | null;
             /**
              * Format: int64
@@ -5085,6 +5177,12 @@ export interface components {
             created_at: string;
             created_by: string;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success. `None` means the code is *data*: a
+             *     command that ran and reported a problem is a task that succeeded.
+             */
+            expect_exit_code?: number | null;
             /**
              * @description Which branch of a fan-out this task is, once the fan-out has expanded.
              *
@@ -5109,6 +5207,15 @@ export interface components {
              *     actually saw survives a crash and stays readable after upstream changes.
              */
             inputs?: unknown;
+            /**
+             * @description Whether this task is executed by a worker or by a process.
+             *
+             *     `agent` on everything that predates command steps, which is why the
+             *     column defaults to it: an unreadable or missing value must never be
+             *     guessed as `command`, because that would execute a stored shell line on
+             *     the strength of a corrupt row.
+             */
+            kind: components["schemas"]["TaskKind"];
             last_block_kind?: null | components["schemas"]["BlockKind"];
             /**
              * @description Text of the most recent failure, kept on the task so the board can
@@ -5187,11 +5294,21 @@ export interface components {
             workflow_run_id?: string | null;
             /** @description Which step of that workflow produced this task. */
             workflow_step_key?: string | null;
+            /** @description What a provisioned worktree forks from. `None` means the repo's HEAD. */
+            worktree_base_ref?: string | null;
             /**
              * @description Worktree to execute in. When set, the worker's working directory is
              *     resolved from it rather than from the repo or project root.
              */
             worktree_id?: string | null;
+            /**
+             * @description What checkout this task runs in, frozen from the step at launch.
+             *
+             *     A fan-out placeholder carries it to its branches, which is how expansion
+             *     knows to provision one checkout per branch — inside the same transaction
+             *     that emits them.
+             */
+            worktree_mode: components["schemas"]["WorktreeMode"];
         };
         TaskActionResponse: {
             message: string;
@@ -5328,6 +5445,16 @@ export interface components {
              */
             source_task_number?: number | null;
         };
+        /**
+         * @description What executes a task.
+         *
+         *     The task-level mirror of [`crate::workflows::StepKind`], and named rather
+         *     than inferred from "does `command` have a value" for the same reason: a task
+         *     meant to be a command and missing its command line must be *reported*, not
+         *     quietly run as an agent task against an empty instruction.
+         * @enum {string}
+         */
+        TaskKind: "agent" | "command";
         TaskListResponse: {
             /**
              * Format: int64
@@ -6042,7 +6169,27 @@ export interface components {
         WorkflowStep: {
             /** @description `None` means the agent that launched the run. */
             assigned_agent_id?: string | null;
+            /**
+             * @description The command line, for a command step. `None` on every agent step, and
+             *     launch refuses an agent step that carries one.
+             */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard wall-clock ceiling for a command step, in seconds.
+             *
+             *     Required rather than inherited from a default: a stored command runs
+             *     unattended and forever, and the author is the only person who knows
+             *     whether this is a two-second linter or a four-minute build.
+             */
+            command_timeout_secs?: number | null;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success, for the steps where non-zero really is
+             *     a failure. Absent by default — see [`StepKind::Command`].
+             */
+            expect_exit_code?: number | null;
             /**
              * @description Pointer *within each item* naming its branch, e.g. `/name` over
              *     `{"name": "repo-a"}` labels the branch `repo-a`.
@@ -6062,6 +6209,8 @@ export interface components {
              */
             for_each_step_key?: string | null;
             input_schema?: unknown;
+            /** @description Agent step or command step. See [`StepKind`]. */
+            kind?: components["schemas"]["StepKind"];
             /**
              * @description Which loop body this step belongs to.
              *
@@ -6099,6 +6248,13 @@ export interface components {
             system_prompt?: string | null;
             title: string;
             workflow_id: string;
+            /** @description What a provisioned worktree forks from. `None` means the repo's HEAD. */
+            worktree_base_ref?: string | null;
+            /**
+             * @description What checkout this step runs in. See
+             *     [`crate::workflows::worktrees::WorktreeMode`].
+             */
+            worktree_mode?: components["schemas"]["WorktreeMode"];
         };
         /**
          * @description An inbound endpoint mapping a payload to a run input.
@@ -6121,6 +6277,14 @@ export interface components {
             last_run_id?: string | null;
             workflow_id: string;
         };
+        /**
+         * @description Where a step gets its working directory from.
+         *
+         *     `Inherit` is the default and is exactly today's behaviour, which is what lets
+         *     every template that predates this feature keep working untouched.
+         * @enum {string}
+         */
+        WorktreeMode: "inherit" | "per_run" | "per_branch";
         WorktreeResponse: {
             worktree: components["schemas"]["ProjectWorktree"];
         };
@@ -7504,6 +7668,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_worktree_orphans: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrphanWorktreesResponse"];
                 };
             };
             /** @description Project not found */

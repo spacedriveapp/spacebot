@@ -1,11 +1,13 @@
 //! Workflow template storage and instantiation.
 
+use crate::agent::command_step::MAX_COMMAND_TIMEOUT_SECS;
 use crate::error::Result;
 use crate::tasks::{
     ContractProblem, ContractResolution, ContractSide, CreateTaskInput, GateConfigError,
     GateDisposition, GateKind, Task, TaskInputBinding, TaskPriority, TaskProjectBinding,
     TaskStatus, TaskStore,
 };
+use crate::workflows::worktrees::{self, PreparedWorktree, WorktreeError, WorktreeMode};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +24,49 @@ pub struct Workflow {
     pub input_schema: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// What a step *is*: something a model does, or something a process does.
+///
+/// Named rather than inferred from "does `command` have a value". A NULL command
+/// on a step somebody meant to be a command step is a template bug, and
+/// inferring the kind would silently turn it into an agent step running a model
+/// against an empty instruction — expensive, slow, and wrong in a way nothing
+/// reports. With an explicit kind, launch refuses and names the missing field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    /// Today's behaviour: one task, claimed by a worker with a full tool loop.
+    #[default]
+    Agent,
+    /// A process, an exit code, and its output. A deterministic check makes
+    /// every downstream decision trustworthy, because the loop and branch
+    /// predicates that read step outputs are only as trustworthy as the value
+    /// they read.
+    Command,
+}
+
+impl StepKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepKind::Agent => "agent",
+            StepKind::Command => "command",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(StepKind::Agent),
+            "command" => Some(StepKind::Command),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StepKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// One step of a pipeline. Becomes exactly one task per launch.
@@ -74,6 +119,27 @@ pub struct WorkflowStep {
     /// Required on the body's exit step: a loop with no exit condition always
     /// burns its whole budget.
     pub loop_until: Option<Value>,
+    /// Agent step or command step. See [`StepKind`].
+    #[serde(default)]
+    pub kind: StepKind,
+    /// The command line, for a command step. `None` on every agent step, and
+    /// launch refuses an agent step that carries one.
+    pub command: Option<String>,
+    /// Hard wall-clock ceiling for a command step, in seconds.
+    ///
+    /// Required rather than inherited from a default: a stored command runs
+    /// unattended and forever, and the author is the only person who knows
+    /// whether this is a two-second linter or a four-minute build.
+    pub command_timeout_secs: Option<i64>,
+    /// The exit code that means success, for the steps where non-zero really is
+    /// a failure. Absent by default — see [`StepKind::Command`].
+    pub expect_exit_code: Option<i64>,
+    /// What checkout this step runs in. See
+    /// [`crate::workflows::worktrees::WorktreeMode`].
+    #[serde(default)]
+    pub worktree_mode: WorktreeMode,
+    /// What a provisioned worktree forks from. `None` means the repo's HEAD.
+    pub worktree_base_ref: Option<String>,
 }
 
 /// What an edge means, now that "the loop finished" is two outcomes.
@@ -598,6 +664,50 @@ pub enum LaunchError {
         gate_key: String,
         details: String,
     },
+    #[error(
+        "step `{step_key}` is a command step but carries no command — set one, or change its \
+         kind to `agent`"
+    )]
+    CommandStepWithoutCommand { step_key: String },
+    #[error(
+        "step `{step_key}` is an agent step and carries a command line, which nothing would run \
+         — a field that is settable and consumed by nothing reads on the canvas as a step that \
+         runs a command and does not"
+    )]
+    AgentStepWithCommand { step_key: String },
+    #[error(
+        "command step `{step_key}` has no timeout — a stored command runs unattended and forever, \
+         and only its author knows whether this is a two-second linter or a four-minute build"
+    )]
+    CommandStepWithoutTimeout { step_key: String },
+    #[error(
+        "command step `{step_key}` asks for a {timeout_secs}s timeout; it must be between 1 and \
+         {ceiling} (limit: MAX_COMMAND_TIMEOUT_SECS) — a step is not a daemon"
+    )]
+    CommandTimeoutOutOfRange {
+        step_key: String,
+        timeout_secs: i64,
+        ceiling: i64,
+    },
+    #[error(
+        "command step `{step_key}` has no repo and provisions no worktree, so there is no \
+         directory to run it in — bind it to a repo rather than letting it default to the \
+         workspace"
+    )]
+    CommandStepWithoutBinding { step_key: String },
+    #[error(
+        "step `{step_key}` asks for a worktree per fan-out branch but is not a fan-out — give it \
+         a for_each_step_key, or use `per_run`. Degrading this to `per_run` would hand you a \
+         pipeline that looks isolated and is not"
+    )]
+    PerBranchWithoutFanOut { step_key: String },
+    #[error(
+        "step `{step_key}` asks for its own worktree ({mode}) but names no repo — a worktree is \
+         forked from a repo, so set repo_id"
+    )]
+    WorktreeWithoutRepo { step_key: String, mode: String },
+    #[error("step `{step_key}` cannot be given a worktree: {details}")]
+    WorktreeUnavailable { step_key: String, details: String },
     #[error("workflow storage error: {0}")]
     Storage(String),
 }
@@ -710,8 +820,10 @@ impl WorkflowStore {
                  (workflow_id, step_key, title, description, assigned_agent_id, priority, \
                   input_schema, output_schema, system_prompt, repo_id, position, \
                   for_each_step_key, for_each_pointer, for_each_key, \
-                  loop_group, loop_max_iterations, loop_until) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  loop_group, loop_max_iterations, loop_until, \
+                  kind, command, command_timeout_secs, expect_exit_code, \
+                  worktree_mode, worktree_base_ref) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workflow_id, step_key) DO UPDATE SET \
                  title = excluded.title, description = excluded.description, \
                  assigned_agent_id = excluded.assigned_agent_id, priority = excluded.priority, \
@@ -723,7 +835,12 @@ impl WorkflowStore {
                  for_each_key = excluded.for_each_key, \
                  loop_group = excluded.loop_group, \
                  loop_max_iterations = excluded.loop_max_iterations, \
-                 loop_until = excluded.loop_until",
+                 loop_until = excluded.loop_until, \
+                 kind = excluded.kind, command = excluded.command, \
+                 command_timeout_secs = excluded.command_timeout_secs, \
+                 expect_exit_code = excluded.expect_exit_code, \
+                 worktree_mode = excluded.worktree_mode, \
+                 worktree_base_ref = excluded.worktree_base_ref",
         )
         .bind(&step.workflow_id)
         .bind(&step.step_key)
@@ -742,6 +859,12 @@ impl WorkflowStore {
         .bind(&step.loop_group)
         .bind(step.loop_max_iterations)
         .bind(step.loop_until.as_ref().map(|value| value.to_string()))
+        .bind(step.kind.as_str())
+        .bind(&step.command)
+        .bind(step.command_timeout_secs)
+        .bind(step.expect_exit_code)
+        .bind(step.worktree_mode.as_str())
+        .bind(&step.worktree_base_ref)
         .execute(&self.pool)
         .await
         .context("failed to write workflow step")?;
@@ -753,7 +876,9 @@ impl WorkflowStore {
             "SELECT workflow_id, step_key, title, description, assigned_agent_id, priority, \
                     input_schema, output_schema, system_prompt, repo_id, position, \
                     for_each_step_key, for_each_pointer, for_each_key, \
-                    loop_group, loop_max_iterations, loop_until \
+                    loop_group, loop_max_iterations, loop_until, \
+                    kind, command, command_timeout_secs, expect_exit_code, \
+                    worktree_mode, worktree_base_ref \
              FROM workflow_steps WHERE workflow_id = ? ORDER BY position ASC, step_key ASC",
         )
         .bind(workflow_id)
@@ -1333,6 +1458,95 @@ impl WorkflowStore {
             }
         }
 
+        // 2c. Command steps and worktree modes.
+        //
+        //     Everything here is knowable from the template, which is the whole
+        //     argument for checking it at launch: a command step with no
+        //     directory to run in, or a base ref that does not exist, discovered
+        //     three steps into a run has already cost the run. While a person is
+        //     watching, the answer can still be a corrected template.
+        for step in &steps {
+            match step.kind {
+                StepKind::Command => {
+                    let command = step.command.as_deref().map(str::trim).unwrap_or("");
+                    if command.is_empty() {
+                        return Err(LaunchError::CommandStepWithoutCommand {
+                            step_key: step.step_key.clone(),
+                        });
+                    }
+                    let Some(timeout_secs) = step.command_timeout_secs else {
+                        return Err(LaunchError::CommandStepWithoutTimeout {
+                            step_key: step.step_key.clone(),
+                        });
+                    };
+                    if !(1..=MAX_COMMAND_TIMEOUT_SECS).contains(&timeout_secs) {
+                        return Err(LaunchError::CommandTimeoutOutOfRange {
+                            step_key: step.step_key.clone(),
+                            timeout_secs,
+                            ceiling: MAX_COMMAND_TIMEOUT_SECS,
+                        });
+                    }
+                    // A command step runs in exactly the directory its binding
+                    // names, under the rule `resolve_worker_working_dir`
+                    // already enforces. A step with no binding has no directory,
+                    // and silently defaulting to the workspace would run a
+                    // stored shell line against whatever happened to be there.
+                    if step.repo_id.is_none() && !step.worktree_mode.provisions() {
+                        return Err(LaunchError::CommandStepWithoutBinding {
+                            step_key: step.step_key.clone(),
+                        });
+                    }
+                }
+                // The dead-config guard, applied to a field this change is
+                // adding rather than only to the one it is deleting.
+                StepKind::Agent => {
+                    if step
+                        .command
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|command| !command.is_empty())
+                    {
+                        return Err(LaunchError::AgentStepWithCommand {
+                            step_key: step.step_key.clone(),
+                        });
+                    }
+                }
+            }
+
+            if !step.worktree_mode.provisions() {
+                continue;
+            }
+            // `per_branch` on a step that is not a fan-out is a template error.
+            // Silently degrading it to `per_run` gives an author a pipeline that
+            // looks isolated and is not, and the failure that produces — two
+            // agents editing one working tree — is not a race that yields a bad
+            // result but one that yields an incoherent one.
+            if step.worktree_mode == WorktreeMode::PerBranch
+                && !fan_outs.contains(step.step_key.as_str())
+            {
+                return Err(LaunchError::PerBranchWithoutFanOut {
+                    step_key: step.step_key.clone(),
+                });
+            }
+            let Some(repo_id) = step.repo_id.as_deref() else {
+                return Err(LaunchError::WorktreeWithoutRepo {
+                    step_key: step.step_key.clone(),
+                    mode: step.worktree_mode.to_string(),
+                });
+            };
+            worktrees::verify_base_ref(
+                &self.pool,
+                &step.step_key,
+                repo_id,
+                step.worktree_base_ref.as_deref(),
+            )
+            .await
+            .map_err(|error| LaunchError::WorktreeUnavailable {
+                step_key: step.step_key.clone(),
+                details: error.to_string(),
+            })?;
+        }
+
         // 3. Every input a step says it needs is actually wired.
         //
         //    Without this the mistake surfaces at run time as an unresolvable
@@ -1414,6 +1628,11 @@ impl WorkflowStore {
         .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
         let mut task_numbers: HashMap<String, i64> = HashMap::new();
+        // Tracked separately from the tasks because rolling back a launch has to
+        // undo the disk as well as the database. A checkout left behind by a
+        // launch that never produced a runnable graph is an orphan by
+        // construction — nothing will ever own it.
+        let mut provisioned: Vec<PreparedWorktree> = Vec::new();
         if let Err(error) = self
             .emit_graph(
                 task_store,
@@ -1426,9 +1645,11 @@ impl WorkflowStore {
                 &loops,
                 identity,
                 &mut task_numbers,
+                &mut provisioned,
             )
             .await
         {
+            worktrees::discard_checkouts(&provisioned).await;
             self.rollback_run(task_store, &run_id, &task_numbers).await;
             return Err(error);
         }
@@ -1459,6 +1680,7 @@ impl WorkflowStore {
         loops: &LoopWiring,
         identity: &LaunchIdentity,
         task_numbers: &mut HashMap<String, i64>,
+        provisioned: &mut Vec<PreparedWorktree>,
     ) -> std::result::Result<(), LaunchError> {
         for step in steps {
             let task = task_store
@@ -1492,21 +1714,107 @@ impl WorkflowStore {
                 .await
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
+            // The command and worktree columns are frozen onto the task here for
+            // the reason the fan-out and loop specs are: a template edited
+            // mid-run must not change what a run already in flight does, and a
+            // run whose template was deleted still has to finish.
             sqlx::query(
                 "UPDATE tasks SET workflow_run_id = ?, workflow_step_key = ?, \
-                 input_schema = ?, output_schema = ?, system_prompt = ? WHERE task_number = ?",
+                 input_schema = ?, output_schema = ?, system_prompt = ?, \
+                 kind = ?, command = ?, command_timeout_secs = ?, expect_exit_code = ?, \
+                 worktree_mode = ?, worktree_base_ref = ? WHERE task_number = ?",
             )
             .bind(run_id)
             .bind(&step.step_key)
             .bind(step.input_schema.as_ref().map(|v| v.to_string()))
             .bind(step.output_schema.as_ref().map(|v| v.to_string()))
             .bind(&step.system_prompt)
+            .bind(step.kind.as_str())
+            .bind(&step.command)
+            .bind(step.command_timeout_secs)
+            .bind(step.expect_exit_code)
+            .bind(step.worktree_mode.as_str())
+            .bind(&step.worktree_base_ref)
             .bind(task.task_number)
             .execute(&self.pool)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
             task_numbers.insert(step.step_key.clone(), task.task_number);
+        }
+
+        // `per_run` provisioning: one checkout per step, made at launch.
+        //
+        // `per_branch` is deliberately *not* done here — its width is not known
+        // until the fan-out expands, and its checkouts are created inside the
+        // expansion transaction so a branch task can never exist without one.
+        let wanted = steps
+            .iter()
+            .filter(|step| step.worktree_mode == WorktreeMode::PerRun)
+            .count() as i64;
+        if wanted > 0 {
+            worktrees::check_cap(&self.pool, run_id, wanted)
+                .await
+                .map_err(|error| LaunchError::WorktreeUnavailable {
+                    step_key: "*".to_string(),
+                    details: error.to_string(),
+                })?;
+        }
+
+        for step in steps {
+            if step.worktree_mode != WorktreeMode::PerRun {
+                continue;
+            }
+            let Some(repo_id) = step.repo_id.as_deref() else {
+                // Validation refused this already; reaching it means the rows
+                // changed underneath us and the launch is unwinding anyway.
+                return Err(LaunchError::WorktreeWithoutRepo {
+                    step_key: step.step_key.clone(),
+                    mode: step.worktree_mode.to_string(),
+                });
+            };
+            let Some(task_number) = task_numbers.get(&step.step_key).copied() else {
+                continue;
+            };
+
+            let prepared = worktrees::create_checkout(
+                &self.pool,
+                run_id,
+                &step.step_key,
+                None,
+                repo_id,
+                step.worktree_base_ref.as_deref(),
+            )
+            .await
+            .map_err(|error| LaunchError::WorktreeUnavailable {
+                step_key: step.step_key.clone(),
+                details: error.to_string(),
+            })?;
+            provisioned.push(prepared.clone());
+
+            let mut conn = self
+                .pool
+                .acquire()
+                .await
+                .map_err(|error| LaunchError::Storage(error.to_string()))?;
+            worktrees::record_worktree(&mut conn, run_id, &step.step_key, None, &prepared)
+                .await
+                .map_err(|error: WorktreeError| LaunchError::WorktreeUnavailable {
+                    step_key: step.step_key.clone(),
+                    details: error.to_string(),
+                })?;
+
+            // The binding, not a prompt line. `resolve_worker_working_dir`
+            // resolves a worktree binding to a directory and refuses anything
+            // the allowlist does not cover, so the provisioned checkout is
+            // enforced by exactly the machinery that was already there.
+            sqlx::query("UPDATE tasks SET project_id = ?, worktree_id = ? WHERE task_number = ?")
+                .bind(&prepared.project_id)
+                .bind(&prepared.worktree_id)
+                .bind(task_number)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
         // A fan-out step becomes exactly one task, marked as a placeholder.
@@ -2874,6 +3182,29 @@ fn step_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowStep> {
         loop_group: row.try_get("loop_group").ok().flatten(),
         loop_max_iterations: row.try_get("loop_max_iterations").ok().flatten(),
         loop_until: read_json(&row, "loop_until"),
+        // An unreadable kind falls back to `agent`, which is the conservative
+        // direction: an agent step with a stray command line is refused at
+        // launch and says so, whereas defaulting to `command` would execute a
+        // stored shell line on the strength of a corrupt row.
+        kind: row
+            .try_get::<String, _>("kind")
+            .ok()
+            .as_deref()
+            .and_then(StepKind::parse)
+            .unwrap_or(StepKind::Agent),
+        command: row.try_get("command").ok().flatten(),
+        command_timeout_secs: row.try_get("command_timeout_secs").ok().flatten(),
+        expect_exit_code: row.try_get("expect_exit_code").ok().flatten(),
+        // Same argument: an unreadable mode is `inherit`, which provisions
+        // nothing. Guessing `per_branch` here would create checkouts nobody
+        // asked for.
+        worktree_mode: row
+            .try_get::<String, _>("worktree_mode")
+            .ok()
+            .as_deref()
+            .and_then(WorktreeMode::parse)
+            .unwrap_or(WorktreeMode::Inherit),
+        worktree_base_ref: row.try_get("worktree_base_ref").ok().flatten(),
     })
 }
 
@@ -2980,6 +3311,9 @@ pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
          system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
          for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
          loop_group TEXT, loop_max_iterations INTEGER, loop_until TEXT, \
+         kind TEXT NOT NULL DEFAULT 'agent', command TEXT, \
+         command_timeout_secs INTEGER, expect_exit_code INTEGER, \
+         worktree_mode TEXT NOT NULL DEFAULT 'inherit', worktree_base_ref TEXT, \
          PRIMARY KEY (workflow_id, step_key))",
         "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
          parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
@@ -3018,6 +3352,15 @@ pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
          agent_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, \
          last_delivery_at TEXT, last_outcome TEXT, last_detail TEXT, last_run_id TEXT, \
          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+        // What a run provisioned, and what became of it. The reaper's entire
+        // worklist — a test pool without it would let the reaping tests pass
+        // against a database that never recorded anything to reap.
+        "CREATE TABLE workflow_run_worktrees (id TEXT PRIMARY KEY NOT NULL, \
+         run_id TEXT NOT NULL, step_key TEXT NOT NULL, branch_key TEXT, \
+         repo_id TEXT NOT NULL, worktree_id TEXT NOT NULL, path TEXT NOT NULL, \
+         branch TEXT NOT NULL, \
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
+         reaped_at TEXT, reap_outcome TEXT, reap_detail TEXT)",
     ] {
         sqlx::query(statement)
             .execute(pool)
@@ -3082,6 +3425,12 @@ mod tests {
             loop_group: None,
             loop_max_iterations: None,
             loop_until: None,
+            kind: StepKind::Agent,
+            command: None,
+            command_timeout_secs: None,
+            expect_exit_code: None,
+            worktree_mode: WorktreeMode::Inherit,
+            worktree_base_ref: None,
         }
     }
 
@@ -3484,6 +3833,7 @@ mod tests {
                 &LoopWiring::default(),
                 &LaunchIdentity::agent("agent-1"),
                 &mut emitted,
+                &mut Vec::new(),
             )
             .await
             .expect("emit");
@@ -3624,6 +3974,155 @@ mod tests {
 
         assert_ne!(first.run.id, second.run.id);
         assert_ne!(first.task_numbers["build"], second.task_numbers["build"]);
+    }
+
+    // -- Command steps and worktree modes, at launch -----------------------
+
+    /// A command step runs in exactly the directory its binding names. With no
+    /// binding there is no directory, and defaulting to the workspace would run
+    /// a stored shell line against whatever happened to be there — which is the
+    /// same class of mistake the cwd enforcement exists to prevent, made at
+    /// template-authoring time instead of run time.
+    #[tokio::test]
+    async fn a_command_step_with_no_binding_is_refused_at_launch_rather_than_defaulting_to_the_workspace()
+     {
+        let (workflows, tasks, id) = fixture().await;
+        let mut check = step(&id, "lint", 0);
+        check.kind = StepKind::Command;
+        check.command = Some("bun run lint".into());
+        check.command_timeout_secs = Some(120);
+        workflows.put_step(&check).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a command with nowhere to run is refused");
+        assert!(
+            matches!(error, LaunchError::CommandStepWithoutBinding { ref step_key } if step_key == "lint"),
+            "{error}"
+        );
+    }
+
+    /// A command line on an agent step is a field that is settable and consumed
+    /// by nothing — the exact dead-config shape this change is elsewhere
+    /// deleting an instance of. It also reads on the canvas as a step that runs
+    /// a command and does not.
+    #[tokio::test]
+    async fn an_agent_step_carrying_a_command_line_is_refused_rather_than_ignoring_it() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut agent = step(&id, "summarise", 0);
+        agent.command = Some("bun run lint".into());
+        workflows.put_step(&agent).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a command nothing would run is refused");
+        assert!(
+            matches!(error, LaunchError::AgentStepWithCommand { .. }),
+            "{error}"
+        );
+    }
+
+    /// A command step with no timeout is refused rather than given a default.
+    /// A stored command runs unattended and forever, and the author is the only
+    /// person who knows whether this is a linter or a build.
+    #[tokio::test]
+    async fn a_command_step_without_a_timeout_is_refused_rather_than_given_one() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut check = step(&id, "lint", 0);
+        check.kind = StepKind::Command;
+        check.command = Some("bun run lint".into());
+        check.repo_id = Some("repo-1".into());
+        workflows.put_step(&check).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a command with no ceiling is refused");
+        assert!(
+            matches!(error, LaunchError::CommandStepWithoutTimeout { .. }),
+            "{error}"
+        );
+    }
+
+    /// The command and its ceiling are frozen onto the task, not read back from
+    /// the template at pickup. A template edited mid-run must not change what a
+    /// run already in flight does, and a run whose template was deleted still
+    /// has to finish.
+    #[tokio::test]
+    async fn a_command_step_compiles_into_a_task_carrying_its_own_command_and_ceiling() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut check = step(&id, "lint", 0);
+        check.kind = StepKind::Command;
+        check.command = Some("bun run lint".into());
+        check.command_timeout_secs = Some(120);
+        check.expect_exit_code = None;
+        check.repo_id = Some("repo-1".into());
+        workflows.put_step(&check).await.expect("put step");
+
+        let run = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let number = run.task_numbers["lint"];
+
+        // Editing the template afterwards must not reach the running task.
+        let mut edited = check.clone();
+        edited.command = Some("rm -rf /".into());
+        workflows.put_step(&edited).await.expect("edit the step");
+
+        let task = tasks
+            .get_by_number(number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert_eq!(task.kind, crate::tasks::TaskKind::Command);
+        assert_eq!(task.command.as_deref(), Some("bun run lint"));
+        assert_eq!(task.command_timeout_secs, Some(120));
+        assert!(task.command_spec().is_some());
+    }
+
+    /// Degrading `per_branch` to `per_run` on a step that is not a fan-out would
+    /// give an author a pipeline that *looks* isolated and is not. The failure
+    /// that produces — two agents editing one working tree — is not a race that
+    /// yields a bad result but one that yields an incoherent one, so it is
+    /// refused while a person is still watching.
+    #[tokio::test]
+    async fn a_per_branch_worktree_on_a_step_that_is_not_a_fan_out_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut build = step(&id, "build", 0);
+        build.worktree_mode = WorktreeMode::PerBranch;
+        build.repo_id = Some("repo-1".into());
+        workflows.put_step(&build).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("per_branch without a fan-out is a template error");
+        assert!(
+            matches!(error, LaunchError::PerBranchWithoutFanOut { ref step_key } if step_key == "build"),
+            "{error}"
+        );
+    }
+
+    /// A worktree is forked from a repo. A step that asks for one and names no
+    /// repo has nothing to fork, and saying so names the field to set.
+    #[tokio::test]
+    async fn a_step_asking_for_its_own_worktree_without_a_repo_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        let mut build = step(&id, "build", 0);
+        build.worktree_mode = WorktreeMode::PerRun;
+        workflows.put_step(&build).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("no repo means no worktree");
+        assert!(
+            matches!(error, LaunchError::WorktreeWithoutRepo { .. }),
+            "{error}"
+        );
     }
 
     // -- Fan-out -----------------------------------------------------------

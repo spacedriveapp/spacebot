@@ -377,6 +377,61 @@ pub struct Task {
     /// the recurrence limiter, and the unblock path — none of which applies to
     /// a branch that was simply not taken.
     pub skip_reason: Option<String>,
+    /// Whether this task is executed by a worker or by a process.
+    ///
+    /// `agent` on everything that predates command steps, which is why the
+    /// column defaults to it: an unreadable or missing value must never be
+    /// guessed as `command`, because that would execute a stored shell line on
+    /// the strength of a corrupt row.
+    pub kind: TaskKind,
+    /// The command line, frozen from the step at launch. See [`TaskKind`].
+    pub command: Option<String>,
+    /// Hard wall-clock ceiling for that command, in seconds.
+    pub command_timeout_secs: Option<i64>,
+    /// The exit code that means success. `None` means the code is *data*: a
+    /// command that ran and reported a problem is a task that succeeded.
+    pub expect_exit_code: Option<i64>,
+    /// What checkout this task runs in, frozen from the step at launch.
+    ///
+    /// A fan-out placeholder carries it to its branches, which is how expansion
+    /// knows to provision one checkout per branch — inside the same transaction
+    /// that emits them.
+    pub worktree_mode: crate::workflows::WorktreeMode,
+    /// What a provisioned worktree forks from. `None` means the repo's HEAD.
+    pub worktree_base_ref: Option<String>,
+}
+
+/// What executes a task.
+///
+/// The task-level mirror of [`crate::workflows::StepKind`], and named rather
+/// than inferred from "does `command` have a value" for the same reason: a task
+/// meant to be a command and missing its command line must be *reported*, not
+/// quietly run as an agent task against an empty instruction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// Claimed by a worker with a full tool loop. Everything, until now.
+    #[default]
+    Agent,
+    /// Executed as a process. The exit code is the answer.
+    Command,
+}
+
+impl TaskKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskKind::Agent => "agent",
+            TaskKind::Command => "command",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(TaskKind::Agent),
+            "command" => Some(TaskKind::Command),
+            _ => None,
+        }
+    }
 }
 
 /// The codebase a task acts on. Every field is optional and independently
@@ -396,6 +451,33 @@ impl TaskProjectBinding {
 }
 
 impl Task {
+    /// Everything needed to execute this task as a command, or `None` if it is
+    /// not one.
+    ///
+    /// Returns `None` for a command task whose command line or timeout is
+    /// missing rather than substituting a default. A stored command with no
+    /// timeout is not a command with a default timeout — it is a row that
+    /// should never have been written, and the pickup path parks it for a
+    /// person instead of inventing the one number nobody chose.
+    pub fn command_spec(&self) -> Option<crate::agent::command_step::CommandSpec> {
+        if self.kind != TaskKind::Command {
+            return None;
+        }
+        let command = self.command.as_deref().map(str::trim).unwrap_or("");
+        if command.is_empty() {
+            return None;
+        }
+        let timeout_secs = u64::try_from(self.command_timeout_secs?).ok()?;
+        if timeout_secs == 0 {
+            return None;
+        }
+        Some(crate::agent::command_step::CommandSpec {
+            command: command.to_string(),
+            timeout_secs,
+            expect_exit_code: self.expect_exit_code,
+        })
+    }
+
     /// The codebase this task is bound to, as a single value.
     pub fn binding(&self) -> TaskProjectBinding {
         TaskProjectBinding {
@@ -2185,11 +2267,108 @@ impl TaskStore {
             }
         }
 
-        let branches = self.emit_fan_out_branches(&placeholder, &items).await?;
+        // `per_branch` provisioning, immediately before the emit and inside the
+        // same expansion below.
+        //
+        // Checkouts are made on disk first because `git worktree add` is not
+        // transactional and SQLite cannot roll it back. The rows that make them
+        // *visible* — the `project_worktrees` row each branch binds to — go in
+        // with the branches themselves, so a branch task can never commit
+        // without its checkout. The reverse leftover, a directory with no task,
+        // is what the orphan report exists to name.
+        let mut prepared: Vec<Option<crate::workflows::worktrees::PreparedWorktree>> =
+            vec![None; items.len()];
+        if placeholder.worktree_mode == crate::workflows::WorktreeMode::PerBranch {
+            match self.prepare_branch_worktrees(&placeholder, &items).await {
+                Ok(created) => prepared = created,
+                Err(reason) => {
+                    // A repo that will not produce a worktree is a `capability`
+                    // block, not a dependency wait: nothing upstream is going to
+                    // fix it and a person has to go and look at the checkout.
+                    self.block_task(placeholder.task_number, BlockKind::Capability, &reason)
+                        .await?;
+                    return Ok(Some(FanOutOutcome::Blocked {
+                        placeholder_task_number: placeholder.task_number,
+                        reason,
+                    }));
+                }
+            }
+        }
+
+        let branches = match self
+            .emit_fan_out_branches(&placeholder, &items, &prepared)
+            .await
+        {
+            Ok(branches) => branches,
+            Err(error) => {
+                // The transaction did not commit, so no branch exists to own the
+                // checkouts we just made. They are seconds old and clean, so git
+                // takes them back without a `--force` anywhere in sight.
+                let made: Vec<_> = prepared.into_iter().flatten().collect();
+                crate::workflows::worktrees::discard_checkouts(&made).await;
+                return Err(error);
+            }
+        };
         Ok(Some(FanOutOutcome::Expanded {
             placeholder_task_number: placeholder.task_number,
             branches,
         }))
+    }
+
+    /// Create one checkout per branch, or none at all.
+    ///
+    /// All-or-nothing on purpose: a half-provisioned expansion would put some
+    /// branches in their own tree and the rest in the repo's, which is the
+    /// trampling this feature exists to stop, made harder to see by the fact
+    /// that most of it worked.
+    async fn prepare_branch_worktrees(
+        &self,
+        placeholder: &Task,
+        items: &[(String, Value)],
+    ) -> std::result::Result<Vec<Option<crate::workflows::worktrees::PreparedWorktree>>, String>
+    {
+        use crate::workflows::worktrees;
+
+        let Some(run_id) = placeholder.workflow_run_id.as_deref() else {
+            return Err(
+                "this step asks for a worktree per branch but belongs to no run, so there is no \
+                 run-scoped name to give one"
+                    .to_string(),
+            );
+        };
+        let Some(repo_id) = placeholder.repo_id.as_deref() else {
+            return Err(
+                "this step asks for a worktree per branch but names no repo to fork one from"
+                    .to_string(),
+            );
+        };
+        let step_key = placeholder.workflow_step_key.as_deref().unwrap_or("step");
+
+        worktrees::check_cap(&self.pool, run_id, items.len() as i64)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut prepared = Vec::with_capacity(items.len());
+        for (branch_key, _) in items {
+            match worktrees::create_checkout(
+                &self.pool,
+                run_id,
+                step_key,
+                Some(branch_key),
+                repo_id,
+                placeholder.worktree_base_ref.as_deref(),
+            )
+            .await
+            {
+                Ok(worktree) => prepared.push(Some(worktree)),
+                Err(error) => {
+                    let made: Vec<_> = prepared.into_iter().flatten().collect();
+                    worktrees::discard_checkouts(&made).await;
+                    return Err(error.to_string());
+                }
+            }
+        }
+        Ok(prepared)
     }
 
     /// Park a placeholder that cannot be expanded, and say why on the card.
@@ -2223,6 +2402,7 @@ impl TaskStore {
         &self,
         placeholder: &Task,
         items: &[(String, Value)],
+        prepared: &[Option<crate::workflows::worktrees::PreparedWorktree>],
     ) -> Result<Vec<i64>> {
         let parents = self.list_parents(placeholder.task_number).await?;
         let children = self.list_children(placeholder.task_number).await?;
@@ -2245,7 +2425,26 @@ impl TaskStore {
             .context("failed to open fan-out expansion transaction")?;
 
         let mut branches = Vec::with_capacity(items.len());
-        for (branch_key, item) in items {
+        for (index, (branch_key, item)) in items.iter().enumerate() {
+            let worktree = prepared.get(index).and_then(Option::as_ref);
+            // The `project_worktrees` row goes in first: the branch below binds
+            // to it by id, and `tasks.worktree_id` is a foreign key. Both writes
+            // are in this transaction, which is the whole point — a branch task
+            // that committed without its checkout would run in the repo's own
+            // tree, precisely the failure the cwd enforcement was built to
+            // prevent, reintroduced one layer up.
+            if let Some(worktree) = worktree {
+                crate::workflows::worktrees::record_worktree(
+                    &mut tx,
+                    placeholder.workflow_run_id.as_deref().unwrap_or_default(),
+                    placeholder.workflow_step_key.as_deref().unwrap_or("step"),
+                    Some(branch_key),
+                    worktree,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to record a branch worktree: {error}"))?;
+            }
+
             let task_number: i64 = sqlx::query_scalar(
                 "UPDATE task_number_seq SET next_number = next_number + 1 \
                  WHERE id = 1 RETURNING next_number - 1",
@@ -2259,8 +2458,11 @@ impl TaskStore {
                      id, task_number, title, description, status, priority, \
                      owner_agent_id, assigned_agent_id, subtasks, metadata, created_by, \
                      project_id, repo_id, worktree_id, input_schema, output_schema, \
-                     system_prompt, workflow_run_id, workflow_step_key, fan_out_branch_key) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     system_prompt, workflow_run_id, workflow_step_key, fan_out_branch_key, \
+                     kind, command, command_timeout_secs, expect_exit_code, \
+                     worktree_mode, worktree_base_ref) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                         ?, ?, ?, ?, ?, ?)",
             )
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(task_number)
@@ -2278,15 +2480,37 @@ impl TaskStore {
             .bind(&subtasks)
             .bind(&metadata)
             .bind(&placeholder.created_by)
-            .bind(&placeholder.project_id)
+            .bind(
+                worktree
+                    .map(|w| w.project_id.clone())
+                    .or_else(|| placeholder.project_id.clone()),
+            )
             .bind(&placeholder.repo_id)
-            .bind(&placeholder.worktree_id)
+            // The branch's own checkout wins over whatever the placeholder was
+            // bound to. This binding is the whole feature: `resolve_worker_working_dir`
+            // turns it into a directory and refuses anything outside the
+            // allowlist, so isolation is enforced by machinery that already
+            // existed rather than by a prompt line asking nicely.
+            .bind(
+                worktree
+                    .map(|w| w.worktree_id.clone())
+                    .or_else(|| placeholder.worktree_id.clone()),
+            )
             .bind(placeholder.input_schema.as_ref().map(|v| v.to_string()))
             .bind(placeholder.output_schema.as_ref().map(|v| v.to_string()))
             .bind(&placeholder.system_prompt)
             .bind(&placeholder.workflow_run_id)
             .bind(&placeholder.workflow_step_key)
             .bind(branch_key)
+            // A fan-out of command steps is one of the cases this exists for —
+            // "lint each of these five repos" — so the command travels to the
+            // branches with everything else the placeholder was holding.
+            .bind(placeholder.kind.as_str())
+            .bind(&placeholder.command)
+            .bind(placeholder.command_timeout_secs)
+            .bind(placeholder.expect_exit_code)
+            .bind(placeholder.worktree_mode.as_str())
+            .bind(&placeholder.worktree_base_ref)
             .execute(&mut *tx)
             .await
             .context("failed to insert a fan-out branch")?;
@@ -4796,7 +5020,9 @@ const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status
      workflow_run_id, workflow_step_key, system_prompt, \
      fan_out_branch_key, fan_out_placeholder, \
      loop_group, loop_iteration, loop_terminal, loop_resolution, \
-     awaiting_loop_group, awaiting_loop_arm, skip_reason";
+     awaiting_loop_group, awaiting_loop_arm, skip_reason, \
+     kind, command, command_timeout_secs, expect_exit_code, \
+     worktree_mode, worktree_base_ref";
 
 const RUN_SELECT_COLUMNS: &str = "SELECT id, task_number, attempt, worker_id, outcome, \
      summary, error, started_at, ended_at";
@@ -5032,6 +5258,29 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .ok()
             .flatten()
             .filter(|value| !value.is_empty()),
+        // An unreadable kind reads as `agent`, which is the only safe default:
+        // it leaves the task claimable by a worker rather than executing a
+        // shell line this row may not really carry.
+        kind: row
+            .try_get::<Option<String>, _>("kind")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(TaskKind::parse)
+            .unwrap_or(TaskKind::Agent),
+        command: read_optional_id(&row, "command"),
+        command_timeout_secs: row.try_get("command_timeout_secs").ok().flatten(),
+        expect_exit_code: row.try_get("expect_exit_code").ok().flatten(),
+        // Same argument, opposite direction: an unreadable mode provisions
+        // nothing rather than creating checkouts nobody asked for.
+        worktree_mode: row
+            .try_get::<Option<String>, _>("worktree_mode")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(crate::workflows::WorktreeMode::parse)
+            .unwrap_or(crate::workflows::WorktreeMode::Inherit),
+        worktree_base_ref: read_optional_id(&row, "worktree_base_ref"),
     })
 }
 
@@ -5167,7 +5416,13 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             loop_resolution TEXT,
             awaiting_loop_group TEXT,
             awaiting_loop_arm TEXT,
-            skip_reason TEXT
+            skip_reason TEXT,
+            kind TEXT NOT NULL DEFAULT 'agent',
+            command TEXT,
+            command_timeout_secs INTEGER,
+            expect_exit_code INTEGER,
+            worktree_mode TEXT NOT NULL DEFAULT 'inherit',
+            worktree_base_ref TEXT
         )
         "#,
     )

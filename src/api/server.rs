@@ -216,6 +216,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(projects::disk_usage))
         .routes(routes!(projects::create_repo))
         .routes(routes!(projects::delete_repo))
+        .routes(routes!(projects::list_worktree_orphans))
         .routes(routes!(projects::create_worktree))
         .routes(routes!(projects::delete_worktree))
         // Ingest routes

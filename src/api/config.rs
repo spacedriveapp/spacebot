@@ -113,7 +113,6 @@ pub(super) struct SandboxSection {
 pub(super) struct ProjectsSection {
     use_worktrees: bool,
     worktree_name_template: String,
-    auto_create_worktrees: bool,
     auto_discover_repos: bool,
     auto_discover_worktrees: bool,
     disk_usage_warning_threshold: u64,
@@ -274,7 +273,6 @@ pub(super) struct SandboxUpdate {
 pub(super) struct ProjectsUpdate {
     use_worktrees: Option<bool>,
     worktree_name_template: Option<String>,
-    auto_create_worktrees: Option<bool>,
     auto_discover_repos: Option<bool>,
     auto_discover_worktrees: Option<bool>,
     disk_usage_warning_threshold: Option<u64>,
@@ -403,7 +401,6 @@ pub(super) async fn get_agent_config(
         projects: ProjectsSection {
             use_worktrees: projects.use_worktrees,
             worktree_name_template: projects.worktree_name_template.clone(),
-            auto_create_worktrees: projects.auto_create_worktrees,
             auto_discover_repos: projects.auto_discover_repos,
             auto_discover_worktrees: projects.auto_discover_worktrees,
             disk_usage_warning_threshold: projects.disk_usage_warning_threshold,
@@ -950,9 +947,6 @@ fn update_projects_table(
     }
     if let Some(ref template) = projects.worktree_name_template {
         table["worktree_name_template"] = toml_edit::value(template.as_str());
-    }
-    if let Some(auto_create) = projects.auto_create_worktrees {
-        table["auto_create_worktrees"] = toml_edit::value(auto_create);
     }
     if let Some(auto_repos) = projects.auto_discover_repos {
         table["auto_discover_repos"] = toml_edit::value(auto_repos);

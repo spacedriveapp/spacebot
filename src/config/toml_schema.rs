@@ -395,7 +395,6 @@ pub(super) struct TomlOpenCodePermissions {
 pub(super) struct TomlProjectsConfig {
     pub(super) use_worktrees: Option<bool>,
     pub(super) worktree_name_template: Option<String>,
-    pub(super) auto_create_worktrees: Option<bool>,
     pub(super) auto_discover_repos: Option<bool>,
     pub(super) auto_discover_worktrees: Option<bool>,
     pub(super) disk_usage_warning_threshold: Option<u64>,

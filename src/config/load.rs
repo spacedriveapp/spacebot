@@ -1169,9 +1169,6 @@ impl Config {
                         worktree_name_template: p
                             .worktree_name_template
                             .unwrap_or_else(|| base.worktree_name_template.clone()),
-                        auto_create_worktrees: p
-                            .auto_create_worktrees
-                            .unwrap_or(base.auto_create_worktrees),
                         auto_discover_repos: p
                             .auto_discover_repos
                             .unwrap_or(base.auto_discover_repos),
@@ -1336,9 +1333,6 @@ impl Config {
                             worktree_name_template: p
                                 .worktree_name_template
                                 .unwrap_or_else(|| base.worktree_name_template.clone()),
-                            auto_create_worktrees: p
-                                .auto_create_worktrees
-                                .unwrap_or(base.auto_create_worktrees),
                             auto_discover_repos: p
                                 .auto_discover_repos
                                 .unwrap_or(base.auto_discover_repos),

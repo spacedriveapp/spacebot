@@ -1137,9 +1137,6 @@ pub struct ProjectsConfig {
     pub use_worktrees: bool,
     /// Worktree naming convention. Variables: {branch}, {feature}, {repo}.
     pub worktree_name_template: String,
-    /// Whether the agent can create new worktrees autonomously
-    /// or should ask for confirmation first.
-    pub auto_create_worktrees: bool,
     /// Whether to auto-discover repos when a project is created by scanning
     /// the project root for git repositories.
     pub auto_discover_repos: bool,
@@ -1156,7 +1153,6 @@ impl Default for ProjectsConfig {
         Self {
             use_worktrees: true,
             worktree_name_template: "{branch}".to_string(),
-            auto_create_worktrees: false,
             auto_discover_repos: true,
             auto_discover_worktrees: true,
             disk_usage_warning_threshold: 53_687_091_200, // 50 GB

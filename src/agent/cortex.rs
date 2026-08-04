@@ -4438,6 +4438,54 @@ async fn assess_workflow_runs(deps: &AgentDeps, logger: &CortexLogger) -> anyhow
             })),
         );
 
+        // Reaping is keyed on the *run* being finished, never on the step: a
+        // retry after a step-scoped reap would find no checkout. Git refuses on
+        // a dirty tree and that refusal is respected, recorded and surfaced —
+        // uncommitted work from a failed run is evidence, and the failed runs
+        // are exactly the ones whose worktrees are worth keeping.
+        for reaped in
+            crate::workflows::worktrees::reap_run(deps.task_store.pool(), &transition.run_id).await
+        {
+            let event = match reaped.outcome {
+                crate::workflows::ReapOutcome::Removed => "workflow_worktree_removed",
+                crate::workflows::ReapOutcome::Refused => "workflow_worktree_left_behind",
+                crate::workflows::ReapOutcome::Missing => "workflow_worktree_already_gone",
+                crate::workflows::ReapOutcome::Failed => "workflow_worktree_reap_failed",
+            };
+            let message = match reaped.outcome {
+                crate::workflows::ReapOutcome::Removed => format!(
+                    "Removed the worktree run {} made for step `{}`: {}",
+                    transition.run_id, reaped.step_key, reaped.path
+                ),
+                crate::workflows::ReapOutcome::Refused => format!(
+                    "Left {} behind — it has uncommitted changes, so git refused to delete it \
+                     and so did we. Look at the diff before removing it by hand.",
+                    reaped.path
+                ),
+                crate::workflows::ReapOutcome::Missing => format!(
+                    "The worktree run {} made for step `{}` was already gone: {}",
+                    transition.run_id, reaped.step_key, reaped.path
+                ),
+                crate::workflows::ReapOutcome::Failed => format!(
+                    "Could not remove {}: {}",
+                    reaped.path,
+                    reaped.detail.as_deref().unwrap_or("git gave no reason")
+                ),
+            };
+            logger.log(
+                event,
+                &message,
+                Some(serde_json::json!({
+                    "run_id": transition.run_id,
+                    "step_key": reaped.step_key,
+                    "branch_key": reaped.branch_key,
+                    "path": reaped.path,
+                    "outcome": reaped.outcome,
+                    "detail": reaped.detail,
+                })),
+            );
+        }
+
         // Only the two that need somebody. A run that succeeded is what was
         // asked for, and an inbox full of successes is one nobody reads.
         if !transition.status.warrants_notice() {
@@ -4951,6 +4999,552 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
     }
 }
 
+/// Execute a command task, doing deliberately everything the worker path does
+/// incidentally.
+///
+/// The list matters more than the code: an attempt row so the run is visible
+/// even if the process dies, a registry entry so the reaper can tell a slow
+/// command from a dead one, and task events so the board moves. A command task
+/// that skipped any of those would look, to every recovery mechanism this
+/// codebase has, like a task nobody ever picked up.
+async fn run_command_task(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+    task: crate::tasks::Task,
+) -> anyhow::Result<()> {
+    use crate::agent::command_step::{self, CommandRefusal};
+
+    // Refusals first, before anything is registered or spawned. All three are
+    // configuration faults a person fixes once, so they park as `capability`
+    // blocks and spend no failure budget: retrying an uncontained host two more
+    // times does not install bubblewrap, and burning the budget would park the
+    // card under a reason that names the wrong problem.
+    let refuse = |reason: String| -> (String, String) {
+        (
+            format!(
+                "Task #{} will not run as a command: {reason}",
+                task.task_number
+            ),
+            reason,
+        )
+    };
+
+    let Some(spec) = task.command_spec() else {
+        let (message, reason) = refuse(
+            "it is a command task with no usable command line or timeout — the row was written \
+             without the fields a command step requires"
+                .to_string(),
+        );
+        return park_command_task(deps, logger, &task, &message, &reason).await;
+    };
+
+    if let Err(error) = command_step::check_containment(&deps.sandbox) {
+        let (message, reason) = refuse(error.to_string());
+        return park_command_task(deps, logger, &task, &message, &reason).await;
+    }
+
+    // A command step runs in exactly the directory its binding names. A step
+    // with no binding has no directory, and defaulting to the workspace would
+    // run a stored shell line against whatever happened to be there.
+    if task.binding().is_empty() {
+        let (message, reason) = refuse(
+            CommandRefusal::NoWorkingDirectory {
+                command: spec.command.clone(),
+            }
+            .to_string(),
+        );
+        return park_command_task(deps, logger, &task, &message, &reason).await;
+    }
+    let Some(directory) = crate::tools::spawn_worker::resolve_directory_from_project(
+        deps,
+        None,
+        task.project_id.as_deref(),
+        task.repo_id.as_deref(),
+        task.worktree_id.as_deref(),
+    )
+    .await
+    else {
+        let (message, reason) = refuse(
+            "its project, repo or worktree binding does not resolve to a directory — the \
+             project or worktree it names has most likely been removed"
+                .to_string(),
+        );
+        return park_command_task(deps, logger, &task, &message, &reason).await;
+    };
+
+    // The same cwd rule the worker path uses, and the same refusal. Reusing it
+    // rather than re-deriving it is the point: a provisioned worktree is inside
+    // the project root and therefore already covered by the allowlist, and
+    // anything that is not gets stopped here.
+    let working_dir = match crate::agent::worker::resolve_worker_working_dir(
+        &deps.sandbox,
+        std::path::Path::new(&directory),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let (message, reason) = refuse(
+                CommandRefusal::DirectoryNotAllowed {
+                    task_number: task.task_number,
+                    detail: error.to_string(),
+                }
+                .to_string(),
+            );
+            return park_command_task(deps, logger, &task, &message, &reason).await;
+        }
+    };
+
+    // From here the command is going to run, so it becomes visible to
+    // everything that watches running work.
+    let worker_id: WorkerId = uuid::Uuid::new_v4();
+    let (lifecycle, mut cancel_rx) = register_detached_worker_for_pickup(
+        &deps.process_control_registry,
+        deps.task_store.as_ref(),
+        &deps.agent_id,
+        task.task_number,
+        worker_id,
+    )
+    .await?;
+
+    let run_id = match deps
+        .task_store
+        .start_run(task.task_number, Some(&worker_id.to_string()))
+        .await
+    {
+        Ok(run) => Some(run.id),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                "failed to open task run row for a command step — continuing without attempt logging"
+            );
+            None
+        }
+    };
+
+    let description = format!("task #{}: {}", task.task_number, task.title);
+    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: deps.agent_id.clone(),
+        task_number: task.task_number,
+        status: "in_progress".to_string(),
+        action: "updated".to_string(),
+    });
+    let _ = deps.event_tx.send(ProcessEvent::WorkerStarted {
+        agent_id: deps.agent_id.clone(),
+        worker_id,
+        channel_id: None,
+        task: description.clone(),
+        // Its own worker type, because a graph — or a workers list — that draws
+        // a shell command identically to an agent is lying about what it does.
+        worker_type: "command".to_string(),
+        interactive: false,
+        directory: Some(working_dir.display().to_string()),
+    });
+
+    let run_logger = crate::conversation::history::ProcessRunLogger::new(deps.sqlite_pool.clone());
+    run_logger.log_worker_started(
+        None,
+        worker_id,
+        &description,
+        "command",
+        &deps.agent_id,
+        false,
+        None,
+    );
+
+    logger.log(
+        "command_step_started",
+        &format!(
+            "Task #{} is running `{}` in {}",
+            task.task_number,
+            spec.command,
+            working_dir.display()
+        ),
+        Some(serde_json::json!({
+            "task_number": task.task_number,
+            "command": spec.command,
+            "timeout_secs": spec.timeout_secs,
+            "working_dir": working_dir.display().to_string(),
+        })),
+    );
+
+    let task_store = deps.task_store.clone();
+    let event_tx = deps.event_tx.clone();
+    let agent_id = deps.agent_id.clone();
+    let logger = logger.clone();
+    let sandbox = deps.sandbox.clone();
+    let registry = deps.process_control_registry.clone();
+    let secrets_snapshot = deps.runtime_config.secrets.load().clone();
+    let agent_id_typed = deps.agent_id.clone();
+
+    tokio::spawn(async move {
+        // Command output goes into the next step's prompt, so it is scrubbed on
+        // the same terms worker output is. This is the first path where the text
+        // is attacker-influenceable at scale — a build log written by whatever
+        // the build touched.
+        let scrub = |text: String| -> String {
+            let scrubbed = if let Some(store) = secrets_snapshot.as_ref() {
+                crate::secrets::scrub::scrub_with_store(&text, store, &agent_id_typed)
+            } else {
+                text
+            };
+            crate::secrets::scrub::scrub_leaks(&scrubbed)
+        };
+
+        let execution = tokio::select! {
+            biased;
+            execution = command_step::execute_command(&sandbox, &spec, &working_dir) => execution,
+            // A stopped run drops the future, and `kill_on_drop` on the
+            // outermost process takes the tree with it. Recorded as "could not
+            // run" because that is exactly what happened: nothing reported.
+            _ = &mut cancel_rx => command_step::CommandExecution::NotRun(
+                command_step::CommandNotRun::Cancelled,
+            ),
+        };
+
+        let execution = match execution {
+            command_step::CommandExecution::Ran(mut run) => {
+                run.stdout = scrub(run.stdout);
+                run.stderr = scrub(run.stderr);
+                command_step::CommandExecution::Ran(run)
+            }
+            other => other,
+        };
+
+        let settlement = command_step::settle_command_task(
+            &task_store,
+            &task,
+            run_id.as_deref(),
+            &spec,
+            &execution,
+        )
+        .await;
+
+        let (status, event, message, success) = match &settlement {
+            Ok(command_step::CommandSettlement::Succeeded { exit_code }) => (
+                TaskStatus::Done,
+                "command_step_completed",
+                format!(
+                    "Task #{} ran `{}` and it exited {exit_code} — the code is the answer, so \
+                     the task succeeded",
+                    task.task_number, spec.command
+                ),
+                true,
+            ),
+            Ok(command_step::CommandSettlement::ExpectationMissed {
+                expected,
+                actual,
+                disposition,
+            }) => (
+                status_after(disposition),
+                "command_step_expectation_missed",
+                format!(
+                    "Task #{} ran `{}`, which exited {actual} where the step requires {expected}",
+                    task.task_number, spec.command
+                ),
+                false,
+            ),
+            Ok(command_step::CommandSettlement::OutputsRejected {
+                problems,
+                disposition,
+            }) => (
+                status_after(disposition),
+                "command_step_outputs_rejected",
+                format!(
+                    "Task #{} ran `{}` but its outputs do not fit the declared schema: {}",
+                    task.task_number,
+                    spec.command,
+                    problems.join("; ")
+                ),
+                false,
+            ),
+            Ok(command_step::CommandSettlement::Cancelled) => (
+                TaskStatus::Ready,
+                "command_step_cancelled",
+                format!(
+                    "Task #{} was stopped before `{}` reported — returned to ready without \
+                     spending a failure",
+                    task.task_number, spec.command
+                ),
+                false,
+            ),
+            Ok(command_step::CommandSettlement::CouldNotRun {
+                reason,
+                disposition,
+            }) => (
+                status_after(disposition),
+                "command_step_did_not_run",
+                format!(
+                    "Task #{} could not run `{}`: {reason}",
+                    task.task_number, spec.command
+                ),
+                false,
+            ),
+            Err(error) => {
+                // The command may well have run; we failed to write down what it
+                // did. Left in `in_progress` on purpose so the reaper picks it
+                // up, which is better than closing work we cannot describe.
+                tracing::warn!(
+                    %error,
+                    task_number = task.task_number,
+                    "failed to settle a command task — leaving it for the reaper"
+                );
+                registry.unregister_detached_worker(worker_id).await;
+                return;
+            }
+        };
+
+        logger.log(
+            event,
+            &message,
+            Some(serde_json::json!({
+                "task_number": task.task_number,
+                "command": spec.command,
+                "worker_id": worker_id.to_string(),
+            })),
+        );
+        run_logger.log_worker_completed(worker_id, &message, success);
+        let _ = event_tx.send(ProcessEvent::TaskUpdated {
+            agent_id: agent_id.clone(),
+            task_number: task.task_number,
+            status: status.as_str().to_string(),
+            action: "updated".to_string(),
+        });
+        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+            agent_id,
+            worker_id,
+            channel_id: None,
+            result: message,
+            notify: !success,
+            success,
+        });
+
+        let _ = lifecycle.compare_exchange(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE,
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        registry.unregister_detached_worker(worker_id).await;
+    });
+
+    Ok(())
+}
+
+/// Where the failure budget left a task that could not complete.
+fn status_after(disposition: &crate::tasks::FailureDisposition) -> TaskStatus {
+    match disposition {
+        crate::tasks::FailureDisposition::Parked { .. } => TaskStatus::Blocked,
+        _ => TaskStatus::Ready,
+    }
+}
+
+/// Park a command task nobody can run yet, without charging it a failure.
+///
+/// `Capability` rather than `Transient`: the command never started, so there is
+/// nothing flaky about it. A person installs a sandbox backend, or binds the
+/// step to a repo, and the task is claimable again — which is precisely the
+/// recovery a capability block describes and a spent failure budget does not.
+async fn park_command_task(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+    task: &crate::tasks::Task,
+    message: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    tracing::warn!(
+        task_number = task.task_number,
+        reason,
+        "refusing to run a command step"
+    );
+    logger.log(
+        "command_step_refused",
+        message,
+        Some(serde_json::json!({
+            "task_number": task.task_number,
+            "reason": reason,
+        })),
+    );
+
+    if let Err(error) = deps
+        .task_store
+        .block_task(
+            task.task_number,
+            crate::tasks::BlockKind::Capability,
+            reason,
+        )
+        .await
+    {
+        tracing::warn!(%error, task_number = task.task_number, "failed to park a refused command step");
+    }
+
+    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: deps.agent_id.clone(),
+        task_number: task.task_number,
+        status: TaskStatus::Backlog.as_str().to_string(),
+        action: "updated".to_string(),
+    });
+
+    Ok(())
+}
+
+/// Whether a claimed task still has anywhere to go once its inputs are asked
+/// for.
+///
+/// Extracted so the command path and the worker path make the same decision
+/// about a broken graph. Two copies of "is this task's contract satisfiable"
+/// would drift, and the drift would show up as a command step running against
+/// inputs a worker step would have refused.
+enum PickupInputs {
+    /// Inputs are ready, or the task declared no contract.
+    Proceed(Option<serde_json::Value>),
+    /// This pass parked, skipped or otherwise settled the task. Nothing else
+    /// should happen to it.
+    Settled,
+}
+
+async fn resolve_pickup_inputs(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+    task: &crate::tasks::Task,
+) -> PickupInputs {
+    // Resolve the input contract before spending anything on a worker.
+    //
+    // A task whose inputs cannot be assembled is a broken *graph*, not a failed
+    // agent — the upstream task never produced what this one was promised, and
+    // the worker has not run yet. So it parks as a `dependency` block, which
+    // costs no failure budget and clears itself once the upstream lands.
+    match deps.task_store.resolve_inputs(task.task_number).await {
+        Ok(crate::tasks::ContractResolution::NotRequired) => PickupInputs::Proceed(None),
+        Ok(crate::tasks::ContractResolution::Resolved { inputs }) => {
+            if let Err(error) = deps.task_store.set_inputs(task.task_number, &inputs).await {
+                tracing::warn!(%error, task_number = task.task_number, "failed to persist resolved inputs");
+            }
+            PickupInputs::Proceed(Some(inputs))
+        }
+        // Upstream work this task reads from has not finished. Nothing is
+        // wrong: it goes back to the backlog as a `dependency` wait, which
+        // costs no failure budget and which the sweep clears on its own.
+        // Reporting it as an unresolvable contract would put a broken-graph
+        // notice on a pipeline that is working exactly as designed.
+        Ok(crate::tasks::ContractResolution::Pending { waiting_on }) => {
+            let reason = waiting_on.join("; ");
+
+            logger.log(
+                "task_pickup_inputs_pending",
+                &format!(
+                    "Task #{} is waiting on upstream work before it can start: {reason}",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "waiting_on": waiting_on,
+                })),
+            );
+
+            if let Err(error) = deps
+                .task_store
+                .block_task(
+                    task.task_number,
+                    crate::tasks::BlockKind::Dependency,
+                    &reason,
+                )
+                .await
+            {
+                tracing::warn!(%error, task_number = task.task_number, "failed to park task waiting on upstream work");
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Backlog.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            PickupInputs::Settled
+        }
+        // A required input's source was skipped, so this step will never be
+        // able to satisfy its own contract either. Settled, not parked: there
+        // is nothing for a person to repair, and blocking it would put a card
+        // in the triage column for a branch that simply was not taken.
+        //
+        // The sweep normally gets here first. This is the same check on the
+        // claim path, for a task that reached `ready` by another route — an
+        // operator unblocking it, or an edge added after promotion.
+        Ok(crate::tasks::ContractResolution::Unreachable { reason }) => {
+            logger.log(
+                "task_skipped_by_condition",
+                &format!("Task #{} will not run — {reason}", task.task_number),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "reason": reason,
+                })),
+            );
+
+            match deps.task_store.skip_task(task.task_number, &reason).await {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_number = task.task_number,
+                    "failed to settle a task whose required input will never arrive"
+                ),
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Skipped.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            PickupInputs::Settled
+        }
+        Ok(crate::tasks::ContractResolution::Unresolved { problems }) => {
+            let reason = problems
+                .iter()
+                .map(|problem| problem.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            logger.log(
+                "task_pickup_inputs_unresolved",
+                &format!(
+                    "Task #{} cannot start — its inputs are not available: {reason}",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "problems": problems,
+                })),
+            );
+
+            if let Err(error) = deps
+                .task_store
+                .block_task(
+                    task.task_number,
+                    crate::tasks::BlockKind::Dependency,
+                    &reason,
+                )
+                .await
+            {
+                tracing::warn!(%error, task_number = task.task_number, "failed to park task with unresolved inputs");
+            }
+
+            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: deps.agent_id.clone(),
+                task_number: task.task_number,
+                status: TaskStatus::Backlog.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            PickupInputs::Settled
+        }
+        Err(error) => {
+            // A storage failure here is our bug, not the graph's. Blocking the
+            // task would punish it for our problem, so the run proceeds without
+            // resolved inputs and the worker sees the task as contract-free.
+            tracing::warn!(%error, task_number = task.task_number, "failed to resolve task inputs");
+            PickupInputs::Proceed(None)
+        }
+    }
+}
+
 async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
     let Some(task) = deps.task_store.claim_next_ready(&deps.agent_id).await? else {
         return Ok(());
@@ -4964,6 +5558,24 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             "title": task.title,
         })),
     );
+
+    // Inputs first, before anything is rendered or spawned. A task whose
+    // contract cannot be satisfied is a broken graph, and neither a worker nor a
+    // command should be started for it.
+    let resolved_inputs = match resolve_pickup_inputs(deps, logger, &task).await {
+        PickupInputs::Proceed(inputs) => inputs,
+        PickupInputs::Settled => return Ok(()),
+    };
+
+    // A command step is not a worker, and this is the only scheduler change the
+    // feature needs. Everything the worker path below does incidentally —
+    // attempt records, event emission, the reaper's view of a live process — is
+    // done deliberately in `run_command_task`, because a command task that
+    // skipped any of it would be invisible to the machinery that recovers dead
+    // work.
+    if task.kind == crate::tasks::TaskKind::Command {
+        return run_command_task(deps, logger, task).await;
+    }
 
     let prompt_engine = deps.runtime_config.prompts.load();
     let sandbox_enabled = deps.sandbox.mode_enabled();
@@ -5053,143 +5665,6 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &model_name,
         )
         .map_err(|error| anyhow::anyhow!("failed to append tool-use enforcement: {error}"))?;
-
-    // Resolve the input contract before spending anything on a worker.
-    //
-    // A task whose inputs cannot be assembled is a broken *graph*, not a failed
-    // agent — the upstream task never produced what this one was promised, and
-    // the worker has not run yet. So it parks as a `dependency` block, which
-    // costs no failure budget and clears itself once the upstream lands.
-    let resolved_inputs = match deps.task_store.resolve_inputs(task.task_number).await {
-        Ok(crate::tasks::ContractResolution::NotRequired) => None,
-        Ok(crate::tasks::ContractResolution::Resolved { inputs }) => {
-            if let Err(error) = deps.task_store.set_inputs(task.task_number, &inputs).await {
-                tracing::warn!(%error, task_number = task.task_number, "failed to persist resolved inputs");
-            }
-            Some(inputs)
-        }
-        // Upstream work this task reads from has not finished. Nothing is
-        // wrong: it goes back to the backlog as a `dependency` wait, which
-        // costs no failure budget and which the sweep clears on its own.
-        // Reporting it as an unresolvable contract would put a broken-graph
-        // notice on a pipeline that is working exactly as designed.
-        Ok(crate::tasks::ContractResolution::Pending { waiting_on }) => {
-            let reason = waiting_on.join("; ");
-
-            logger.log(
-                "task_pickup_inputs_pending",
-                &format!(
-                    "Task #{} is waiting on upstream work before it can start: {reason}",
-                    task.task_number
-                ),
-                Some(serde_json::json!({
-                    "task_number": task.task_number,
-                    "waiting_on": waiting_on,
-                })),
-            );
-
-            if let Err(error) = deps
-                .task_store
-                .block_task(
-                    task.task_number,
-                    crate::tasks::BlockKind::Dependency,
-                    &reason,
-                )
-                .await
-            {
-                tracing::warn!(%error, task_number = task.task_number, "failed to park task waiting on upstream work");
-            }
-
-            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
-                agent_id: deps.agent_id.clone(),
-                task_number: task.task_number,
-                status: TaskStatus::Backlog.as_str().to_string(),
-                action: "updated".to_string(),
-            });
-            return Ok(());
-        }
-        // A required input's source was skipped, so this step will never be
-        // able to satisfy its own contract either. Settled, not parked: there
-        // is nothing for a person to repair, and blocking it would put a card
-        // in the triage column for a branch that simply was not taken.
-        //
-        // The sweep normally gets here first. This is the same check on the
-        // claim path, for a task that reached `ready` by another route — an
-        // operator unblocking it, or an edge added after promotion.
-        Ok(crate::tasks::ContractResolution::Unreachable { reason }) => {
-            logger.log(
-                "task_skipped_by_condition",
-                &format!("Task #{} will not run — {reason}", task.task_number),
-                Some(serde_json::json!({
-                    "task_number": task.task_number,
-                    "reason": reason,
-                })),
-            );
-
-            match deps.task_store.skip_task(task.task_number, &reason).await {
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    %error,
-                    task_number = task.task_number,
-                    "failed to settle a task whose required input will never arrive"
-                ),
-            }
-
-            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
-                agent_id: deps.agent_id.clone(),
-                task_number: task.task_number,
-                status: TaskStatus::Skipped.as_str().to_string(),
-                action: "updated".to_string(),
-            });
-            return Ok(());
-        }
-        Ok(crate::tasks::ContractResolution::Unresolved { problems }) => {
-            let reason = problems
-                .iter()
-                .map(|problem| problem.to_string())
-                .collect::<Vec<_>>()
-                .join("; ");
-
-            logger.log(
-                "task_pickup_inputs_unresolved",
-                &format!(
-                    "Task #{} cannot start — its inputs are not available: {reason}",
-                    task.task_number
-                ),
-                Some(serde_json::json!({
-                    "task_number": task.task_number,
-                    "problems": problems,
-                })),
-            );
-
-            if let Err(error) = deps
-                .task_store
-                .block_task(
-                    task.task_number,
-                    crate::tasks::BlockKind::Dependency,
-                    &reason,
-                )
-                .await
-            {
-                tracing::warn!(%error, task_number = task.task_number, "failed to park task with unresolved inputs");
-            }
-
-            let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
-                agent_id: deps.agent_id.clone(),
-                task_number: task.task_number,
-                status: TaskStatus::Backlog.as_str().to_string(),
-                action: "updated".to_string(),
-            });
-            return Ok(());
-        }
-        Err(error) => {
-            // A storage failure here is our bug, not the graph's. Blocking the
-            // task would punish it for our problem, so the run proceeds without
-            // resolved inputs and the worker sees the task as contract-free.
-            tracing::warn!(%error, task_number = task.task_number, "failed to resolve task inputs");
-            None
-        }
-    };
 
     let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
     if let Some(description) = &task.description {

@@ -18,8 +18,8 @@ pub use store::{
     LoopResolution, LoopSpec, MAX_FAN_OUT_BRANCHES, MAX_FILING_DEPTH, MAX_GRAPH_TASKS,
     MAX_LOOP_ITERATIONS, MAX_RUN_TASKS, MAX_TASKS_FILED_PER_TASK, OutputSubmission, PendingTask,
     PreviousIterationBinding, ReadySweep, SETTLED_STATUSES, SkippedTask, StalledTask, Task,
-    TaskBindingPatch, TaskEdgeSummary, TaskGraph, TaskGraphEdge, TaskInputBinding, TaskListFilter,
-    TaskPriority, TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus, TaskStore, TaskSubtask,
-    TaskUpdateResult, UpdateTaskInput, WorkerOutputSubmission, WorkerTaskUpdateResult,
-    can_transition, filer_id, legal_transitions, parse_filer_task_number,
+    TaskBindingPatch, TaskEdgeSummary, TaskGraph, TaskGraphEdge, TaskInputBinding, TaskKind,
+    TaskListFilter, TaskPriority, TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus,
+    TaskStore, TaskSubtask, TaskUpdateResult, UpdateTaskInput, WorkerOutputSubmission,
+    WorkerTaskUpdateResult, can_transition, filer_id, legal_transitions, parse_filer_task_number,
 };

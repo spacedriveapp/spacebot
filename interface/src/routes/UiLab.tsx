@@ -65,6 +65,8 @@ function fixtureTask(overrides: Partial<TaskItem>): TaskItem {
 		block_recurrences: 0,
 		fan_out_placeholder: false,
 		loop_terminal: false,
+		kind: "agent" as const,
+		worktree_mode: "inherit" as const,
 		...overrides,
 	};
 }

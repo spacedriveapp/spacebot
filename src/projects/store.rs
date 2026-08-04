@@ -50,8 +50,6 @@ pub struct ProjectSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_name_template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_create_worktrees: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_discover_repos: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_discover_worktrees: Option<bool>,
@@ -186,6 +184,10 @@ pub struct ProjectStore {
 impl ProjectStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     // -- Projects -----------------------------------------------------------

@@ -401,6 +401,12 @@ mod tests {
                     loop_group: None,
                     loop_max_iterations: None,
                     loop_until: None,
+                    kind: crate::workflows::StepKind::Agent,
+                    command: None,
+                    command_timeout_secs: None,
+                    expect_exit_code: None,
+                    worktree_mode: crate::workflows::WorktreeMode::Inherit,
+                    worktree_base_ref: None,
                 })
                 .await
                 .expect("put step");

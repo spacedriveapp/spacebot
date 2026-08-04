@@ -585,6 +585,35 @@ impl Sandbox {
         working_dir: &Path,
         command_env: &HashMap<String, String>,
     ) -> Command {
+        self.wrap_inner(program, args, working_dir, command_env, true)
+    }
+
+    /// [`Sandbox::wrap`], with the agent's tool secrets left out of the child's
+    /// environment.
+    ///
+    /// For stored, unattended execution — a workflow command step. A worker gets
+    /// the secrets because a worker is trusted to use them, in the moment, for
+    /// work someone asked for. A template command is authored once and runs
+    /// forever, so the credentials it can reach should be the ones somebody
+    /// deliberately gave it rather than every credential the agent holds.
+    pub fn wrap_without_tool_secrets(
+        &self,
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        command_env: &HashMap<String, String>,
+    ) -> Command {
+        self.wrap_inner(program, args, working_dir, command_env, false)
+    }
+
+    fn wrap_inner(
+        &self,
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        command_env: &HashMap<String, String>,
+        inject_tool_secrets: bool,
+    ) -> Command {
         let config = self.config.load();
 
         // Prepend tools/bin to PATH for all commands
@@ -601,7 +630,11 @@ impl Sandbox {
         };
 
         // Read tool secrets once for injection into the subprocess.
-        let tool_secrets = self.tool_secrets();
+        let tool_secrets = if inject_tool_secrets {
+            self.tool_secrets()
+        } else {
+            HashMap::new()
+        };
 
         if config.mode == SandboxMode::Disabled {
             return self.wrap_passthrough(
