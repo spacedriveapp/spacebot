@@ -899,6 +899,25 @@ impl TaskStore {
         rows.into_iter().map(task_from_row).collect()
     }
 
+    /// How many tasks one run currently holds, for [`MAX_RUN_TASKS`].
+    ///
+    /// Live rows rather than a cumulative counter on the run, and the
+    /// difference is worth stating: expansion deletes the placeholder it
+    /// replaces, so this undercounts a run's history by one per fan-out. A
+    /// counter would be exact and would have to be incremented at every insert
+    /// path — launch, expansion, iteration — where a single missed call is a
+    /// ceiling that silently stops enforcing. A count that cannot drift, of the
+    /// thing the ceiling is actually protecting (rows that exist and get
+    /// scheduled), is the safer of the two.
+    pub async fn count_run_tasks(&self, run_id: &str) -> Result<i64> {
+        let count = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE workflow_run_id = ?")
+            .bind(run_id)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count the tasks of a workflow run")?;
+        Ok(count)
+    }
+
     pub async fn update(&self, task_number: i64, input: UpdateTaskInput) -> Result<Option<Task>> {
         Ok(self
             .update_with_status_transition(task_number, input)
@@ -2136,6 +2155,36 @@ impl TaskStore {
             }));
         }
 
+        // The width cap above bounds one fan-out; this bounds the run it is
+        // part of. Both are needed: fifty branches is within the width cap
+        // every time, and a loop body containing one reaches fifty again on
+        // every pass.
+        //
+        // Asked here, immediately before the emit, rather than by the
+        // supervisor afterwards — a ceiling that only reports is a ceiling that
+        // has already let the run spend the thing it was protecting. The
+        // placeholder itself goes away in the expansion, so it is counted out
+        // of the total the branches would take the run to.
+        if let Some(run_id) = &placeholder.workflow_run_id {
+            let existing = self.count_run_tasks(run_id).await?;
+            let after = existing - 1 + items.len() as i64;
+            if after > MAX_RUN_TASKS {
+                return Ok(Some(
+                    self.block_placeholder(
+                        &placeholder,
+                        &format!(
+                            "expanding this fan-out into {} branches would take the run to {after} \
+                             tasks, past the run task ceiling of {MAX_RUN_TASKS} (limit: \
+                             MAX_RUN_TASKS) — nothing was emitted, and the run is parked rather \
+                             than half-expanded",
+                            items.len()
+                        ),
+                    )
+                    .await?,
+                ));
+            }
+        }
+
         let branches = self.emit_fan_out_branches(&placeholder, &items).await?;
         Ok(Some(FanOutOutcome::Expanded {
             placeholder_task_number: placeholder.task_number,
@@ -2501,11 +2550,90 @@ impl TaskStore {
         }
 
         if iteration < spec.max_iterations {
+            // The loop has budget left; the *run* may not. Checked before the
+            // emit for the same reason the fan-out ceiling is, and answered
+            // here rather than inside `emit_loop_iteration` so the refusal
+            // happens before the boundary is claimed and a task number
+            // allocated.
+            if let Some(refusal) = self
+                .refuse_iteration_at_run_ceiling(&terminal, &spec)
+                .await?
+            {
+                return Ok(Some(refusal));
+            }
             return self.emit_loop_iteration(&terminal, &spec, iteration).await;
         }
 
         self.exhaust_loop(&terminal, &spec, iteration, &evaluation.detail)
             .await
+    }
+
+    /// Stop a loop that would take its run past [`MAX_RUN_TASKS`].
+    ///
+    /// `None` means there is room and the iteration may be emitted.
+    ///
+    /// The loop is settled as `ExhaustedBlocked` and the exit task is parked
+    /// with the ceiling named on the card. Deliberately *not* `ExhaustedRouted`:
+    /// the `on_exhausted` edge is a declared give-up path that itself emits
+    /// tasks, and releasing it here would spend past the very ceiling that
+    /// stopped us. Running out of the run's budget and running out of the
+    /// loop's own attempts are different events with different recoveries — a
+    /// person raises a limit for one and fixes a template for the other — so
+    /// they settle into different states rather than sharing one.
+    async fn refuse_iteration_at_run_ceiling(
+        &self,
+        terminal: &Task,
+        spec: &LoopSpec,
+    ) -> Result<Option<LoopOutcome>> {
+        let (Some(run_id), Some(iteration)) = (&terminal.workflow_run_id, terminal.loop_iteration)
+        else {
+            return Ok(None);
+        };
+
+        let existing = self.count_run_tasks(run_id).await?;
+        // The next pass is a copy of this one, so the pass that just finished
+        // is exactly the size of the one being asked for.
+        let body: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks \
+             WHERE workflow_run_id = ? AND loop_group = ? AND loop_iteration = ?",
+        )
+        .bind(run_id)
+        .bind(&spec.group)
+        .bind(iteration)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to size a loop body against the run ceiling")?;
+
+        if existing + body <= MAX_RUN_TASKS {
+            return Ok(None);
+        }
+
+        let reason = format!(
+            "loop `{}` has attempts left, but iteration {} would add {body} more task(s) to a run \
+             that already holds {existing}, past the run task ceiling of {MAX_RUN_TASKS} (limit: \
+             MAX_RUN_TASKS) — the loop is parked here rather than taking its give-up path, which \
+             would spend past the same ceiling",
+            spec.group,
+            iteration + 1
+        );
+
+        // The conditional settle is the concurrency story, exactly as in the
+        // emit path: two callers can reach one boundary and only one may
+        // decide it.
+        if !self
+            .settle_loop(terminal.task_number, LoopResolution::ExhaustedBlocked)
+            .await?
+        {
+            return Ok(None);
+        }
+        self.block_task(terminal.task_number, BlockKind::NeedsInput, &reason)
+            .await?;
+
+        Ok(Some(LoopOutcome::ExhaustedBlocked {
+            terminal_task_number: terminal.task_number,
+            iteration,
+            reason,
+        }))
     }
 
     /// Record what the boundary decided, if nobody else has.
@@ -3991,6 +4119,42 @@ enum BindingResolution {
 /// Metadata key under which a placeholder carries its frozen fan-out spec.
 pub const FAN_OUT_METADATA_KEY: &str = "fan_out";
 
+/// Branches one fan-out may emit.
+///
+/// The number of tasks a fan-out produces is decided at run time by model
+/// output, and each branch is itself a live model call. A scan step that
+/// hallucinates a 900-element array is a 900-task fan-out; inside a loop body
+/// it is that again per pass. Loops have had a ceiling ([`MAX_LOOP_ITERATIONS`])
+/// since they shipped for exactly this reason, and width had none.
+///
+/// Fifty, decided rather than derived: comfortably above every real fan-out
+/// anyone has run here (repos in a project, files in a change, hosts in a
+/// fleet), and far enough below a hallucinated collection that the two do not
+/// overlap. It is checked at expansion and it **refuses** — see
+/// [`fan_out_items`] for why truncating is the one thing it must not do.
+pub const MAX_FAN_OUT_BRANCHES: usize = 50;
+
+/// Tasks one run may hold.
+///
+/// The second ceiling, and the one that catches what the first cannot: fan-out
+/// and loops both grow the graph *after* launch, so 25 iterations of a body
+/// containing a 50-branch fan-out is 1,250 tasks without either limit being
+/// exceeded on its own. The per-task failure budget bounds failures per task and
+/// nothing bounded the size of the run.
+///
+/// Two hundred, sitting deliberately under [`MAX_GRAPH_TASKS`]: a run that hits
+/// this ceiling is still small enough to be rendered whole in one graph view,
+/// so the first thing a person does after being told a run was stopped actually
+/// works.
+///
+/// This is a crude proxy for the ceiling people actually want, which is cost.
+/// Token accounting per run has to survive retries and cross the agent
+/// boundary; a task count needs neither and is available now. Enforced at the
+/// three places a run can grow — launch, fan-out expansion, and loop iteration
+/// — because a ceiling checked only by the supervisor would report a run it had
+/// already let spend.
+pub const MAX_RUN_TASKS: i64 = 200;
+
 /// The input key each branch's item is bound to.
 ///
 /// Fixed rather than configurable, because a fan-out step's input schema has to
@@ -4282,6 +4446,36 @@ fn fan_out_items(
             spec.source_task_number
         ));
     };
+
+    // Refused, not truncated, and this is the whole reason the check lives
+    // here rather than in the emitter with a `.take(MAX)` on it.
+    //
+    // A fan-out nearly always feeds a fan-in, and a fan-in reads whatever
+    // branches exist and reports the aggregate as the answer. Emitting the
+    // first fifty of nine hundred would therefore produce a confident,
+    // well-formed, complete-looking summary of a subset — a wrong answer
+    // delivered with no indication that anything was dropped. A run that stops
+    // is recoverable by a person in a minute; a run that quietly answers a
+    // different question than the one asked is not recoverable at all, because
+    // nobody knows to look.
+    //
+    // The count and the pointer are both in the message because the two
+    // plausible causes need different fixes and only these two facts tell them
+    // apart: a pointer aimed one level too high selects the wrong collection,
+    // and a correct pointer at a genuinely enormous collection means the step
+    // before this one is what needs bounding.
+    if items.len() > MAX_FAN_OUT_BRANCHES {
+        return Err(format!(
+            "`{}` selects {} items in task #{}'s outputs, and one fan-out may emit at most \
+             {MAX_FAN_OUT_BRANCHES} branches (limit: MAX_FAN_OUT_BRANCHES) — nothing was \
+             emitted, because a truncated fan-out feeding a fan-in would report part of the \
+             collection as the whole of it; narrow the collection upstream, or raise the limit \
+             deliberately",
+            spec.pointer,
+            items.len(),
+            spec.source_task_number
+        ));
+    }
 
     let mut labelled = Vec::with_capacity(items.len());
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();

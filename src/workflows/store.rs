@@ -2,8 +2,9 @@
 
 use crate::error::Result;
 use crate::tasks::{
-    ContractProblem, ContractSide, CreateTaskInput, GateConfigError, GateDisposition, GateKind,
-    TaskInputBinding, TaskPriority, TaskProjectBinding, TaskStatus, TaskStore,
+    ContractProblem, ContractResolution, ContractSide, CreateTaskInput, GateConfigError,
+    GateDisposition, GateKind, Task, TaskInputBinding, TaskPriority, TaskProjectBinding,
+    TaskStatus, TaskStore,
 };
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -251,6 +252,84 @@ pub fn validate_step_gate(gate: &StepGate) -> std::result::Result<(), GateConfig
     }
 }
 
+/// How a run is going.
+///
+/// `stuck` is the value this enum exists for. The other four are reductions
+/// over tasks that a caller could have computed itself; `stuck` is not
+/// derivable from any single task, because every task in a wedged run looks
+/// individually reasonable — a loop body parked for a person, a step behind a
+/// gate that stopped polling, a placeholder that will never expand. Only the
+/// run can see that none of them will ever move.
+///
+/// The distinction that matters most is the one this enum does *not* make:
+/// `stuck` versus still `running`. A run waiting on a gate that can still open
+/// is waiting, not stuck, and reporting it as stuck teaches people to ignore
+/// the status — which is worse than the silence it replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Something is in flight, promotable, or waiting on a gate that can still
+    /// open.
+    Running,
+    /// Every task settled and no failure path was taken. Includes runs where a
+    /// branch was skipped: a condition that ruled a step out is the pipeline
+    /// working, and `status_reason` says which steps did not run.
+    Succeeded,
+    /// A task used its whole failure budget, or a loop ran out of attempts and
+    /// took its `on_exhausted` edge.
+    Failed,
+    /// Nothing in flight, nothing promotable, and no gate that can still open —
+    /// and not finished. `status_reason` says which task is holding it and why.
+    Stuck,
+    /// A person stopped it.
+    Cancelled,
+}
+
+impl RunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Running => "running",
+            RunStatus::Succeeded => "succeeded",
+            RunStatus::Failed => "failed",
+            RunStatus::Stuck => "stuck",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(RunStatus::Running),
+            "succeeded" => Some(RunStatus::Succeeded),
+            "failed" => Some(RunStatus::Failed),
+            "stuck" => Some(RunStatus::Stuck),
+            "cancelled" => Some(RunStatus::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// Whether the run has stopped for good. Every terminal status carries a
+    /// `finished_at`, and no terminal run is ever assessed again.
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, RunStatus::Running)
+    }
+
+    /// Whether reaching this status is worth telling somebody about, once.
+    ///
+    /// `succeeded` is not: a pipeline that worked is what was asked for, and an
+    /// inbox that fills up with successes is an inbox nobody reads, which would
+    /// bury the two states that do need a person. `cancelled` is not either —
+    /// the person who cancelled it already knows.
+    pub fn warrants_notice(self) -> bool {
+        matches!(self, RunStatus::Stuck | RunStatus::Failed)
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// One launch of a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WorkflowRun {
@@ -258,6 +337,12 @@ pub struct WorkflowRun {
     pub workflow_id: String,
     pub inputs: Value,
     pub launched_by: String,
+    pub status: RunStatus,
+    /// When the run stopped, in any terminal sense. `None` exactly while
+    /// `status` is `running`.
+    pub finished_at: Option<String>,
+    /// Why the run reached its current status, in words.
+    pub status_reason: Option<String>,
     pub created_at: String,
 }
 
@@ -455,6 +540,12 @@ pub enum LaunchError {
          the condition for whether it runs"
     )]
     GateReadsItsOwnStep { step_key: String, gate_key: String },
+    #[error(
+        "this workflow has {steps} steps and one run may hold at most {ceiling} tasks (limit: \
+         MAX_RUN_TASKS) — a template already over the ceiling at launch would be parked the \
+         moment it started, so it is refused here where the message can name what to change"
+    )]
+    RunTaskCeiling { steps: usize, ceiling: i64 },
     #[error("gate `{gate_key}` on step `{step_key}` is not usable: {details}")]
     GateConfigInvalid {
         step_key: String,
@@ -987,6 +1078,17 @@ impl WorkflowStore {
         if steps.is_empty() {
             return Err(LaunchError::NoSteps {
                 id: workflow_id.to_string(),
+            });
+        }
+        // The third and outermost place the run task ceiling is enforced. Both
+        // of the others — fan-out expansion and loop iteration — park a run
+        // that has already started; this one refuses while a person is still
+        // watching, which is the only place the answer can be a corrected
+        // template rather than an incident.
+        if steps.len() as i64 > crate::tasks::MAX_RUN_TASKS {
+            return Err(LaunchError::RunTaskCeiling {
+                steps: steps.len(),
+                ceiling: crate::tasks::MAX_RUN_TASKS,
             });
         }
 
@@ -1637,10 +1739,9 @@ impl WorkflowStore {
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<Option<WorkflowRun>> {
-        let row = sqlx::query(
-            "SELECT id, workflow_id, inputs, launched_by, created_at FROM workflow_runs \
-             WHERE id = ?",
-        )
+        let row = sqlx::query(&format!(
+            "{RUN_SELECT_COLUMNS} FROM workflow_runs WHERE id = ?"
+        ))
         .bind(run_id)
         .fetch_optional(&self.pool)
         .await
@@ -1650,16 +1751,641 @@ impl WorkflowStore {
     }
 
     pub async fn list_runs(&self, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
-        let rows = sqlx::query(
-            "SELECT id, workflow_id, inputs, launched_by, created_at FROM workflow_runs \
-             WHERE workflow_id = ? ORDER BY created_at DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "{RUN_SELECT_COLUMNS} FROM workflow_runs WHERE workflow_id = ? \
+             ORDER BY created_at DESC"
+        ))
         .bind(workflow_id)
         .fetch_all(&self.pool)
         .await
         .context("failed to list workflow runs")?;
 
         rows.into_iter().map(run_from_row).collect()
+    }
+
+    // -- Run state ----------------------------------------------------------
+
+    /// Runs still worth judging, oldest first.
+    ///
+    /// `grace_secs` is the reaper's floor, for the reaper's reason. A launch
+    /// inserts the run row and then emits its graph, so a run examined in that
+    /// window has fewer tasks than it will have — possibly none — and would be
+    /// read as finished before it had started. The reaper solved the same
+    /// shape of race (a claim and its worker registration are separate writes)
+    /// with a grace period rather than a lock, and a second mechanism for one
+    /// problem is how the two drift apart.
+    pub async fn list_assessable_runs(&self, grace_secs: i64) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query(&format!(
+            "{RUN_SELECT_COLUMNS} FROM workflow_runs \
+             WHERE status = 'running' \
+               AND created_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?) \
+             ORDER BY created_at ASC"
+        ))
+        .bind(format!("-{} seconds", grace_secs.max(0)))
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list runs to assess")?;
+
+        rows.into_iter().map(run_from_row).collect()
+    }
+
+    /// Move a running run to a terminal status, once.
+    ///
+    /// `false` means somebody else got there first — another agent's tick, or a
+    /// person cancelling — and the caller must not act on the transition it
+    /// thought it was making.
+    ///
+    /// This conditional UPDATE is the whole once-only story behind the
+    /// notification. Every agent's cortex assesses every running run, so two
+    /// processes reaching the same verdict on the same tick is normal; the
+    /// `status = 'running'` guard means exactly one of them observes the
+    /// transition, and it is the same pattern `claim_next_ready` uses to hand a
+    /// task to exactly one worker. Notifying on *state* instead would repeat
+    /// every tick for as long as the run stayed stuck, which is a status nobody
+    /// reads dressed up as a status somebody might.
+    pub async fn settle_run(&self, run_id: &str, status: RunStatus, reason: &str) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE workflow_runs SET status = ?, status_reason = ?, \
+             finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE id = ? AND status = 'running'",
+        )
+        .bind(status.as_str())
+        .bind(reason)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to settle a workflow run")?;
+
+        Ok(updated.rows_affected() > 0)
+    }
+
+    /// Judge every assessable run and record what changed.
+    ///
+    /// The periodic pass, shaped like the reaper: it asks one question of each
+    /// run, writes only transitions, and returns them so the caller can log and
+    /// notify. One run that cannot be assessed does not stop the others —
+    /// a storage error while reading one run's tasks is our problem, and
+    /// abandoning the pass over it would let every other run go unwatched.
+    pub async fn sweep_runs(
+        &self,
+        task_store: &TaskStore,
+        grace_secs: i64,
+    ) -> Result<Vec<RunTransition>> {
+        let runs = self.list_assessable_runs(grace_secs).await?;
+        let mut transitions = Vec::new();
+
+        for run in runs {
+            let assessment = match self.assess_run(task_store, &run).await {
+                Ok(assessment) => assessment,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        run_id = %run.id,
+                        "failed to assess a workflow run — leaving it running"
+                    );
+                    continue;
+                }
+            };
+
+            let RunAssessment::Settled { status, reason } = assessment else {
+                continue;
+            };
+
+            if self.settle_run(&run.id, status, &reason).await? {
+                transitions.push(RunTransition {
+                    run_id: run.id.clone(),
+                    workflow_id: run.workflow_id.clone(),
+                    launched_by: run.launched_by.clone(),
+                    status,
+                    reason,
+                });
+            }
+        }
+
+        Ok(transitions)
+    }
+
+    /// Decide whether one run has stopped, and if so how.
+    ///
+    /// Three questions, in the order that makes the cheap answer the common
+    /// one: is anything in flight, is anything at the frontier able to move,
+    /// and is anything still waiting on the outside world. None of the three
+    /// and not finished means stuck.
+    ///
+    /// The frontier — unsettled tasks whose every parent has settled — is the
+    /// only part of the graph worth interrogating, and that is not an
+    /// optimisation. A task waiting on an unfinished parent tells you nothing
+    /// about whether the run can advance; its parent does. Judging it too would
+    /// make every downstream step of a wedged run report "waiting on a parent"
+    /// and the run would never be called stuck. The graph is acyclic, so an
+    /// unsettled task set always has a non-empty frontier, which is what makes
+    /// the reduction complete rather than merely cheaper.
+    pub async fn assess_run(
+        &self,
+        task_store: &TaskStore,
+        run: &WorkflowRun,
+    ) -> Result<RunAssessment> {
+        let tasks = task_store.list_by_workflow_run(&run.id).await?;
+
+        if tasks.is_empty() {
+            // Past the grace period, so this is not a launch mid-emit. Either a
+            // rollback left the row behind or somebody deleted the cards; both
+            // want a person, and neither is success.
+            return Ok(RunAssessment::Settled {
+                status: RunStatus::Stuck,
+                reason: "this run has no tasks — its launch left nothing behind, so nothing \
+                         will ever run"
+                    .to_string(),
+            });
+        }
+
+        // A loop that ran out of attempts and took its `on_exhausted` edge is
+        // the run reporting failure through a path its author declared. The
+        // give-up branch may still be running, so this only decides the verdict
+        // once everything settles — a rollback step in flight is a run that is
+        // still going.
+        let exhausted = tasks.iter().find(|task| {
+            task.loop_resolution == Some(crate::tasks::LoopResolution::ExhaustedRouted)
+        });
+
+        let unsettled: Vec<&Task> = tasks
+            .iter()
+            .filter(|task| !task.status.is_terminal())
+            .collect();
+
+        if unsettled.is_empty() {
+            if let Some(task) = exhausted {
+                return Ok(RunAssessment::Settled {
+                    status: RunStatus::Failed,
+                    reason: format!(
+                        "loop `{}` ran out of attempts at task #{} and the run took its \
+                         on_exhausted path",
+                        task.loop_group.as_deref().unwrap_or("?"),
+                        task.task_number
+                    ),
+                });
+            }
+
+            let skipped: Vec<&Task> = tasks
+                .iter()
+                .filter(|task| task.status == TaskStatus::Skipped)
+                .collect();
+
+            // Succeeded either way. A skipped branch is a condition that ruled
+            // a step out, which is the pipeline working — but "everything ran"
+            // and "four steps never ran" are different things to have happened,
+            // and the reason is where that difference lives rather than in a
+            // sixth status every caller would have to treat as success anyway.
+            let reason = if skipped.is_empty() {
+                format!("all {} task(s) finished", tasks.len())
+            } else {
+                format!(
+                    "{} of {} task(s) finished; {} did not run: {}",
+                    tasks.len() - skipped.len(),
+                    tasks.len(),
+                    skipped.len(),
+                    skipped
+                        .iter()
+                        .map(|task| format!(
+                            "#{} ({})",
+                            task.task_number,
+                            task.skip_reason.as_deref().unwrap_or("no reason recorded")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            };
+
+            return Ok(RunAssessment::Settled {
+                status: RunStatus::Succeeded,
+                reason,
+            });
+        }
+
+        // Anything in flight settles it without a single further query. This is
+        // the overwhelmingly common answer for a healthy run, and it comes
+        // before every verdict below on purpose: a terminal status stamps
+        // `finished_at` and retires the run from ever being looked at again, so
+        // declaring one while a worker is still writing would leave the last
+        // thing that happened unrecorded. A run with one permanently failed
+        // step and three still building has failed; it has not *finished*
+        // failing until they stop.
+        if unsettled.iter().any(|task| in_flight(task)) {
+            return Ok(RunAssessment::Advancing);
+        }
+
+        // A task that used its whole failure budget is `failed`, not `stuck`,
+        // and the difference is the recovery: the pipeline ran, something in it
+        // does not work, and retrying it unchanged will not help. Checked
+        // before the frontier walk so it wins over the generic "blocked"
+        // reading of the same row — one label covering both is exactly the bug
+        // this codebase keeps paying for.
+        for task in &unsettled {
+            let limit = task
+                .max_retries
+                .unwrap_or(crate::tasks::DEFAULT_FAILURE_LIMIT);
+            if task.consecutive_failures >= limit {
+                return Ok(RunAssessment::Settled {
+                    status: RunStatus::Failed,
+                    reason: format!(
+                        "task #{} ({}) used its whole failure budget ({}/{}): {}",
+                        task.task_number,
+                        task.title,
+                        task.consecutive_failures,
+                        limit,
+                        task.last_error.as_deref().unwrap_or("no error recorded")
+                    ),
+                });
+            }
+        }
+
+        let gates = crate::tasks::GateStore::new(self.pool.clone());
+        let mut held: Vec<String> = Vec::new();
+
+        for task in &unsettled {
+            if !task_store
+                .unfinished_parents(task.task_number)
+                .await?
+                .is_empty()
+            {
+                // Not at the frontier. Whatever it is waiting for is judged on
+                // its own row.
+                continue;
+            }
+
+            match frontier_hold(task_store, &gates, task).await? {
+                // One task that can still move is the whole answer.
+                None => return Ok(RunAssessment::Advancing),
+                Some(reason) => {
+                    held.push(format!("#{} ({}) {reason}", task.task_number, task.title))
+                }
+            }
+        }
+
+        if held.is_empty() {
+            // Unsettled tasks, none at the frontier: every one of them waits on
+            // another that is not finished. Only a cycle in `task_dependencies`
+            // produces this, and it deadlocks exactly as thoroughly as anything
+            // below — so it is reported rather than silently read as healthy.
+            return Ok(RunAssessment::Settled {
+                status: RunStatus::Stuck,
+                reason: format!(
+                    "all {} unfinished task(s) are waiting on another unfinished task, so none \
+                     of them can start — the dependency edges of this run form a cycle",
+                    unsettled.len()
+                ),
+            });
+        }
+
+        Ok(RunAssessment::Settled {
+            status: RunStatus::Stuck,
+            reason: format!("nothing in this run can advance: {}", held.join("; ")),
+        })
+    }
+
+    /// Stop a run, and settle the work it had not started.
+    ///
+    /// Unstarted tasks are settled as `skipped`; running ones are left alone to
+    /// finish or be reaped, because killing work mid-flight throws away
+    /// whatever it had already done and leaves a worker writing into a task
+    /// nobody will read.
+    ///
+    /// `skipped` rather than a new `cancelled` task status, deliberately.
+    /// `skipped` already means precisely "settled, and will never run" — it is
+    /// terminal, it satisfies a dependency edge, it carries its own
+    /// `skip_reason` field, and every promote, claim, fan-out and loop
+    /// predicate in the scheduler already accounts for it. An eighth status
+    /// would have to be taught to all of them, and a single missed predicate is
+    /// a task waiting forever on a parent that will never run. Nothing recovers
+    /// differently between a branch that was ruled out and a card cancelled
+    /// with the run, which is the test for whether two conditions may share a
+    /// label; what differs is *why*, and that is on the card in `skip_reason`
+    /// and on the run in `status` and `status_reason`.
+    ///
+    /// One transaction over both tables — they are one database — so a run
+    /// cannot end up cancelled with claimable cards, or emptied without being
+    /// cancelled.
+    pub async fn cancel_run(&self, run_id: &str, cancelled_by: &str) -> Result<CancelOutcome> {
+        let Some(run) = self.get_run(run_id).await? else {
+            return Ok(CancelOutcome::NotFound);
+        };
+
+        // Cancellable while anything of the run might still be sitting on a
+        // board: `running` obviously, and also `stuck` and `failed`, which are
+        // terminal for the *run* while leaving parked cards behind. Cancelling
+        // one of those is how a person clears them. A `succeeded` run has
+        // nothing left to settle and a `cancelled` one has already been through
+        // here.
+        if matches!(run.status, RunStatus::Succeeded | RunStatus::Cancelled) {
+            return Ok(CancelOutcome::AlreadyFinished { status: run.status });
+        }
+
+        let reason = format!("cancelled by {cancelled_by}");
+        let skip_reason = format!(
+            "workflow run {run_id} was cancelled by {cancelled_by} before this task started"
+        );
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open a run cancellation transaction")?;
+
+        sqlx::query(
+            "UPDATE workflow_runs SET status = 'cancelled', status_reason = ?, \
+             finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        )
+        .bind(&reason)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to cancel a workflow run")?;
+
+        // The claim race, solved the way `claim_next_ready` solves it rather
+        // than with a second mechanism. A task being claimed as this runs is
+        // either still `ready`, in which case this UPDATE wins and the claim's
+        // own `WHERE status = 'ready'` then matches nothing and hands back no
+        // task, or it is already `in_progress`, in which case it is not in the
+        // list below and is left to finish. There is no ordering of the two in
+        // which a cancelled task is also handed to a worker.
+        let settled = sqlx::query(
+            "UPDATE tasks SET status = 'skipped', skip_reason = ?, worker_id = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE workflow_run_id = ? \
+               AND status IN ('backlog', 'ready', 'pending_approval', 'blocked')",
+        )
+        .bind(&skip_reason)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to settle the unstarted tasks of a cancelled run")?
+        .rows_affected();
+
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE workflow_run_id = ? AND status = 'in_progress'",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to count the in-flight tasks of a cancelled run")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit a run cancellation")?;
+
+        Ok(CancelOutcome::Cancelled {
+            settled: settled as i64,
+            left_running: running,
+        })
+    }
+
+    /// Remove a run and everything it emitted.
+    ///
+    /// The endpoint that did not exist, which is why two agents left empty run
+    /// rows behind: cleanup had nothing to call.
+    ///
+    /// Refused while the run is `running` — cancel it first. A delete is not a
+    /// stop: it would take the cards out from under a pipeline that is still
+    /// being scheduled and leave the scheduler mid-promote on rows that no
+    /// longer exist. Refused too while any task is `in_progress`, whatever the
+    /// run says, because a live worker writing into a deleted task is the one
+    /// outcome with no recovery at all.
+    ///
+    /// Gates go before tasks, exactly as in the launch rollback: a gate
+    /// outliving its task is a stored, repeating, outbound request against a
+    /// card that no longer exists.
+    pub async fn delete_run(
+        &self,
+        task_store: &TaskStore,
+        run_id: &str,
+    ) -> Result<DeleteRunOutcome> {
+        let Some(run) = self.get_run(run_id).await? else {
+            return Ok(DeleteRunOutcome::NotFound);
+        };
+
+        if run.status == RunStatus::Running {
+            return Ok(DeleteRunOutcome::Refused {
+                reason: "this run is still running — cancel it first, so its unstarted tasks are \
+                         settled and anything in flight is allowed to finish"
+                    .to_string(),
+            });
+        }
+
+        let tasks = task_store.list_by_workflow_run(run_id).await?;
+        if let Some(task) = tasks
+            .iter()
+            .find(|task| task.status == TaskStatus::InProgress)
+        {
+            return Ok(DeleteRunOutcome::Refused {
+                reason: format!(
+                    "task #{} is still in progress — a worker is writing to it, so the run \
+                     cannot be removed until it finishes or is reaped",
+                    task.task_number
+                ),
+            });
+        }
+
+        let gates = crate::tasks::GateStore::new(self.pool.clone());
+        for task in &tasks {
+            gates.delete_for_task(task.task_number).await?;
+
+            // `delete` only touches `tasks`, so the edges and bindings that
+            // mention this number would outlive it — present in the table and
+            // invisible to every join the scheduler makes, which is the worst
+            // of both. The expansion path removes a placeholder's rows for
+            // exactly this reason.
+            sqlx::query(
+                "DELETE FROM task_dependencies \
+                 WHERE parent_task_number = ? OR child_task_number = ?",
+            )
+            .bind(task.task_number)
+            .bind(task.task_number)
+            .execute(&self.pool)
+            .await
+            .context("failed to remove a deleted run task's edges")?;
+
+            sqlx::query("DELETE FROM task_input_bindings WHERE child_task_number = ?")
+                .bind(task.task_number)
+                .execute(&self.pool)
+                .await
+                .context("failed to remove a deleted run task's input bindings")?;
+
+            task_store.delete(task.task_number).await?;
+        }
+
+        sqlx::query("DELETE FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to delete a workflow run")?;
+
+        Ok(DeleteRunOutcome::Deleted {
+            tasks_removed: tasks.len(),
+        })
+    }
+}
+
+/// What a run assessment concluded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunAssessment {
+    /// Something can still happen without anyone intervening. Includes waiting
+    /// on a gate that can still open, which is the case a stuck detector must
+    /// not flag.
+    Advancing,
+    /// The run has stopped, in the named sense and for the stated reason.
+    Settled { status: RunStatus, reason: String },
+}
+
+/// A run that just changed status. One per transition, never per tick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunTransition {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub launched_by: String,
+    pub status: RunStatus,
+    pub reason: String,
+}
+
+/// What cancelling did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CancelOutcome {
+    Cancelled {
+        /// Unstarted tasks settled as `skipped`.
+        settled: i64,
+        /// Tasks left in flight to finish or be reaped.
+        left_running: i64,
+    },
+    /// Nothing to cancel. The status says which kind of finished it already is.
+    AlreadyFinished {
+        status: RunStatus,
+    },
+    NotFound,
+}
+
+/// What deleting did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeleteRunOutcome {
+    Deleted {
+        tasks_removed: usize,
+    },
+    /// Refused, with a sentence naming what to do instead.
+    Refused {
+        reason: String,
+    },
+    NotFound,
+}
+
+/// Whether this task is doing something, or about to be.
+///
+/// `pending_approval` counts. A run holding a card that asks a person to
+/// approve it is *waiting*, not stuck: it has already said what it needs, in
+/// the one place a person is looking, and calling that stuck would double-report
+/// a healthy pause.
+fn in_flight(task: &Task) -> bool {
+    matches!(
+        task.status,
+        TaskStatus::InProgress | TaskStatus::Ready | TaskStatus::PendingApproval
+    )
+}
+
+/// Why this frontier task cannot move, or `None` if it can.
+///
+/// Only asked of tasks whose every parent has settled, so "waiting on an
+/// upstream task" is never the answer — the graph has already handed this task
+/// everything it was owed and the question is whether anything else is in the
+/// way.
+///
+/// Every `None` is a claim that this run will change on its own without anyone
+/// touching it, so each one is a chance to park a healthy run by mistake. They
+/// are therefore deliberately generous: anything the scheduler might still act
+/// on, and anything we could not determine, reads as "can move".
+async fn frontier_hold(
+    task_store: &TaskStore,
+    gates: &crate::tasks::GateStore,
+    task: &Task,
+) -> Result<Option<String>> {
+    // Parked for a person. `dependency` blocks rest in `backlog` rather than
+    // here, so this is a sticky kind or a transient one, and neither clears
+    // itself — the sweep will not touch it and no upstream event will either.
+    if task.status == TaskStatus::Blocked {
+        return Ok(Some(format!(
+            "is blocked ({}) and only a person can release it: {}",
+            task.block_kind
+                .map(|kind| kind.to_string())
+                .unwrap_or_else(|| "no kind recorded".to_string()),
+            task.block_reason.as_deref().unwrap_or("no reason recorded")
+        )));
+    }
+
+    // The loop boundary owns this card and clears the column when it decides.
+    // Its verdict depends on the body, whose own rows are assessed like any
+    // other — so a wedged loop is caught at the body task that is actually
+    // stuck rather than here, where the reason would be "waiting for a loop".
+    if task.awaiting_loop_group.is_some() {
+        return Ok(None);
+    }
+
+    // A placeholder is shape, not work: expansion replaces it. Parked
+    // placeholders are the exception and the reason this check is not just
+    // `return Ok(None)` — `expand_fan_outs` skips anything with a `block_kind`,
+    // so a placeholder that failed to expand once will never be tried again.
+    // That is where a refused fan-out width and a refused run task ceiling both
+    // land, and the ceiling that refused is named on the card.
+    if task.fan_out_placeholder {
+        return match &task.block_reason {
+            Some(reason) => Ok(Some(format!("is a fan-out that will not expand: {reason}"))),
+            None => Ok(None),
+        };
+    }
+
+    // Gates, and the distinction the whole detector turns on.
+    let blocking = gates.blocking_gates(task.task_number).await?;
+    let dead: Vec<&crate::tasks::TaskGate> = blocking
+        .iter()
+        .filter(|gate| !gate.can_still_open())
+        .collect();
+    if !dead.is_empty() {
+        return Ok(Some(format!(
+            "is held by a gate that will never open: {}",
+            dead.iter()
+                .map(|gate| gate.explain())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    if !blocking.is_empty() {
+        // Waiting on the world, which has not answered yet and still can. This
+        // is the false positive that would matter most: park a run for having
+        // asked CI a question and nobody trusts the status again.
+        return Ok(None);
+    }
+
+    // Parents done, nothing gating it, and its inputs still will not resolve.
+    // The sweep reports this every tick and cannot fix it — a missing pointer
+    // is not repaired by an upstream task finishing — so the task will sit in
+    // the backlog until a person changes the graph.
+    match task_store.resolve_inputs(task.task_number).await {
+        Ok(ContractResolution::Unresolved { problems }) => Ok(Some(format!(
+            "has every upstream task finished but its inputs still do not resolve: {}",
+            problems
+                .iter()
+                .map(|problem| problem.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))),
+        // Everything else can still change, or is ours to fix rather than the
+        // graph's. `Unreachable` becomes a skip on the next sweep, which is
+        // progress; an error here is our failure and must not park a run.
+        Ok(_) => Ok(None),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                "failed to check a task's inputs while assessing its run — treating it as able \
+                 to advance"
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -2129,6 +2855,10 @@ fn gate_from_row(row: sqlx::sqlite::SqliteRow) -> Result<StepGate> {
     })
 }
 
+/// The columns every run read selects, in the order [`run_from_row`] expects.
+const RUN_SELECT_COLUMNS: &str = "SELECT id, workflow_id, inputs, launched_by, status, \
+     finished_at, status_reason, created_at";
+
 fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
     Ok(WorkflowRun {
         id: row.try_get("id").context("failed to read run id")?,
@@ -2139,6 +2869,17 @@ fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         launched_by: row
             .try_get("launched_by")
             .context("failed to read run launched_by")?,
+        // An unreadable status reads as `running`, which is the only safe
+        // default: it keeps the run under the supervisor's eye instead of
+        // silently retiring it as finished.
+        status: row
+            .try_get::<String, _>("status")
+            .ok()
+            .as_deref()
+            .and_then(RunStatus::parse)
+            .unwrap_or(RunStatus::Running),
+        finished_at: row.try_get("finished_at").ok().flatten(),
+        status_reason: row.try_get("status_reason").ok().flatten(),
         created_at: row
             .try_get("created_at")
             .context("failed to read run created_at")?,
@@ -3940,8 +4681,12 @@ mod tests {
              source_step_key TEXT, config TEXT NOT NULL, label TEXT, \
              poll_interval_secs INTEGER NOT NULL DEFAULT 60, disposition TEXT, \
              PRIMARY KEY (workflow_id, step_key, gate_key))",
+            // `status`, `finished_at` and `status_reason` are as much a part of
+            // this table as the columns it was created with — a pool without
+            // them passes tests the real database would refuse.
             "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY NOT NULL, workflow_id TEXT NOT NULL, \
              inputs TEXT NOT NULL, launched_by TEXT NOT NULL, \
+             status TEXT NOT NULL DEFAULT 'running', finished_at TEXT, status_reason TEXT, \
              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
         ] {
             sqlx::query(statement)
@@ -4237,6 +4982,772 @@ mod tests {
         assert!(
             workflows.list_gates(&id).await.expect("gates").is_empty(),
             "a condition reading a deleted step goes with it"
+        );
+    }
+
+    // -- Spend ceilings -----------------------------------------------------
+
+    /// The only live hazard on this board: fan-out width was uncapped, and the
+    /// width is decided at run time by model output. A scan step that
+    /// hallucinates a nine-hundred-element array is nine hundred tasks, each of
+    /// them a live model call, on an instance that runs unattended on a timer.
+    ///
+    /// If this regresses, the cap is either gone or — far worse — has become a
+    /// truncation. The assertion that no branch exists is the one that matters:
+    /// a fan-out that emitted the first fifty would feed the report step a
+    /// subset and the report would present it as the whole collection, which is
+    /// a wrong answer delivered confidently rather than a run that stopped.
+    #[tokio::test]
+    async fn a_fan_out_wider_than_the_branch_cap_is_refused_naming_the_pointer_and_the_count_and_emits_no_branches()
+     {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+
+        let repos: Vec<serde_json::Value> = (0..crate::tasks::MAX_FAN_OUT_BRANCHES + 1)
+            .map(|index| serde_json::json!({"name": format!("repo-{index}")}))
+            .collect();
+        let found = repos.len();
+        complete(
+            &tasks,
+            launched.task_numbers["scan"],
+            serde_json::json!({"repos": repos}),
+        )
+        .await;
+
+        let outcomes = tasks
+            .expand_fan_outs("agent-1")
+            .await
+            .expect("expansion pass");
+        let placeholder = launched.task_numbers["build"];
+        match &outcomes[..] {
+            [
+                crate::tasks::FanOutOutcome::Blocked {
+                    placeholder_task_number,
+                    reason,
+                },
+            ] => {
+                assert_eq!(*placeholder_task_number, placeholder);
+                assert!(
+                    reason.contains("/repos"),
+                    "the refusal must name the pointer, or nobody knows which collection was \
+                     too wide: {reason}"
+                );
+                assert!(
+                    reason.contains(&found.to_string()),
+                    "the refusal must name the count found, which is what separates a pointer \
+                     aimed at the wrong level from a genuinely enormous collection: {reason}"
+                );
+                assert!(
+                    reason.contains("MAX_FAN_OUT_BRANCHES"),
+                    "a run stopped by a ceiling that does not say which ceiling is \
+                     indistinguishable from a bug: {reason}"
+                );
+            }
+            other => panic!("expected the fan-out to be refused, got {other:?}"),
+        }
+
+        let run_tasks = tasks
+            .list_by_workflow_run(&launched.run.id)
+            .await
+            .expect("run tasks");
+        assert_eq!(
+            run_tasks.len(),
+            3,
+            "the refusal must emit nothing at all — scan, the parked placeholder, and report"
+        );
+        assert!(
+            run_tasks
+                .iter()
+                .all(|task| task.fan_out_branch_key.is_none()),
+            "not one branch may exist: a truncated fan-out feeding a fan-in reports part of the \
+             collection as the whole of it"
+        );
+    }
+
+    /// A template already past the run ceiling is refused at launch, where the
+    /// answer is a corrected template rather than an incident.
+    ///
+    /// If this regresses, the ceiling is only enforced on the paths that grow a
+    /// run *after* launch, and a large enough template starts a run that is
+    /// parked the instant it begins.
+    #[tokio::test]
+    async fn a_template_with_more_steps_than_one_run_may_hold_is_refused_at_launch_naming_the_ceiling()
+     {
+        let (workflows, tasks, id) = fixture().await;
+        for index in 0..=crate::tasks::MAX_RUN_TASKS {
+            workflows
+                .put_step(&step(&id, &format!("s{index}"), index))
+                .await
+                .expect("step");
+        }
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a template over the run ceiling must be refused");
+        match error {
+            LaunchError::RunTaskCeiling { steps, ceiling } => {
+                assert_eq!(steps as i64, crate::tasks::MAX_RUN_TASKS + 1);
+                assert_eq!(ceiling, crate::tasks::MAX_RUN_TASKS);
+                assert!(
+                    error.to_string().contains("MAX_RUN_TASKS"),
+                    "the refusal names the limit it was"
+                );
+            }
+            other => panic!("expected RunTaskCeiling, got {other:?}"),
+        }
+    }
+
+    /// Fill a run out to `total` tasks with settled filler, so a ceiling can be
+    /// reached without emitting two hundred real cards.
+    ///
+    /// The numbers start well above the sequence so they cannot collide with
+    /// anything the run allocates afterwards.
+    async fn pad_run_to(pool: &SqlitePool, run_id: &str, existing: i64, total: i64) {
+        for index in 0..(total - existing) {
+            sqlx::query(
+                "INSERT INTO tasks (id, task_number, title, status, priority, owner_agent_id, \
+                 assigned_agent_id, created_by, workflow_run_id) \
+                 VALUES (?, ?, ?, 'done', 'medium', 'agent-1', 'agent-1', 'test', ?)",
+            )
+            .bind(format!("filler-{index}"))
+            .bind(100_000 + index)
+            .bind(format!("filler {index}"))
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .expect("filler task");
+        }
+    }
+
+    /// The second ceiling, and the one the width cap cannot cover: fifty
+    /// branches is within the width cap every time, and a loop body containing
+    /// one reaches fifty again on every pass.
+    ///
+    /// If this regresses, a run's size is once again decided entirely by model
+    /// output, and the only thing standing between a wedged pipeline and an
+    /// unbounded bill is that no single step happened to fan out too wide.
+    #[tokio::test]
+    async fn a_fan_out_that_would_cross_the_run_task_ceiling_parks_the_run_stuck_and_names_the_ceiling()
+     {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        // Three real tasks plus filler, two short of the ceiling: a ten-branch
+        // fan-out is well within the width cap and still cannot fit.
+        pad_run_to(
+            tasks.pool(),
+            &launched.run.id,
+            3,
+            crate::tasks::MAX_RUN_TASKS - 2,
+        )
+        .await;
+
+        let repos: Vec<serde_json::Value> = (0..10)
+            .map(|index| serde_json::json!({"name": format!("repo-{index}")}))
+            .collect();
+        complete(
+            &tasks,
+            launched.task_numbers["scan"],
+            serde_json::json!({"repos": repos}),
+        )
+        .await;
+
+        let outcomes = tasks
+            .expand_fan_outs("agent-1")
+            .await
+            .expect("expansion pass");
+        match &outcomes[..] {
+            [crate::tasks::FanOutOutcome::Blocked { reason, .. }] => assert!(
+                reason.contains("MAX_RUN_TASKS")
+                    && reason.contains(&crate::tasks::MAX_RUN_TASKS.to_string()),
+                "the refusal must name the ceiling and its value: {reason}"
+            ),
+            other => panic!("expected the run ceiling to refuse the expansion, got {other:?}"),
+        }
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch run")
+            .expect("run exists");
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(status, RunStatus::Stuck);
+                assert!(
+                    reason.contains("MAX_RUN_TASKS"),
+                    "the run must carry the ceiling that stopped it, not just the word stuck: \
+                     {reason}"
+                );
+            }
+            other => panic!("a run that cannot expand cannot advance, got {other:?}"),
+        }
+    }
+
+    /// The other post-launch growth path, and the one the fan-out check cannot
+    /// cover: a loop with attempts left, whose next pass will not fit.
+    ///
+    /// It must not take its `on_exhausted` edge here. That edge is a declared
+    /// give-up path that emits tasks of its own, so routing to it would spend
+    /// past the very ceiling that stopped the loop. If this regresses, hitting
+    /// the run ceiling inside a loop either does nothing — and the loop keeps
+    /// spending — or fires the give-up branch and spends anyway.
+    #[tokio::test]
+    async fn a_loop_that_cannot_fit_another_pass_parks_at_the_run_ceiling_instead_of_giving_up() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(5)).await;
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["analyze"],
+            serde_json::json!({"failures": ["boom"]}),
+        )
+        .await;
+        // One task short of the ceiling, so the two-task body cannot fit even
+        // though the loop still has four attempts left.
+        pad_run_to(
+            tasks.pool(),
+            &launched.run.id,
+            4,
+            crate::tasks::MAX_RUN_TASKS - 1,
+        )
+        .await;
+
+        run_pass(&tasks, &launched.run.id, 1, false).await;
+
+        let outcomes = tasks.advance_loops("agent-1").await.expect("boundary");
+        match &outcomes[..] {
+            [crate::tasks::LoopOutcome::ExhaustedBlocked { reason, .. }] => assert!(
+                reason.contains("MAX_RUN_TASKS") && reason.contains("give-up path"),
+                "the loop must park naming the ceiling, and say why it did not route: {reason}"
+            ),
+            other => panic!("expected the run ceiling to stop the loop, got {other:?}"),
+        }
+
+        let run_tasks = tasks
+            .list_by_workflow_run(&launched.run.id)
+            .await
+            .expect("run tasks");
+        assert!(
+            run_tasks.iter().all(|task| task.loop_iteration != Some(2)),
+            "not one task of the next pass may exist — the ceiling refuses, it does not \
+             half-emit"
+        );
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch run")
+            .expect("run exists");
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(
+                    status,
+                    RunStatus::Stuck,
+                    "out of the run's budget is a person raising a limit; out of the loop's own \
+                     attempts is a person fixing a template — different recoveries, so not the \
+                     same status"
+                );
+                assert!(reason.contains("MAX_RUN_TASKS"), "{reason}");
+            }
+            other => panic!("expected the run to be parked, got {other:?}"),
+        }
+    }
+
+    // -- Run state ----------------------------------------------------------
+
+    /// Launch `build -> deploy` and finish `build`, leaving `deploy` at the
+    /// frontier for whatever the caller wants to do to it.
+    async fn frontier_fixture() -> (WorkflowStore, TaskStore, WorkflowRun, i64) {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["build", "deploy"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("step");
+        }
+        workflows
+            .link_steps(&id, "build", "deploy")
+            .await
+            .expect("link");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["build"],
+            serde_json::json!({"artifact": "a.tar"}),
+        )
+        .await;
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch run")
+            .expect("run exists");
+        let deploy = launched.task_numbers["deploy"];
+        (workflows, tasks, run, deploy)
+    }
+
+    /// The ordinary ending, and the one thing it must not do is call a skipped
+    /// branch a failure.
+    ///
+    /// If this regresses, either every finished run stays `running` forever —
+    /// so nothing ever reports and the status is decoration — or a pipeline
+    /// whose condition correctly ruled a branch out is reported as having
+    /// failed, which sends someone to debug a run that did exactly what it was
+    /// designed to do.
+    #[tokio::test]
+    async fn a_run_whose_tasks_have_all_settled_succeeds_and_a_skipped_branch_is_not_a_failure() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        tasks
+            .skip_task(deploy, "the rollback branch was not taken")
+            .await
+            .expect("skip");
+
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(
+                    status,
+                    RunStatus::Succeeded,
+                    "a branch that was not taken is the pipeline working"
+                );
+                assert!(
+                    reason.contains("did not run")
+                        && reason.contains("the rollback branch was not taken"),
+                    "succeeded-with-a-skip and succeeded-outright have the same recovery and so \
+                     share a status, but not saying which happened is how the difference gets \
+                     lost: {reason}"
+                );
+            }
+            other => panic!("expected the run to have settled, got {other:?}"),
+        }
+    }
+
+    /// The false positive that would matter most.
+    ///
+    /// A gate that has not opened yet is the world not having answered, and it
+    /// answers on its own. If this regresses, every pipeline waiting on CI is
+    /// reported as stuck, people learn the status is noise, and the two states
+    /// that genuinely need somebody get ignored along with it — strictly worse
+    /// than the silence this feature replaced.
+    #[tokio::test]
+    async fn a_run_waiting_on_a_gate_that_can_still_open_is_waiting_rather_than_stuck() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        crate::tasks::GateStore::new(tasks.pool().clone())
+            .create(
+                deploy,
+                GateKind::Http,
+                &serde_json::json!({"url": "https://ci.example/status", "expect_status": 200}),
+                Some("waiting for CI on main"),
+                60,
+                None,
+            )
+            .await
+            .expect("gate");
+
+        assert_eq!(
+            workflows
+                .assess_run(&tasks, &run)
+                .await
+                .expect("assess the run"),
+            RunAssessment::Advancing,
+            "a run waiting on a pollable gate is waiting, not stuck"
+        );
+    }
+
+    /// The gate case that *is* stuck, and the reason the two need separating.
+    ///
+    /// A gate that has errored its way past `GATE_ERROR_LIMIT` has stopped
+    /// being polled, so its `erroring` no longer means "still trying" — it
+    /// means "gave up trying", and the branch it guards will never be decided.
+    /// If this regresses, a run behind an unreachable endpoint is
+    /// indistinguishable from one waiting on a build, which is the silence this
+    /// whole feature exists to remove.
+    #[tokio::test]
+    async fn a_gate_that_has_stopped_polling_leaves_its_run_stuck_rather_than_waiting() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        let gate = crate::tasks::GateStore::new(tasks.pool().clone())
+            .create(
+                deploy,
+                GateKind::Http,
+                &serde_json::json!({"url": "https://ci.example/status", "expect_status": 200}),
+                Some("waiting for CI on main"),
+                60,
+                Some(GateDisposition::Route),
+            )
+            .await
+            .expect("gate");
+        sqlx::query(
+            "UPDATE task_gates SET last_result = 'erroring', consecutive_errors = ?, \
+             last_detail = 'dns failure' WHERE id = ?",
+        )
+        .bind(crate::tasks::GATE_ERROR_LIMIT)
+        .bind(&gate.id)
+        .execute(tasks.pool())
+        .await
+        .expect("exhaust the gate's error budget");
+
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(status, RunStatus::Stuck);
+                assert!(
+                    reason.contains(&deploy.to_string()) && reason.contains("never open"),
+                    "the reason must name the task and say the gate will not open: {reason}"
+                );
+            }
+            other => panic!("a gate that stopped polling wedges its run, got {other:?}"),
+        }
+    }
+
+    /// The case the doc calls out: nothing is running, nothing is promotable,
+    /// and every individual card looks reasonable.
+    ///
+    /// If this regresses, a run parked behind a task only a person can release
+    /// sits silently forever, which is precisely the state that made run status
+    /// necessary — and the assertion on the reason is half the point, because
+    /// "stuck" with no reason sends someone reading rows.
+    #[tokio::test]
+    async fn a_run_whose_only_unfinished_task_is_blocked_forever_is_stuck_and_says_which_and_why() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        tasks
+            .block_task(
+                deploy,
+                crate::tasks::BlockKind::NeedsInput,
+                "needs a production credential nobody has issued",
+            )
+            .await
+            .expect("block");
+
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(status, RunStatus::Stuck);
+                assert!(
+                    reason.contains(&deploy.to_string())
+                        && reason.contains("needs_input")
+                        && reason.contains("production credential"),
+                    "the reason carries the task, the kind, and the card's own words: {reason}"
+                );
+            }
+            other => panic!("expected a stuck run, got {other:?}"),
+        }
+    }
+
+    /// `failed` and `stuck` are one label away from being the same bug this
+    /// codebase has now paid for four times.
+    ///
+    /// A task that used its whole failure budget has run, repeatedly, and does
+    /// not work; a stuck run has not run at all and is waiting on a person.
+    /// They recover differently — fix the step versus release the block — so
+    /// they must not share a status. If this regresses, every exhausted
+    /// pipeline is reported as stuck and the recovery advice is wrong.
+    #[tokio::test]
+    async fn a_task_that_used_its_whole_failure_budget_makes_its_run_failed_rather_than_stuck() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        for _ in 0..crate::tasks::DEFAULT_FAILURE_LIMIT {
+            for status in [TaskStatus::Ready, TaskStatus::InProgress] {
+                tasks
+                    .update(
+                        deploy,
+                        crate::tasks::UpdateTaskInput {
+                            status: Some(status),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("advance")
+                    .expect("exists");
+            }
+            tasks
+                .record_failure(
+                    deploy,
+                    crate::tasks::TaskRunOutcome::Failed,
+                    "the deploy host refused the connection",
+                )
+                .await
+                .expect("record failure");
+        }
+
+        match workflows
+            .assess_run(&tasks, &run)
+            .await
+            .expect("assess the run")
+        {
+            RunAssessment::Settled { status, reason } => {
+                assert_eq!(status, RunStatus::Failed);
+                assert!(
+                    reason.contains("failure budget") && reason.contains("refused the connection"),
+                    "the reason says which task ran out and what it said: {reason}"
+                );
+            }
+            other => panic!("expected a failed run, got {other:?}"),
+        }
+    }
+
+    /// Cancelling settles what has not started and leaves what has.
+    ///
+    /// Killing a task mid-flight throws away whatever it had already done, and
+    /// leaves a worker writing into a card nobody will read. If this regresses,
+    /// either cancel stops nothing — the graph carries on scheduling — or it
+    /// stops too much and destroys work in progress.
+    #[tokio::test]
+    async fn cancelling_a_run_settles_its_unstarted_tasks_and_leaves_the_running_one_alone() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["build", "test", "deploy"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("step");
+        }
+        workflows
+            .link_steps(&id, "build", "test")
+            .await
+            .expect("link");
+        workflows
+            .link_steps(&id, "test", "deploy")
+            .await
+            .expect("link");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        complete(
+            &tasks,
+            launched.task_numbers["build"],
+            serde_json::json!({"artifact": "a.tar"}),
+        )
+        .await;
+
+        // `test` is claimed and running; `deploy` has not started.
+        let test = launched.task_numbers["test"];
+        let deploy = launched.task_numbers["deploy"];
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let claimed = tasks
+            .claim_next_ready("agent-1")
+            .await
+            .expect("claim")
+            .expect("something was ready");
+        assert_eq!(claimed.task_number, test);
+
+        let outcome = workflows
+            .cancel_run(&launched.run.id, "pat")
+            .await
+            .expect("cancel");
+        assert_eq!(
+            outcome,
+            CancelOutcome::Cancelled {
+                settled: 1,
+                left_running: 1
+            }
+        );
+
+        let run = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.finished_at.is_some(), "a terminal run is stamped");
+
+        let running = tasks
+            .get_by_number(test)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            running.status,
+            TaskStatus::InProgress,
+            "work already in flight finishes or is reaped; cancelling must not throw it away"
+        );
+
+        let unstarted = tasks
+            .get_by_number(deploy)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(unstarted.status, TaskStatus::Skipped);
+        assert!(
+            unstarted
+                .skip_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("cancelled by pat")),
+            "the card says why it will never run, and who decided"
+        );
+
+        // The claim race, from the other side: a cancelled task is no longer
+        // ready, so nothing can be handed out after the cancel.
+        assert!(
+            tasks
+                .claim_next_ready("agent-1")
+                .await
+                .expect("claim")
+                .is_none(),
+            "cancelling must close the window `claim_next_ready` reads"
+        );
+    }
+
+    /// Delete is not a stop, and refusing to conflate them is the whole
+    /// content of this test.
+    ///
+    /// If this regresses, deleting a live run pulls the cards out from under
+    /// the scheduler mid-promote, or worse, out from under a worker that is
+    /// still writing to one.
+    #[tokio::test]
+    async fn deleting_a_run_is_refused_while_it_is_live_and_removes_everything_once_it_is_not() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+
+        match workflows
+            .delete_run(&tasks, &run.id)
+            .await
+            .expect("delete attempt")
+        {
+            DeleteRunOutcome::Refused { reason } => assert!(
+                reason.contains("cancel it first"),
+                "the refusal says what to do instead: {reason}"
+            ),
+            other => panic!("a running run must not be deletable, got {other:?}"),
+        }
+
+        workflows.cancel_run(&run.id, "pat").await.expect("cancel");
+
+        match workflows.delete_run(&tasks, &run.id).await.expect("delete") {
+            DeleteRunOutcome::Deleted { tasks_removed } => assert_eq!(tasks_removed, 2),
+            other => panic!("expected the run to be deleted, got {other:?}"),
+        }
+
+        assert!(
+            workflows.get_run(&run.id).await.expect("fetch").is_none(),
+            "the row an agent had no way to clean up"
+        );
+        assert!(
+            tasks.get_by_number(deploy).await.expect("fetch").is_none(),
+            "the cards go with it, or the next board view shows work from a run that is gone"
+        );
+    }
+
+    /// A run that stopped says so once.
+    ///
+    /// The supervisor runs on every tick of every agent, so "notify on state"
+    /// would repeat the same alert every thirty seconds for as long as the run
+    /// stayed stuck — a status nobody reads, which is what having no status
+    /// was. The transition is a conditional UPDATE for exactly this reason, and
+    /// if it regresses the inbox fills up until people mute it.
+    #[tokio::test]
+    async fn a_terminal_transition_is_reported_once_however_many_times_the_pass_runs() {
+        let (workflows, tasks, run, deploy) = frontier_fixture().await;
+        tasks
+            .block_task(
+                deploy,
+                crate::tasks::BlockKind::NeedsInput,
+                "needs a production credential nobody has issued",
+            )
+            .await
+            .expect("block");
+
+        let first = workflows.sweep_runs(&tasks, 0).await.expect("first pass");
+        assert_eq!(first.len(), 1, "the transition is reported when it happens");
+        assert_eq!(first[0].run_id, run.id);
+        assert_eq!(first[0].status, RunStatus::Stuck);
+        assert!(
+            first[0].status.warrants_notice(),
+            "stuck is one of the two states a person is told about"
+        );
+
+        let second = workflows.sweep_runs(&tasks, 0).await.expect("second pass");
+        assert!(
+            second.is_empty(),
+            "the run is still stuck and there is nothing new to say — a terminal run is never \
+             assessed again"
+        );
+
+        let settled = workflows
+            .get_run(&run.id)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(settled.status, RunStatus::Stuck);
+        assert!(settled.status_reason.is_some());
+        assert!(settled.finished_at.is_some());
+    }
+
+    /// The grace period, which is the reaper's and exists for the reaper's
+    /// reason: a launch writes the run row and then emits its graph, and a run
+    /// judged inside that window has fewer tasks than it will have.
+    ///
+    /// If this regresses, a run is declared stuck between its own two writes
+    /// and every launch races the supervisor.
+    #[tokio::test]
+    async fn a_run_younger_than_the_grace_period_is_not_judged_at_all() {
+        let (workflows, tasks, id) = fixture().await;
+        workflows
+            .put_step(&step(&id, "build", 0))
+            .await
+            .expect("step");
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        // Every task of this run, gone — the shape of a launch caught between
+        // inserting its run row and emitting its graph.
+        tasks
+            .delete(launched.task_numbers["build"])
+            .await
+            .expect("delete");
+
+        assert!(
+            workflows
+                .sweep_runs(&tasks, 60)
+                .await
+                .expect("sweep")
+                .is_empty(),
+            "a run this young is still being written"
+        );
+        assert_eq!(
+            workflows.sweep_runs(&tasks, 0).await.expect("sweep").len(),
+            1,
+            "past the grace period the same run is judged, and a run with no tasks is not a \
+             success"
         );
     }
 }

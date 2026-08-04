@@ -453,16 +453,30 @@ impl GateStore {
 }
 
 impl TaskGate {
+    /// Whether looking again could ever change this gate's answer.
+    ///
+    /// Two ways for a gate to be finished without having opened, and neither is
+    /// visible from `last_result` alone. `failed` will not become true by being
+    /// asked again — a person has to act. And a gate that has errored
+    /// [`GATE_ERROR_LIMIT`] times in a row has *stopped being asked*, so its
+    /// `erroring` is not "we are still trying", it is "we gave up trying".
+    ///
+    /// This is the predicate that separates a run that is waiting from a run
+    /// that is stuck, and it is written once here rather than at each caller
+    /// because those two answers have opposite recoveries: the first is
+    /// healthy, the second needs somebody. `is_due` below is this question plus
+    /// the backoff clock, which is why it starts by asking it.
+    pub fn can_still_open(&self) -> bool {
+        self.last_result.is_worth_polling() && self.consecutive_errors < GATE_ERROR_LIMIT
+    }
+
     /// Whether this gate should be polled now.
     ///
     /// Errors back off geometrically. A gate whose endpoint is down should not
     /// be asked once a minute forever, and the backoff is capped so a gate that
     /// recovers after a long outage still notices within a quarter of an hour.
     pub fn is_due(&self, now_unix: i64) -> bool {
-        if !self.last_result.is_worth_polling() {
-            return false;
-        }
-        if self.consecutive_errors >= GATE_ERROR_LIMIT {
+        if !self.can_still_open() {
             return false;
         }
         let Some(checked) = self

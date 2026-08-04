@@ -4392,6 +4392,91 @@ async fn poll_due_gates(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Resu
     Ok(polled.len())
 }
 
+/// How long a run must have existed before the supervisor will judge it.
+///
+/// The reaper's floor, for the reaper's reason. `launch` inserts the run row
+/// and then emits its graph, so a run examined inside that window has fewer
+/// tasks than it will have — possibly none — and would be declared finished
+/// before it had started.
+const RUN_ASSESSMENT_GRACE_SECS: i64 = 60;
+
+/// Ask every live workflow run whether it is still going, and say so once.
+///
+/// Runs after the ready sweep on purpose: the sweep is what turns a task whose
+/// last parent just landed into `ready`, and a run assessed before it would be
+/// judged on a graph one tick out of date — which for a run finishing its last
+/// step is the difference between "advancing" and "stuck".
+///
+/// Every agent's cortex assesses every run rather than only its own, because a
+/// run's steps can be assigned to different agents and no single agent sees all
+/// of it. Two ticks reaching the same verdict is normal and harmless: the
+/// transition is a conditional UPDATE, so exactly one of them observes it and
+/// exactly one notification is sent.
+async fn assess_workflow_runs(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<usize> {
+    // Built here from the task store's own pool rather than carried on
+    // `AgentDeps`, exactly as `poll_due_gates` builds its `GateStore`: the
+    // workflow tables live in the same instance database, and threading a
+    // second store through every agent construction site to reach them would
+    // be ceremony around a clone.
+    let workflows = crate::workflows::WorkflowStore::new(deps.task_store.pool().clone());
+    let transitions = workflows
+        .sweep_runs(deps.task_store.as_ref(), RUN_ASSESSMENT_GRACE_SECS)
+        .await?;
+
+    for transition in &transitions {
+        logger.log(
+            "workflow_run_settled",
+            &format!(
+                "Workflow run {} is {} — {}",
+                transition.run_id, transition.status, transition.reason
+            ),
+            Some(serde_json::json!({
+                "run_id": transition.run_id,
+                "workflow_id": transition.workflow_id,
+                "status": transition.status.as_str(),
+                "reason": transition.reason,
+            })),
+        );
+
+        // Only the two that need somebody. A run that succeeded is what was
+        // asked for, and an inbox full of successes is one nobody reads.
+        if !transition.status.warrants_notice() {
+            continue;
+        }
+        let Some(api_state) = &deps.api_state else {
+            continue;
+        };
+
+        api_state.emit_notification(crate::notifications::NewNotification {
+            kind: crate::notifications::NotificationKind::WorkflowRunStopped,
+            severity: match transition.status {
+                crate::workflows::RunStatus::Failed => {
+                    crate::notifications::NotificationSeverity::Error
+                }
+                _ => crate::notifications::NotificationSeverity::Warn,
+            },
+            title: format!("Workflow run {}", transition.status),
+            // The reason, not a link to go and find it. This is the entire
+            // point of attaching one to the transition: "stuck" alone sends
+            // someone reading rows.
+            body: Some(transition.reason.clone()),
+            agent_id: Some(deps.agent_id.to_string()),
+            related_entity_type: Some("workflow_run".to_string()),
+            related_entity_id: Some(transition.run_id.clone()),
+            // The dashboard's own run route, so the inbox entry opens the run
+            // rather than a page a person then has to search from.
+            action_url: Some(format!("/workflow-runs/{}", transition.run_id)),
+            metadata: Some(serde_json::json!({
+                "workflow_id": transition.workflow_id,
+                "launched_by": transition.launched_by,
+                "status": transition.status.as_str(),
+            })),
+        });
+    }
+
+    Ok(transitions.len())
+}
+
 async fn reap_orphaned_task_pickups(
     deps: &AgentDeps,
     logger: &CortexLogger,
@@ -4759,6 +4844,15 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 }
             }
             Err(error) => tracing::warn!(%error, "dependency ready sweep failed"),
+        }
+
+        // Then ask the runs themselves. After the sweep, because the sweep is
+        // what makes a promotable task actually promoted, and a run judged
+        // before it would be judged on last tick's graph.
+        match assess_workflow_runs(deps, logger).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "workflow runs reached a terminal state"),
+            Err(error) => tracing::warn!(%error, "workflow run assessment pass failed"),
         }
 
         if let Err(error) = pickup_one_ready_task(deps, logger).await {

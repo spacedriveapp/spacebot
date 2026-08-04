@@ -60,6 +60,7 @@ fn parse_kind(value: Option<&str>) -> Option<NotificationKind> {
         "task_approval" => Some(NotificationKind::TaskApproval),
         "worker_failed" => Some(NotificationKind::WorkerFailed),
         "cortex_observation" => Some(NotificationKind::CortexObservation),
+        "workflow_run_stopped" => Some(NotificationKind::WorkflowRunStopped),
         _ => None,
     }
 }

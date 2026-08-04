@@ -178,7 +178,8 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         ))
         .routes(routes!(workflows::launch_workflow))
         .routes(routes!(workflows::list_runs))
-        .routes(routes!(workflows::get_run))
+        .routes(routes!(workflows::get_run, workflows::delete_run))
+        .routes(routes!(workflows::cancel_run))
         // Wiki routes
         .routes(routes!(wiki::list_pages, wiki::create_page))
         .routes(routes!(wiki::search_pages))

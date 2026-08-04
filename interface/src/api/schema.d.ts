@@ -2669,6 +2669,35 @@ export interface paths {
         get: operations["get_run"];
         put?: never;
         post?: never;
+        /**
+         * `DELETE /workflow-runs/{run_id}` — remove a finished run and its tasks.
+         * @description The endpoint whose absence left empty run rows behind: cleanup had nothing
+         *     to call. Refused while the run is still going — `409` with the sentence
+         *     saying to cancel it first, because a delete is not a stop.
+         */
+        delete: operations["delete_run"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflow-runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /workflow-runs/{run_id}/cancel` — stop a run.
+         * @description Unstarted tasks are settled; anything already running is left to finish,
+         *     because killing work mid-flight loses whatever it had done. Cancelling a
+         *     `stuck` or `failed` run is allowed and is how the cards it left parked get
+         *     cleared; a `succeeded` run has nothing to clear.
+         */
+        post: operations["cancel_run"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3106,6 +3135,28 @@ export interface components {
         CancelProcessResponse: {
             message: string;
             success: boolean;
+        };
+        CancelRunRequest: {
+            /**
+             * @description Who stopped it. Recorded on the run and on every card it settles, so
+             *     "why did this stop" is answerable from the row rather than from memory.
+             */
+            cancelled_by: string;
+        };
+        /** @description A run that was stopped, and what that did to its tasks. */
+        CancelRunResponse: {
+            /**
+             * Format: int64
+             * @description Tasks left in flight. They are not killed: whatever they had already
+             *     done would be lost, so they finish or are reaped normally.
+             */
+            left_running: number;
+            run: components["schemas"]["WorkflowRun"];
+            /**
+             * Format: int64
+             * @description Unstarted tasks settled as `skipped`.
+             */
+            settled: number;
         };
         ChannelResponse: {
             agent_id: string;
@@ -4505,6 +4556,23 @@ export interface components {
             runs: components["schemas"]["WorkflowRun"][];
         };
         /**
+         * @description How a run is going.
+         *
+         *     `stuck` is the value this enum exists for. The other four are reductions
+         *     over tasks that a caller could have computed itself; `stuck` is not
+         *     derivable from any single task, because every task in a wedged run looks
+         *     individually reasonable — a loop body parked for a person, a step behind a
+         *     gate that stopped polling, a placeholder that will never expand. Only the
+         *     run can see that none of them will ever move.
+         *
+         *     The distinction that matters most is the one this enum does *not* make:
+         *     `stuck` versus still `running`. A run waiting on a gate that can still open
+         *     is waiting, not stuck, and reporting it as stuck teaches people to ignore
+         *     the status — which is worse than the silence it replaced.
+         * @enum {string}
+         */
+        RunStatus: "running" | "succeeded" | "failed" | "stuck" | "cancelled";
+        /**
          * @description Sandbox reporting for one agent, as three separate facts.
          *
          *     `mode` is what the operator asked for and `containment_active` is what the
@@ -5760,9 +5828,17 @@ export interface components {
         /** @description One launch of a workflow. */
         WorkflowRun: {
             created_at: string;
+            /**
+             * @description When the run stopped, in any terminal sense. `None` exactly while
+             *     `status` is `running`.
+             */
+            finished_at?: string | null;
             id: string;
             inputs: unknown;
             launched_by: string;
+            status: components["schemas"]["RunStatus"];
+            /** @description Why the run reached its current status, in words. */
+            status_reason?: string | null;
             workflow_id: string;
         };
         /** @description One step of a pipeline. Becomes exactly one task per launch. */
@@ -12260,6 +12336,82 @@ export interface operations {
             };
             /** @description No such run */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowActionResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run is still going, or a worker is still in it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CancelRunRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelRunResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run has already finished */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

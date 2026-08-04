@@ -218,6 +218,24 @@ pub(super) struct WorkflowActionResponse {
     message: String,
 }
 
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct CancelRunRequest {
+    /// Who stopped it. Recorded on the run and on every card it settles, so
+    /// "why did this stop" is answerable from the row rather than from memory.
+    cancelled_by: String,
+}
+
+/// A run that was stopped, and what that did to its tasks.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct CancelRunResponse {
+    run: crate::workflows::WorkflowRun,
+    /// Unstarted tasks settled as `skipped`.
+    settled: i64,
+    /// Tasks left in flight. They are not killed: whatever they had already
+    /// done would be lost, so they finish or are reaped normally.
+    left_running: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -283,7 +301,10 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::UnknownGateStep { .. }
         | LaunchError::UnknownGateSource { .. }
         | LaunchError::GateReadsItsOwnStep { .. }
-        | LaunchError::GateConfigInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        | LaunchError::GateConfigInvalid { .. }
+        // A template bigger than one run may hold. `422` with the rest: the
+        // template is what has to change, and the message says by how much.
+        | LaunchError::RunTaskCeiling { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         LaunchError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -1126,4 +1147,106 @@ pub(super) async fn get_run(
         .map_err(internal)?;
 
     Ok(Json(RunDetailResponse { run, tasks }))
+}
+
+/// `POST /workflow-runs/{run_id}/cancel` — stop a run.
+///
+/// Unstarted tasks are settled; anything already running is left to finish,
+/// because killing work mid-flight loses whatever it had done. Cancelling a
+/// `stuck` or `failed` run is allowed and is how the cards it left parked get
+/// cleared; a `succeeded` run has nothing to clear.
+#[utoipa::path(
+    post,
+    path = "/workflow-runs/{run_id}/cancel",
+    params(("run_id" = String, Path, description = "Workflow run id")),
+    request_body = CancelRunRequest,
+    responses(
+        (status = 200, body = CancelRunResponse),
+        (status = 404, description = "No such run"),
+        (status = 409, description = "The run has already finished"),
+    ),
+    tag = "workflows",
+)]
+pub(super) async fn cancel_run(
+    State(state): State<Arc<ApiState>>,
+    Path(run_id): Path<String>,
+    Json(request): Json<CancelRunRequest>,
+) -> Result<Json<CancelRunResponse>, (StatusCode, String)> {
+    let store = get_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+
+    let outcome = store
+        .cancel_run(&run_id, &request.cancelled_by)
+        .await
+        .map_err(internal)?;
+
+    let (settled, left_running) = match outcome {
+        crate::workflows::CancelOutcome::Cancelled {
+            settled,
+            left_running,
+        } => (settled, left_running),
+        crate::workflows::CancelOutcome::AlreadyFinished { status } => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("run {run_id} has already finished ({status})"),
+            ));
+        }
+        crate::workflows::CancelOutcome::NotFound => {
+            return Err((StatusCode::NOT_FOUND, format!("no run {run_id}")));
+        }
+    };
+
+    let run = store
+        .get_run(&run_id)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, format!("no run {run_id}")))?;
+
+    Ok(Json(CancelRunResponse {
+        run,
+        settled,
+        left_running,
+    }))
+}
+
+/// `DELETE /workflow-runs/{run_id}` — remove a finished run and its tasks.
+///
+/// The endpoint whose absence left empty run rows behind: cleanup had nothing
+/// to call. Refused while the run is still going — `409` with the sentence
+/// saying to cancel it first, because a delete is not a stop.
+#[utoipa::path(
+    delete,
+    path = "/workflow-runs/{run_id}",
+    params(("run_id" = String, Path, description = "Workflow run id")),
+    responses(
+        (status = 200, body = WorkflowActionResponse),
+        (status = 404, description = "No such run"),
+        (status = 409, description = "The run is still going, or a worker is still in it"),
+    ),
+    tag = "workflows",
+)]
+pub(super) async fn delete_run(
+    State(state): State<Arc<ApiState>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<WorkflowActionResponse>, (StatusCode, String)> {
+    let store = get_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+    let task_store = get_task_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+
+    match store
+        .delete_run(&task_store, &run_id)
+        .await
+        .map_err(internal)?
+    {
+        crate::workflows::DeleteRunOutcome::Deleted { tasks_removed } => {
+            Ok(Json(WorkflowActionResponse {
+                success: true,
+                message: format!("run deleted, along with {tasks_removed} task(s)"),
+            }))
+        }
+        crate::workflows::DeleteRunOutcome::Refused { reason } => {
+            Err((StatusCode::CONFLICT, reason))
+        }
+        crate::workflows::DeleteRunOutcome::NotFound => {
+            Err((StatusCode::NOT_FOUND, format!("no run {run_id}")))
+        }
+    }
 }

@@ -21,6 +21,14 @@ pub enum NotificationKind {
     TaskApproval,
     WorkerFailed,
     CortexObservation,
+    /// A workflow run stopped without finishing — `stuck` or `failed`.
+    ///
+    /// Its own kind rather than a reuse of `worker_failed`, which is about one
+    /// process dying and is answered by looking at that process. A stopped run
+    /// is a pipeline that will not continue on its own; the thing to look at is
+    /// the run, the recovery is usually a template or a limit, and filtering
+    /// the inbox for one must not drag in the other.
+    WorkflowRunStopped,
 }
 
 impl NotificationKind {
@@ -29,6 +37,7 @@ impl NotificationKind {
             NotificationKind::TaskApproval => "task_approval",
             NotificationKind::WorkerFailed => "worker_failed",
             NotificationKind::CortexObservation => "cortex_observation",
+            NotificationKind::WorkflowRunStopped => "workflow_run_stopped",
         }
     }
 }
