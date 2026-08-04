@@ -4864,13 +4864,14 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                 logger.log(
                     "task_ready_sweep",
                     &format!(
-                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {}, skipped {} task(s)",
+                        "Dependency sweep promoted {}, demoted {}, held {}, waiting {}, gated {}, skipped {}, unclaimable {} task(s)",
                         sweep.promoted.len(),
                         sweep.demoted.len(),
                         sweep.stalled.len(),
                         sweep.pending.len(),
                         sweep.gated.len(),
-                        sweep.skipped.len()
+                        sweep.skipped.len(),
+                        sweep.unclaimable.len()
                     ),
                     Some(serde_json::json!({
                         "promoted": sweep.promoted,
@@ -4879,8 +4880,29 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
                         "pending": sweep.pending.iter().map(|p| p.task_number).collect::<Vec<_>>(),
                         "gated": sweep.gated.iter().map(|g| g.task_number).collect::<Vec<_>>(),
                         "skipped": sweep.skipped.iter().map(|s| s.task_number).collect::<Vec<_>>(),
+                        "unclaimable": sweep.unclaimable.iter().map(|u| u.task_number).collect::<Vec<_>>(),
                     })),
                 );
+
+                // Ready, unclaimed, and beyond the fleet. Nothing owns these —
+                // that is what being pooled means — so nothing else will ever
+                // mention them, and a pool nobody watches is the failure this
+                // whole feature exists to avoid rather than introduce.
+                for unclaimable in &sweep.unclaimable {
+                    logger.log(
+                        "task_unclaimable",
+                        &format!(
+                            "Task #{} is ready and nothing in the fleet can claim it — {}",
+                            unclaimable.task_number,
+                            unclaimable.explain()
+                        ),
+                        Some(serde_json::json!({
+                            "task_number": unclaimable.task_number,
+                            "requires": unclaimable.requires,
+                            "undeclared": unclaimable.undeclared,
+                        })),
+                    );
+                }
 
                 // Waiting, not broken — a fan-in whose branches are still
                 // running. Named anyway, because a card that sits still with
@@ -7909,6 +7931,71 @@ mod tests {
                 .is_none(),
             "a parked task must stay out of the pickup loop"
         );
+    }
+
+    /// A pooled task the reaper picks up goes back to the pool, not back to the
+    /// agent that died holding it.
+    ///
+    /// Claiming stamped the agent, so without this the reaper returns the task
+    /// to `ready` still addressed to a process that is gone — and a crashed
+    /// agent takes the work with it, which is the exact failure capability
+    /// assignment exists to prevent.
+    #[tokio::test]
+    async fn reaping_a_pooled_task_returns_it_to_the_pool_not_to_the_agent_that_died() {
+        let (store, registry) = reaper_fixture().await;
+        for agent_id in ["agent-1", "agent-2"] {
+            store
+                .set_agent_capabilities(agent_id, &["rust".to_string()])
+                .await
+                .expect("declare");
+        }
+
+        let task = store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-1".to_string(),
+                assigned_agent_id: String::new(),
+                required_capabilities: vec!["rust".to_string()],
+                title: "pooled and doomed".to_string(),
+                status: TaskStatus::Ready,
+                created_by: "test".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create pooled task");
+
+        let claimed = store
+            .claim_next_ready("agent-1")
+            .await
+            .expect("claim")
+            .expect("a capable agent claims it");
+        assert_eq!(
+            claimed.assigned_agent_id, "agent-1",
+            "claiming stamps the agent, which is what makes the reaper's job possible at all"
+        );
+
+        let reaped = reap_orphaned_task_pickups_in(&store, &registry, "agent-1", 0)
+            .await
+            .expect("reap");
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].new_status, TaskStatus::Ready);
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Ready);
+        assert_eq!(
+            after.assigned_agent_id, "",
+            "the dead agent's stamp is gone — the task is back in the pool it came from"
+        );
+
+        let rescued = store
+            .claim_next_ready("agent-2")
+            .await
+            .expect("claim")
+            .expect("a different capable agent can take the abandoned work");
+        assert_eq!(rescued.task_number, task.task_number);
     }
 
     // -- Blocked worker routing ---------------------------------------------

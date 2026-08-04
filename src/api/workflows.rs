@@ -38,6 +38,13 @@ pub(super) struct SaveStepRequest {
     /// Omit to run the step as whoever launched the run.
     #[serde(default)]
     assigned_agent_id: Option<String>,
+    /// Say what the step needs instead of who should do it.
+    ///
+    /// Set, and the emitted task is unassigned: any agent declaring all of
+    /// these claims it. Mutually exclusive with `assigned_agent_id`, and a
+    /// requirement no agent in the fleet can satisfy is refused at launch.
+    #[serde(default)]
+    required_capabilities: Option<Vec<String>>,
     #[serde(default)]
     priority: Option<String>,
     #[serde(default)]
@@ -342,7 +349,18 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::CommandTimeoutOutOfRange { .. }
         | LaunchError::CommandStepWithoutBinding { .. }
         | LaunchError::PerBranchWithoutFanOut { .. }
+        // A step that says both who and what, or neither usefully, is a
+        // template fact and the message names the field.
+        | LaunchError::StepAssignedAndRequires { .. }
+        | LaunchError::StepRequiresNothing { .. }
+        | LaunchError::PooledStepGrowsTheGraph { .. }
         | LaunchError::WorktreeWithoutRepo { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        // The template may be perfectly good and the *fleet* is what does not
+        // match it — an agent was deleted, or has not declared the label yet.
+        // `409` with the worktree case for the same reason: nothing about the
+        // steps has to change, something outside them does.
+        LaunchError::NoAgentDeclaresCapability { .. }
+        | LaunchError::NoAgentCoversCapabilities { .. } => StatusCode::CONFLICT,
         // Not the template's fault and not the input's: the repo, its base ref,
         // or the disk would not cooperate. A person has to go and look at the
         // checkout, which is a different job from editing a step.
@@ -612,6 +630,7 @@ pub(super) async fn put_step(
             title: request.title,
             description: request.description,
             assigned_agent_id: request.assigned_agent_id,
+            required_capabilities: request.required_capabilities,
             priority,
             input_schema: request.input_schema,
             output_schema: request.output_schema,

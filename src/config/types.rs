@@ -1271,6 +1271,21 @@ pub struct AgentConfig {
     pub display_name: Option<String>,
     /// User-defined role description (e.g. "handles tier 1 support").
     pub role: Option<String>,
+    /// What this agent can do — the labels a pooled task is matched against.
+    ///
+    /// Declared, never inferred from tools or model. Inference here is a guess
+    /// that fails silently, and the failure looks like work quietly not
+    /// happening. Opaque strings the operator chooses, with no taxonomy: every
+    /// scheme invented up front is wrong for the fleet that eventually exists.
+    ///
+    /// Distinct from `role`, which is prose for a human and for the prompt.
+    /// This is machine-matched, and the two would drift the moment somebody
+    /// rewrote one of them.
+    ///
+    /// Empty on every agent by default, which is exactly right for a fleet of
+    /// one: an agent declaring nothing can claim no pooled task, and nothing
+    /// pools work unless somebody asks for it.
+    pub capabilities: Vec<String>,
     /// Custom gradient start color (CSS color string, e.g. "hsl(260, 70%, 55%)").
     pub gradient_start: Option<String>,
     /// Custom gradient end color.
@@ -1335,6 +1350,9 @@ pub struct ResolvedAgentConfig {
     pub id: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
+    /// See [`AgentConfig::capabilities`]. Normalised on resolve, so what
+    /// reaches the database is trimmed, de-duplicated and sorted.
+    pub capabilities: Vec<String>,
     pub gradient_start: Option<String>,
     pub gradient_end: Option<String>,
     pub workspace: PathBuf,
@@ -1424,6 +1442,7 @@ impl AgentConfig {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             role: self.role.clone(),
+            capabilities: crate::tasks::normalise_capabilities(&self.capabilities),
             gradient_start: self.gradient_start.clone(),
             gradient_end: self.gradient_end.clone(),
             workspace: self

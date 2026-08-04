@@ -1576,6 +1576,7 @@ fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::ap
             id: agent.id,
             display_name: agent.display_name,
             role: agent.role,
+            capabilities: agent.capabilities,
             gradient_start: agent.gradient_start,
             gradient_end: agent.gradient_end,
             workspace: agent.workspace.to_string_lossy().to_string(),
@@ -1627,6 +1628,32 @@ async fn run(
         .context("failed to migrate legacy tasks to global database")?;
 
     let global_task_store = Arc::new(spacebot::tasks::TaskStore::new(instance_pool.clone()));
+
+    // Project every agent's declared capabilities into the task database.
+    //
+    // config.toml is the authority for what an agent can do; the scheduler
+    // needs the same facts inside a query, because "may this agent claim that
+    // task" and "can anything in the fleet claim it" are both predicates. Done
+    // on every start rather than only on change, so a config edited by hand
+    // while the daemon was down takes effect — and so a database that drifted
+    // for any reason is corrected by a restart.
+    //
+    // Wholesale per agent, so a capability deleted from the file disappears
+    // here too. Agents deleted from the file are not swept: an agent id that
+    // vanished from config still owns rows nothing else would clean up, and
+    // deleting one through the API already forgets it.
+    for agent in config.resolve_agents() {
+        if let Err(error) = global_task_store
+            .set_agent_capabilities(&agent.id, &agent.capabilities)
+            .await
+        {
+            tracing::error!(
+                %error,
+                agent_id = %agent.id,
+                "failed to record an agent's capabilities — it will claim no pooled work this run"
+            );
+        }
+    }
 
     // Instance-wide wiki knowledge base.
     let global_wiki_store = Arc::new(spacebot::wiki::WikiStore::new(instance_pool.clone()));
@@ -1854,6 +1881,7 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            Some(global_task_store.clone()),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -1872,6 +1900,9 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            // Setup mode: agents are not running yet and nothing can claim
+            // anything, so there is no pool to keep in step with.
+            None,
         );
     }
 
@@ -2638,6 +2669,7 @@ async fn run(
                                             new_llm_manager.clone(),
                                             agent_links.clone(),
                                             agent_humans.clone(),
+                                            Some(global_task_store.clone()),
                                         );
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -3125,6 +3157,7 @@ async fn initialize_agents(
                 id: agent.config.id.clone(),
                 display_name: agent.config.display_name.clone(),
                 role: agent.config.role.clone(),
+                capabilities: agent.config.capabilities.clone(),
                 gradient_start: agent.config.gradient_start.clone(),
                 gradient_end: agent.config.gradient_end.clone(),
                 workspace: agent.config.workspace.to_string_lossy().to_string(),

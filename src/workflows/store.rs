@@ -77,8 +77,22 @@ pub struct WorkflowStep {
     pub step_key: String,
     pub title: String,
     pub description: Option<String>,
-    /// `None` means the agent that launched the run.
+    /// `None` means the agent that launched the run — unless
+    /// `required_capabilities` is set, in which case nobody is named and the
+    /// emitted task goes into the pool.
     pub assigned_agent_id: Option<String>,
+    /// What this step needs, instead of who should do it.
+    ///
+    /// The step-level half of the same choice a task has. `None` on every step
+    /// that exists today. Set, and the emitted task is unassigned and claimed
+    /// by whichever capable agent asks first.
+    ///
+    /// A requirement nothing in the fleet can satisfy is refused at **launch**,
+    /// the way an unknown step reference already is — a template is edited by
+    /// somebody who is still watching, and a pooled task nothing can claim is
+    /// otherwise only visible in the sweep report.
+    #[serde(default)]
+    pub required_capabilities: Option<Vec<String>>,
     pub priority: TaskPriority,
     pub input_schema: Option<Value>,
     pub output_schema: Option<Value>,
@@ -708,6 +722,46 @@ pub enum LaunchError {
     WorktreeWithoutRepo { step_key: String, mode: String },
     #[error("step `{step_key}` cannot be given a worktree: {details}")]
     WorktreeUnavailable { step_key: String, details: String },
+    #[error(
+        "step `{step_key}` names agent `{assigned_agent_id}` and also requires [{}] — a step is \
+         addressed one way or the other, so drop one",
+        .requires.join(", ")
+    )]
+    StepAssignedAndRequires {
+        step_key: String,
+        assigned_agent_id: String,
+        requires: Vec<String>,
+    },
+    #[error(
+        "step `{step_key}` states a requirement with nothing in it — a step that requires nothing \
+         is a step assigned to the launching agent, so say that instead of leaving a field that \
+         reads as pooled on the canvas and behaves as pushed"
+    )]
+    StepRequiresNothing { step_key: String },
+    #[error(
+        "step `{step_key}` requires `{capability}`, which no agent declares — declare it on an \
+         agent, or correct the step. Launching would emit a task nothing in the fleet could ever \
+         claim"
+    )]
+    NoAgentDeclaresCapability {
+        step_key: String,
+        capability: String,
+    },
+    #[error(
+        "step `{step_key}` requires [{}], and while every one of those is declared somewhere, no \
+         single agent has them all — give one agent the rest, or split the step",
+        .requires.join(", ")
+    )]
+    NoAgentCoversCapabilities {
+        step_key: String,
+        requires: Vec<String>,
+    },
+    #[error(
+        "step `{step_key}` states a requirement and also {reason} — both of those grow the run \
+         graph after launch, by a per-agent pass that assumes it is the only one running, and a \
+         pooled task is reconciled by every agent's pass. Name an agent on this step"
+    )]
+    PooledStepGrowsTheGraph { step_key: String, reason: String },
     #[error("workflow storage error: {0}")]
     Storage(String),
 }
@@ -817,16 +871,19 @@ impl WorkflowStore {
     pub async fn put_step(&self, step: &WorkflowStep) -> Result<()> {
         sqlx::query(
             "INSERT INTO workflow_steps \
-                 (workflow_id, step_key, title, description, assigned_agent_id, priority, \
+                 (workflow_id, step_key, title, description, assigned_agent_id, \
+                  required_capabilities, priority, \
                   input_schema, output_schema, system_prompt, repo_id, position, \
                   for_each_step_key, for_each_pointer, for_each_key, \
                   loop_group, loop_max_iterations, loop_until, \
                   kind, command, command_timeout_secs, expect_exit_code, \
                   worktree_mode, worktree_base_ref) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workflow_id, step_key) DO UPDATE SET \
                  title = excluded.title, description = excluded.description, \
-                 assigned_agent_id = excluded.assigned_agent_id, priority = excluded.priority, \
+                 assigned_agent_id = excluded.assigned_agent_id, \
+                 required_capabilities = excluded.required_capabilities, \
+                 priority = excluded.priority, \
                  input_schema = excluded.input_schema, output_schema = excluded.output_schema, \
                  system_prompt = excluded.system_prompt, repo_id = excluded.repo_id, \
                  position = excluded.position, \
@@ -847,6 +904,13 @@ impl WorkflowStore {
         .bind(&step.title)
         .bind(&step.description)
         .bind(&step.assigned_agent_id)
+        .bind(
+            step.required_capabilities
+                .as_ref()
+                .map(|labels| serde_json::to_string(&crate::tasks::normalise_capabilities(labels)))
+                .transpose()
+                .context("failed to serialize a step's required capabilities")?,
+        )
         .bind(step.priority.as_str())
         .bind(step.input_schema.as_ref().map(|v| v.to_string()))
         .bind(step.output_schema.as_ref().map(|v| v.to_string()))
@@ -873,7 +937,8 @@ impl WorkflowStore {
 
     pub async fn list_steps(&self, workflow_id: &str) -> Result<Vec<WorkflowStep>> {
         let rows = sqlx::query(
-            "SELECT workflow_id, step_key, title, description, assigned_agent_id, priority, \
+            "SELECT workflow_id, step_key, title, description, assigned_agent_id, \
+                    required_capabilities, priority, \
                     input_schema, output_schema, system_prompt, repo_id, position, \
                     for_each_step_key, for_each_pointer, for_each_key, \
                     loop_group, loop_max_iterations, loop_until, \
@@ -1547,6 +1612,95 @@ impl WorkflowStore {
             })?;
         }
 
+        // 2d. Capability requirements, checked against the fleet as it is right
+        //     now.
+        //
+        //     This is the earlier of the two places a requirement nothing can
+        //     satisfy is caught, and the better one: the sweep report catches
+        //     it too, but only after a run started and only for whoever is
+        //     reading the board. Here the answer is still a corrected template,
+        //     named by step and by label.
+        //
+        //     It does not cover an agent being deleted mid-run — nothing
+        //     checked at launch can — which is what the sweep report is for.
+        let fleet = task_store
+            .fleet_capabilities()
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        let declared_anywhere: HashSet<&str> = fleet
+            .values()
+            .flat_map(|held| held.iter().map(String::as_str))
+            .collect();
+        for step in &steps {
+            let Some(requires) = step.required_capabilities.as_ref() else {
+                continue;
+            };
+            let requires = crate::tasks::normalise_capabilities(requires);
+
+            if requires.is_empty() {
+                return Err(LaunchError::StepRequiresNothing {
+                    step_key: step.step_key.clone(),
+                });
+            }
+            if let Some(assigned) = step
+                .assigned_agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Err(LaunchError::StepAssignedAndRequires {
+                    step_key: step.step_key.clone(),
+                    assigned_agent_id: assigned.to_string(),
+                    requires,
+                });
+            }
+
+            // Fan-out expansion and loop advancement are per-agent passes that
+            // create rows, and neither is guarded against two agents running it
+            // at once — they never had to be, because a pushed task has exactly
+            // one agent sweeping it. A pooled task is swept by all of them, so
+            // pooling one of these steps would race two expansions of the same
+            // placeholder. Refused rather than allowed and hoped over.
+            if step.for_each_step_key.is_some() {
+                return Err(LaunchError::PooledStepGrowsTheGraph {
+                    step_key: step.step_key.clone(),
+                    reason: "fans out over another step".to_string(),
+                });
+            }
+            if step.loop_group.is_some() {
+                return Err(LaunchError::PooledStepGrowsTheGraph {
+                    step_key: step.step_key.clone(),
+                    reason: format!(
+                        "is in loop body `{}`",
+                        step.loop_group.as_deref().unwrap_or_default()
+                    ),
+                });
+            }
+
+            if let Some(capability) = requires
+                .iter()
+                .find(|label| !declared_anywhere.contains(label.as_str()))
+            {
+                return Err(LaunchError::NoAgentDeclaresCapability {
+                    step_key: step.step_key.clone(),
+                    capability: capability.clone(),
+                });
+            }
+            // Every label is held by somebody and no one holds them all. A
+            // different repair from the case above, so a different error —
+            // reporting both as "unknown capability" would send an author
+            // hunting for a typo that is not there.
+            if !fleet
+                .values()
+                .any(|held| requires.iter().all(|label| held.contains(label)))
+            {
+                return Err(LaunchError::NoAgentCoversCapabilities {
+                    step_key: step.step_key.clone(),
+                    requires,
+                });
+            }
+        }
+
         // 3. Every input a step says it needs is actually wired.
         //
         //    Without this the mistake surfaces at run time as an unresolvable
@@ -1683,13 +1837,25 @@ impl WorkflowStore {
         provisioned: &mut Vec<PreparedWorktree>,
     ) -> std::result::Result<(), LaunchError> {
         for step in steps {
+            // A step that states a requirement names nobody: the emitted task
+            // goes into the pool with `assigned_agent_id` empty, and the first
+            // capable agent to ask stamps itself on it. Everything else — the
+            // launching agent as the default assignee — is unchanged, which is
+            // the whole point of the requirement being opt-in.
+            let requires = step.required_capabilities.clone().unwrap_or_default();
+            let assigned_agent_id = if requires.is_empty() {
+                step.assigned_agent_id
+                    .clone()
+                    .unwrap_or_else(|| identity.agent_id.clone())
+            } else {
+                crate::tasks::UNASSIGNED_AGENT_ID.to_string()
+            };
+
             let task = task_store
                 .create(CreateTaskInput {
                     owner_agent_id: identity.agent_id.clone(),
-                    assigned_agent_id: step
-                        .assigned_agent_id
-                        .clone()
-                        .unwrap_or_else(|| identity.agent_id.clone()),
+                    assigned_agent_id,
+                    required_capabilities: requires,
                     title: step.title.clone(),
                     description: step.description.clone(),
                     // Every step starts in backlog, entry steps included. The
@@ -3170,6 +3336,15 @@ fn step_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowStep> {
         title: row.try_get("title").context("failed to read step title")?,
         description: row.try_get("description").ok().flatten(),
         assigned_agent_id: row.try_get("assigned_agent_id").ok().flatten(),
+        // An unreadable requirement becomes `None`, which makes the step a
+        // pushed one. Conservative in the same direction as `kind` above: a
+        // step that runs on the launching agent is wrong, a step nothing can
+        // ever claim is wrong *and* silent.
+        required_capabilities: row
+            .try_get::<Option<String>, _>("required_capabilities")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
         priority: TaskPriority::parse(&priority).unwrap_or(TaskPriority::Medium),
         input_schema: read_json(&row, "input_schema"),
         output_schema: read_json(&row, "output_schema"),
@@ -3307,6 +3482,7 @@ pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
         "CREATE TABLE workflow_steps (workflow_id TEXT NOT NULL, step_key TEXT NOT NULL, \
          title TEXT NOT NULL, description TEXT, assigned_agent_id TEXT, \
+         required_capabilities TEXT, \
          priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
          system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
          for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
@@ -3413,6 +3589,7 @@ mod tests {
             title: format!("step {key}"),
             description: None,
             assigned_agent_id: None,
+            required_capabilities: None,
             priority: TaskPriority::Medium,
             input_schema: None,
             output_schema: None,
@@ -6360,6 +6537,232 @@ mod tests {
             1,
             "past the grace period the same run is judged, and a run with no tasks is not a \
              success"
+        );
+    }
+
+    // -- Capability-based step assignment (#28) -----------------------------
+
+    /// A step that states a requirement no agent can satisfy is refused at
+    /// launch, naming the step and the label.
+    ///
+    /// It is knowable now, while a person is still watching and the answer can
+    /// be a corrected template. Launching anyway emits a task that sits in the
+    /// pool forever, visible only in a sweep report nobody asked for.
+    #[tokio::test]
+    async fn a_step_requiring_a_capability_nothing_declares_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        tasks
+            .set_agent_capabilities("agent-1", &["rust".to_string()])
+            .await
+            .expect("declare");
+
+        let mut needy = step(&id, "port", 0);
+        needy.required_capabilities = Some(vec!["haskell".into()]);
+        workflows.put_step(&needy).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("launch should be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("port") && message.contains("haskell"),
+            "the refusal names the step and the capability: {message}"
+        );
+
+        assert!(
+            tasks
+                .list(crate::tasks::TaskListFilter::default())
+                .await
+                .expect("list")
+                .is_empty(),
+            "a refused launch emits nothing"
+        );
+    }
+
+    /// A requirement every label of which is declared somewhere, but not all on
+    /// one agent, is refused with a different message.
+    ///
+    /// Two conditions, two repairs: one wants a label declared, the other wants
+    /// a step split or an agent widened. Reporting both as "unknown capability"
+    /// sends an author hunting for a typo that is not there.
+    #[tokio::test]
+    async fn a_step_no_single_agent_covers_is_refused_and_says_so_rather_than_naming_a_typo() {
+        let (workflows, tasks, id) = fixture().await;
+        tasks
+            .set_agent_capabilities("agent-rust", &["rust".to_string()])
+            .await
+            .expect("declare");
+        tasks
+            .set_agent_capabilities("agent-design", &["design".to_string()])
+            .await
+            .expect("declare");
+
+        let mut needy = step(&id, "redesign", 0);
+        needy.required_capabilities = Some(vec!["rust".into(), "design".into()]);
+        workflows.put_step(&needy).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("launch should be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("no single agent"),
+            "the refusal says the fleet is split, not that a label is unknown: {message}"
+        );
+    }
+
+    /// A step that states a satisfiable requirement emits an unassigned task,
+    /// and a capable agent claims it — including one that is not the launcher.
+    ///
+    /// This is the feature end to end. If the emitted task were assigned to the
+    /// launching agent by the usual default, the requirement would be a field
+    /// nothing ever matched against.
+    #[tokio::test]
+    async fn a_step_with_a_satisfiable_requirement_emits_a_pooled_task_a_capable_agent_claims() {
+        let (workflows, tasks, id) = fixture().await;
+        tasks
+            .set_agent_capabilities("agent-designer", &["design".to_string()])
+            .await
+            .expect("declare");
+
+        let mut needy = step(&id, "mock", 0);
+        needy.required_capabilities = Some(vec!["design".into()]);
+        workflows.put_step(&needy).await.expect("put step");
+
+        let run = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("launch");
+        let number = run.task_numbers["mock"];
+
+        let emitted = tasks
+            .get_by_number(number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert_eq!(
+            emitted.assigned_agent_id, "",
+            "a step stating a requirement names nobody, not the launching agent"
+        );
+        assert_eq!(
+            emitted.owner_agent_id, "agent-1",
+            "the run still has an owner"
+        );
+        assert_eq!(
+            emitted.required_capabilities.as_deref(),
+            Some(["design".to_string()].as_slice())
+        );
+
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+
+        assert!(
+            tasks
+                .claim_next_ready("agent-1")
+                .await
+                .expect("claim")
+                .is_none(),
+            "the launching agent declares nothing and cannot claim its own run's pooled step"
+        );
+        let claimed = tasks
+            .claim_next_ready("agent-designer")
+            .await
+            .expect("claim")
+            .expect("the capable agent claims it");
+        assert_eq!(claimed.task_number, number);
+        assert_eq!(claimed.assigned_agent_id, "agent-designer");
+    }
+
+    /// Naming an agent and stating a requirement on the same step is refused.
+    ///
+    /// Whichever one lost would be a field set on the canvas and read by
+    /// nothing — the dead-config failure, in the place it would be least
+    /// visible, because the step would still run.
+    #[tokio::test]
+    async fn a_step_that_both_names_an_agent_and_states_a_requirement_is_refused_at_launch() {
+        let (workflows, tasks, id) = fixture().await;
+        tasks
+            .set_agent_capabilities("agent-designer", &["design".to_string()])
+            .await
+            .expect("declare");
+
+        let mut confused = step(&id, "mock", 0);
+        confused.assigned_agent_id = Some("agent-designer".into());
+        confused.required_capabilities = Some(vec!["design".into()]);
+        workflows.put_step(&confused).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("launch should be refused");
+        assert!(
+            error.to_string().contains("addressed one way or the other"),
+            "the refusal explains that the two are alternatives: {error}"
+        );
+    }
+
+    /// A requirement with nothing in it is refused rather than silently read as
+    /// "assigned to the launcher".
+    ///
+    /// On the canvas an empty requirement reads as pooled. Behaving as pushed
+    /// would be the same field-set-and-ignored failure, discovered only when
+    /// the wrong agent runs the step.
+    #[tokio::test]
+    async fn a_step_requiring_an_empty_list_is_refused_rather_than_treated_as_unpooled() {
+        let (workflows, tasks, id) = fixture().await;
+
+        let mut empty = step(&id, "mock", 0);
+        empty.required_capabilities = Some(Vec::new());
+        workflows.put_step(&empty).await.expect("put step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("launch should be refused");
+        assert!(
+            error.to_string().contains("requires nothing")
+                || error.to_string().contains("nothing in it"),
+            "the refusal says the requirement is empty: {error}"
+        );
+    }
+
+    /// Pooling a step that grows the run graph after launch is refused.
+    ///
+    /// Fan-out expansion and loop advancement are per-agent passes with no
+    /// guard against two of them running at once — they never needed one,
+    /// because a pushed task has exactly one agent sweeping it. A pooled task
+    /// is swept by every agent, so allowing this would race two expansions of
+    /// the same placeholder and emit each branch twice.
+    #[tokio::test]
+    async fn a_pooled_step_that_would_grow_the_graph_after_launch_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        tasks
+            .set_agent_capabilities("agent-designer", &["design".to_string()])
+            .await
+            .expect("declare");
+
+        workflows
+            .put_step(&step(&id, "collect", 0))
+            .await
+            .expect("put step");
+        let mut fan = step(&id, "each", 1);
+        fan.for_each_step_key = Some("collect".into());
+        fan.for_each_pointer = Some("/items".into());
+        fan.required_capabilities = Some(vec!["design".into()]);
+        workflows.put_step(&fan).await.expect("put step");
+        workflows
+            .link_steps(&id, "collect", "each")
+            .await
+            .expect("link");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("launch should be refused");
+        assert!(
+            error.to_string().contains("each"),
+            "the refusal names the step: {error}"
         );
     }
 }

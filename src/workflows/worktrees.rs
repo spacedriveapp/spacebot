@@ -706,6 +706,7 @@ mod tests {
             title: key.to_string(),
             description: None,
             assigned_agent_id: None,
+            required_capabilities: None,
             priority: crate::tasks::TaskPriority::Medium,
             input_schema: None,
             output_schema: None,

@@ -12,7 +12,7 @@ use serde_json::Value;
 #[cfg(test)]
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row as _, SqlitePool};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +209,67 @@ impl TaskStatus {
 /// callers that already have the row in hand.
 pub const SETTLED_STATUSES: &str = "('done', 'skipped')";
 
+/// What `assigned_agent_id` holds while a pooled task is waiting to be claimed.
+///
+/// The column is `NOT NULL` and rewriting a fifty-column table to change that
+/// would be a migration with far more downside than this sentinel has. Empty is
+/// safe as a sentinel because no agent id is empty, so `assigned_agent_id = ?`
+/// never accidentally matches a pooled task — the only way to one is through
+/// the capability predicate.
+///
+/// "Unclaimed" and "pooled" are separate facts and stay separate columns:
+/// `required_capabilities IS NOT NULL` says the task came from a pool and never
+/// changes, this says nobody holds it *right now*. Collapsing them would leave
+/// the reaper unable to tell a crashed pooled task from a crashed pushed one.
+pub const UNASSIGNED_AGENT_ID: &str = "";
+
+/// The tasks an agent is allowed to claim: the ones addressed to it by name,
+/// plus the unclaimed pooled ones whose every requirement it declares.
+///
+/// Two `?` placeholders, both the claiming agent's id, in that order.
+///
+/// `NOT EXISTS (a requirement the agent does not hold)` rather than a count
+/// comparison: a count needs the requirement list to be free of duplicates to
+/// be correct, and this does not care.
+const CLAIMABLE_BY_AGENT: &str = "(t.assigned_agent_id = ? \
+     OR (t.required_capabilities IS NOT NULL \
+         AND t.assigned_agent_id = '' \
+         AND NOT EXISTS (\
+           SELECT 1 FROM json_each(t.required_capabilities) AS required \
+            WHERE NOT EXISTS (\
+              SELECT 1 FROM agent_capabilities ac \
+               WHERE ac.agent_id = ? AND ac.capability = required.value))))";
+
+/// Which tasks a per-agent scheduling pass may reconcile.
+///
+/// One `?`, the sweeping agent's id.
+///
+/// A pushed task belongs to one agent and only that agent's sweep touches it. A
+/// pooled task belongs to nobody until it is claimed, so every sweep is
+/// entitled to promote it — the alternative is a pool that only moves while one
+/// particular agent is alive, which is the failure the pool exists to remove.
+/// Every write the sweep makes is conditional on the status it read, so two
+/// agents reconciling the same pooled task is a race only one of them wins.
+const SWEEPABLE_BY_AGENT: &str = "(t.assigned_agent_id = ? OR t.required_capabilities IS NOT NULL)";
+
+/// Trim, drop empties, de-duplicate, and sort a capability list.
+///
+/// Sorted so two spellings of the same set compare equal on the wire and in the
+/// row. Case is *not* folded: labels are opaque strings the operator chose, and
+/// silently equating `Rust` with `rust` would be this layer inventing the
+/// taxonomy the design deliberately does not have. The drift that invites is
+/// answered by offering the existing set when authoring, not here.
+pub fn normalise_capabilities<S: AsRef<str>>(labels: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = labels
+        .iter()
+        .map(|label| label.as_ref().trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
@@ -274,6 +335,18 @@ pub struct Task {
     pub priority: TaskPriority,
     pub owner_agent_id: String,
     pub assigned_agent_id: String,
+    /// What this task needs, instead of who should do it.
+    ///
+    /// `None` on a pushed task — the common case, and the one a fleet of one
+    /// never leaves. `Some` makes the task *pooled*: any agent declaring all of
+    /// these labels may claim it, and claiming stamps `assigned_agent_id` so
+    /// that from that moment it is indistinguishable from a pushed task.
+    ///
+    /// This stays set for the life of the task, including while it is claimed.
+    /// It answers "where did this come from", which is a different question
+    /// from "who has it now" — and the reaper needs both to put a crashed
+    /// pooled task back in the pool rather than back on the agent that died.
+    pub required_capabilities: Option<Vec<String>>,
     pub subtasks: Vec<TaskSubtask>,
     pub metadata: Value,
     pub source_memory_id: Option<String>,
@@ -623,7 +696,12 @@ pub struct TaskRun {
 #[derive(Debug, Clone)]
 pub struct CreateTaskInput {
     pub owner_agent_id: String,
+    /// Who runs this. Leave empty and set `required_capabilities` instead to
+    /// pool it; setting both is refused rather than resolved, because either
+    /// resolution silently ignores half of what the caller asked for.
     pub assigned_agent_id: String,
+    /// What this task needs. Empty means it names an agent instead.
+    pub required_capabilities: Vec<String>,
     pub title: String,
     pub description: Option<String>,
     pub status: TaskStatus,
@@ -649,6 +727,7 @@ impl Default for CreateTaskInput {
         Self {
             owner_agent_id: String::new(),
             assigned_agent_id: String::new(),
+            required_capabilities: Vec::new(),
             title: String::new(),
             description: None,
             status: TaskStatus::Backlog,
@@ -747,6 +826,27 @@ impl TaskStore {
             serde_json::to_string(&input.subtasks).context("failed to serialize subtasks")?;
         let metadata_json = input.metadata.to_string();
 
+        // Naming an agent and stating a requirement are the two ways to address
+        // a task and they answer the same question. Doing both is refused here
+        // rather than resolved in favour of one, because whichever one lost
+        // would be a field the caller set and nothing read — and the way that
+        // fails is work quietly going to the wrong agent, or to none.
+        let requirements = normalise_capabilities(&input.required_capabilities);
+        if !requirements.is_empty() && !input.assigned_agent_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "task `{}` names agent `{}` and also requires [{}] — a task is addressed one way \
+                 or the other, so drop the assignment to pool it or drop the requirement to push it",
+                input.title,
+                input.assigned_agent_id,
+                requirements.join(", ")
+            )
+            .into());
+        }
+        let requirements_json = (!requirements.is_empty())
+            .then(|| serde_json::to_string(&requirements))
+            .transpose()
+            .context("failed to serialize required capabilities")?;
+
         for attempt in 0..Self::MAX_CREATE_RETRIES {
             let mut tx = self
                 .pool
@@ -770,11 +870,11 @@ impl TaskStore {
                 r#"
                 INSERT INTO tasks (
                     id, task_number, title, description, status, priority,
-                    owner_agent_id, assigned_agent_id,
+                    owner_agent_id, assigned_agent_id, required_capabilities,
                     subtasks, metadata, source_memory_id, created_by,
                     project_id, repo_id, worktree_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&task_id)
@@ -785,6 +885,7 @@ impl TaskStore {
             .bind(input.priority.as_str())
             .bind(&input.owner_agent_id)
             .bind(&input.assigned_agent_id)
+            .bind(&requirements_json)
             .bind(&subtasks_json)
             .bind(&metadata_json)
             .bind(&input.source_memory_id)
@@ -1135,6 +1236,15 @@ impl TaskStore {
             .unwrap_or(current.assigned_agent_id.clone());
         let reassigned = next_assigned != current.assigned_agent_id;
 
+        // Naming an agent takes a pooled task out of the pool for good.
+        //
+        // Without this the requirement outlives the decision: the next failure
+        // or reap would clear the stamp — that is what returning to the pool
+        // means — and the person's assignment would be quietly undone by
+        // machinery they never saw. "Assign this to designer" means it is
+        // designer's, so the pool membership ends here.
+        let leaves_pool = !next_assigned.is_empty() && current.required_capabilities.is_some();
+
         // If the task is being reassigned to a different agent, clear the worker
         // binding so the old worker cannot keep updating it.
         let clear_worker = input.clear_worker_id || (reassigned && current.worker_id.is_some());
@@ -1190,6 +1300,9 @@ impl TaskStore {
         }
         if input.max_retries.is_some() {
             query.push_str("max_retries = ?, ");
+        }
+        if leaves_pool {
+            query.push_str("required_capabilities = NULL, ");
         }
 
         query.push_str(
@@ -1264,32 +1377,72 @@ impl TaskStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Atomically claim the highest-priority ready task assigned to the given
-    /// agent. Moves it to `in_progress` and returns it.
+    /// Every condition a task must meet before `agent` may claim it, as
+    /// independent predicates joined with `AND`.
     ///
-    /// Placeholders are excluded here as well as in the sweep, because the
-    /// sweep is not the only way into `ready`: unblocking a parked placeholder
-    /// puts it there directly, and "never claimed" has to hold however it
-    /// arrived rather than only on the path we remembered to guard.
+    /// A list rather than one hand-written clause because this is the
+    /// chokepoint: the same conditions have to hold in the SELECT that picks a
+    /// candidate *and* in the conditional UPDATE that wins the race for it, and
+    /// a condition added to one and forgotten in the other is a task handed to
+    /// two workers. Composed here, both queries get it by construction, and the
+    /// next hold to be added — a gate, a loop boundary — is one more entry.
+    ///
+    /// Placeholder count and order matter: [`CLAIMABLE_BY_AGENT`] takes the
+    /// agent id twice and nothing else takes anything, so every caller binds
+    /// the agent id twice, in this order. [`Self::bind_claim_predicates`] is
+    /// the only thing that should be doing it.
+    fn claim_predicates() -> String {
+        [
+            "t.status = 'ready'",
+            // Excluded here as well as in the sweep, because the sweep is not
+            // the only way into `ready`: unblocking a parked placeholder puts
+            // it there directly, and "never claimed" has to hold however it
+            // arrived rather than only on the path we remembered to guard.
+            "t.fan_out_placeholder = 0",
+            CLAIMABLE_BY_AGENT,
+            &format!(
+                "NOT EXISTS (\
+                   SELECT 1 FROM task_dependencies d \
+                     JOIN tasks p ON p.task_number = d.parent_task_number \
+                    WHERE d.child_task_number = t.task_number \
+                      AND p.status NOT IN {SETTLED_STATUSES})"
+            ),
+        ]
+        .join(" AND ")
+    }
+
+    /// Bind what [`Self::claim_predicates`] asks for, in the order it asks.
+    fn bind_claim_predicates<'q>(
+        query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+        agent_id: &'q str,
+    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+        query.bind(agent_id).bind(agent_id)
+    }
+
+    /// Atomically claim the highest-priority ready task this agent may take —
+    /// addressed to it by name, or pooled and within its capabilities. Moves it
+    /// to `in_progress` and returns it.
+    ///
+    /// Claiming stamps `assigned_agent_id`. From that moment a pooled task is
+    /// indistinguishable from a pushed one, which is why the attempt log, the
+    /// failure budget and the reaper need no knowledge of pools at all.
     pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
-        let row = sqlx::query(&format!(
-            "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
-             AND fan_out_placeholder = 0 \
-             AND NOT EXISTS (\
-               SELECT 1 FROM task_dependencies d \
-                 JOIN tasks p ON p.task_number = d.parent_task_number \
-                WHERE d.child_task_number = tasks.task_number \
-                  AND p.status NOT IN {SETTLED_STATUSES}) \
-             ORDER BY CASE priority \
-               WHEN 'critical' THEN 0 \
-               WHEN 'high' THEN 1 \
-               WHEN 'medium' THEN 2 \
-               WHEN 'low' THEN 3 \
-               ELSE 4 END ASC, \
-             task_number ASC \
-             LIMIT 1"
-        ))
-        .bind(assigned_agent_id)
+        let predicates = Self::claim_predicates();
+
+        let row = Self::bind_claim_predicates(
+            sqlx::query(&format!(
+                "SELECT t.task_number FROM tasks t WHERE {predicates} \
+                 ORDER BY CASE t.priority \
+                   WHEN 'critical' THEN 0 \
+                   WHEN 'high' THEN 1 \
+                   WHEN 'medium' THEN 2 \
+                   WHEN 'low' THEN 3 \
+                   ELSE 4 END ASC, \
+                 t.task_number ASC \
+                 LIMIT 1"
+            )),
+            assigned_agent_id,
+        )
         .fetch_optional(&self.pool)
         .await
         .context("failed to find ready task")?;
@@ -1301,18 +1454,20 @@ impl TaskStore {
         let task_number: i64 = row
             .try_get("task_number")
             .context("failed to read task_number from ready task row")?;
-        let result = sqlx::query(&format!(
-            "UPDATE tasks SET status = 'in_progress', \
-             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE task_number = ? AND status = 'ready' \
-             AND fan_out_placeholder = 0 \
-             AND NOT EXISTS (\
-               SELECT 1 FROM task_dependencies d \
-                 JOIN tasks p ON p.task_number = d.parent_task_number \
-                WHERE d.child_task_number = tasks.task_number \
-                  AND p.status NOT IN {SETTLED_STATUSES})"
-        ))
-        .bind(task_number)
+
+        // The race, decided here. Every predicate from the SELECT is re-checked
+        // under the write, so two agents competing for the same pooled task
+        // both pass the SELECT and exactly one changes a row.
+        let result = Self::bind_claim_predicates(
+            sqlx::query(&format!(
+                "UPDATE tasks AS t SET status = 'in_progress', assigned_agent_id = ?, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                 WHERE t.task_number = ? AND {predicates}"
+            ))
+            .bind(assigned_agent_id)
+            .bind(task_number),
+            assigned_agent_id,
+        )
         .execute(&self.pool)
         .await
         .context("failed to claim ready task")?;
@@ -1926,7 +2081,7 @@ impl TaskStore {
         // those apart, and it clears this column when it does.
         let promoted: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT task_number FROM tasks t \
-             WHERE t.assigned_agent_id = ? \
+             WHERE {SWEEPABLE_BY_AGENT} \
                AND t.status = 'backlog' \
                AND t.fan_out_placeholder = 0 \
                AND t.awaiting_loop_group IS NULL \
@@ -2046,7 +2201,7 @@ impl TaskStore {
         // Demote: promoted too early, or a parent came back.
         let demoted: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT task_number FROM tasks t \
-             WHERE t.assigned_agent_id = ? \
+             WHERE {SWEEPABLE_BY_AGENT} \
                AND t.status = 'ready' \
                AND EXISTS (\
                  SELECT 1 FROM task_dependencies d \
@@ -2075,7 +2230,154 @@ impl TaskStore {
             }
         }
 
+        // Last, because it reads the pool as the pass leaves it: a task
+        // promoted a moment ago is exactly the one at risk of landing in a pool
+        // nothing can empty, and a report built before the promotion would miss
+        // it for a whole tick.
+        sweep.unclaimable = self.unclaimable_pool().await?;
+
         Ok(sweep)
+    }
+
+    /// Ready, unclaimed, pooled, and beyond the whole fleet.
+    ///
+    /// The pool has no owner, so nothing else will ever mention these: they are
+    /// not stalled (their graph is fine), not gated (nothing is holding them),
+    /// and not waiting (nothing is coming). Without this they sit at `ready`
+    /// looking exactly like work about to start, forever.
+    ///
+    /// Matched in Rust rather than SQL because the answer has to distinguish
+    /// two failures the same query would flatten — see [`UnclaimableTask`] —
+    /// and because a fleet is a handful of rows.
+    pub async fn unclaimable_pool(&self) -> Result<Vec<UnclaimableTask>> {
+        let pooled: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT task_number, required_capabilities FROM tasks \
+             WHERE status = 'ready' AND assigned_agent_id = '' \
+               AND required_capabilities IS NOT NULL \
+               AND fan_out_placeholder = 0",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list the unclaimed task pool")?;
+
+        if pooled.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fleet = self.fleet_capabilities().await?;
+        let declared_anywhere: HashSet<&str> = fleet
+            .values()
+            .flat_map(|held| held.iter().map(String::as_str))
+            .collect();
+
+        let mut unclaimable = Vec::new();
+        for (task_number, requirements_json) in pooled {
+            let requires: Vec<String> =
+                serde_json::from_str(&requirements_json).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        %error,
+                        task_number,
+                        "task has unreadable required_capabilities — treating it as requiring nothing readable"
+                    );
+                    Vec::new()
+                });
+
+            if fleet
+                .values()
+                .any(|held| requires.iter().all(|label| held.contains(label)))
+            {
+                continue;
+            }
+
+            let undeclared: Vec<String> = requires
+                .iter()
+                .filter(|label| !declared_anywhere.contains(label.as_str()))
+                .cloned()
+                .collect();
+
+            unclaimable.push(UnclaimableTask {
+                task_number,
+                requires,
+                undeclared,
+            });
+        }
+
+        Ok(unclaimable)
+    }
+
+    // -- Capabilities -------------------------------------------------------
+
+    /// Every agent that declares anything, and what it declares.
+    ///
+    /// Agents declaring nothing are absent rather than present-and-empty, and
+    /// that loses no information: an agent with no capabilities can claim no
+    /// pooled task, because a pooled task requires at least one.
+    pub async fn fleet_capabilities(&self) -> Result<HashMap<String, HashSet<String>>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT agent_id, capability FROM agent_capabilities")
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to read fleet capabilities")?;
+
+        let mut fleet: HashMap<String, HashSet<String>> = HashMap::new();
+        for (agent_id, capability) in rows {
+            fleet.entry(agent_id).or_default().insert(capability);
+        }
+        Ok(fleet)
+    }
+
+    /// Replace what one agent declares.
+    ///
+    /// A projection of config.toml, so it is written wholesale rather than
+    /// patched: a capability removed from the file has to disappear from here,
+    /// and an upsert-only sync would leave a deleted label matching tasks
+    /// forever. Done in one transaction so no sweep or claim ever sees an agent
+    /// mid-rewrite with half its capabilities.
+    pub async fn set_agent_capabilities(
+        &self,
+        agent_id: &str,
+        capabilities: &[String],
+    ) -> Result<()> {
+        let capabilities = normalise_capabilities(capabilities);
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open capability sync transaction")?;
+
+        sqlx::query("DELETE FROM agent_capabilities WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to clear an agent's capabilities")?;
+
+        for capability in &capabilities {
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_capabilities (agent_id, capability) VALUES (?, ?)",
+            )
+            .bind(agent_id)
+            .bind(capability)
+            .execute(&mut *tx)
+            .await
+            .context("failed to record an agent capability")?;
+        }
+
+        tx.commit()
+            .await
+            .context("failed to commit capability sync transaction")?;
+        Ok(())
+    }
+
+    /// Forget an agent entirely. Called when one is deleted, so its labels stop
+    /// making pooled tasks look claimable by something that no longer exists.
+    pub async fn forget_agent_capabilities(&self, agent_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM agent_capabilities WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await
+            .context("failed to forget an agent's capabilities")?;
+        Ok(())
     }
 
     // -- Fan-out ------------------------------------------------------------
@@ -4162,9 +4464,21 @@ impl TaskStore {
         let block_kind = exhausted.then_some(BlockKind::Transient.as_str());
         let block_reason = exhausted.then_some(error);
 
+        // A pooled task goes back to the pool, not back to the agent that just
+        // failed it. Claiming stamped `assigned_agent_id`; leaving the stamp on
+        // would mean a crashed agent takes the work with it — the exact failure
+        // the pool exists to prevent — and it would mean an unblocked task
+        // silently belonging to one agent forever after.
+        //
+        // Both dispositions, not just the requeue. A parked task is one a
+        // person will look at and release, and it must be released into the
+        // pool it came from. Who ran the failed attempt is in `task_runs`,
+        // which is where that question belongs.
         sqlx::query(
             "UPDATE tasks SET consecutive_failures = ?, last_error = ?, status = ?, \
              block_kind = ?, block_reason = ?, \
+             assigned_agent_id = CASE WHEN required_capabilities IS NULL \
+               THEN assigned_agent_id ELSE '' END, \
              worker_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE task_number = ? AND status = 'in_progress'",
         )
@@ -4924,6 +5238,64 @@ pub struct ReadySweep {
     /// covering any two of them would tell whoever reads the board the wrong
     /// thing about what to do next.
     pub skipped: Vec<SkippedTask>,
+    /// Pooled tasks that are ready, unclaimed, and beyond every agent in the
+    /// fleet.
+    ///
+    /// A fifth kind of "did not move", and it has to be its own list for the
+    /// reason the other four do — the repair is different. `stalled` wants the
+    /// graph fixed, `pending` wants nothing yet, `gated` wants the world to
+    /// change, `skipped` wants nothing ever, and this wants the *fleet*
+    /// changed: an agent to declare something, or the requirement corrected.
+    ///
+    /// Unlike the others this is not scoped to the sweeping agent, because the
+    /// pool is not either. Every agent's sweep reports the same list, which is
+    /// the point: a pool nobody owns must not become a pool nobody watches.
+    pub unclaimable: Vec<UnclaimableTask>,
+}
+
+/// A pooled task no agent in the fleet can claim.
+///
+/// Deliberately carries `undeclared` rather than a single boolean, because two
+/// different failures both end with a task nothing can take and they are
+/// repaired differently:
+///
+///   - a label no agent declares at all — usually a typo, or an agent that was
+///     deleted. Someone declares it, or the requirement is corrected.
+///   - every label held by *someone*, but no single agent holding all of them.
+///     Nothing is misspelled and nothing is missing; the requirement asks for a
+///     combination the fleet has not got, so an agent gains a label or the task
+///     is split.
+///
+/// Reporting only "unclaimable" would send whoever reads it hunting for a
+/// missing capability that is right there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UnclaimableTask {
+    pub task_number: i64,
+    /// What the task asked for.
+    pub requires: Vec<String>,
+    /// The subset of `requires` that no agent in the fleet declares at all.
+    /// Empty means every label is held by someone and no one holds them all.
+    pub undeclared: Vec<String>,
+}
+
+impl UnclaimableTask {
+    /// One line, already phrased for a human, naming the repair.
+    pub fn explain(&self) -> String {
+        if self.undeclared.is_empty() {
+            format!(
+                "no single agent has all of [{}] — every one of them is declared by somebody, so \
+                 give one agent the rest or split the task",
+                self.requires.join(", ")
+            )
+        } else {
+            format!(
+                "no agent declares [{}] (this task requires [{}]) — declare it on an agent, or \
+                 correct the requirement",
+                self.undeclared.join(", "),
+                self.requires.join(", ")
+            )
+        }
+    }
 }
 
 /// A task settled by the sweep because a branch it needed did not run.
@@ -4949,6 +5321,7 @@ impl ReadySweep {
             && self.pending.is_empty()
             && self.gated.is_empty()
             && self.skipped.is_empty()
+            && self.unclaimable.is_empty()
     }
 }
 
@@ -5012,7 +5385,8 @@ pub enum FailureDisposition {
 
 /// Column list used by all SELECT queries. Kept in sync with `task_from_row`.
 const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
-     owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
+     owner_agent_id, assigned_agent_id, required_capabilities, \
+     subtasks, metadata, source_memory_id, worker_id, \
      created_by, approved_at, approved_by, created_at, updated_at, completed_at, \
      consecutive_failures, max_retries, last_error, project_id, repo_id, worktree_id, \
      block_kind, block_reason, block_recurrences, last_block_kind, \
@@ -5184,6 +5558,14 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         assigned_agent_id: row
             .try_get("assigned_agent_id")
             .context("failed to read assigned_agent_id")?,
+        // Unreadable JSON becomes `None`, which reads as "pushed" and so is
+        // claimable by nobody rather than by everybody. The only way to write
+        // this column is `create`, which serialises a `Vec<String>`.
+        required_capabilities: row
+            .try_get::<Option<String>, _>("required_capabilities")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
         subtasks: parse_subtasks(&subtasks_value),
         metadata: parse_metadata(&metadata_value),
         source_memory_id: row.try_get("source_memory_id").ok(),
@@ -5381,6 +5763,7 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
             priority TEXT NOT NULL DEFAULT 'medium',
             owner_agent_id TEXT NOT NULL,
             assigned_agent_id TEXT NOT NULL,
+            required_capabilities TEXT,
             subtasks TEXT,
             metadata TEXT,
             source_memory_id TEXT,
@@ -5525,6 +5908,20 @@ pub(crate) async fn create_task_schema(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("task_number_seq should be created");
+
+    // Not decoration either: the claim query joins this table, so a test pool
+    // without it would fail every claim rather than exercising the match. It
+    // lives with the tasks schema because the claim is what reads it.
+    sqlx::query(
+        "CREATE TABLE agent_capabilities (
+            agent_id TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            PRIMARY KEY (agent_id, capability)
+        )",
+    )
+    .execute(pool)
+    .await
+    .expect("agent_capabilities schema should be created");
 }
 
 #[cfg(test)]
@@ -8685,6 +9082,573 @@ mod tests {
                 inputs: serde_json::json!({"results": {"a": {"ok": true}}})
             },
             "only the branches that ran are collected, and the skipped one does not wait"
+        );
+    }
+
+    // -- Capability-based assignment (#28) ---------------------------------
+
+    /// Declare what an agent can do, the way the startup sync does.
+    async fn declare(store: &TaskStore, agent_id: &str, capabilities: &[&str]) {
+        let owned: Vec<String> = capabilities.iter().map(|c| c.to_string()).collect();
+        store
+            .set_agent_capabilities(agent_id, &owned)
+            .await
+            .expect("capabilities should be recorded");
+    }
+
+    fn pooled_input(title: &str, requires: &[&str]) -> CreateTaskInput {
+        CreateTaskInput {
+            owner_agent_id: "agent-test".to_string(),
+            assigned_agent_id: String::new(),
+            required_capabilities: requires.iter().map(|c| c.to_string()).collect(),
+            title: title.to_string(),
+            status: TaskStatus::Ready,
+            created_by: "branch".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Push is unchanged: a task that names an agent is that agent's, and no
+    /// capability makes it anybody else's.
+    ///
+    /// If this regresses, adding a capability to an agent silently widens who
+    /// can pick up work that was deliberately addressed — which is the opposite
+    /// of opt-in, and invisible until two agents run the same card.
+    #[tokio::test]
+    async fn a_task_naming_an_agent_is_claimed_only_by_that_agent_however_capable_the_others_are() {
+        let store = setup_store().await;
+        declare(&store, "agent-other", &["rust", "review", "design"]).await;
+
+        store
+            .create(self_assigned_input("named work", TaskStatus::Ready))
+            .await
+            .expect("create");
+
+        assert!(
+            store
+                .claim_next_ready("agent-other")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a named task is not claimable by another agent, capabilities or not"
+        );
+
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("the named agent claims its own task");
+        assert_eq!(claimed.assigned_agent_id, "agent-test");
+        assert_eq!(claimed.status, TaskStatus::InProgress);
+    }
+
+    /// A pooled task goes to an agent that declares everything it asks for, and
+    /// to nobody else.
+    ///
+    /// If this regresses in one direction the pool never empties; in the other,
+    /// work goes to an agent that cannot do it and fails its way through the
+    /// whole failure budget before anyone notices.
+    #[tokio::test]
+    async fn a_pooled_task_is_claimed_by_a_capable_agent_and_refused_to_an_incapable_one() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust", "review"]).await;
+        declare(&store, "agent-design", &["design"]).await;
+
+        store
+            .create(pooled_input("port the parser", &["rust"]))
+            .await
+            .expect("create");
+
+        assert!(
+            store
+                .claim_next_ready("agent-design")
+                .await
+                .expect("claim")
+                .is_none(),
+            "an agent that does not declare `rust` must not claim a task requiring it"
+        );
+        assert!(
+            store
+                .claim_next_ready("agent-nothing")
+                .await
+                .expect("claim")
+                .is_none(),
+            "an agent that declares nothing at all claims nothing from the pool"
+        );
+
+        let claimed = store
+            .claim_next_ready("agent-rust")
+            .await
+            .expect("claim")
+            .expect("a capable agent claims the pooled task");
+        assert_eq!(claimed.status, TaskStatus::InProgress);
+    }
+
+    /// Requirements are a subset test, not an equality test: an agent that can
+    /// do more than the task asks still qualifies, and one that covers only
+    /// part of a multi-label requirement does not.
+    ///
+    /// Getting this backwards would make every extra capability an agent gained
+    /// *narrow* what it could claim, which fails silently and looks like the
+    /// scheduler having stopped.
+    #[tokio::test]
+    async fn a_pooled_task_needs_every_label_it_asks_for_and_tolerates_agents_that_have_more() {
+        let store = setup_store().await;
+        declare(&store, "agent-generalist", &["rust", "review", "design"]).await;
+        declare(&store, "agent-partial", &["rust"]).await;
+
+        store
+            .create(pooled_input("review the port", &["rust", "review"]))
+            .await
+            .expect("create");
+
+        assert!(
+            store
+                .claim_next_ready("agent-partial")
+                .await
+                .expect("claim")
+                .is_none(),
+            "holding some of the requirement is not holding the requirement"
+        );
+        assert!(
+            store
+                .claim_next_ready("agent-generalist")
+                .await
+                .expect("claim")
+                .is_some(),
+            "holding more than the requirement still satisfies it"
+        );
+    }
+
+    /// Two agents that can both do the work compete for one pooled task and
+    /// exactly one gets it.
+    ///
+    /// This is the property the whole design rests on — the conditional UPDATE
+    /// decides the race. If it regresses, two workers run the same card, which
+    /// is the most expensive failure this system has.
+    #[tokio::test]
+    async fn two_capable_agents_racing_one_pooled_task_produce_exactly_one_winner() {
+        let store = setup_store().await;
+        declare(&store, "agent-a", &["rust"]).await;
+        declare(&store, "agent-b", &["rust"]).await;
+
+        let task = store
+            .create(pooled_input("the only card", &["rust"]))
+            .await
+            .expect("create");
+
+        let (first, second) = tokio::join!(
+            store.claim_next_ready("agent-a"),
+            store.claim_next_ready("agent-b")
+        );
+        let winners: Vec<Task> = [first.expect("claim"), second.expect("claim")]
+            .into_iter()
+            .flatten()
+            .collect();
+
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one of two capable agents may claim one pooled task"
+        );
+        assert_eq!(winners[0].task_number, task.task_number);
+
+        let settled = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert!(
+            settled.assigned_agent_id == "agent-a" || settled.assigned_agent_id == "agent-b",
+            "the winner stamped itself, and it is one of the two racers"
+        );
+    }
+
+    /// Claiming stamps the agent, so from that moment a pooled task is
+    /// indistinguishable from a pushed one.
+    ///
+    /// This is what lets the attempt log, the failure budget and the reaper
+    /// know nothing about pools. If the stamp regresses, every one of them
+    /// starts looking at a task with no agent on it.
+    #[tokio::test]
+    async fn claiming_a_pooled_task_stamps_the_agent_so_it_looks_pushed_afterwards() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        let created = store
+            .create(pooled_input("stamp me", &["rust"]))
+            .await
+            .expect("create");
+        assert_eq!(
+            created.assigned_agent_id, "",
+            "a pooled task names nobody until it is claimed"
+        );
+
+        let claimed = store
+            .claim_next_ready("agent-rust")
+            .await
+            .expect("claim")
+            .expect("claimed");
+        assert_eq!(claimed.assigned_agent_id, "agent-rust");
+
+        // The proof that it is now indistinguishable: the by-name filter finds
+        // it, which is the same query every downstream consumer uses.
+        let listed = store
+            .list(TaskListFilter {
+                assigned_agent_id: Some("agent-rust".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].task_number, created.task_number);
+        assert_eq!(
+            listed[0].required_capabilities.as_deref(),
+            Some(["rust".to_string()].as_slice()),
+            "the requirement stays on the task — it is where the task came from, not who has it"
+        );
+    }
+
+    /// A failed attempt on a pooled task returns it to the pool, not to the
+    /// agent that just failed it.
+    ///
+    /// This is the reaper's path too: it requeues through `record_failure`. If
+    /// the stamp survives a requeue, a crashed agent takes the work with it —
+    /// the exact failure this feature exists to prevent.
+    #[tokio::test]
+    async fn a_failed_pooled_task_returns_to_the_pool_rather_than_to_the_agent_that_failed_it() {
+        let store = setup_store().await;
+        declare(&store, "agent-a", &["rust"]).await;
+        declare(&store, "agent-b", &["rust"]).await;
+
+        let created = store
+            .create(pooled_input("crash me", &["rust"]))
+            .await
+            .expect("create");
+        store
+            .claim_next_ready("agent-a")
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        let disposition = store
+            .record_failure(
+                created.task_number,
+                TaskRunOutcome::Abandoned,
+                "worker vanished",
+            )
+            .await
+            .expect("record failure");
+        assert!(matches!(disposition, FailureDisposition::Requeued { .. }));
+
+        let requeued = store
+            .get_by_number(created.task_number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert_eq!(requeued.status, TaskStatus::Ready);
+        assert_eq!(
+            requeued.assigned_agent_id, "",
+            "a reaped pooled task is unassigned again, not still stamped with the dead agent"
+        );
+
+        let other = store
+            .claim_next_ready("agent-b")
+            .await
+            .expect("claim")
+            .expect("another capable agent picks it up");
+        assert_eq!(other.task_number, created.task_number);
+    }
+
+    /// A pushed task keeps its agent across a failure. The unstamping is for
+    /// pooled tasks only.
+    ///
+    /// Without this the requeue path would quietly unassign ordinary work,
+    /// which no agent would then ever claim — a task nothing owns and nothing
+    /// reports, because it is not pooled and so not in the unclaimable list
+    /// either.
+    #[tokio::test]
+    async fn a_failed_pushed_task_keeps_its_agent() {
+        let store = setup_store().await;
+        let created = store
+            .create(self_assigned_input("mine still", TaskStatus::Ready))
+            .await
+            .expect("create");
+        store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        store
+            .record_failure(created.task_number, TaskRunOutcome::Failed, "boom")
+            .await
+            .expect("record failure");
+
+        let requeued = store
+            .get_by_number(created.task_number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert_eq!(requeued.assigned_agent_id, "agent-test");
+        assert_eq!(requeued.status, TaskStatus::Ready);
+    }
+
+    /// Assigning a pooled task to an agent takes it out of the pool for good.
+    ///
+    /// If the requirement outlived the assignment, the next failure would clear
+    /// the stamp — that is what returning to the pool means — and quietly undo
+    /// a decision a person made, with nothing on screen to say so.
+    #[tokio::test]
+    async fn assigning_a_pooled_task_to_an_agent_takes_it_out_of_the_pool_permanently() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        let created = store
+            .create(pooled_input("hand it to someone", &["rust"]))
+            .await
+            .expect("create");
+
+        let updated = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    assigned_agent_id: Some("agent-rust".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update")
+            .expect("task");
+        assert_eq!(updated.assigned_agent_id, "agent-rust");
+        assert_eq!(
+            updated.required_capabilities, None,
+            "naming an agent ends pool membership, so nothing later un-names it"
+        );
+
+        store
+            .claim_next_ready("agent-rust")
+            .await
+            .expect("claim")
+            .expect("claimed");
+        store
+            .record_failure(created.task_number, TaskRunOutcome::Failed, "boom")
+            .await
+            .expect("record failure");
+
+        let requeued = store
+            .get_by_number(created.task_number)
+            .await
+            .expect("read")
+            .expect("task");
+        assert_eq!(
+            requeued.assigned_agent_id, "agent-rust",
+            "the person's assignment survives a requeue"
+        );
+    }
+
+    /// Naming an agent and stating a requirement are two answers to one
+    /// question, so asking both is refused rather than resolved.
+    ///
+    /// Silently picking one would leave a field the caller set and nothing
+    /// read, and the way that fails is work going somewhere nobody asked for.
+    #[tokio::test]
+    async fn a_task_that_both_names_an_agent_and_states_a_requirement_is_refused() {
+        let store = setup_store().await;
+        let error = store
+            .create(CreateTaskInput {
+                required_capabilities: vec!["rust".into()],
+                ..self_assigned_input("both at once", TaskStatus::Ready)
+            })
+            .await
+            .expect_err("create should be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("agent-test") && message.contains("rust"),
+            "the refusal names both halves of the contradiction: {message}"
+        );
+    }
+
+    /// The sweep promotes a pooled task even though no agent is named on it.
+    ///
+    /// A pooled task belongs to nobody, so a sweep scoped only by
+    /// `assigned_agent_id` would never look at one — it would sit in the
+    /// backlog with its parents done, forever, and nothing would say why.
+    #[tokio::test]
+    async fn the_sweep_promotes_a_pooled_task_that_no_agent_is_named_on() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        let parent = task_at(&store, "upstream", TaskStatus::InProgress).await;
+        let child = store
+            .create(CreateTaskInput {
+                status: TaskStatus::Backlog,
+                depends_on: vec![parent.task_number],
+                ..pooled_input("downstream", &["rust"])
+            })
+            .await
+            .expect("create child");
+
+        finish(&store, parent.task_number).await;
+
+        // Swept by an agent that could not claim it, which is the point: who
+        // reconciles the graph and who runs the work are different questions.
+        let sweep = store.recompute_ready("agent-design").await.expect("sweep");
+        assert!(
+            sweep.promoted.contains(&child.task_number),
+            "a pooled task whose parents are done is promoted by any agent's sweep"
+        );
+    }
+
+    /// The sweep names pooled tasks nothing in the fleet can claim.
+    ///
+    /// Nothing owns a pooled task, so nothing else will ever mention it. Left
+    /// out, a task requiring a label nobody declares sits at `ready` looking
+    /// exactly like work about to start — the "parked and silent" failure this
+    /// codebase keeps rediscovering.
+    #[tokio::test]
+    async fn the_sweep_reports_a_pooled_task_no_agent_can_claim() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        let claimable = store
+            .create(pooled_input("doable", &["rust"]))
+            .await
+            .expect("create");
+        let stranded = store
+            .create(pooled_input("nobody does haskell", &["haskell"]))
+            .await
+            .expect("create");
+
+        let sweep = store.recompute_ready("agent-rust").await.expect("sweep");
+        let reported: Vec<i64> = sweep
+            .unclaimable
+            .iter()
+            .map(|held| held.task_number)
+            .collect();
+        assert_eq!(
+            reported,
+            vec![stranded.task_number],
+            "only the task beyond the fleet is reported, not every pooled task"
+        );
+        assert!(
+            !reported.contains(&claimable.task_number),
+            "a task an agent can claim is not a hold"
+        );
+        assert!(
+            !sweep.is_empty(),
+            "a sweep that found an unclaimable task has something to say"
+        );
+
+        let hold = &sweep.unclaimable[0];
+        assert_eq!(hold.undeclared, vec!["haskell".to_string()]);
+        assert!(
+            hold.explain().contains("haskell"),
+            "the report names the label to declare: {}",
+            hold.explain()
+        );
+    }
+
+    /// "No agent declares this label" and "no single agent has all of them" are
+    /// two conditions with two different repairs, and they are reported as two.
+    ///
+    /// Collapsing them into one "unclaimable" would send whoever reads the
+    /// board hunting for a missing capability that is right there on another
+    /// agent.
+    #[tokio::test]
+    async fn a_requirement_split_across_two_agents_is_reported_differently_from_a_missing_one() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+        declare(&store, "agent-design", &["design"]).await;
+
+        let split = store
+            .create(pooled_input("needs both hands", &["rust", "design"]))
+            .await
+            .expect("create");
+
+        let sweep = store.recompute_ready("agent-rust").await.expect("sweep");
+        let hold = sweep
+            .unclaimable
+            .iter()
+            .find(|held| held.task_number == split.task_number)
+            .expect("a requirement no single agent covers is still unclaimable");
+        assert!(
+            hold.undeclared.is_empty(),
+            "nothing is missing from the fleet — every label is declared somewhere"
+        );
+        let explanation = hold.explain();
+        assert!(
+            explanation.contains("no single agent"),
+            "the message says the fleet is split, not that a label is unknown: {explanation}"
+        );
+    }
+
+    /// A pooled task that has been claimed is not reported as unclaimable.
+    ///
+    /// The report is about the *pool*, and a claimed task has left it. Without
+    /// this, every capability-matched task in flight would be flagged as
+    /// stranded on every tick, and a report that cries wolf is a report nobody
+    /// reads.
+    #[tokio::test]
+    async fn a_claimed_pooled_task_is_no_longer_reported_as_unclaimable() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        store
+            .create(pooled_input("in flight", &["rust"]))
+            .await
+            .expect("create");
+        store
+            .claim_next_ready("agent-rust")
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        // Now take the capability away, so the task would be unmatched if it
+        // were still in the pool.
+        store
+            .set_agent_capabilities("agent-rust", &[])
+            .await
+            .expect("clear capabilities");
+
+        let sweep = store.recompute_ready("agent-rust").await.expect("sweep");
+        assert!(
+            sweep.unclaimable.is_empty(),
+            "work already in progress is not in the pool and is not a pool hold"
+        );
+    }
+
+    /// Capabilities are replaced wholesale, so removing one actually removes
+    /// it.
+    ///
+    /// An upsert-only sync would leave a deleted label matching pooled tasks
+    /// forever — config.toml and the scheduler would disagree with nothing to
+    /// say so.
+    #[tokio::test]
+    async fn re_declaring_an_agents_capabilities_removes_the_ones_it_dropped() {
+        let store = setup_store().await;
+        declare(&store, "agent-rust", &["rust", "review"]).await;
+        declare(&store, "agent-rust", &["rust"]).await;
+
+        let fleet = store.fleet_capabilities().await.expect("fleet");
+        let held = fleet.get("agent-rust").expect("agent is present");
+        assert!(held.contains("rust"));
+        assert!(
+            !held.contains("review"),
+            "a capability dropped from the declaration is gone, not merged"
+        );
+
+        store
+            .create(pooled_input("needs review", &["review"]))
+            .await
+            .expect("create");
+        assert!(
+            store
+                .claim_next_ready("agent-rust")
+                .await
+                .expect("claim")
+                .is_none(),
+            "the dropped capability stops matching immediately"
         );
     }
 }

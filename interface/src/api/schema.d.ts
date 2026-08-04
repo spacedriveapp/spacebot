@@ -3094,6 +3094,16 @@ export interface components {
         };
         /** @description Summary of an agent's configuration, exposed via the API. */
         AgentInfo: {
+            /**
+             * @description What this agent declares it can do. Published so the step editor can
+             *     offer the labels that already exist rather than inviting a fleet where
+             *     `rust` and `Rust` are two capabilities and one of them matches nothing.
+             *
+             *     Always present, empty included: a client that has to distinguish "no
+             *     capabilities" from "this build does not report them" cannot, if the
+             *     field disappears when it is empty.
+             */
+            capabilities: string[];
             context_window: number;
             display_name?: string | null;
             gradient_end?: string | null;
@@ -3568,6 +3578,13 @@ export interface components {
         };
         CreateAgentRequest: {
             agent_id: string;
+            /**
+             * @description What this agent can do — the labels pooled tasks are matched against.
+             *
+             *     Opaque strings the operator chooses. Omit for none, which is right for
+             *     an agent that only ever takes work addressed to it by name.
+             */
+            capabilities?: string[] | null;
             display_name?: string | null;
             role?: string | null;
         };
@@ -3705,7 +3722,11 @@ export interface components {
             remote_url?: string | null;
         };
         CreateTaskRequest: {
-            /** @description Agent assigned to execute. Defaults to `owner_agent_id`. */
+            /**
+             * @description Agent assigned to execute. Defaults to `owner_agent_id`, unless
+             *     `required_capabilities` is set — then the task is pooled and nobody is
+             *     named until an agent claims it.
+             */
             assigned_agent_id?: string | null;
             created_by?: string | null;
             /** @description Task numbers that must finish before this one may run. */
@@ -3719,6 +3740,13 @@ export interface components {
             project_id?: string | null;
             /** @description Repo within the project. A project holds many repos. */
             repo_id?: string | null;
+            /**
+             * @description What this task needs, instead of who should do it.
+             *
+             *     Any agent declaring all of these may claim it. Mutually exclusive with
+             *     `assigned_agent_id`; sending both is rejected rather than resolved.
+             */
+            required_capabilities?: string[] | null;
             source_memory_id?: string | null;
             /**
              * @description Status to create the task in. Defaults to `pending_approval`.
@@ -4890,6 +4918,14 @@ export interface components {
             position?: number | null;
             priority?: string | null;
             repo_id?: string | null;
+            /**
+             * @description Say what the step needs instead of who should do it.
+             *
+             *     Set, and the emitted task is unassigned: any agent declaring all of
+             *     these claims it. Mutually exclusive with `assigned_agent_id`, and a
+             *     requirement no agent in the fleet can satisfy is refused at launch.
+             */
+            required_capabilities?: string[] | null;
             /** @description Extra instructions appended to the worker prompt when this step runs. */
             system_prompt?: string | null;
             title: string;
@@ -5262,6 +5298,20 @@ export interface components {
              *     `web` in the same project.
              */
             repo_id?: string | null;
+            /**
+             * @description What this task needs, instead of who should do it.
+             *
+             *     `None` on a pushed task — the common case, and the one a fleet of one
+             *     never leaves. `Some` makes the task *pooled*: any agent declaring all of
+             *     these labels may claim it, and claiming stamps `assigned_agent_id` so
+             *     that from that moment it is indistinguishable from a pushed task.
+             *
+             *     This stays set for the life of the task, including while it is claimed.
+             *     It answers "where did this come from", which is a different question
+             *     from "who has it now" — and the reaper needs both to put a crashed
+             *     pooled task back in the pool rather than back on the agent that died.
+             */
+            required_capabilities?: string[] | null;
             /**
              * @description Why this task will never run, when its status is `skipped`.
              *
@@ -5686,6 +5736,12 @@ export interface components {
         };
         UpdateAgentRequest: {
             agent_id: string;
+            /**
+             * @description Replace what this agent declares it can do. Absent leaves it alone; an
+             *     empty list clears it, which is how an agent is taken out of every pool
+             *     without deleting it.
+             */
+            capabilities?: string[] | null;
             display_name?: string | null;
             gradient_end?: string | null;
             gradient_start?: string | null;
@@ -6167,7 +6223,11 @@ export interface components {
         };
         /** @description One step of a pipeline. Becomes exactly one task per launch. */
         WorkflowStep: {
-            /** @description `None` means the agent that launched the run. */
+            /**
+             * @description `None` means the agent that launched the run — unless
+             *     `required_capabilities` is set, in which case nobody is named and the
+             *     emitted task goes into the pool.
+             */
             assigned_agent_id?: string | null;
             /**
              * @description The command line, for a command step. `None` on every agent step, and
@@ -6242,6 +6302,19 @@ export interface components {
             position: number;
             priority: components["schemas"]["TaskPriority"];
             repo_id?: string | null;
+            /**
+             * @description What this step needs, instead of who should do it.
+             *
+             *     The step-level half of the same choice a task has. `None` on every step
+             *     that exists today. Set, and the emitted task is unassigned and claimed
+             *     by whichever capable agent asks first.
+             *
+             *     A requirement nothing in the fleet can satisfy is refused at **launch**,
+             *     the way an unknown step reference already is — a template is edited by
+             *     somebody who is still watching, and a pooled task nothing can claim is
+             *     otherwise only visible in the sweep report.
+             */
+            required_capabilities?: string[] | null;
             /** @description Stable name that edges and bindings reference. */
             step_key: string;
             /** @description Per-step instructions appended to the worker prompt at pickup. */

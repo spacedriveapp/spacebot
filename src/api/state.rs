@@ -209,6 +209,14 @@ pub struct AgentInfo {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// What this agent declares it can do. Published so the step editor can
+    /// offer the labels that already exist rather than inviting a fleet where
+    /// `rust` and `Rust` are two capabilities and one of them matches nothing.
+    ///
+    /// Always present, empty included: a client that has to distinguish "no
+    /// capabilities" from "this build does not report them" cannot, if the
+    /// field disappears when it is empty.
+    pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gradient_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

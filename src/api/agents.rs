@@ -130,6 +130,12 @@ pub struct CreateAgentRequest {
     pub agent_id: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
+    /// What this agent can do — the labels pooled tasks are matched against.
+    ///
+    /// Opaque strings the operator chooses. Omit for none, which is right for
+    /// an agent that only ever takes work addressed to it by name.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
 }
 
 /// Result from internal agent creation logic.
@@ -144,6 +150,11 @@ pub(super) struct UpdateAgentRequest {
     agent_id: String,
     display_name: Option<String>,
     role: Option<String>,
+    /// Replace what this agent declares it can do. Absent leaves it alone; an
+    /// empty list clears it, which is how an agent is taken out of every pool
+    /// without deleting it.
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
     gradient_start: Option<String>,
     gradient_end: Option<String>,
 }
@@ -715,6 +726,15 @@ pub async fn create_agent_internal(
     {
         new_table["role"] = toml_edit::value(role.as_str());
     }
+    let capabilities =
+        crate::tasks::normalise_capabilities(request.capabilities.as_deref().unwrap_or(&[]));
+    if !capabilities.is_empty() {
+        let mut array = toml_edit::Array::new();
+        for capability in &capabilities {
+            array.push(capability.as_str());
+        }
+        new_table["capabilities"] = toml_edit::value(array);
+    }
     agents_array.push(new_table);
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -763,6 +783,7 @@ pub async fn create_agent_internal(
         default: false,
         display_name: request.display_name.clone().filter(|s| !s.is_empty()),
         role: request.role.clone().filter(|s| !s.is_empty()),
+        capabilities: capabilities.clone(),
         gradient_start: None,
         gradient_end: None,
         workspace: None,
@@ -790,6 +811,27 @@ pub async fn create_agent_internal(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
+
+    // Project the declaration into the database the scheduler reads. config.toml
+    // is the authority; this is the joinable copy, and without it the new agent
+    // declares nothing and claims no pooled work.
+    //
+    // A failure here is logged rather than fatal: the agent is already on disk,
+    // startup re-syncs every agent from config, and until then the sweep reports
+    // the pooled tasks nobody can claim by name. Silent is the one thing it is
+    // not.
+    if let Some(task_store) = state.task_store.load().as_ref().clone()
+        && let Err(error) = task_store
+            .set_agent_capabilities(&agent_config.id, &agent_config.capabilities)
+            .await
+    {
+        tracing::error!(
+            %error,
+            agent_id = %agent_config.id,
+            "failed to record the new agent's capabilities — it will claim no pooled work until \
+             the next restart"
+        );
+    }
 
     for dir in [
         &agent_config.workspace,
@@ -1149,6 +1191,7 @@ pub async fn create_agent_internal(
             id: agent_config.id.clone(),
             display_name: agent_config.display_name.clone(),
             role: agent_config.role.clone(),
+            capabilities: agent_config.capabilities.clone(),
             gradient_start: agent_config.gradient_start.clone(),
             gradient_end: agent_config.gradient_end.clone(),
             workspace: agent_config.workspace.to_string_lossy().to_string(),
@@ -1220,6 +1263,11 @@ pub(super) async fn update_agent(
 
     let config_path = state.config_path.read().await.clone();
 
+    let next_capabilities = request
+        .capabilities
+        .as_deref()
+        .map(crate::tasks::normalise_capabilities);
+
     // Acquire the config write mutex to prevent concurrent read-modify-write races.
     let _config_guard = state.config_write_mutex.lock().await;
 
@@ -1253,6 +1301,17 @@ pub(super) async fn update_agent(
                         table.remove("role");
                     } else {
                         table["role"] = toml_edit::value(role.as_str());
+                    }
+                }
+                if let Some(capabilities) = &next_capabilities {
+                    if capabilities.is_empty() {
+                        table.remove("capabilities");
+                    } else {
+                        let mut array = toml_edit::Array::new();
+                        for capability in capabilities {
+                            array.push(capability.as_str());
+                        }
+                        table["capabilities"] = toml_edit::value(array);
                     }
                 }
                 if let Some(gradient_start) = &request.gradient_start {
@@ -1313,7 +1372,29 @@ pub(super) async fn update_agent(
             Some(gradient_end.clone())
         };
     }
+    if let Some(capabilities) = &next_capabilities {
+        info.capabilities = capabilities.clone();
+    }
     state.set_agent_configs(configs);
+
+    // Keep the scheduler's copy in step with the file. Removing a label has to
+    // reach the database or a pooled task keeps matching an agent that no
+    // longer claims to do the work — `set_agent_capabilities` replaces the set
+    // wholesale for exactly that reason.
+    if let Some(capabilities) = &next_capabilities
+        && let Some(task_store) = state.task_store.load().as_ref().clone()
+        && let Err(error) = task_store
+            .set_agent_capabilities(&agent_id, capabilities)
+            .await
+    {
+        tracing::error!(
+            %error,
+            agent_id = %agent_id,
+            "failed to update an agent's capabilities in the task database — config.toml and the \
+             scheduler now disagree until the next restart"
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     tracing::info!(agent_id = %agent_id, "agent updated via API");
 
@@ -1403,6 +1484,23 @@ pub(super) async fn delete_agent(
                 tracing::warn!(%error, "failed to write config.toml");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+    }
+
+    // Forget what it could do, for the same reason and in the same place.
+    //
+    // A deleted agent's labels left behind would make a pooled task look
+    // claimable by something that no longer exists, which is the one state the
+    // sweep report cannot warn about: it would find a covering agent and say
+    // nothing while the task sat there forever.
+    if let Some(task_store) = state.task_store.load().as_ref().clone()
+        && let Err(error) = task_store.forget_agent_capabilities(&agent_id).await
+    {
+        tracing::error!(
+            %error,
+            agent_id = %agent_id,
+            "failed to forget a deleted agent's capabilities — pooled tasks may look claimable by \
+             an agent that is gone"
+        );
     }
 
     // Drop the wake-manager registration only after the fallible config write

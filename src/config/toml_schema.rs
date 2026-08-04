@@ -427,6 +427,10 @@ pub(super) struct TomlAgentConfig {
     pub(super) default: bool,
     pub(super) display_name: Option<String>,
     pub(super) role: Option<String>,
+    /// What this agent can do, as opaque labels. See
+    /// [`crate::config::AgentConfig::capabilities`].
+    #[serde(default)]
+    pub(super) capabilities: Vec<String>,
     pub(super) gradient_start: Option<String>,
     pub(super) gradient_end: Option<String>,
     pub(super) workspace: Option<String>,

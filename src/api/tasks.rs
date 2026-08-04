@@ -36,9 +36,17 @@ pub(super) struct TaskListQuery {
 pub(super) struct CreateTaskRequest {
     /// Agent that owns (created) this task.
     owner_agent_id: String,
-    /// Agent assigned to execute. Defaults to `owner_agent_id`.
+    /// Agent assigned to execute. Defaults to `owner_agent_id`, unless
+    /// `required_capabilities` is set — then the task is pooled and nobody is
+    /// named until an agent claims it.
     #[serde(default)]
     assigned_agent_id: Option<String>,
+    /// What this task needs, instead of who should do it.
+    ///
+    /// Any agent declaring all of these may claim it. Mutually exclusive with
+    /// `assigned_agent_id`; sending both is rejected rather than resolved.
+    #[serde(default)]
+    required_capabilities: Option<Vec<String>>,
     title: String,
     #[serde(default)]
     description: Option<String>,
@@ -447,14 +455,35 @@ pub(super) async fn create_task(
     let priority =
         parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
 
-    let assigned = request
+    // A pooled task names nobody. The default-to-owner fallback has to be
+    // skipped for one, or every pooled task would be created already assigned
+    // to its creator and the requirement would never be matched against
+    // anything.
+    let requires =
+        crate::tasks::normalise_capabilities(&request.required_capabilities.unwrap_or_default());
+    let named = request
         .assigned_agent_id
-        .unwrap_or_else(|| request.owner_agent_id.clone());
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Both is a caller mistake, not a server fault. The store refuses it too —
+    // this is only here so the answer is a 422 rather than a 500.
+    if !requires.is_empty() && named.is_some() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let assigned = if requires.is_empty() {
+        named
+            .map(str::to_string)
+            .unwrap_or_else(|| request.owner_agent_id.clone())
+    } else {
+        crate::tasks::UNASSIGNED_AGENT_ID.to_string()
+    };
 
     let task = store
         .create(crate::tasks::CreateTaskInput {
             owner_agent_id: request.owner_agent_id,
             assigned_agent_id: assigned,
+            required_capabilities: requires,
             title: request.title,
             description: request.description,
             status,

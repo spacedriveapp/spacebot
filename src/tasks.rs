@@ -20,6 +20,7 @@ pub use store::{
     PreviousIterationBinding, ReadySweep, SETTLED_STATUSES, SkippedTask, StalledTask, Task,
     TaskBindingPatch, TaskEdgeSummary, TaskGraph, TaskGraphEdge, TaskInputBinding, TaskKind,
     TaskListFilter, TaskPriority, TaskProjectBinding, TaskRun, TaskRunOutcome, TaskStatus,
-    TaskStore, TaskSubtask, TaskUpdateResult, UpdateTaskInput, WorkerOutputSubmission,
-    WorkerTaskUpdateResult, can_transition, filer_id, legal_transitions, parse_filer_task_number,
+    TaskStore, TaskSubtask, TaskUpdateResult, UNASSIGNED_AGENT_ID, UnclaimableTask,
+    UpdateTaskInput, WorkerOutputSubmission, WorkerTaskUpdateResult, can_transition, filer_id,
+    legal_transitions, normalise_capabilities, parse_filer_task_number,
 };

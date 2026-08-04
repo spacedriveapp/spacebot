@@ -38,6 +38,9 @@ pub fn spawn_file_watcher(
     llm_manager: Arc<crate::llm::LlmManager>,
     agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
     agent_humans: Arc<arc_swap::ArcSwap<Vec<crate::config::HumanDef>>>,
+    // Where declared capabilities are projected to. `None` in setup mode,
+    // before the instance database exists.
+    task_store: Option<Arc<crate::tasks::TaskStore>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
@@ -207,6 +210,26 @@ pub fn spawn_file_watcher(
 
                 agent_humans.store(Arc::new(config.humans.clone()));
                 tracing::info!("agent humans reloaded ({} entries)", config.humans.len());
+
+                // Capabilities are declared in this file, so an edit to it has
+                // to reach the database the scheduler matches against. Without
+                // this the field would be settable by hand and consumed by
+                // nothing until a restart — and the way that fails is a pooled
+                // task sitting still while config.toml says an agent can do it.
+                if let Some(task_store) = &task_store {
+                    let rt = tokio::runtime::Handle::current();
+                    for agent in config.resolve_agents() {
+                        if let Err(error) = rt.block_on(
+                            task_store.set_agent_capabilities(&agent.id, &agent.capabilities),
+                        ) {
+                            tracing::error!(
+                                %error,
+                                agent_id = %agent.id,
+                                "failed to reload an agent's capabilities from config.toml"
+                            );
+                        }
+                    }
+                }
 
                 if let Some(ref perms) = discord_permissions
                     && let Some(discord_config) = &config.messaging.discord

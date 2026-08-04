@@ -342,6 +342,11 @@ impl Tool for TaskCreateTool {
             .create(CreateTaskInput {
                 owner_agent_id: self.agent_id.clone(),
                 assigned_agent_id,
+                // A worker files a card for somebody by name. Pooling from a
+                // tool is deliberately not offered yet: it would need the model
+                // to know the fleet's label vocabulary, and a guessed label is
+                // a task nothing can claim.
+                required_capabilities: Vec::new(),
                 title: args.title,
                 description: args.description,
                 status,

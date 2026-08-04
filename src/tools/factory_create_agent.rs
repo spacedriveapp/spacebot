@@ -201,6 +201,11 @@ impl Tool for FactoryCreateAgentTool {
             agent_id: agent_id.clone(),
             display_name: Some(args.display_name.clone()),
             role: args.role.clone(),
+            // The factory does not guess capabilities. A label invented by a
+            // model is a label nothing else in the fleet uses, which is a pool
+            // of one that matches nothing — declared by an operator or not at
+            // all.
+            capabilities: None,
         };
 
         let create_result = crate::api::agents::create_agent_internal(&self.state, create_request)
