@@ -97,7 +97,7 @@ emergency_threshold = 0.95     # drop oldest 50%, no LLM
 [defaults.cortex]
 tick_interval_secs = 30
 worker_timeout_secs = 600
-branch_timeout_secs = 60
+branch_timeout_secs = 600
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
 # Warmup controls for cold-start behavior and manual rewarm.
@@ -199,11 +199,11 @@ base_url = "http://localhost:4000/v1"
 api_key = "env:LITELLM_API_KEY"
 ```
 
-The `secret:` prefix resolves from the agent's secret store at config load time. If the secret doesn't exist, the value is treated as missing and implicit env fallbacks are tried.
+The `secret:` prefix resolves from the instance's secret store at config load time. There is no fallback: if a provider's `api_key` reference cannot be resolved (the secret doesn't exist, or the store is locked), config load fails with an error naming the provider rather than booting with a key that will 401 on first use.
 
 Two environment variable pairs bootstrap a provider when the config file does not define one under that name: `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) with `ANTHROPIC_BASE_URL`, and `LITELLM_API_KEY` with `LITELLM_BASE_URL`. No other `*_API_KEY` variable configures a provider — everything else needs an explicit `[llm.provider.<id>]` block.
 
-Use `POST /api/secrets/migrate` to automatically move plaintext credentials from `config.toml` into the secret store and replace them with `secret:` references. See [Secret Store -- Migration](/docs/secrets#migration) for details.
+Use `POST /api/secrets/migrate` to automatically move plaintext credentials from `config.toml` into the secret store and replace them with `secret:` references. Provider keys (`[llm.provider.*].api_key`) are not scanned — they already accept `secret:` / `env:` references directly, so write the reference yourself. See [Secret Store -- Migration](/docs/secrets#migration) for details.
 
 ## Env-Only Mode
 
@@ -473,12 +473,14 @@ At least one provider must be configured.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `channel` | string | `anthropic/claude-sonnet-4-20250514` | Model for user-facing channels |
-| `branch` | string | `anthropic/claude-sonnet-4-20250514` | Model for thinking branches |
-| `worker` | string | `anthropic/claude-haiku-4.5-20250514` | Model for task workers |
-| `compactor` | string | `anthropic/claude-haiku-4.5-20250514` | Model for summarization |
-| `cortex` | string | `anthropic/claude-haiku-4.5-20250514` | Model for system observation |
+| `channel` | string | `anthropic/claude-sonnet-4` | Model for user-facing channels |
+| `branch` | string | `anthropic/claude-sonnet-4` | Model for thinking branches |
+| `worker` | string | `anthropic/claude-sonnet-4` | Model for task workers |
+| `compactor` | string | `anthropic/claude-sonnet-4` | Model for summarization |
+| `cortex` | string | `anthropic/claude-sonnet-4` | Model for system observation |
 | `rate_limit_cooldown_secs` | integer | 60 | How long to deprioritize a rate-limited model |
+
+The defaults above apply only when an `anthropic` provider is configured — it is the one provider whose model catalog Spacebot can name with confidence. When `[defaults.routing]` is absent and no `anthropic` provider exists, routing is empty and the instance boots into setup mode: configure `[defaults.routing]` explicitly, pointing each role at a model your provider actually serves (e.g. `litellm/<model>`). Spacebot never guesses a model name for a non-Anthropic provider — a guessed string would look right and fail on first use.
 
 Routing selects providers by the prefix before the first `/` in the model name.
 
@@ -535,7 +537,7 @@ Thresholds are fractions of `context_window`.
 |-----|------|---------|-------------|
 | `tick_interval_secs` | integer | 30 | How often the cortex runtime loop runs maintenance ticks while continuously observing events |
 | `worker_timeout_secs` | integer | 600 | Worker idle timeout before cancellation |
-| `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
+| `branch_timeout_secs` | integer | 600 | Branch timeout before cancellation |
 | `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
 | `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |

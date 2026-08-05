@@ -65,15 +65,20 @@ Available environment variables:
 
 | Variable                 | Description            |
 | ------------------------ | ---------------------- |
-| `ANTHROPIC_API_KEY`      | Anthropic API key      |
-| `OPENAI_API_KEY`         | OpenAI API key         |
-| `OPENROUTER_API_KEY`     | OpenRouter API key     |
+| `ANTHROPIC_API_KEY`      | Anthropic API key (or `ANTHROPIC_AUTH_TOKEN` for OAuth tokens) |
+| `ANTHROPIC_BASE_URL`     | Override the Anthropic endpoint |
+| `LITELLM_API_KEY`        | LiteLLM proxy key — the supported path to every non-Anthropic provider |
+| `LITELLM_BASE_URL`       | Override the LiteLLM endpoint (default `http://localhost:4000/v1`) |
 | `DISCORD_BOT_TOKEN`      | Discord bot token      |
 | `SLACK_BOT_TOKEN`        | Slack bot token        |
 | `SLACK_APP_TOKEN`        | Slack app token        |
+| `TELEGRAM_BOT_TOKEN`     | Telegram bot token     |
 | `BRAVE_SEARCH_API_KEY`   | Brave Search API key   |
+| `SPACEBOT_MODEL`         | Override channel, branch, and worker model |
 | `SPACEBOT_CHANNEL_MODEL` | Override channel model |
 | `SPACEBOT_WORKER_MODEL`  | Override worker model  |
+
+`ANTHROPIC_API_KEY` and `LITELLM_API_KEY` are the only two variables that bootstrap a provider. Other provider variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, …) were retired and are ignored with a warning — configure those providers with an explicit `[llm.provider.<id>]` block in `config.toml` instead.
 
 ### Config File
 

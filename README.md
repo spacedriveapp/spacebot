@@ -110,7 +110,7 @@ For process capabilities, tool access by type, memory internals, cron, and multi
 
 Spacebot is built around an instance-level task board. Every agent on the instance shares it, every task carries a globally unique number, and it is the substrate through which agents delegate work to each other.
 
-A task moves through five states — `pending_approval` → `backlog` → `ready` → `in_progress` → `done` — at one of four priorities. Two agent IDs sit on every task: the **owner** (who created it) and the **assignee** (who executes it). Reassigning is how work changes hands.
+A task moves through seven states — `pending_approval` → `backlog` → `ready` → `in_progress` → `done`, with `blocked` (waiting on a person) and `skipped` (settled without running) off the main line — at one of four priorities. Two agent IDs sit on every task: the **owner** (who created it) and the **assignee** (who executes it). Reassigning is how work changes hands.
 
 **Agents delegate by creating tasks.** When one agent calls `send_agent_message` on another, that is not a chat message — it opens a task on the target agent's board, owned by the sender and assigned to the recipient, at `ready`. The board is the inter-agent protocol, and who may message whom is constrained by the communication graph.
 

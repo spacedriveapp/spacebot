@@ -27,9 +27,9 @@ worker = "anthropic/claude-haiku-4.5-20250514"
 compactor = "anthropic/claude-haiku-4.5-20250514"
 cortex = "anthropic/claude-haiku-4.5-20250514"
 
-# Azure example:
-# channel = "azure/gpt-4o"
-# worker = "azure/gpt-4o-mini"
+# Via a LiteLLM gateway:
+# channel = "litellm/gpt-4o"
+# worker = "litellm/gpt-4o-mini"
 ```
 
 | Process | Why this model tier |
@@ -41,9 +41,9 @@ cortex = "anthropic/claude-haiku-4.5-20250514"
 | Cortex | System-level observation. Small context, simple signal processing. Cheapest tier. |
 
 **Model Format:**
-- Standard providers: `<provider>/<model-name>` (e.g., `anthropic/claude-sonnet-4-20250514`, `openai/gpt-4o`)
-- Azure: `azure/<deployment-name>` (e.g., `azure/gpt-4o`, `azure/gpt-5.2`)
-- Custom providers: `<provider-id>/<model-name>` (e.g., `my_anthropic/claude-3.5-sonnet`)
+- Any provider: `<provider-id>/<model-name>` (e.g., `anthropic/claude-sonnet-4-20250514`, `litellm/gpt-4o`, `my_anthropic/claude-3.5-sonnet`)
+
+The prefix is the provider id from your `[llm.provider.<id>]` block — there is no fixed vendor list. For Azure OpenAI deployments, point an `openai_compatible` provider (or LiteLLM) at the deployment URL and route by that provider's id; the retired `azure` api_type is rejected at config load.
 
 ### Level 2: Task-Type Overrides
 
