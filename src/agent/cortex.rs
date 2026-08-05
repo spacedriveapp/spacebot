@@ -3696,23 +3696,26 @@ pub fn spawn_association_loop(
 enum DetachedRouting {
     /// Worker produced a usable result — mark `Done` and notify success.
     Success,
-    /// Terminal failure that won't fix itself (cancelled, wall-clock
-    /// timeout). Mark `Done` so the loop doesn't pick the task up again;
-    /// emit a failure event so callers can react (escalate to a human,
-    /// raise a follow-up task, etc.).
-    Terminal,
-    /// An external defense stopped the worker — captcha, login wall, rate
-    /// limit, WAF. Park the task as a [`BlockKind::Capability`] block.
+    /// The worker stopped without completing the work and retrying it
+    /// unchanged will not help: an external defense stopped it (captcha,
+    /// login wall, rate limit, WAF), or a person cancelled it. Park the task
+    /// as a [`BlockKind::Capability`] block.
     ///
-    /// This is deliberately neither `Terminal` nor `Requeue`. `Done` would
-    /// claim work that never happened, and requeueing would spend failure
-    /// budget on an obstacle the agent has no way to clear — the next
-    /// attempt hits the same wall with the same credentials. A capability
-    /// block is sticky, so the task waits for someone to supply the access
-    /// instead of being retried or silently closed.
+    /// This is deliberately neither `Success` nor `Requeue`. `Done` would
+    /// claim work that never happened, and requeueing would either spend
+    /// failure budget on an obstacle the agent has no way to clear — the
+    /// next attempt hits the same wall with the same credentials — or
+    /// resurrect a task a person deliberately stopped. A capability block is
+    /// sticky, so the task waits for a human decision instead of being
+    /// retried or silently closed.
     Blocked { reason: String },
-    /// Transient failure (LLM error, panic, generic Failed). Requeue to
-    /// `Ready` so the next pickup pass can retry.
+    /// Transient failure (LLM error, panic, generic Failed) or a wall-clock
+    /// timeout. Requeue to `Ready` through [`TaskStore::record_failure`] so
+    /// the attempt spends failure budget: retried while budget remains,
+    /// parked in `blocked` once the retry limit is hit. A timeout requeues
+    /// rather than settling because the task may simply need a longer
+    /// budget — `Done` would claim work that never happened and release the
+    /// rest of the graph on it.
     Requeue,
 }
 
@@ -3724,9 +3727,17 @@ fn route_detached_outcome(
         Ok(WorkerOutcome::Success { .. }) | Ok(WorkerOutcome::Partial { .. }) => {
             DetachedRouting::Success
         }
-        Ok(WorkerOutcome::Cancelled { .. }) | Ok(WorkerOutcome::Timeout { .. }) => {
-            DetachedRouting::Terminal
-        }
+        // A person stopped this worker on purpose. Parking the task as
+        // blocked keeps that decision visible instead of either claiming the
+        // work finished (Done) or quietly retrying it (Requeue).
+        Ok(WorkerOutcome::Cancelled { reason, .. }) => DetachedRouting::Blocked {
+            reason: format!("cancelled: {reason}"),
+        },
+        // The wall-clock ran out mid-work. Nothing about the outcome says the
+        // task is done, so it goes back through the failure budget like any
+        // other transient failure — retried while budget remains, parked for
+        // a human once the limit is hit.
+        Ok(WorkerOutcome::Timeout { .. }) => DetachedRouting::Requeue,
         Ok(WorkerOutcome::Blocked { reason, url, .. }) => DetachedRouting::Blocked {
             reason: match url {
                 Some(url) => format!("{} at {url}", reason.describe()),
@@ -3790,6 +3801,187 @@ fn emit_requeue_outcome(
     });
 }
 
+/// Close the attempt row for a detached run before any status write, so the
+/// log reflects what happened even if the status write then fails. A missing
+/// `run_id` means the row never opened, and a failed close only warns — the
+/// reaper settles still-open rows as abandoned.
+async fn close_run_attempt(
+    task_store: &Arc<TaskStore>,
+    task_number: i64,
+    run_id: Option<&str>,
+    outcome: crate::tasks::TaskRunOutcome,
+    summary: Option<&str>,
+    error: Option<&str>,
+) {
+    let Some(run_id) = run_id else {
+        return;
+    };
+    if let Err(close_error) = task_store.finish_run(run_id, outcome, summary, error).await {
+        tracing::warn!(%close_error, task_number, "failed to close task run row");
+    }
+}
+
+/// Settle a detached worker the supervisor killed for exceeding its wall
+/// clock. Mirrors the completion path's ordering: close the attempt row
+/// first so the run history stops claiming the attempt is in flight, then
+/// write the retry bookkeeping and status.
+#[allow(clippy::too_many_arguments)]
+async fn handle_detached_timeout(
+    task: &crate::tasks::Task,
+    worker_id: WorkerId,
+    run_id: Option<&str>,
+    timeout_retry_limit: u8,
+    task_store: &Arc<TaskStore>,
+    run_logger: &crate::conversation::history::ProcessRunLogger,
+    logger: &CortexLogger,
+    event_tx: &tokio::sync::broadcast::Sender<ProcessEvent>,
+    agent_id: &str,
+    links: &Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
+    agent_names: &Arc<std::collections::HashMap<String, String>>,
+    sqlite_pool: &sqlx::SqlitePool,
+    injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
+    scrub: impl Fn(String) -> String,
+) {
+    let (next_timeout_count, exhausted, next_status) =
+        detached_timeout_transition(&task.metadata, timeout_retry_limit);
+
+    let timeout_message = scrub(format!(
+        "Worker cancelled by supervisor timeout (attempt {} of {}).",
+        next_timeout_count, timeout_retry_limit
+    ));
+
+    close_run_attempt(
+        task_store,
+        task.task_number,
+        run_id,
+        crate::tasks::TaskRunOutcome::Timeout,
+        None,
+        Some(&timeout_message),
+    )
+    .await;
+
+    let update_result = task_store
+        .update(
+            task.task_number,
+            UpdateTaskInput {
+                status: Some(next_status),
+                clear_worker_id: true,
+                metadata: Some(serde_json::json!({
+                    "supervisor_timeout_count": next_timeout_count,
+                    "supervisor_timeout_exhausted": exhausted,
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    match update_result {
+        Ok(Some(_)) => {
+            run_logger.log_worker_completed(worker_id, &timeout_message, false);
+            let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                agent_id: Arc::from(agent_id),
+                task_number: task.task_number,
+                status: next_status.as_str().to_string(),
+                action: "updated".to_string(),
+            });
+            logger.log(
+                "task_pickup_timeout",
+                &format!(
+                    "Detached worker timeout for task #{} (count: {}, exhausted: {})",
+                    task.task_number, next_timeout_count, exhausted
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "worker_id": worker_id.to_string(),
+                    "supervisor_timeout_count": next_timeout_count,
+                    "supervisor_timeout_exhausted": exhausted,
+                    "retry_limit": timeout_retry_limit,
+                })),
+            );
+
+            notify_delegation_completion(
+                task,
+                &timeout_message,
+                false,
+                agent_id,
+                links,
+                agent_names,
+                sqlite_pool,
+                injection_tx,
+            )
+            .await;
+
+            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                agent_id: Arc::from(agent_id),
+                worker_id,
+                channel_id: None,
+                result: timeout_message,
+                notify: true,
+                success: false,
+            });
+        }
+        Ok(None) => {
+            tracing::warn!(
+                task_number = task.task_number,
+                "failed to update task status after detached timeout cancellation: task missing"
+            );
+            run_logger.log_worker_completed(worker_id, &timeout_message, false);
+            logger.log(
+                "task_pickup_timeout_persist_failure",
+                &format!(
+                    "Detached worker timeout for task #{} but task update returned no row",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "worker_id": worker_id.to_string(),
+                    "supervisor_timeout_count": next_timeout_count,
+                    "supervisor_timeout_exhausted": exhausted,
+                    "retry_limit": timeout_retry_limit,
+                })),
+            );
+            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                agent_id: Arc::from(agent_id),
+                worker_id,
+                channel_id: None,
+                result: timeout_message.clone(),
+                notify: true,
+                success: false,
+            });
+        }
+        Err(update_error) => {
+            tracing::warn!(
+                %update_error,
+                task_number = task.task_number,
+                "failed to update task status after detached timeout cancellation"
+            );
+            run_logger.log_worker_completed(worker_id, &timeout_message, false);
+            logger.log(
+                "task_pickup_timeout_persist_failure",
+                &format!(
+                    "Detached worker timeout for task #{} but failed to persist status",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "worker_id": worker_id.to_string(),
+                    "supervisor_timeout_count": next_timeout_count,
+                    "supervisor_timeout_exhausted": exhausted,
+                    "retry_limit": timeout_retry_limit,
+                })),
+            );
+            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                agent_id: Arc::from(agent_id),
+                worker_id,
+                channel_id: None,
+                result: timeout_message.clone(),
+                notify: true,
+                success: false,
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_detached_completion(
     routing: DetachedRouting,
@@ -3810,26 +4002,26 @@ async fn handle_detached_completion(
 ) {
     let success = matches!(routing, DetachedRouting::Success);
 
-    // Close the attempt row before touching task status, so the log reflects
-    // what happened even if the status write then fails.
-    if let Some(run_id) = run_id {
-        let (summary, error) = if success {
-            (Some(result_text), None)
-        } else {
-            (None, Some(result_text))
-        };
-        if let Err(error) = task_store
-            .finish_run(run_id, run_outcome, summary, error)
-            .await
-        {
-            tracing::warn!(%error, task_number = task.task_number, "failed to close task run row");
-        }
-    }
+    let (summary, error) = if success {
+        (Some(result_text), None)
+    } else {
+        (None, Some(result_text))
+    };
+    close_run_attempt(
+        task_store,
+        task.task_number,
+        run_id,
+        run_outcome,
+        summary,
+        error,
+    )
+    .await;
 
-    // A wall the agent cannot climb is not an outcome the task board should
-    // absorb as either success or failure. `block_task` parks it with the
+    // A stop the agent cannot resolve itself — an external wall, or a
+    // person's cancel — is not an outcome the task board should absorb as
+    // either success or failure. `block_task` parks it with the
     // reason attached and leaves the failure budget untouched, so the card
-    // reads as "waiting on access" rather than "finished" or "flaky".
+    // reads as "waiting on a decision" rather than "finished" or "flaky".
     if let DetachedRouting::Blocked { reason } = &routing {
         match task_store
             .block_task(
@@ -3850,7 +4042,7 @@ async fn handle_detached_completion(
                     event_tx,
                     agent_id,
                     &format!(
-                        "Picked-up task #{} was blocked by an external defense ({reason}) and parked as {}: {result_text}",
+                        "Picked-up task #{} was blocked ({reason}) and parked as {}: {result_text}",
                         task.task_number,
                         outcome.status.as_str()
                     ),
@@ -3891,7 +4083,7 @@ async fn handle_detached_completion(
                 logger.log(
                     "task_pickup_block_persist_failure",
                     &format!(
-                        "Picked-up task #{} hit an external block but could not be parked: {error}",
+                        "Picked-up task #{} was blocked but could not be parked: {error}",
                         task.task_number
                     ),
                     Some(serde_json::json!({
@@ -3999,11 +4191,11 @@ async fn handle_detached_completion(
     // `Blocked` returned above. It groups with `Requeue` here only so that the
     // fallback if that ever changes is "still claimable", never "done".
     let new_status = match routing {
-        DetachedRouting::Success | DetachedRouting::Terminal => TaskStatus::Done,
+        DetachedRouting::Success => TaskStatus::Done,
         DetachedRouting::Blocked { .. } | DetachedRouting::Requeue => TaskStatus::Ready,
     };
     let update_input = match routing {
-        DetachedRouting::Success | DetachedRouting::Terminal => UpdateTaskInput {
+        DetachedRouting::Success => UpdateTaskInput {
             status: Some(new_status),
             ..Default::default()
         },
@@ -4139,16 +4331,11 @@ async fn handle_detached_completion(
 
     let log_event = match routing {
         DetachedRouting::Success => "task_pickup_completed",
-        DetachedRouting::Terminal => "task_pickup_terminal_failure",
         DetachedRouting::Blocked { .. } => "task_pickup_blocked",
         DetachedRouting::Requeue => "task_pickup_failed",
     };
     let log_message = match &routing {
         DetachedRouting::Success => format!("Completed picked-up task #{}", task.task_number),
-        DetachedRouting::Terminal => format!(
-            "Terminal failure on picked-up task #{}: {result_text}",
-            task.task_number
-        ),
         DetachedRouting::Blocked { reason } => format!(
             "Picked-up task #{} was blocked ({reason}): {result_text}",
             task.task_number
@@ -6139,133 +6326,23 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                     .cortex
                     .load()
                     .detached_worker_timeout_retry_limit;
-                let (next_timeout_count, exhausted, next_status) =
-                    detached_timeout_transition(&task.metadata, timeout_retry_limit);
-
-                let timeout_message = scrub(format!(
-                    "Worker cancelled by supervisor timeout (attempt {} of {}).",
-                    next_timeout_count, timeout_retry_limit
-                ));
-                let update_result = task_store
-                    .update(
-                        task.task_number,
-                        UpdateTaskInput {
-                            status: Some(next_status),
-                            clear_worker_id: true,
-                            metadata: Some(serde_json::json!({
-                                "supervisor_timeout_count": next_timeout_count,
-                                "supervisor_timeout_exhausted": exhausted,
-                            })),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-
-                match update_result {
-                    Ok(Some(_)) => {
-                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
-                        let _ = event_tx.send(ProcessEvent::TaskUpdated {
-                            agent_id: Arc::from(agent_id.as_str()),
-                            task_number: task.task_number,
-                            status: next_status.as_str().to_string(),
-                            action: "updated".to_string(),
-                        });
-                        logger.log(
-                            "task_pickup_timeout",
-                            &format!(
-                                "Detached worker timeout for task #{} (count: {}, exhausted: {})",
-                                task.task_number, next_timeout_count, exhausted
-                            ),
-                            Some(serde_json::json!({
-                                "task_number": task.task_number,
-                                "worker_id": worker_id.to_string(),
-                                "supervisor_timeout_count": next_timeout_count,
-                                "supervisor_timeout_exhausted": exhausted,
-                                "retry_limit": timeout_retry_limit,
-                            })),
-                        );
-
-                        notify_delegation_completion(
-                            &task,
-                            &timeout_message,
-                            false,
-                            &agent_id,
-                            &links,
-                            &agent_names,
-                            &sqlite_pool,
-                            &injection_tx,
-                        )
-                        .await;
-
-                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id: Arc::from(agent_id.as_str()),
-                            worker_id,
-                            channel_id: None,
-                            result: timeout_message,
-                            notify: true,
-                            success: false,
-                        });
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            task_number = task.task_number,
-                            "failed to update task status after detached timeout cancellation: task missing"
-                        );
-                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
-                        logger.log(
-                                "task_pickup_timeout_persist_failure",
-                                &format!(
-                                    "Detached worker timeout for task #{} but task update returned no row",
-                                    task.task_number
-                                ),
-                                Some(serde_json::json!({
-                                    "task_number": task.task_number,
-                                    "worker_id": worker_id.to_string(),
-                                    "supervisor_timeout_count": next_timeout_count,
-                                    "supervisor_timeout_exhausted": exhausted,
-                                    "retry_limit": timeout_retry_limit,
-                                })),
-                            );
-                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id: Arc::from(agent_id.as_str()),
-                            worker_id,
-                            channel_id: None,
-                            result: timeout_message.clone(),
-                            notify: true,
-                            success: false,
-                        });
-                    }
-                    Err(update_error) => {
-                        tracing::warn!(
-                            %update_error,
-                            task_number = task.task_number,
-                            "failed to update task status after detached timeout cancellation"
-                        );
-                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
-                        logger.log(
-                            "task_pickup_timeout_persist_failure",
-                            &format!(
-                                "Detached worker timeout for task #{} but failed to persist status",
-                                task.task_number
-                            ),
-                            Some(serde_json::json!({
-                                "task_number": task.task_number,
-                                "worker_id": worker_id.to_string(),
-                                "supervisor_timeout_count": next_timeout_count,
-                                "supervisor_timeout_exhausted": exhausted,
-                                "retry_limit": timeout_retry_limit,
-                            })),
-                        );
-                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id: Arc::from(agent_id.as_str()),
-                            worker_id,
-                            channel_id: None,
-                            result: timeout_message.clone(),
-                            notify: true,
-                            success: false,
-                        });
-                    }
-                }
+                handle_detached_timeout(
+                    &task,
+                    worker_id,
+                    run_id.as_deref(),
+                    timeout_retry_limit,
+                    &task_store,
+                    &run_logger,
+                    &logger,
+                    &event_tx,
+                    &agent_id,
+                    &links,
+                    &agent_names,
+                    &sqlite_pool,
+                    &injection_tx,
+                    &scrub,
+                )
+                .await;
             }
         };
 
@@ -6602,6 +6679,7 @@ mod tests {
         signal_from_event, summarize_signal_text, take_lagged_control_flag,
     };
     use crate::ProcessEvent;
+    use crate::agent::channel_dispatch::WorkerCompletionError;
     use crate::agent::process_control::ControlActionResult;
     use crate::memory::MemoryType;
     use crate::tasks::TaskStatus;
@@ -8152,23 +8230,52 @@ mod tests {
             DetachedRouting::Success
         );
         assert_eq!(
-            route_detached_outcome(&Ok(WorkerOutcome::Timeout {
-                elapsed_secs: 1,
-                segments_run: 1
+            route_detached_outcome(&Ok(WorkerOutcome::Partial {
+                result: "partial body".to_string(),
+                segments_run: 10
             })),
-            DetachedRouting::Terminal
-        );
-        assert_eq!(
-            route_detached_outcome(&Ok(WorkerOutcome::Cancelled {
-                reason: "user".to_string()
-            })),
-            DetachedRouting::Terminal
+            DetachedRouting::Success
         );
         assert_eq!(
             route_detached_outcome(&Ok(WorkerOutcome::Failed {
                 reason: "llm error".to_string()
             })),
             DetachedRouting::Requeue
+        );
+        assert_eq!(
+            route_detached_outcome(&Err(WorkerCompletionError::Failed {
+                message: "worker panicked".to_string()
+            })),
+            DetachedRouting::Requeue
+        );
+    }
+
+    #[test]
+    fn a_timeout_requeues_instead_of_settling_as_done() {
+        // A wall-clock timeout means the work never finished — settling Done
+        // would release fan-outs, loops, and dependents on incomplete work.
+        // Requeue spends failure budget and parks the task after the limit.
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Timeout {
+                elapsed_secs: 1,
+                segments_run: 1
+            })),
+            DetachedRouting::Requeue
+        );
+    }
+
+    #[test]
+    fn a_cancelled_worker_blocks_for_a_human_decision() {
+        // Cancellation is a person's choice. Done would claim work that never
+        // happened; requeue would resurrect a task someone stopped. A sticky
+        // block keeps the decision visible.
+        assert_eq!(
+            route_detached_outcome(&Ok(WorkerOutcome::Cancelled {
+                reason: "user".to_string()
+            })),
+            DetachedRouting::Blocked {
+                reason: "cancelled: user".to_string()
+            }
         );
     }
 
@@ -8291,6 +8398,70 @@ mod tests {
         assert!(
             announced,
             "the dashboard must be told the task parked, not left showing it in progress"
+        );
+    }
+
+    /// A supervisor-killed worker must close its attempt row — a row left open
+    /// reads as still running in the task history forever.
+    #[tokio::test]
+    async fn a_supervisor_timeout_closes_its_attempt_row() {
+        let (store, _registry) = reaper_fixture().await;
+        let store = Arc::new(store);
+        let task = running_task(&store, "agent-1", "long report").await;
+        let run = store
+            .start_run(task.task_number, None)
+            .await
+            .expect("open attempt row");
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(4);
+        let pool = store.pool().clone();
+
+        super::handle_detached_timeout(
+            &task,
+            uuid::Uuid::new_v4(),
+            Some(&run.id),
+            3,
+            &store,
+            &crate::conversation::history::ProcessRunLogger::new(pool.clone()),
+            &super::CortexLogger::new(pool.clone()),
+            &event_tx,
+            "agent-1",
+            &Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            &Arc::new(std::collections::HashMap::new()),
+            &pool,
+            &injection_tx,
+            |text| text,
+        )
+        .await;
+
+        let runs = store.list_runs(task.task_number).await.expect("list runs");
+        let closed = runs
+            .iter()
+            .find(|candidate| candidate.id == run.id)
+            .expect("the attempt row survives");
+        assert_eq!(closed.outcome, Some(crate::tasks::TaskRunOutcome::Timeout));
+        assert!(
+            closed.ended_at.is_some(),
+            "the attempt log must stop claiming the run is still in flight"
+        );
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            after.status,
+            TaskStatus::Ready,
+            "one timeout spends a retry, not the task"
+        );
+        assert_eq!(
+            after
+                .metadata
+                .get("supervisor_timeout_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 }
