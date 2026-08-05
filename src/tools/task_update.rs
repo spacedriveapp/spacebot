@@ -496,12 +496,77 @@ mod tests {
             .expect_err("missing task should be rejected the same way");
 
         assert_eq!(existing_foreign.to_string(), missing.to_string());
-        assert_eq!(
-            existing_foreign.to_string(),
-            format!(
-                "task_update failed: worker {} can only update task #{}",
-                worker_id, assigned.task_number
+    }
+
+    #[tokio::test]
+    async fn worker_scope_refuses_privileged_fields_but_branch_scope_allows_them() {
+        let task_store = Arc::new(setup_test_store().await);
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Assigned task".to_string(),
+                description: None,
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("task should be created");
+        let worker_id = WorkerId::new_v4();
+        task_store
+            .update(
+                created.task_number,
+                crate::tasks::UpdateTaskInput {
+                    worker_id: Some(worker_id.to_string()),
+                    ..Default::default()
+                },
             )
+            .await
+            .expect("worker assignment should update");
+
+        let worker_tool =
+            TaskUpdateTool::for_worker(task_store.clone(), AgentId::from("agent-test"), worker_id);
+        let worker_error = worker_tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: Some("Retitled by worker".to_string()),
+                description: None,
+                status: Some("done".to_string()),
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect_err("worker-scope update of privileged fields should be refused");
+        assert_eq!(
+            worker_error.to_string(),
+            "task_update failed: workers can only update subtasks and metadata"
         );
+
+        let branch_tool = TaskUpdateTool::for_branch(task_store, AgentId::from("agent-test"));
+        let output = branch_tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: Some("Retitled by branch".to_string()),
+                description: None,
+                status: Some("done".to_string()),
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect("branch-scope update of privileged fields should succeed");
+        assert_eq!(output.status, "done");
     }
 }

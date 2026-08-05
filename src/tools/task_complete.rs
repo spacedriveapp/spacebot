@@ -66,11 +66,7 @@ impl Tool for TaskCompleteTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Submit the structured result of your assigned task. The `outputs` \
-                object is validated against the task's declared output schema and read by \
-                downstream tasks, so every value must be one you actually produced. If it does \
-                not match the schema you will be told what is wrong and can call this again."
-                .to_string(),
+            description: crate::prompts::text::get("tools/task_complete").to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
