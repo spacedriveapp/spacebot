@@ -112,8 +112,6 @@ export function ModelSelect({
 		"kilo",
 		"anthropic",
 		"openai",
-		"openai-chatgpt",
-		"github-copilot",
 		"ollama",
 		"deepseek",
 		"xai",

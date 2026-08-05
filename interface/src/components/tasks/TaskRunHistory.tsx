@@ -131,16 +131,26 @@ export function TaskRunHistoryView({ runs, onWorkerClick }: TaskRunHistoryViewPr
 									{running ? "Running" : (style?.label ?? run.outcome)}
 								</Badge>
 								{duration && <span className="text-[11px] text-ink-faint">{duration}</span>}
-								{run.worker_id && (
-									<button
-										type="button"
-										onClick={() => onWorkerClick?.(run.worker_id as string)}
-										className="font-mono text-[11px] text-ink-faint underline-offset-2 hover:text-ink hover:underline"
-										title="Open worker transcript"
-									>
-										{run.worker_id.slice(0, 8)}
-									</button>
-								)}
+								{run.worker_id &&
+									(onWorkerClick ? (
+										<button
+											type="button"
+											onClick={() => onWorkerClick(run.worker_id as string)}
+											className="font-mono text-[11px] text-ink-faint underline-offset-2 hover:text-ink hover:underline"
+											title="Open worker transcript"
+										>
+											{run.worker_id.slice(0, 8)}
+										</button>
+									) : (
+										// No handler means there is nowhere to go — a button that
+										// does nothing is a worse promise than plain text.
+										<span
+											className="font-mono text-[11px] text-ink-faint"
+											title="Worker"
+										>
+											{run.worker_id.slice(0, 8)}
+										</span>
+									))}
 							</div>
 
 							{run.summary && (

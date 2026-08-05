@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faCodeBranch, faExternalLinkAlt } from "@fortawesome/free-solid-svg-icons";
 import { Badge, Popover, SelectPill, OptionList, OptionListItem } from "@spacedrive/primitives";
+import { isRecord } from "@/lib/json";
 
 // ---------------------------------------------------------------------------
 // GitHub metadata helpers
@@ -11,10 +12,6 @@ interface GithubReference {
   kind: "issue" | "pr";
   label: string;
   url: string | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function toSafeExternalUrl(value: unknown): string | null {

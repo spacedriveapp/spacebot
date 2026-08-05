@@ -9,6 +9,7 @@ import {
 	ReactFlowProvider,
 	useReactFlow,
 	type Connection,
+	type EdgeChange,
 	type EdgeTypes,
 	type NodeChange,
 	type NodeTypes,
@@ -545,20 +546,55 @@ function CanvasInner({
 		],
 	);
 
-	// Only positions are absorbed. Selection is owned by the page — the step
-	// panel on the right has to agree with the highlighted box — and deletion of
-	// a step is a confirmed action in that panel, not a keystroke on the canvas.
-	const onNodesChange = useCallback((changes: NodeChange<CanvasNode>[]) => {
-		setDragged((previous) => {
-			let next = previous;
+	// Only positions are absorbed into canvas state. Selection is owned by the
+	// page — the step panel on the right has to agree with the highlighted box
+	// — and deletion of a step is a confirmed action in that panel, not a
+	// keystroke on the canvas. Selection changes still have to be *read* here:
+	// Enter or Space on a focused node arrives as a select change, not an
+	// onNodeClick, so without this the canvas is mouse-only.
+	const onNodesChange = useCallback(
+		(changes: NodeChange<CanvasNode>[]) => {
+			setDragged((previous) => {
+				let next = previous;
+				for (const change of changes) {
+					if (change.type !== "position" || !change.position) continue;
+					if (next === previous) next = {...previous};
+					next[change.id] = change.position;
+				}
+				return next;
+			});
 			for (const change of changes) {
-				if (change.type !== "position" || !change.position) continue;
-				if (next === previous) next = {...previous};
-				next[change.id] = change.position;
+				if (change.type !== "select" || !change.selected) continue;
+				// A loop's group box is a bracket, not a step — the click handler
+				// refuses it, and the keyboard path has to agree.
+				const node = nodes.find((candidate) => candidate.id === change.id);
+				if (!node || node.type === "loopGroup") continue;
+				setSelectedEdgeId(null);
+				onSelect(change.id);
+				break;
 			}
-			return next;
-		});
-	}, []);
+		},
+		[nodes, onSelect],
+	);
+
+	// Same story for edges: a focused edge emits select changes on Enter, and
+	// selectedEdgeId is what onEdgeClick sets. A click emits the change first
+	// and then fires onEdgeClick, so both paths must be idempotent — a toggle
+	// here would cancel the click's own toggle. Deselecting is Escape, or a
+	// click on the pane.
+	const onEdgesChange = useCallback(
+		(changes: EdgeChange<DependencyFlowEdge>[]) => {
+			for (const change of changes) {
+				if (change.type !== "select") continue;
+				setSelectedEdgeId((current) => {
+					if (change.selected) return change.id;
+					return current === change.id ? null : current;
+				});
+				break;
+			}
+		},
+		[],
+	);
 
 	/**
 	 * A dropped connection.
@@ -660,15 +696,14 @@ function CanvasInner({
 				nodeTypes={NODE_TYPES}
 				edgeTypes={EDGE_TYPES}
 				onNodesChange={onNodesChange}
+				onEdgesChange={onEdgesChange}
 				onConnect={onConnect}
 				onNodeClick={(_event, node) => {
 					if (node.type === "loopGroup") return;
 					setSelectedEdgeId(null);
 					onSelect(node.id);
 				}}
-				onEdgeClick={(_event, edge) =>
-					setSelectedEdgeId((current) => (current === edge.id ? null : edge.id))
-				}
+				onEdgeClick={(_event, edge) => setSelectedEdgeId(edge.id)}
 				onPaneClick={() => setSelectedEdgeId(null)}
 				nodesDraggable
 				nodesConnectable={editable}

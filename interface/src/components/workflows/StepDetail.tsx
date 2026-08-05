@@ -628,6 +628,7 @@ function StepFields({
 				<select
 					value={priority}
 					onChange={(event) => setPriority(event.target.value)}
+					aria-label="Priority"
 					className="rounded border border-app-line bg-app px-1.5 py-1 text-[11px] text-ink outline-none focus:border-accent"
 				>
 					{PRIORITIES.map((value) => (
@@ -645,8 +646,9 @@ function StepFields({
 
 			<KindPicker value={kind} onChange={setKind} />
 
-			<Field label="Title">
+			<Field label="Title" htmlFor="step-title">
 				<input
+					id="step-title"
 					value={title}
 					onChange={(event) => setTitle(event.target.value)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-xs text-ink outline-none focus:border-accent"
@@ -668,8 +670,10 @@ function StepFields({
 					<Field
 						label="Description"
 						hint="The brief the worker is given. This is the task's body."
+						htmlFor="step-description"
 					>
 						<textarea
+							id="step-description"
 							value={description}
 							onChange={(event) => setDescription(event.target.value)}
 							rows={4}
@@ -680,8 +684,10 @@ function StepFields({
 					<Field
 						label="System prompt"
 						hint="Appended to the worker prompt when this step runs. Standing instructions, not the task itself."
+						htmlFor="step-system-prompt"
 					>
 						<textarea
+							id="step-system-prompt"
 							value={systemPrompt}
 							onChange={(event) => setSystemPrompt(event.target.value)}
 							rows={3}
@@ -721,8 +727,10 @@ function StepFields({
 					<Field
 						label="Input schema"
 						hint="What this step needs before it runs. Each key here wants a binding below."
+						htmlFor="step-input-schema"
 					>
 						<textarea
+							id="step-input-schema"
 							value={inputSchema}
 							onChange={(event) => setInputSchema(event.target.value)}
 							rows={5}
@@ -735,8 +743,10 @@ function StepFields({
 					<Field
 						label="Output schema"
 						hint="What it must produce. Enforced when the worker calls task_complete."
+						htmlFor="step-output-schema"
 					>
 						<textarea
+							id="step-output-schema"
 							value={outputSchema}
 							onChange={(event) => setOutputSchema(event.target.value)}
 							rows={5}
@@ -771,8 +781,10 @@ function StepFields({
 				<Field
 					label="Loop body"
 					hint="Every step sharing this name is one body, and the whole body runs again until it converges or runs out. Blank for an ordinary step."
+					htmlFor="step-loop-group"
 				>
 					<input
+						id="step-loop-group"
 						value={loopGroup}
 						onChange={(event) => setLoopGroup(event.target.value)}
 						spellCheck={false}
@@ -820,9 +832,11 @@ function StepFields({
 							<Field
 								label="Passes"
 								hint={`How many times the body may run before the loop gives up. Blank means ${DEFAULT_LOOP_MAX_ITERATIONS}. Ceiling is ${MAX_LOOP_ITERATIONS} — every pass is a live model call.`}
+								htmlFor="step-max-iterations"
 							>
 								<div className="flex items-center gap-2">
 									<input
+										id="step-max-iterations"
 										value={maxIterations}
 										onChange={(event) => setMaxIterations(event.target.value)}
 										inputMode="numeric"
@@ -1168,8 +1182,10 @@ function CommandFields({
 			<Field
 				label="Command"
 				hint="Run through `sh -c` in the directory this step binds to. Its exit code, stdout and stderr become the step's outputs — no output schema to declare."
+				htmlFor="step-command"
 			>
 				<textarea
+					id="step-command"
 					value={command}
 					onChange={(event) => onCommandChange(event.target.value)}
 					rows={3}
@@ -1182,9 +1198,11 @@ function CommandFields({
 			<Field
 				label="Timeout"
 				hint={`Required — there is no default. Only the author knows whether this is a two-second linter or a four-minute build. Ceiling ${MAX_COMMAND_TIMEOUT_SECS}s (${formatTimeout(MAX_COMMAND_TIMEOUT_SECS)}).`}
+				htmlFor="step-timeout-secs"
 			>
 				<div className="flex items-center gap-2">
 					<input
+						id="step-timeout-secs"
 						value={timeoutSecs}
 						onChange={(event) => onTimeoutChange(event.target.value)}
 						inputMode="numeric"
@@ -1202,9 +1220,10 @@ function CommandFields({
 				</p>
 			</Field>
 
-			<Field label="Expected exit code" hint="Optional. Leave blank unless a non-zero code really is a failure.">
+			<Field label="Expected exit code" hint="Optional. Leave blank unless a non-zero code really is a failure." htmlFor="step-expect-exit">
 				<div className="flex items-center gap-2">
 					<input
+						id="step-expect-exit"
 						value={expectExit}
 						onChange={(event) => onExpectExitChange(event.target.value)}
 						inputMode="numeric"
@@ -1362,6 +1381,7 @@ function WhereItRuns({
 
 			<Field
 				label="Repo"
+				htmlFor="step-repo"
 				hint={
 					isCommand
 						? "Required for a command step: it runs in exactly the directory this resolves to. With no binding there is no directory, and launch refuses rather than falling back to the workspace."
@@ -1369,6 +1389,7 @@ function WhereItRuns({
 				}
 			>
 				<select
+					id="step-repo"
 					value={repoId}
 					onChange={(event) => onRepoChange(event.target.value)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -1394,8 +1415,9 @@ function WhereItRuns({
 				)}
 			</Field>
 
-			<Field label="Checkout" hint={WORKTREE_MODE_HINT[mode]}>
+			<Field label="Checkout" hint={WORKTREE_MODE_HINT[mode]} htmlFor="step-checkout-mode">
 				<select
+					id="step-checkout-mode"
 					value={mode}
 					onChange={(event) => onModeChange(event.target.value as WorktreeMode)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -1460,8 +1482,10 @@ function WhereItRuns({
 					<Field
 						label="Base ref"
 						hint="A branch, tag or sha to fork from. Blank uses the repo's current HEAD, which is not reproducible — a pipeline whose starting point drifts under it is one whose failures cannot be explained afterwards."
+						htmlFor="step-base-ref"
 					>
 						<input
+							id="step-base-ref"
 							value={baseRef}
 							onChange={(event) => onBaseRefChange(event.target.value)}
 							spellCheck={false}
@@ -1488,17 +1512,30 @@ function WhereItRuns({
 function Field({
 	label,
 	hint,
+	htmlFor,
 	children,
 }: {
 	label: string;
 	hint?: string;
+	/**
+	 * The control's id, so the label actually names it. Omitted when the child
+	 * is not one labelable control — a button row or a multi-input composite —
+	 * in which case the text renders as a span, because a `<label>` that names
+	 * nothing is a promise a screen reader cannot keep.
+	 */
+	htmlFor?: string;
 	children: React.ReactNode;
 }) {
+	const className = "mb-0.5 block text-[11px] font-medium text-ink-dull";
 	return (
 		<div className="mb-2">
-			<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
-				{label}
-			</label>
+			{htmlFor ? (
+				<label htmlFor={htmlFor} className={className}>
+					{label}
+				</label>
+			) : (
+				<span className={className}>{label}</span>
+			)}
 			{hint && <p className="mb-1 text-[10px] text-ink-faint">{hint}</p>}
 			{children}
 		</div>
@@ -1996,8 +2033,10 @@ function ConditionForm({
 			<Field
 				label="Name"
 				hint="What this condition is called in the template. Saving the same name twice edits it."
+				htmlFor="gate-key"
 			>
 				<input
+					id="gate-key"
 					value={gateKey}
 					onChange={(event) => setGateKey(event.target.value)}
 					disabled={gate != null}
@@ -2010,8 +2049,10 @@ function ConditionForm({
 			<Field
 				label="Reads"
 				hint="Another step's output, or a URL polled until it answers."
+				htmlFor="gate-kind"
 			>
 				<select
+					id="gate-kind"
 					value={kind}
 					onChange={(event) => setKind(event.target.value)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -2023,8 +2064,9 @@ function ConditionForm({
 
 			{kind === "task_output" ? (
 				<>
-					<Field label="Whose output">
+					<Field label="Whose output" htmlFor="gate-source-step">
 						<select
+							id="gate-source-step"
 							value={sourceStepKey}
 							onChange={(event) => setSourceStepKey(event.target.value)}
 							className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -2052,8 +2094,9 @@ function ConditionForm({
 				</>
 			) : (
 				<>
-					<Field label="URL">
+					<Field label="URL" htmlFor="gate-url">
 						<input
+							id="gate-url"
 							value={url}
 							onChange={(event) => setUrl(event.target.value)}
 							spellCheck={false}
@@ -2061,8 +2104,9 @@ function ConditionForm({
 							className="w-full rounded border border-app-line bg-app px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
 						/>
 					</Field>
-					<Field label="Expected status" hint="Blank to accept any status.">
+					<Field label="Expected status" hint="Blank to accept any status." htmlFor="gate-expect-status">
 						<input
+							id="gate-expect-status"
 							value={expectStatus}
 							onChange={(event) => setExpectStatus(event.target.value)}
 							inputMode="numeric"
@@ -2094,8 +2138,10 @@ function ConditionForm({
 					<Field
 						label="Headers"
 						hint="JSON object, sent with every poll. For an auth token, blank is safer than a secret in a template."
+						htmlFor="gate-headers"
 					>
 						<textarea
+							id="gate-headers"
 							value={headers}
 							onChange={(event) => setHeaders(event.target.value)}
 							rows={2}
@@ -2107,8 +2153,10 @@ function ConditionForm({
 					<Field
 						label="Poll every"
 						hint={`Seconds between polls. Minimum ${MIN_POLL_INTERVAL_SECS} — this is polled server-side with nobody watching, so a short interval is a way to be mistaken for an attack.`}
+						htmlFor="gate-poll-secs"
 					>
 						<input
+							id="gate-poll-secs"
 							value={pollSecs}
 							onChange={(event) => setPollSecs(event.target.value)}
 							inputMode="numeric"
@@ -2123,8 +2171,10 @@ function ConditionForm({
 			<Field
 				label="Label"
 				hint='What the board shows. "waiting for CI on main" beats a URL.'
+				htmlFor="gate-label"
 			>
 				<input
+					id="gate-label"
 					value={label}
 					onChange={(event) => setLabel(event.target.value)}
 					placeholder="the deploy went green"
@@ -2132,8 +2182,9 @@ function ConditionForm({
 				/>
 			</Field>
 
-			<Field label="If it is false" hint="The whole of branching is this field.">
+			<Field label="If it is false" hint="The whole of branching is this field." htmlFor="gate-disposition">
 				<select
+					id="gate-disposition"
 					value={disposition}
 					onChange={(event) =>
 						setDisposition(event.target.value as DispositionChoice)

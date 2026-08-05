@@ -6,6 +6,7 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "NODE_OPTIONS='--max-old-space-size=6144' vite build",
+		"test": "bun test",
 		"preview": "vite preview"
 	},
 	"dependencies": {
@@ -45,7 +46,6 @@
 		"graphology-layout-forceatlas2": "^0.10.1",
 		"graphology-types": "^0.24.8",
 		"ogl": "^1.0.11",
-		"openapi-fetch": "^0.17",
 		"react": "^19.0.0",
 		"react-dom": "^19.0.0",
 		"react-hook-form": "^7.71.1",
@@ -63,6 +63,7 @@
 		"@types/react": "^19.0.0",
 		"@types/react-dom": "^19.0.0",
 		"@vitejs/plugin-react": "^4.3.4",
+		"bun-types": "^1.3.14",
 		"openapi-typescript": "^7",
 		"tailwindcss": "^4.2.2",
 		"tailwindcss-radix": "^4.0.2",

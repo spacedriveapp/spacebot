@@ -1,0 +1,5 @@
+[test]
+# The API client reads `window.__SPACEBOT_BASE_PATH` at module scope, so any
+# test importing a module that reaches `@/api/client` needs a window to exist
+# before the import graph evaluates.
+preload = ["./test/setup.ts"]

@@ -109,7 +109,10 @@ export function LaunchPanel({
 				)
 			) : (
 				<div className="mb-2">
-					<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
+					<label
+						htmlFor="launch-inputs-json"
+						className="mb-0.5 block text-[11px] font-medium text-ink-dull"
+					>
 						Inputs
 					</label>
 					<p className="mb-1 text-[10px] text-ink-faint">
@@ -118,6 +121,7 @@ export function LaunchPanel({
 							: "The declared schema is richer than this form can render, so the payload is edited as JSON."}
 					</p>
 					<textarea
+						id="launch-inputs-json"
 						value={raw}
 						onChange={(event) => setRaw(event.target.value)}
 						spellCheck={false}
@@ -129,7 +133,10 @@ export function LaunchPanel({
 			)}
 
 			<div className="mb-2">
-				<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
+				<label
+					htmlFor="launch-launched-by"
+					className="mb-0.5 block text-[11px] font-medium text-ink-dull"
+				>
 					Launched by
 				</label>
 				<p className="mb-1 text-[10px] text-ink-faint">
@@ -137,6 +144,7 @@ export function LaunchPanel({
 					not name one.
 				</p>
 				<select
+					id="launch-launched-by"
 					value={launchedBy}
 					onChange={(event) => setLaunchedBy(event.target.value)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -186,6 +194,8 @@ function SchemaControl({
 	onChange: (next: FieldValue) => void;
 }) {
 	const label = field.title ?? field.key;
+	// One control per field, so the id can come straight from the field key.
+	const controlId = `launch-field-${field.key}`;
 
 	if (field.kind === "boolean") {
 		return (
@@ -206,7 +216,10 @@ function SchemaControl({
 
 	return (
 		<div>
-			<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
+			<label
+				htmlFor={controlId}
+				className="mb-0.5 block text-[11px] font-medium text-ink-dull"
+			>
 				{label}
 				{field.required && (
 					<span className="ml-1 text-status-error" title="Required">
@@ -224,6 +237,7 @@ function SchemaControl({
 			)}
 			{field.kind === "enum" ? (
 				<select
+					id={controlId}
 					value={typeof value === "string" ? value : ""}
 					onChange={(event) => onChange(event.target.value)}
 					className="w-full rounded border border-app-line bg-app px-2 py-1 text-[11px] text-ink outline-none focus:border-accent"
@@ -237,6 +251,7 @@ function SchemaControl({
 				</select>
 			) : (
 				<input
+					id={controlId}
 					value={typeof value === "string" ? value : ""}
 					onChange={(event) => onChange(event.target.value)}
 					inputMode={

@@ -143,8 +143,10 @@ function CanvasInner({
 			});
 	}, [edges, tasks, statusByNumber]);
 
-	// Only positions are absorbed. Selection belongs to the page, because the
-	// panel beside the canvas has to agree with the highlighted box.
+	// Only positions and selection are absorbed. Selection belongs to the page,
+	// because the panel beside the canvas has to agree with the highlighted
+	// box. Handling the select change matters for the keyboard: Enter or Space
+	// on a focused node arrives here, not via onNodeClick.
 	const onNodesChange = (changes: NodeChange<TaskGraphFlowNode>[]) => {
 		setDragged((previous) => {
 			let next = previous;
@@ -155,6 +157,12 @@ function CanvasInner({
 			}
 			return next;
 		});
+		for (const change of changes) {
+			if (change.type === "select" && change.selected) {
+				onSelect(Number(change.id));
+				break;
+			}
+		}
 	};
 
 	return (

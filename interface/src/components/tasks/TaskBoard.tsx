@@ -2,6 +2,7 @@ import {useCallback, useMemo, useState} from "react";
 import {
 	DndContext,
 	DragOverlay,
+	KeyboardCode,
 	KeyboardSensor,
 	PointerSensor,
 	closestCorners,
@@ -153,9 +154,21 @@ export function TaskBoard({
 	// A drag must not fire on a click: the card is both the drag handle and the
 	// button that opens the drawer, and 5px is the usual threshold between the
 	// two intents.
+	//
+	// Keyboard drag starts on Space alone, not the default Space-or-Enter:
+	// Enter is the card's activation key (it opens the drawer), and a sensor
+	// that also starts a drag on Enter leaves a keyboard user no way to
+	// activate without dragging.
 	const sensors = useSensors(
 		useSensor(PointerSensor, {activationConstraint: {distance: 5}}),
-		useSensor(KeyboardSensor, {coordinateGetter: sortableKeyboardCoordinates}),
+		useSensor(KeyboardSensor, {
+			coordinateGetter: sortableKeyboardCoordinates,
+			keyboardCodes: {
+				start: [KeyboardCode.Space],
+				cancel: [KeyboardCode.Esc],
+				end: [KeyboardCode.Space, KeyboardCode.Enter],
+			},
+		}),
 	);
 
 	const handleDragEnd = useCallback(
@@ -372,6 +385,17 @@ function Card({
 	const {attributes, listeners, setNodeRef, transform, transition, isDragging} =
 		useSortable({id: task.id});
 
+	// The div carries role="button", which no browser activates from the
+	// keyboard — and dnd-kit's own key listener only drags. Enter activates the
+	// card the way a click does. Space is left to the drag sensor: one key
+	// doing both would be a trap. While a keyboard drag is in the air, Enter is
+	// the drop key, so it must not also open the drawer.
+	const {onKeyDown: dragKeyDown, ...otherListeners} = listeners ?? {};
+	const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+		dragKeyDown?.(event);
+		if (event.key === "Enter" && !isDragging) onClick();
+	};
+
 	return (
 		<CardBody
 			ref={setNodeRef}
@@ -381,6 +405,7 @@ function Card({
 			resolveAgentName={resolveAgentName}
 			agents={agents}
 			onClick={onClick}
+			onKeyDown={handleKeyDown}
 			style={{transform: CSS.Transform.toString(transform), transition}}
 			// The original stays in place as a ghost while the overlay copy moves,
 			// so the column keeps its height and nothing below it jumps.
@@ -388,7 +413,7 @@ function Card({
 				active ? "border-accent/60 bg-app-box" : ""
 			}`}
 			{...attributes}
-			{...listeners}
+			{...otherListeners}
 		/>
 	);
 }

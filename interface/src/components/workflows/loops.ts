@@ -21,9 +21,20 @@ import type {
  * it.
  */
 
-/** How many passes a body runs when the exit step does not say. Server default. */
+/**
+ * How many passes a body runs when the exit step does not say. Server default.
+ *
+ * Mirrors `DEFAULT_LOOP_MAX_ITERATIONS` in `src/tasks/store.rs`; launch is the
+ * authority, this copy only lets the editor show what the server will do.
+ */
 export const DEFAULT_LOOP_MAX_ITERATIONS = 3;
-/** The server's ceiling. Every pass is a live model call, hence a hard cap. */
+/**
+ * The server's ceiling. Every pass is a live model call, hence a hard cap.
+ *
+ * Mirrors `MAX_LOOP_ITERATIONS` in `src/tasks/store.rs` — launch refuses
+ * anything above it, so the editor must never offer more. Keep the two in
+ * lockstep; the test in `loops.test.ts` pins this copy to the Rust value.
+ */
 export const MAX_LOOP_ITERATIONS = 25;
 
 export interface LoopBody {

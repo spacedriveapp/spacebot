@@ -11,6 +11,8 @@
  * JSON editor, which is always correct and never lies about what it supports.
  */
 
+import {isRecord} from "@/lib/json";
+
 export type FieldKind = "string" | "number" | "integer" | "boolean" | "enum";
 
 export interface SchemaField {
@@ -23,10 +25,6 @@ export interface SchemaField {
 	options?: string[];
 	/** Rendered as the control's initial value. */
 	initial?: unknown;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

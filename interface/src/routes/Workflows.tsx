@@ -404,18 +404,23 @@ function CreateWorkflowForm({
 					onChange={(event) => setName(event.target.value)}
 					spellCheck={false}
 					autoFocus
+					aria-label="Workflow key"
 					placeholder="release-notes-chain"
 					className="w-64 rounded border border-app-line bg-app px-2 py-1 font-mono text-xs text-ink outline-none focus:border-accent"
 				/>
 				<input
 					value={description}
 					onChange={(event) => setDescription(event.target.value)}
+					aria-label="Workflow description"
 					placeholder="What this pipeline does"
 					className="min-w-0 flex-1 rounded border border-app-line bg-app px-2 py-1 text-xs text-ink outline-none focus:border-accent"
 				/>
 			</div>
 
-			<label className="mb-0.5 block text-[11px] font-medium text-ink-dull">
+			<label
+				htmlFor="workflow-input-schema"
+				className="mb-0.5 block text-[11px] font-medium text-ink-dull"
+			>
 				Launch input schema
 			</label>
 			<p className="mb-1 text-[10px] text-ink-faint">
@@ -423,6 +428,7 @@ function CreateWorkflowForm({
 				turns the launcher into a form instead of a JSON box.
 			</p>
 			<textarea
+				id="workflow-input-schema"
 				value={schema}
 				onChange={(event) => setSchema(event.target.value)}
 				spellCheck={false}

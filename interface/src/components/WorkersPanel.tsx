@@ -389,7 +389,7 @@ function WorkerDetailInline({
 		};
 	}, [detailData, liveWorker]);
 
-	const [copied, setCopied] = useState(false);
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 	const [cancelling, setCancelling] = useState(false);
 
 	const isActive = !!liveWorker;
@@ -428,9 +428,11 @@ function WorkerDetailInline({
 		}
 		if (detail?.result) lines.push(`\n---\nResult: ${detail.result}`);
 
-		void copyText(lines.join("\n")).then(() => {
-			setCopied(true);
-			setTimeout(() => setCopied(false), 2000);
+		// copyText reports whether the copy landed; claiming "copied" on a
+		// refusal would send the operator off with an empty clipboard.
+		void copyText(lines.join("\n")).then((ok) => {
+			setCopyState(ok ? "copied" : "failed");
+			setTimeout(() => setCopyState("idle"), 2000);
 		});
 	}, [detail, liveTranscript]);
 
@@ -455,8 +457,16 @@ function WorkerDetailInline({
 					/>
 				)}
 				<CircleButton
-					icon={copied ? Check : Copy}
-					title="Copy transcript"
+					icon={
+						copyState === "copied" ? Check
+						: copyState === "failed" ? XCircle
+						: Copy
+					}
+					title={
+						copyState === "failed"
+							? "Copy failed — the browser refused it"
+							: "Copy transcript"
+					}
 					onClick={copyTranscript}
 					variant="default"
 				/>
