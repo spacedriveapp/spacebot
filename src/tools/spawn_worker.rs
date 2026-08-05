@@ -529,7 +529,7 @@ impl Tool for DetachedSpawnWorkerTool {
             .working_memory
             .emit(
                 crate::memory::WorkingMemoryEventType::WorkerSpawned,
-                format!("Worker spawned (cortex): {}", &args.task),
+                format!("Worker spawned (cortex): {}", args.task),
             )
             .importance(0.5)
             .record();

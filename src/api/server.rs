@@ -546,6 +546,8 @@ fn normalize_api_path(path: &str) -> String {
                             | "skills"
                             | "tools"
                             | "links"
+                            | "projects"
+                            | "avatar"
                     ) =>
                 {
                     normalized.push("{id}")
@@ -694,5 +696,31 @@ mod tests {
         assert!(!is_webhook_delivery_path("/api/agents"));
         assert!(!is_webhook_delivery_path("/api/secrets"));
         assert!(!is_webhook_delivery_path("/api/workflows/abc/webhook"));
+    }
+
+    /// Static agent subroutes are not agent IDs. Folding "avatar" or
+    /// "projects" into {id} would mislabel their metrics and merge them with
+    /// real per-agent traffic — while a genuine agent id must still collapse.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn static_agent_subroutes_are_not_collapsed_into_id_placeholders() {
+        use super::normalize_api_path;
+
+        assert_eq!(
+            normalize_api_path("/api/agents/avatar"),
+            "/api/agents/avatar"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/projects"),
+            "/api/agents/projects"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/projects/reorder"),
+            "/api/agents/projects/reorder"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/some-agent/config"),
+            "/api/agents/{id}/config"
+        );
     }
 }

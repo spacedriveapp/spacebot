@@ -197,7 +197,7 @@ pub(super) async fn channel_messages(
     let limit = query.limit.min(100);
     let fetch_limit = limit + 1;
 
-    for (_agent_id, pool) in pools.iter() {
+    for pool in pools.values() {
         let logger = ProcessRunLogger::new(pool.clone());
         match logger
             .load_channel_timeline(&query.channel_id, fetch_limit, query.before.as_deref())
@@ -424,7 +424,7 @@ pub(super) async fn cancel_process(
             // Fallback for detached workers (for example after restart): no live
             // channel state exists, but the DB row is still marked running.
             let pools = state.agent_pools.load();
-            for (_agent_id, pool) in pools.iter() {
+            for pool in pools.values() {
                 let logger = ProcessRunLogger::new(pool.clone());
                 match logger.cancel_running_detached_worker(worker_id).await {
                     Ok(true) => {

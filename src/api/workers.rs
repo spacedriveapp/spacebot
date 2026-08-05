@@ -150,7 +150,7 @@ pub(super) async fn list_workers(
     let live_statuses = {
         let blocks = state.channel_status_blocks.read().await;
         let mut map = std::collections::HashMap::new();
-        for (_channel_id, status_block) in blocks.iter() {
+        for status_block in blocks.values() {
             let block = status_block.read().await;
             for worker in &block.active_workers {
                 map.insert(

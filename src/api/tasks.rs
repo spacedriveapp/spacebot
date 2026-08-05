@@ -1508,6 +1508,40 @@ fn gate_store(state: &ApiState) -> Result<crate::tasks::GateStore, StatusCode> {
     ))
 }
 
+/// Header names whose values are credentials, matched case-insensitively.
+/// Anything else in a gate's `headers` map rides through the API untouched.
+const CREDENTIAL_HEADER_NAMES: [&str; 5] = [
+    "authorization",
+    "private-token",
+    "x-api-key",
+    "token",
+    "api-key",
+];
+
+/// What a redacted credential value reads as in an API response.
+const REDACTED_CREDENTIAL_VALUE: &str = "********";
+
+/// A gate as the API may show it: the stored row with credential-bearing
+/// header values blanked out.
+///
+/// The stored config keeps the real values — the evaluator sends them — but
+/// this response is read by anyone who can see the task, and a token written
+/// into a gate config must not come back out of the API in plaintext.
+fn redacted_gate(gate: crate::tasks::TaskGate) -> crate::tasks::TaskGate {
+    let mut config = gate.config.clone();
+    if let Some(headers) = config
+        .get_mut("headers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (name, value) in headers.iter_mut() {
+            if CREDENTIAL_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+                *value = serde_json::Value::String(REDACTED_CREDENTIAL_VALUE.to_string());
+            }
+        }
+    }
+    crate::tasks::TaskGate { config, ..gate }
+}
+
 /// `GET /tasks/{number}/gates` — what this task is waiting on outside the graph.
 #[utoipa::path(
     get,
@@ -1530,7 +1564,9 @@ pub(super) async fn list_task_gates(
             tracing::warn!(%error, task_number = number, "failed to list task gates");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(Json(TaskGatesResponse { gates }))
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
 }
 
 /// `POST /tasks/{number}/gates` — hold this task until something outside says go.
@@ -1643,7 +1679,9 @@ pub(super) async fn create_task_gate(
             "failed to list gates".to_string(),
         )
     })?;
-    Ok(Json(TaskGatesResponse { gates }))
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
 }
 
 /// `DELETE /tasks/{number}/gates/{gate_id}` — stop waiting on it.
@@ -1681,7 +1719,9 @@ pub(super) async fn delete_task_gate(
         tracing::warn!(%error, task_number = number, "failed to list task gates");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok(Json(TaskGatesResponse { gates }))
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
 }
 
 /// `GET /tasks/{number}/graph` — every task connected to this one, and the
@@ -1732,4 +1772,371 @@ pub(super) async fn get_task_graph(
         })?;
 
     Ok(Json(graph))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        ))
+    }
+
+    async fn state_with_task_store() -> Arc<ApiState> {
+        let state = test_api_state();
+        state.set_task_store(Arc::new(crate::tasks::store::setup_test_store().await));
+        state
+    }
+
+    fn create_request(title: &str) -> CreateTaskRequest {
+        CreateTaskRequest {
+            owner_agent_id: "agent-test".to_string(),
+            assigned_agent_id: None,
+            required_capabilities: None,
+            title: title.to_string(),
+            description: None,
+            priority: None,
+            subtasks: Vec::new(),
+            metadata: None,
+            source_memory_id: None,
+            created_by: None,
+            project_id: None,
+            repo_id: None,
+            worktree_id: None,
+            depends_on: Vec::new(),
+            status: None,
+        }
+    }
+
+    async fn create_one(state: &Arc<ApiState>, title: &str) -> crate::tasks::Task {
+        create_task(State(state.clone()), Json(create_request(title)))
+            .await
+            .expect("task should be created")
+            .0
+            .task
+    }
+
+    fn list_query() -> TaskListQuery {
+        TaskListQuery {
+            agent_id: None,
+            owner_agent_id: None,
+            assigned_agent_id: None,
+            status: None,
+            priority: None,
+            created_by: None,
+            limit: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_without_store_is_service_unavailable() {
+        let state = test_api_state();
+        let result = list_tasks(State(state), Query(list_query())).await;
+        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+    }
+
+    #[tokio::test]
+    async fn create_get_and_list_round_trip() {
+        let state = state_with_task_store().await;
+
+        let created = create_task(State(state.clone()), Json(create_request("write the spec")))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        assert_eq!(created.status, crate::tasks::TaskStatus::PendingApproval);
+        assert_eq!(created.title, "write the spec");
+        // No assignee named and no capability pool: the owner takes it.
+        assert_eq!(created.assigned_agent_id, "agent-test");
+
+        let fetched = get_task(State(state.clone()), Path(created.task_number))
+            .await
+            .expect("task should be found")
+            .0
+            .task;
+        assert_eq!(fetched.task_number, created.task_number);
+
+        let listed = list_tasks(State(state), Query(list_query()))
+            .await
+            .expect("tasks should list")
+            .0;
+        assert!(
+            listed
+                .tasks
+                .iter()
+                .any(|task| task.task_number == created.task_number)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_task_rejects_unknown_status() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("bad status");
+        request.status = Some("doing-it".to_string());
+
+        let result = create_task(State(state), Json(request)).await;
+        assert!(matches!(result, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[tokio::test]
+    async fn create_task_rejects_assignee_and_capabilities_together() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("who does this");
+        request.assigned_agent_id = Some("agent-test".to_string());
+        request.required_capabilities = Some(vec!["rust".to_string()]);
+
+        let result = create_task(State(state), Json(request)).await;
+        assert!(matches!(result, Err(StatusCode::UNPROCESSABLE_ENTITY)));
+    }
+
+    #[tokio::test]
+    async fn get_task_unknown_number_is_not_found() {
+        let state = state_with_task_store().await;
+        let result = get_task(State(state), Path(999)).await;
+        assert!(matches!(result, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn block_task_parks_with_typed_reason() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "wait on a person").await;
+
+        let blocked = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "which environment?".to_string(),
+            }),
+        )
+        .await
+        .expect("block should succeed")
+        .0
+        .task;
+
+        assert_eq!(blocked.status, crate::tasks::TaskStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn block_task_rejects_unknown_kind_and_unknown_task() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "kind check").await;
+
+        let bad_kind = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "vibes".to_string(),
+                reason: "no reason".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(bad_kind, Err(StatusCode::UNPROCESSABLE_ENTITY)));
+
+        let missing = block_task(
+            State(state),
+            Path(999),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "no task".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(missing, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn unblock_releases_blocked_task_to_ready() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "park then release").await;
+        let _blocked = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "holding".to_string(),
+            }),
+        )
+        .await
+        .expect("block should succeed");
+
+        // Nothing upstream is outstanding, so the release lands in ready.
+        let released = unblock_task(State(state), Path(task.task_number))
+            .await
+            .expect("unblock should succeed")
+            .0
+            .task;
+        assert_eq!(released.status, crate::tasks::TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn unblock_task_outside_parked_states_is_not_found() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("already running");
+        request.status = Some("ready".to_string());
+        let task = create_task(State(state.clone()), Json(request))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        let result = unblock_task(State(state), Path(task.task_number)).await;
+        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn execute_task_refuses_pending_approval() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "not yet approved").await;
+
+        let result = execute_task(
+            State(state),
+            Path(task.task_number),
+            Json(ApproveRequest { approved_by: None }),
+        )
+        .await;
+        assert!(matches!(result, Err(StatusCode::CONFLICT)));
+    }
+
+    #[tokio::test]
+    async fn execute_task_moves_backlog_to_ready() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("run me");
+        request.status = Some("backlog".to_string());
+        let task = create_task(State(state.clone()), Json(request))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        let executed = execute_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(ApproveRequest {
+                approved_by: Some("operator".to_string()),
+            }),
+        )
+        .await
+        .expect("execute should succeed")
+        .0
+        .task;
+        assert_eq!(executed.status, crate::tasks::TaskStatus::Ready);
+
+        let missing = execute_task(
+            State(state),
+            Path(999),
+            Json(ApproveRequest { approved_by: None }),
+        )
+        .await;
+        assert!(matches!(missing, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn gate_listing_redacts_credential_headers_but_keeps_config() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "gated on ci").await;
+
+        let _created = create_task_gate(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "http".to_string(),
+                config: serde_json::json!({
+                    "url": "https://ci.example.com/status",
+                    "expect_status": 200,
+                    "headers": {
+                        "Authorization": "Bearer super-secret",
+                        "PRIVATE-token": "glpat-secret",
+                        "X-Api-Key": "apikey-secret",
+                        "X-Build-Id": "42"
+                    }
+                }),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await
+        .expect("gate should be created");
+
+        let gates = list_task_gates(State(state.clone()), Path(task.task_number))
+            .await
+            .expect("gates should list")
+            .0
+            .gates;
+        assert_eq!(gates.len(), 1);
+        let listed = &gates[0].config;
+
+        assert_eq!(listed["headers"]["Authorization"], "********");
+        assert_eq!(listed["headers"]["PRIVATE-token"], "********");
+        assert_eq!(listed["headers"]["X-Api-Key"], "********");
+        assert_eq!(listed["headers"]["X-Build-Id"], "42");
+        assert_eq!(listed["url"], "https://ci.example.com/status");
+        assert_eq!(listed["expect_status"], 200);
+
+        // The stored row keeps the real values — the evaluator sends them.
+        let stored = gate_store(&state)
+            .expect("gate store")
+            .list_for_task(task.task_number)
+            .await
+            .expect("stored gates");
+        assert_eq!(
+            stored[0].config["headers"]["Authorization"],
+            "Bearer super-secret"
+        );
+        assert_eq!(stored[0].config["headers"]["X-Api-Key"], "apikey-secret");
+    }
+
+    #[tokio::test]
+    async fn create_gate_rejects_unusable_config() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "gate validation").await;
+
+        // Unknown kind.
+        let unknown_kind = create_task_gate(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "smoke_signal".to_string(),
+                config: serde_json::json!({}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            unknown_kind,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+
+        // An http gate with no assertion is satisfied by any response, which
+        // means it is not a gate.
+        let no_assertion = create_task_gate(
+            State(state),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "http".to_string(),
+                config: serde_json::json!({"url": "https://ci.example.com/status"}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            no_assertion,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+    }
 }

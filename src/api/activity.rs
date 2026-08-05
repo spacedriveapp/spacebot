@@ -256,7 +256,7 @@ pub(super) async fn get_activity(
 
     let mut days: HashMap<String, ActivityDay> = HashMap::new();
 
-    for (_agent_id, pool) in pools.iter() {
+    for pool in pools.values() {
         query_count(
             pool,
             "conversation_messages",

@@ -137,6 +137,41 @@ fn model_matches_provider(provider: &str, model: &str) -> bool {
     crate::llm::routing::provider_from_model(model) == provider
 }
 
+/// Resolve the credential and endpoint for a model test.
+///
+/// A caller-supplied `base_url` is honored only when the caller also supplied
+/// the key. When the key comes from stored config, the endpoint is whatever
+/// the provider is configured with — sending the stored credential to a
+/// caller-chosen URL would hand the real key to any server an API-token
+/// holder points the test at.
+fn resolve_test_target(
+    api_type: crate::config::ApiType,
+    request_api_key: &str,
+    request_base_url: Option<&str>,
+    stored: Option<&crate::config::ProviderConfig>,
+) -> Result<(String, String), String> {
+    let caller_key = request_api_key.trim();
+    let caller_url = request_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if caller_key.is_empty() {
+        let stored = stored
+            .filter(|provider| !provider.api_key.trim().is_empty())
+            .ok_or_else(|| "API key is required but not provided".to_string())?;
+        Ok((stored.api_key.trim().to_string(), stored.base_url.clone()))
+    } else {
+        let base_url = match caller_url {
+            Some(url) => resolve_base_url(api_type, Some(url))?,
+            None => match stored {
+                Some(provider) => provider.base_url.clone(),
+                None => resolve_base_url(api_type, None)?,
+            },
+        };
+        Ok((caller_key.to_string(), base_url))
+    }
+}
+
 /// Reload the in-memory defaults config from disk so that newly created agents
 /// inherit the latest routing values rather than stale startup defaults.
 async fn refresh_defaults_config(state: &Arc<ApiState>) {
@@ -220,6 +255,84 @@ fn apply_model_routing(doc: &mut toml_edit::DocumentMut, model: &str) {
             routing_table["worker"] = toml_edit::value(model);
             routing_table["compactor"] = toml_edit::value(model);
             routing_table["cortex"] = toml_edit::value(model);
+        }
+    }
+}
+
+/// Environment variables that bootstrap a provider even when config.toml does
+/// not define it (`Config::load_from_env` / `Config::load_from_path`). Deleting
+/// such a provider from the file would silently reappear on next load, so the
+/// delete handler refuses while the variable is set.
+fn env_bootstrap_vars(provider_id: &str) -> &'static [&'static str] {
+    match provider_id {
+        "anthropic" => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        "litellm" => &["LITELLM_API_KEY"],
+        _ => &[],
+    }
+}
+
+/// Drop model-valued entries whose provider prefix matches from one routing
+/// table. The keys mirror what `apply_model_routing` writes.
+fn scrub_routing_table(routing: &mut toml_edit::Table, provider_id: &str) {
+    const MODEL_KEYS: &[&str] = &[
+        "channel",
+        "branch",
+        "worker",
+        "compactor",
+        "cortex",
+        "voice",
+    ];
+    for key in MODEL_KEYS {
+        let dangling = routing
+            .get(key)
+            .and_then(|item| item.as_str())
+            .is_some_and(|model| crate::llm::routing::provider_from_model(model) == provider_id);
+        if dangling {
+            routing.remove(key);
+        }
+    }
+}
+
+/// Remove routing entries pointing at a deleted provider from
+/// `[defaults.routing]` and every agent's routing table, so the deleted
+/// provider does not leave dangling `provider/model` strings behind. A table
+/// left empty is removed entirely so config loading re-infers routing from
+/// the remaining providers instead of falling back to the hardcoded default.
+fn scrub_provider_routing(doc: &mut toml_edit::DocumentMut, provider_id: &str) {
+    if let Some(defaults) = doc.get_mut("defaults").and_then(|item| item.as_table_mut()) {
+        let now_empty = match defaults
+            .get_mut("routing")
+            .and_then(|item| item.as_table_mut())
+        {
+            Some(routing) => {
+                scrub_routing_table(routing, provider_id);
+                routing.is_empty()
+            }
+            None => false,
+        };
+        if now_empty {
+            defaults.remove("routing");
+        }
+    }
+
+    if let Some(agents) = doc
+        .get_mut("agents")
+        .and_then(|item| item.as_array_of_tables_mut())
+    {
+        for agent in agents.iter_mut() {
+            let now_empty = match agent
+                .get_mut("routing")
+                .and_then(|item| item.as_table_mut())
+            {
+                Some(routing) => {
+                    scrub_routing_table(routing, provider_id);
+                    routing.is_empty()
+                }
+                None => false,
+            };
+            if now_empty {
+                agent.remove("routing");
+            }
         }
     }
 }
@@ -333,6 +446,10 @@ pub(super) async fn update_provider(
 
     let config_path = state.config_path.read().await.clone();
 
+    // Serialize the config.toml read-modify-write with every other handler
+    // that edits it; without the guard a concurrent write loses whole updates.
+    let _config_guard = state.config_write_mutex.lock().await;
+
     let content = if config_path.exists() {
         tokio::fs::read_to_string(&config_path).await.map_err(|error| {
             tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for provider setup");
@@ -432,7 +549,11 @@ pub(super) async fn test_provider_model(
 
     // An empty key means "test what is already configured" — used by the UI to
     // re-check a provider without asking the user to retype a secret.
-    let stored = if request.api_key.trim().is_empty() || request.base_url.is_none() {
+    let caller_url_supplied = request
+        .base_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let stored = if request.api_key.trim().is_empty() || !caller_url_supplied {
         let config_path = state.config_path.read().await.clone();
         crate::config::Config::load_from_path(&config_path)
             .ok()
@@ -441,32 +562,14 @@ pub(super) async fn test_provider_model(
         None
     };
 
-    let api_key = if request.api_key.trim().is_empty() {
-        match stored.as_ref().map(|provider| provider.api_key.clone()) {
-            Some(key) if !key.trim().is_empty() => key,
-            _ => return reject("API key is required but not provided".to_string()),
-        }
-    } else {
-        request.api_key.trim().to_string()
-    };
-
-    let base_url = match request
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(url) => match resolve_base_url(api_type, Some(url)) {
-            Ok(base_url) => base_url,
-            Err(message) => return reject(message),
-        },
-        None => match stored.as_ref().map(|provider| provider.base_url.clone()) {
-            Some(url) => url,
-            None => match resolve_base_url(api_type, None) {
-                Ok(base_url) => base_url,
-                Err(message) => return reject(message),
-            },
-        },
+    let (api_key, base_url) = match resolve_test_target(
+        api_type,
+        &request.api_key,
+        request.base_url.as_deref(),
+        stored.as_ref(),
+    ) {
+        Ok(target) => target,
+        Err(message) => return reject(message),
     };
 
     let llm_config = build_test_llm_config(&provider_id, api_type, base_url, &api_key);
@@ -534,6 +637,31 @@ pub(super) async fn delete_provider(
         }));
     }
 
+    // Env-bootstrapped providers are not owned by config.toml: removing the
+    // file entry (if any) would not remove the provider, and it would reappear
+    // on next load while the delete reported success.
+    let bootstrap_vars: Vec<&str> = env_bootstrap_vars(&provider_id)
+        .iter()
+        .copied()
+        .filter(|var| std::env::var(var).is_ok())
+        .collect();
+    if !bootstrap_vars.is_empty() {
+        return Ok(Json(ProviderUpdateResponse {
+            success: false,
+            message: format!(
+                "Provider '{provider_id}' is configured by the {} environment {}; \
+                 unset {} to remove it.",
+                bootstrap_vars.join(" / "),
+                if bootstrap_vars.len() == 1 {
+                    "variable"
+                } else {
+                    "variables"
+                },
+                bootstrap_vars.join(" / "),
+            ),
+        }));
+    }
+
     let config_path = state.config_path.read().await.clone();
     if !config_path.exists() {
         return Ok(Json(ProviderUpdateResponse {
@@ -541,6 +669,10 @@ pub(super) async fn delete_provider(
             message: "No config file found".into(),
         }));
     }
+
+    // Serialize the config.toml read-modify-write with every other handler
+    // that edits it; without the guard a concurrent write loses whole updates.
+    let _config_guard = state.config_write_mutex.lock().await;
 
     let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
         tracing::error!(%error, path = %config_path.display(), "failed to read config.toml for provider removal");
@@ -571,12 +703,16 @@ pub(super) async fn delete_provider(
         }));
     }
 
+    scrub_provider_routing(&mut doc, &provider_id);
+
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|error| {
             tracing::error!(%error, path = %config_path.display(), "failed to write config.toml for provider removal");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    refresh_defaults_config(&state).await;
 
     Ok(Json(ProviderUpdateResponse {
         success: true,
@@ -636,5 +772,133 @@ mod tests {
         assert!(validate_provider_id("").is_err());
         assert!(validate_provider_id("has/slash").is_err());
         assert!(validate_provider_id("has space").is_err());
+    }
+
+    fn stored_provider() -> crate::config::ProviderConfig {
+        crate::config::ProviderConfig {
+            api_type: ApiType::OpenAiCompatible,
+            base_url: "http://localhost:4000/v1".to_string(),
+            api_key: "sk-real".to_string(),
+            name: None,
+            use_bearer_auth: false,
+            extra_headers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_target_with_stored_key_ignores_caller_base_url() {
+        let stored = stored_provider();
+        let (api_key, base_url) = resolve_test_target(
+            ApiType::OpenAiCompatible,
+            "",
+            Some("http://attacker.example.com/v1"),
+            Some(&stored),
+        )
+        .unwrap();
+        assert_eq!(api_key, "sk-real");
+        assert_eq!(base_url, "http://localhost:4000/v1");
+    }
+
+    #[test]
+    fn test_target_with_caller_key_honors_caller_base_url() {
+        let (api_key, base_url) = resolve_test_target(
+            ApiType::OpenAiCompatible,
+            "sk-caller",
+            Some("http://localhost:9999/v1/"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(api_key, "sk-caller");
+        assert_eq!(base_url, "http://localhost:9999/v1");
+    }
+
+    #[test]
+    fn test_target_with_caller_key_falls_back_to_stored_base_url() {
+        let stored = stored_provider();
+        let (api_key, base_url) =
+            resolve_test_target(ApiType::OpenAiCompatible, "sk-caller", None, Some(&stored))
+                .unwrap();
+        assert_eq!(api_key, "sk-caller");
+        assert_eq!(base_url, "http://localhost:4000/v1");
+    }
+
+    #[test]
+    fn test_target_requires_a_key_when_nothing_is_stored() {
+        assert!(resolve_test_target(ApiType::Anthropic, "", None, None).is_err());
+        let mut stored = stored_provider();
+        stored.api_key = "  ".to_string();
+        assert!(resolve_test_target(ApiType::OpenAiCompatible, "", None, Some(&stored)).is_err());
+    }
+
+    #[test]
+    fn env_bootstrap_vars_cover_only_the_bootstrapped_providers() {
+        assert_eq!(
+            env_bootstrap_vars("anthropic"),
+            &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        );
+        assert_eq!(env_bootstrap_vars("litellm"), &["LITELLM_API_KEY"]);
+        assert!(env_bootstrap_vars("openrouter").is_empty());
+    }
+
+    #[test]
+    fn scrub_provider_routing_removes_only_dangling_entries() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[defaults.routing]
+channel = "litellm/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "litellm/claude-sonnet-4"
+rate_limit_cooldown_secs = 60
+
+[[agents]]
+id = "main"
+default = true
+
+[agents.routing]
+channel = "litellm/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+"#
+        .parse()
+        .unwrap();
+
+        scrub_provider_routing(&mut doc, "litellm");
+
+        let defaults_routing = doc["defaults"]["routing"].as_table().unwrap();
+        assert!(defaults_routing.get("channel").is_none());
+        assert!(defaults_routing.get("worker").is_none());
+        assert_eq!(
+            defaults_routing["branch"].as_str(),
+            Some("anthropic/claude-sonnet-4")
+        );
+
+        let agents = doc["agents"].as_array_of_tables().unwrap();
+        let agent_routing = agents.iter().next().unwrap();
+        assert!(
+            agent_routing["routing"]
+                .as_table()
+                .unwrap()
+                .get("channel")
+                .is_none()
+        );
+        assert_eq!(
+            agent_routing["routing"]["worker"].as_str(),
+            Some("anthropic/claude-sonnet-4")
+        );
+    }
+
+    #[test]
+    fn scrub_provider_routing_drops_a_table_left_empty() {
+        let mut doc: toml_edit::DocumentMut =
+            "[defaults.routing]\nchannel = \"litellm/claude-sonnet-4\"\n"
+                .parse()
+                .unwrap();
+
+        scrub_provider_routing(&mut doc, "litellm");
+
+        // Removing the emptied table lets config loading re-infer routing from
+        // the remaining providers instead of keeping a dangling default.
+        let routing = doc
+            .get("defaults")
+            .and_then(|defaults| defaults.get("routing"));
+        assert!(routing.is_none());
     }
 }
