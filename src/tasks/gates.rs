@@ -16,9 +16,11 @@
 
 use crate::error::Result;
 use anyhow::Context as _;
+use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Row as _, SqlitePool};
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// How long a single gate evaluation may take.
@@ -27,6 +29,14 @@ use std::time::Duration;
 /// timer with nobody watching, so it gets a hard ceiling rather than inheriting
 /// a default from somewhere.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most of a response body a gate will hold in memory.
+///
+/// The timeout bounds how long a poll takes, not how much it downloads, and a
+/// gzipped body decompresses as it streams, so an endpoint can answer with
+/// effectively unbounded bytes. A gate whose assertion needs a bigger answer
+/// than this needs a different design, not a bigger buffer.
+const MAX_GATE_BODY_BYTES: usize = 1024 * 1024;
 
 /// Consecutive evaluation errors before a gate stops polling and asks for help.
 ///
@@ -200,8 +210,14 @@ pub enum GateConfigError {
     },
     #[error("`{url}` is not an http or https URL")]
     UnsupportedScheme { url: String },
+    #[error(
+        "`{url}` points at a private, loopback, or link-local address — a gate cannot poll the network this instance lives on"
+    )]
+    ForbiddenAddress { url: String },
     #[error("an http gate needs at least one of `expect_status` or `pointer`")]
     NoAssertion,
+    #[error("`expect_status` must be an integer HTTP status code (100..=599)")]
+    InvalidExpectStatus,
     #[error("poll interval must be at least {min} seconds")]
     PollTooFast { min: i64 },
 }
@@ -242,8 +258,31 @@ pub fn validate_config(
             // read things on someone else's behalf.
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(GateConfigError::UnsupportedScheme {
-                    url: url.to_string(),
+                    url: redact_url_userinfo(url),
                 });
+            }
+
+            // Literal-IP hosts are judged now; hostnames are judged at
+            // evaluation time, where DNS answers. A stored URL naming the
+            // metadata endpoint by number must fail here, while a person is
+            // still looking at the gate, rather than once a minute in a log
+            // nobody reads.
+            if forbidden_url_address(url).is_some() {
+                return Err(GateConfigError::ForbiddenAddress {
+                    url: redact_url_userinfo(url),
+                });
+            }
+
+            // Presence is not enough: the evaluator reads `expect_status`
+            // with `as_i64`, so a string `"200"` type-checks here and is then
+            // silently dropped there, leaving a gate satisfied by any status.
+            if let Some(expect_status) = config.get("expect_status") {
+                let valid = expect_status
+                    .as_i64()
+                    .is_some_and(|status| (100..=599).contains(&status));
+                if !valid {
+                    return Err(GateConfigError::InvalidExpectStatus);
+                }
             }
 
             // A gate with no assertion is satisfied by any response, which
@@ -376,7 +415,18 @@ impl GateStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Gates worth looking at again, oldest check first.
+    /// Claim the gates worth looking at again, oldest check first.
+    ///
+    /// A claim, not a read: each gate returned has its `last_checked_at`
+    /// stamped inside the same transaction, so a second poller running at the
+    /// same moment sees the fresh stamp and finds nothing due. Without this,
+    /// every per-agent poll loop evaluates the same due gate in the same
+    /// round, and each racer's `record_evaluation` adds its own
+    /// `consecutive_errors` — the backoff and [`GATE_ERROR_LIMIT`] trip once
+    /// per agent instead of once per failure. `record_evaluation` overwrites
+    /// the stamp with the real check time when the evaluation lands, and a
+    /// claim whose poller dies mid-flight simply becomes due again one
+    /// interval later.
     ///
     /// Filters on `last_result` in SQL rather than fetching everything and
     /// deciding in Rust, because the whole point of latching `satisfied` and
@@ -387,7 +437,13 @@ impl GateStore {
     /// again, so asking its endpoint once a minute forever is pure waste. It is
     /// also what stops a `route` gate from re-deciding a branch it has already
     /// settled: the poll that skipped the task is the last one it gets.
-    pub async fn due_for_poll(&self, now_unix: i64) -> Result<Vec<TaskGate>> {
+    pub async fn claim_due_gates(&self, now_unix: i64) -> Result<Vec<TaskGate>> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open gate claim transaction")?;
+
         let rows = sqlx::query(&format!(
             "{SELECT_COLUMNS} FROM task_gates g \
              WHERE g.last_result IN ('pending', 'erroring') \
@@ -398,7 +454,7 @@ impl GateStore {
              ORDER BY g.last_checked_at IS NOT NULL, g.last_checked_at ASC",
             settled = crate::tasks::store::SETTLED_STATUSES
         ))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await
         .context("failed to list gates due for polling")?;
 
@@ -407,10 +463,28 @@ impl GateStore {
             .map(gate_from_row)
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(gates
+        let due: Vec<TaskGate> = gates
             .into_iter()
             .filter(|gate| gate.is_due(now_unix))
-            .collect())
+            .collect();
+
+        for gate in &due {
+            sqlx::query(
+                "UPDATE task_gates \
+                 SET last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+                 WHERE id = ?",
+            )
+            .bind(&gate.id)
+            .execute(&mut *transaction)
+            .await
+            .context("failed to stamp a claimed gate")?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .context("failed to commit gate claim")?;
+        Ok(due)
     }
 
     /// Record what an evaluation found.
@@ -609,7 +683,7 @@ pub async fn poll_gates_once(
     gates: &GateStore,
     now_unix: i64,
 ) -> Result<Vec<GatePoll>> {
-    let due = gates.due_for_poll(now_unix).await?;
+    let due = gates.claim_due_gates(now_unix).await?;
     let mut polled = Vec::with_capacity(due.len());
 
     for gate in due {
@@ -661,7 +735,7 @@ pub async fn poll_gates_once(
                 Ok(true) => {
                     // Record what this gate actually did. Without it the row
                     // keeps whatever the evaluation said — `pending` — while
-                    // `due_for_poll` never looks at it again, so it reports
+                    // `claim_due_gates` never looks at it again, so it reports
                     // "not yet" forever about a decision it already made.
                     let verdict = Evaluation {
                         result: GateResult::Routed,
@@ -724,6 +798,84 @@ pub fn should_route(disposition: GateDisposition, result: GateResult) -> bool {
         && matches!(result, GateResult::Pending | GateResult::Failed)
 }
 
+/// Whether an address is somewhere a gate must never connect.
+///
+/// A gate is a stored, repeating, server-side request carrying config-chosen
+/// credentials — the shape SSRF takes — so loopback, private, link-local
+/// (cloud metadata endpoints live there), and unspecified addresses are
+/// refused outright rather than made configurable.
+fn is_forbidden_address(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            // An IPv4-mapped address is the IPv4 address in another notation;
+            // judge it by what it actually is.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_forbidden_address(&IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unicast_link_local()
+                || v6.is_unique_local()
+        }
+    }
+}
+
+/// `Url::host_str` keeps the brackets on an IPv6 literal (`[::1]`); neither
+/// `IpAddr` parsing nor a DNS lookup wants them.
+fn unbracket_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// A URL as it may be written into an error or a stored detail: same scheme,
+/// host, and path, no credentials.
+///
+/// `last_detail` is served to anyone who can read the task, so
+/// `https://user:password@host/…` must never reach it with the password
+/// still inside.
+fn redact_url_userinfo(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    // `set_username`/`set_password` fail only for cannot-be-a-base URLs
+    // (`mailto:` and friends), which cannot carry userinfo in the first place.
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return url.to_string();
+    }
+    parsed.to_string()
+}
+
+/// The address a URL's host literal points at, when that literal is somewhere
+/// a gate must never connect.
+///
+/// Only literals are answered here — a hostname needs DNS, which validation
+/// deliberately does not perform. Evaluation resolves and applies the same
+/// rule to every answer.
+fn forbidden_url_address(url: &str) -> Option<IpAddr> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let address: IpAddr = unbracket_host(parsed.host_str()?).parse().ok()?;
+    is_forbidden_address(&address).then_some(address)
+}
+
+/// The client knobs every gate request shares.
+///
+/// Redirects are off, not limited: a redirect target is a second URL that
+/// never went through the address check, and a 3xx is a perfectly good
+/// definitive answer for a gate to assert on.
+fn gate_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+}
+
 /// Evaluate an HTTP gate.
 ///
 /// The three outcomes map onto the states deliberately: an assertion that does
@@ -735,24 +887,103 @@ pub async fn evaluate_http(config: &Value) -> Evaluation {
         return Evaluation::new(GateResult::Erroring, "gate config has no url");
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        // A gate follows redirects a little, not forever. An open redirect
-        // chain is a way to spend this process's time.
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-    {
+    let client = match gate_http_client(url).await {
         Ok(client) => client,
+        Err(evaluation) => return evaluation,
+    };
+
+    evaluate_http_with_client(config, &client).await
+}
+
+/// Build the client for one poll, with the target's addresses settled first.
+///
+/// DNS is resolved here and every answer checked against the forbidden set,
+/// then the client is pinned to exactly those addresses — an answer that
+/// changes between the check and the connection cannot smuggle a private
+/// address past it. Configs are re-checked here rather than trusted from
+/// validation because a stored gate outlives the moment it was written.
+async fn gate_http_client(url: &str) -> std::result::Result<reqwest::Client, Evaluation> {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed,
         Err(error) => {
-            return Evaluation::new(GateResult::Erroring, format!("http client: {error}"));
+            return Err(Evaluation::new(
+                GateResult::Erroring,
+                format!("invalid url: {error}"),
+            ));
         }
+    };
+    let Some(host) = parsed.host_str().map(unbracket_host).map(str::to_string) else {
+        return Err(Evaluation::new(
+            GateResult::Erroring,
+            format!("`{}` has no host", redact_url_userinfo(url)),
+        ));
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        return Err(Evaluation::new(
+            GateResult::Erroring,
+            format!("`{}` is not an http or https URL", redact_url_userinfo(url)),
+        ));
+    };
+
+    let addresses: Vec<std::net::SocketAddr> =
+        match tokio::net::lookup_host((host.as_str(), port)).await {
+            Ok(resolved) => resolved.collect(),
+            // Unreachable is not the same as negative. Saying "failed" here
+            // would tell someone their build broke when in fact DNS did.
+            Err(error) => {
+                return Err(Evaluation::new(
+                    GateResult::Erroring,
+                    format!("dns lookup for `{host}` failed: {error}"),
+                ));
+            }
+        };
+    if addresses.is_empty() {
+        return Err(Evaluation::new(
+            GateResult::Erroring,
+            format!("dns lookup for `{host}` returned no addresses"),
+        ));
+    }
+    if let Some(address) = addresses
+        .iter()
+        .map(|address| address.ip())
+        .find(is_forbidden_address)
+    {
+        return Err(Evaluation::new(
+            GateResult::Erroring,
+            format!(
+                "refused to connect to `{host}`: {address} is a private, loopback, or link-local address"
+            ),
+        ));
+    }
+
+    gate_client_builder()
+        .resolve_to_addrs(&host, &addresses)
+        .build()
+        .map_err(|error| Evaluation::new(GateResult::Erroring, format!("http client: {error}")))
+}
+
+/// The fetch-and-assert half of [`evaluate_http`], split from address
+/// resolution so tests can run it against a loopback server.
+async fn evaluate_http_with_client(config: &Value, client: &reqwest::Client) -> Evaluation {
+    let Some(url) = config.get("url").and_then(Value::as_str) else {
+        return Evaluation::new(GateResult::Erroring, "gate config has no url");
     };
 
     let mut request = client.get(url);
     if let Some(headers) = config.get("headers").and_then(Value::as_object) {
         for (name, value) in headers {
             if let Some(value) = value.as_str() {
-                request = request.header(name, value);
+                // Header values go through the same `secret:`/`env:`
+                // indirection as provider credentials — a stored gate must
+                // not need a plaintext token, and the literal string must
+                // never be sent as if it were the secret.
+                let Some(resolved) = crate::config::resolve_env_value(value) else {
+                    return Evaluation::new(
+                        GateResult::Erroring,
+                        format!("header `{name}` names a secret that could not be resolved"),
+                    );
+                };
+                request = request.header(name, resolved);
             }
         }
     }
@@ -762,7 +993,16 @@ pub async fn evaluate_http(config: &Value) -> Evaluation {
         // Unreachable is not the same as negative. Saying "failed" here would
         // tell someone their build broke when in fact DNS did.
         Err(error) => {
-            return Evaluation::new(GateResult::Erroring, format!("request failed: {error}"));
+            // The error embeds the request URL, credentials and all; the
+            // detail is stored and served, so the URL goes in redacted.
+            return Evaluation::new(
+                GateResult::Erroring,
+                format!(
+                    "request to {} failed: {}",
+                    redact_url_userinfo(url),
+                    error.without_url()
+                ),
+            );
         }
     };
 
@@ -789,7 +1029,32 @@ pub async fn evaluate_http(config: &Value) -> Evaluation {
         return Evaluation::new(GateResult::Satisfied, format!("status {status}"));
     };
 
-    let body: Value = match response.json().await {
+    // Read with a ceiling rather than `.json()`: the timeout bounds duration,
+    // not bytes, and decompression multiplies whatever arrives. Overflow is
+    // `Erroring` — an endpoint we cannot safely read is our problem, not an
+    // answer about the thing being waited on.
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return Evaluation::new(
+                    GateResult::Erroring,
+                    format!("failed to read the response body: {error}"),
+                );
+            }
+        };
+        if body.len() + chunk.len() > MAX_GATE_BODY_BYTES {
+            return Evaluation::new(
+                GateResult::Erroring,
+                format!("response body exceeded {MAX_GATE_BODY_BYTES} bytes"),
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body: Value = match serde_json::from_slice(&body) {
         Ok(body) => body,
         Err(error) => {
             return Evaluation::new(
@@ -976,7 +1241,7 @@ mod tests {
     /// A gate that routed has decided. Reporting `pending` afterwards — which
     /// is what the evaluation says, since routing fires on a *pending* mismatch
     /// — would leave the row claiming "not yet" about a settled branch, and
-    /// `due_for_poll` never looks again to correct it.
+    /// `claim_due_gates` never looks again to correct it.
     #[test]
     fn a_routed_verdict_is_settled_and_reads_as_a_decision() {
         assert!(!GateResult::Routed.is_worth_polling());
@@ -1395,5 +1660,419 @@ mod tests {
             1,
             "only the still-waiting gate is due; the settled task's is not"
         );
+    }
+
+    /// Two pollers (the per-agent cortex loops) hitting one due gate in the
+    /// same round must produce one evaluation, not two. Each racer used to add
+    /// its own `consecutive_errors`, so backoff and [`GATE_ERROR_LIMIT`] tripped
+    /// once per agent instead of once per failure.
+    ///
+    /// The gate's URL is refused by the SSRF guard, so the evaluation errors
+    /// deterministically without a packet leaving the host — exactly the
+    /// `erroring` path whose error count this test is about.
+    #[tokio::test]
+    async fn concurrent_pollers_evaluate_a_due_gate_once() {
+        let tasks = crate::tasks::store::setup_test_store().await;
+        let gates = GateStore::new(tasks.pool().clone());
+
+        let task = tasks
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".into(),
+                assigned_agent_id: "agent-test".into(),
+                title: "wait on CI".into(),
+                status: crate::tasks::TaskStatus::Backlog,
+                created_by: "branch".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+        let gate = gates
+            .create(
+                task.task_number,
+                GateKind::Http,
+                &json!({"url": "http://192.168.1.1/gate", "expect_status": 200}),
+                Some("CI on main"),
+                60,
+                None,
+            )
+            .await
+            .expect("gate");
+
+        // A real clock: `last_checked_at` is written by SQLite's `now`, so a
+        // synthetic epoch would make the gate look checked in the future.
+        let now = chrono::Utc::now().timestamp();
+        let (first, second) = tokio::join!(
+            poll_gates_once(&tasks, &gates, now),
+            poll_gates_once(&tasks, &gates, now),
+        );
+        let first = first.expect("first poll");
+        let second = second.expect("second poll");
+        assert_eq!(
+            first.len() + second.len(),
+            1,
+            "the claim must hand the gate to exactly one poller: {first:?} {second:?}"
+        );
+
+        let stored = gates.get(&gate.id).await.expect("read").expect("exists");
+        assert_eq!(stored.last_result, GateResult::Erroring);
+        assert_eq!(
+            stored.consecutive_errors, 1,
+            "one unreachable endpoint is one error, however many pollers saw it"
+        );
+    }
+
+    // -- evaluate_http ------------------------------------------------------
+
+    /// A bare-bones HTTP endpoint on loopback: answers every connection with
+    /// the given response and reports each request head it saw.
+    ///
+    /// The SSRF guard (correctly) refuses to talk to this server, so the
+    /// fetch-and-assert half of evaluation is exercised through
+    /// `evaluate_http_with_client`, and the guard itself is exercised through
+    /// the public `evaluate_http` against literal addresses.
+    struct TestEndpoint {
+        url: String,
+        seen: tokio::sync::mpsc::UnboundedReceiver<String>,
+    }
+
+    async fn start_endpoint(
+        status_line: &'static str,
+        extra_headers: &'static str,
+        body: Vec<u8>,
+    ) -> TestEndpoint {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let seen_tx = seen_tx.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => {
+                                head.extend_from_slice(&chunk[..read]);
+                                if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if seen_tx
+                        .send(String::from_utf8_lossy(&head).into_owned())
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let response = format!(
+                        "{status_line}\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if socket.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    // The final write has nothing after it: a disconnecting
+                    // client ends the task either way, so no branch is needed.
+                    drop(socket.write_all(&body).await);
+                });
+            }
+        });
+        TestEndpoint {
+            url: format!("http://127.0.0.1:{port}/gate"),
+            seen,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_http_gate_opens_on_the_pointed_at_value() {
+        let endpoint =
+            start_endpoint("HTTP/1.1 200 OK", "", br#"{"status":"green"}"#.to_vec()).await;
+        let client = gate_client_builder().build().expect("client");
+
+        let evaluation = evaluate_http_with_client(
+            &json!({"url": endpoint.url, "pointer": "/status", "equals": "green"}),
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            evaluation.result,
+            GateResult::Satisfied,
+            "{}",
+            evaluation.detail
+        );
+    }
+
+    /// The SSRF guard: a gate is a stored, repeating, credentialed request
+    /// made from this host, so the addresses this host can reach are exactly
+    /// the ones it must refuse. Literal IPs never touch DNS, so the refusal
+    /// is decided before a packet could leave.
+    #[tokio::test]
+    async fn an_http_gate_refuses_the_network_this_instance_lives_on() {
+        for url in [
+            "http://127.0.0.1:9/gate",
+            "http://10.1.2.3/gate",
+            "http://172.16.0.1/gate",
+            "http://192.168.1.1/gate",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://0.0.0.0/gate",
+            "http://[::1]/gate",
+            "http://[fe80::1]/gate",
+            "http://[::ffff:127.0.0.1]/gate",
+        ] {
+            let evaluation = evaluate_http(&json!({"url": url, "expect_status": 200})).await;
+            assert_eq!(
+                evaluation.result,
+                GateResult::Erroring,
+                "{url} must be refused, got {}",
+                evaluation.detail
+            );
+            assert!(
+                evaluation
+                    .detail
+                    .contains("private, loopback, or link-local"),
+                "{url}: {}",
+                evaluation.detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_gate_at_a_private_address_is_refused_at_creation() {
+        let error = validate_config(
+            GateKind::Http,
+            &json!({"url": "http://169.254.169.254/latest/meta-data/", "expect_status": 200}),
+            60,
+        )
+        .expect_err("the cloud metadata endpoint must not survive validation");
+        assert!(
+            matches!(error, GateConfigError::ForbiddenAddress { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_hostname_is_not_refused_at_creation() {
+        // Validation does not do DNS; a hostname's addresses are checked at
+        // evaluation time, against whatever DNS says then.
+        validate_config(
+            GateKind::Http,
+            &json!({"url": "http://ci.internal/x", "expect_status": 200}),
+            60,
+        )
+        .expect("a hostname cannot be judged before it resolves");
+    }
+
+    /// A string `"200"` passes a presence check and is then silently dropped
+    /// by the evaluator's `as_i64`, leaving a gate satisfied by any status.
+    #[test]
+    fn a_non_integer_or_out_of_range_expect_status_is_refused() {
+        for expect_status in [json!("200"), json!(99), json!(600), json!(200.5)] {
+            let error = validate_config(
+                GateKind::Http,
+                &json!({"url": "https://ci.internal/x", "expect_status": expect_status}),
+                60,
+            )
+            .expect_err("a status the evaluator cannot act on must not be stored");
+            assert!(
+                matches!(error, GateConfigError::InvalidExpectStatus),
+                "{expect_status} should be refused, got {error}"
+            );
+        }
+
+        validate_config(
+            GateKind::Http,
+            &json!({"url": "https://ci.internal/x", "expect_status": 200}),
+            60,
+        )
+        .expect("a plain integer status is the ordinary case");
+    }
+
+    #[tokio::test]
+    async fn a_status_gate_opens_only_on_the_expected_status() {
+        let endpoint =
+            start_endpoint("HTTP/1.1 200 OK", "", br#"{"status":"green"}"#.to_vec()).await;
+        let client = gate_client_builder().build().expect("client");
+
+        let satisfied =
+            evaluate_http_with_client(&json!({"url": endpoint.url, "expect_status": 200}), &client)
+                .await;
+        assert_eq!(satisfied.result, GateResult::Satisfied);
+
+        let waiting =
+            evaluate_http_with_client(&json!({"url": endpoint.url, "expect_status": 201}), &client)
+                .await;
+        assert_eq!(waiting.result, GateResult::Pending);
+        assert_eq!(waiting.detail, "status 200, expected 201");
+    }
+
+    #[test]
+    fn userinfo_is_stripped_before_a_url_is_stored_or_reported() {
+        assert_eq!(
+            redact_url_userinfo("https://ci-bot:hunter2@ci.internal/builds/1"),
+            "https://ci.internal/builds/1"
+        );
+        assert_eq!(
+            redact_url_userinfo("https://ci.internal/builds/1"),
+            "https://ci.internal/builds/1"
+        );
+    }
+
+    /// The refusal message is shown to the gate's author; it still must not
+    /// carry the credentials back out.
+    #[test]
+    fn a_refused_gate_url_is_reported_without_its_credentials() {
+        let error = validate_config(
+            GateKind::Http,
+            &json!({"url": "http://ci-bot:hunter2@127.0.0.1/x", "expect_status": 200}),
+            60,
+        )
+        .expect_err("a private address is refused");
+        let message = error.to_string();
+        assert!(!message.contains("hunter2"), "got: {message}");
+        assert!(message.contains("127.0.0.1"), "got: {message}");
+    }
+
+    /// `last_detail` is stored and served. A failed request against a URL
+    /// with userinfo must leave the password out of it.
+    #[tokio::test]
+    async fn a_request_failure_never_leaks_url_credentials_into_the_detail() {
+        let client = gate_client_builder().build().expect("client");
+        let evaluation = evaluate_http_with_client(
+            &json!({"url": "http://ci-bot:hunter2@127.0.0.1:9/gate", "expect_status": 200}),
+            &client,
+        )
+        .await;
+        assert_eq!(evaluation.result, GateResult::Erroring);
+        assert!(
+            !evaluation.detail.contains("hunter2"),
+            "the detail is stored and served: {}",
+            evaluation.detail
+        );
+        assert!(
+            evaluation.detail.contains("127.0.0.1"),
+            "the detail still says where it tried: {}",
+            evaluation.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_cap_errors_instead_of_buffering() {
+        let endpoint =
+            start_endpoint("HTTP/1.1 200 OK", "", vec![b'a'; MAX_GATE_BODY_BYTES + 1]).await;
+        let client = gate_client_builder().build().expect("client");
+
+        let evaluation =
+            evaluate_http_with_client(&json!({"url": endpoint.url, "pointer": "/status"}), &client)
+                .await;
+
+        assert_eq!(evaluation.result, GateResult::Erroring);
+        assert!(
+            evaluation.detail.contains("exceeded"),
+            "{}",
+            evaluation.detail
+        );
+    }
+
+    /// A gate header naming a secret that does not resolve must fail closed:
+    /// the literal `secret:…` string is not a credential and must never be
+    /// sent as if it were one.
+    #[tokio::test]
+    async fn an_unresolvable_secret_header_errors_instead_of_sending_the_literal() {
+        let mut endpoint =
+            start_endpoint("HTTP/1.1 200 OK", "", br#"{"status":"green"}"#.to_vec()).await;
+        let client = gate_client_builder().build().expect("client");
+
+        let evaluation = evaluate_http_with_client(
+            &json!({
+                "url": endpoint.url,
+                "pointer": "/status",
+                "headers": {"authorization": "secret:NOT_IN_ANY_STORE_TEST_ONLY"},
+            }),
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            evaluation.result,
+            GateResult::Erroring,
+            "an unresolvable secret must not be sent as its own literal value"
+        );
+        assert!(
+            endpoint.seen.try_recv().is_err(),
+            "no request should leave until every header resolves"
+        );
+    }
+
+    /// The resolver's other indirection mode, exercised end to end: the
+    /// stored value is a whole-value reference, and what arrives at the
+    /// endpoint is what the reference names.
+    #[tokio::test]
+    async fn an_env_referenced_header_arrives_resolved() {
+        unsafe {
+            std::env::set_var("SPACEBOT_GATE_TEST_TOKEN", "s3cret-token");
+        }
+        let mut endpoint =
+            start_endpoint("HTTP/1.1 200 OK", "", br#"{"status":"green"}"#.to_vec()).await;
+        let client = gate_client_builder().build().expect("client");
+
+        let evaluation = evaluate_http_with_client(
+            &json!({
+                "url": endpoint.url,
+                "pointer": "/status",
+                "headers": {"authorization": "env:SPACEBOT_GATE_TEST_TOKEN"},
+            }),
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            evaluation.result,
+            GateResult::Satisfied,
+            "{}",
+            evaluation.detail
+        );
+        let request = endpoint
+            .seen
+            .try_recv()
+            .expect("the request should have arrived");
+        assert!(
+            request.contains("authorization: s3cret-token"),
+            "the endpoint must see the resolved value, not the reference:\n{request}"
+        );
+    }
+
+    /// Redirects are off: a redirect target is a second URL that never went
+    /// through the address check, so the 3xx itself is the definitive answer.
+    #[tokio::test]
+    async fn a_redirect_is_a_definitive_answer_not_an_invitation() {
+        let endpoint = start_endpoint(
+            "HTTP/1.1 302 Found",
+            "location: http://127.0.0.1:1/elsewhere\r\n",
+            Vec::new(),
+        )
+        .await;
+        let client = gate_client_builder().build().expect("client");
+
+        let evaluation =
+            evaluate_http_with_client(&json!({"url": endpoint.url, "expect_status": 200}), &client)
+                .await;
+
+        // Had the redirect been followed, the connection to port 1 would fail
+        // and this would read Erroring. Pending says the 302 was the answer.
+        assert_eq!(
+            evaluation.result,
+            GateResult::Pending,
+            "{}",
+            evaluation.detail
+        );
+        assert!(evaluation.detail.contains("302"), "{}", evaluation.detail);
     }
 }

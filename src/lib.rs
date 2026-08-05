@@ -154,6 +154,28 @@ pub fn classify_broadcast_recv_result<T>(
     }
 }
 
+/// Validate `value` against a JSON `schema`, mapping failures to the caller's
+/// own problem type.
+///
+/// The task contract layer and the workflow launch layer both validate a value
+/// against a stored schema and each reports the failure in its own vocabulary;
+/// the walk is the same either way, so it lives here once. A schema that will
+/// not compile is reported through `map_invalid_schema` rather than silently
+/// skipped: a stored schema nothing can evaluate is misconfiguration, and
+/// quietly accepting every value would hide that.
+pub fn validate_json_schema<T>(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    map_violation: impl Fn(jsonschema::ValidationError<'_>) -> T,
+    map_invalid_schema: impl FnOnce(jsonschema::ValidationError<'static>) -> T,
+) -> Vec<T> {
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(validator) => validator,
+        Err(error) => return vec![map_invalid_schema(error)],
+    };
+    validator.iter_errors(value).map(map_violation).collect()
+}
+
 /// Events sent between processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

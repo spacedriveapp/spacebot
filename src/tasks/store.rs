@@ -1153,7 +1153,22 @@ impl TaskStore {
                     // worse than none, since the scheduler would run it early.
                     for parent in &input.depends_on {
                         if let Err(error) = self.link_tasks(*parent, task_number).await {
-                            let _ = self.delete(task_number).await;
+                            if let Err(delete_error) = self.delete(task_number).await {
+                                // The orphan outranks the original failure: a
+                                // committed task with no edges will be scheduled as
+                                // though the caller asked for exactly that.
+                                tracing::error!(
+                                    %delete_error,
+                                    task_number,
+                                    "failed to roll back a task whose dependency edge was rejected"
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "failed to link task #{task_number} to parent #{parent}: {error}; \
+                                     the compensating delete also failed ({delete_error}), leaving \
+                                     task #{task_number} orphaned"
+                                )
+                                .into());
+                            }
                             return Err(anyhow::anyhow!(
                                 "failed to link task #{task_number} to parent #{parent}: {error}"
                             )
@@ -1638,7 +1653,7 @@ impl TaskStore {
     /// candidate *and* in the conditional UPDATE that wins the race for it, and
     /// a condition added to one and forgotten in the other is a task handed to
     /// two workers. Composed here, both queries get it by construction, and the
-    /// next hold to be added — a gate, a loop boundary — is one more entry.
+    /// the next hold to be added is one more entry.
     ///
     /// Placeholder count and order matter: [`CLAIMABLE_BY_AGENT`] takes the
     /// agent id twice and nothing else takes anything, so every caller binds
@@ -1661,6 +1676,13 @@ impl TaskStore {
             // sweep is not the only way into `ready`, and a decision that
             // reached it by some other path must still be unclaimable.
             "t.kind <> 'decision'",
+            // A task waiting on a loop boundary is not work yet: the boundary
+            // decides whether this pass is superseded, skipped, or released,
+            // and claiming before that decision runs the arm the loop ruled
+            // out. The sweep holds these out of `ready`, but `ready` is also
+            // reachable through unblock and the API, so the hold has to live
+            // at the chokepoint too.
+            "t.awaiting_loop_group IS NULL",
             CLAIMABLE_BY_AGENT,
             &format!(
                 "NOT EXISTS (\
@@ -1669,6 +1691,14 @@ impl TaskStore {
                     WHERE d.child_task_number = t.task_number \
                       AND p.status NOT IN {SETTLED_STATUSES})"
             ),
+            // An unsatisfied gate holds a task exactly as an unfinished parent
+            // does. The same condition the sweep's `gate_holds` decides on,
+            // stated in SQL so the claim — reachable through unblock and the
+            // API, paths the sweep never sees — cannot hand out a gated task.
+            "NOT EXISTS (\
+               SELECT 1 FROM task_gates g \
+                WHERE g.task_number = t.task_number \
+                  AND g.last_result <> 'satisfied')",
         ]
         .join(" AND ")
     }
@@ -2053,6 +2083,13 @@ impl TaskStore {
     /// [`BLOCK_RECURRENCE_LIMIT`] the task escalates to `PendingApproval`
     /// instead, which already raises a notification. That breaks the loop where
     /// a sweep unblocks a card and a worker immediately re-blocks it.
+    ///
+    /// A settled task (`done` or `skipped`) is refused outright. Blocking one
+    /// would flip it back to `backlog`/`blocked`, and the next sweep would
+    /// quietly demote every child that was promoted on the strength of its
+    /// result. Loop exhaustion is the one place moving off `done` is the
+    /// honest record, and it goes through [`TaskStore::park_settled_task`]
+    /// rather than here.
     pub async fn block_task(
         &self,
         task_number: i64,
@@ -2069,7 +2106,7 @@ impl TaskStore {
         // it promotes, so comparing against it made every re-block look like a
         // first offence and the recurrence limiter never fired.
         let row = sqlx::query(
-            "SELECT last_block_kind, block_recurrences FROM tasks WHERE task_number = ?",
+            "SELECT status, last_block_kind, block_recurrences FROM tasks WHERE task_number = ?",
         )
         .bind(task_number)
         .fetch_optional(&mut *tx)
@@ -2082,6 +2119,21 @@ impl TaskStore {
                 .context("failed to commit empty block transaction")?;
             return Ok(None);
         };
+
+        let current_status = row
+            .try_get::<String, _>("status")
+            .ok()
+            .as_deref()
+            .and_then(TaskStatus::parse);
+        if let Some(status) = current_status
+            && status.is_terminal()
+        {
+            return Err(anyhow::Error::new(BlockTaskError::Terminal {
+                task_number,
+                status,
+            })
+            .into());
+        }
 
         let previous_kind = row
             .try_get::<Option<String>, _>("last_block_kind")
@@ -2133,6 +2185,41 @@ impl TaskStore {
             recurrences,
             escalated,
         }))
+    }
+
+    /// Park a *settled* task in front of a person, moving it off `done`.
+    ///
+    /// Loop exhaustion is the only caller, and the one place the flip is the
+    /// honest record: the loop gave up, nothing downstream may use the body's
+    /// result, and leaving `done` would let the sweep proceed as though the
+    /// loop had succeeded. Everywhere else moving off `done` is an accident,
+    /// which is why [`TaskStore::block_task`] refuses settled tasks instead of
+    /// serving both.
+    ///
+    /// No recurrence counting: the callers reach a settled task exactly once,
+    /// behind the conditional `settle_loop` claim.
+    async fn park_settled_task(
+        &self,
+        task_number: i64,
+        kind: BlockKind,
+        reason: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET status = ?, block_kind = ?, last_block_kind = ?, \
+             block_reason = ?, worker_id = NULL, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ?",
+        )
+        .bind(kind.resting_status().as_str())
+        .bind(kind.as_str())
+        .bind(kind.as_str())
+        .bind(reason)
+        .bind(task_number)
+        .execute(&self.pool)
+        .await
+        .context("failed to park a settled task")?;
+
+        Ok(())
     }
 
     /// Release a parked task back to the scheduler.
@@ -3339,7 +3426,16 @@ impl TaskStore {
             .emit_fan_out_branches(&placeholder, &items, &prepared)
             .await
         {
-            Ok(branches) => branches,
+            Ok(Some(branches)) => branches,
+            Ok(None) => {
+                // Another expander claimed the placeholder, so its branches
+                // exist and ours must not. The checkouts we made belong to no
+                // branch; they are seconds old and clean, so git takes them
+                // back without a `--force` anywhere in sight.
+                let made: Vec<_> = prepared.into_iter().flatten().collect();
+                crate::workflows::worktrees::discard_checkouts(&made).await;
+                return Ok(None);
+            }
             Err(error) => {
                 // The transaction did not commit, so no branch exists to own the
                 // checkouts we just made. They are seconds old and clean, so git
@@ -3438,16 +3534,16 @@ impl TaskStore {
     /// Branch edges need no cycle check: each branch takes exactly the
     /// placeholder's parents and children, in a graph that was already acyclic
     /// with the placeholder in that position.
+    /// Returns `None` when another expander claimed the placeholder first —
+    /// the candidate queries of `expand_fan_outs` and `expand_fan_outs_for`
+    /// overlap, so the claim below, not the selection above, decides who
+    /// emits. The caller discards any checkouts it prepared.
     async fn emit_fan_out_branches(
         &self,
         placeholder: &Task,
         items: &[(String, Value)],
         prepared: &[Option<crate::workflows::worktrees::PreparedWorktree>],
-    ) -> Result<Vec<i64>> {
-        let parents = self.list_parents(placeholder.task_number).await?;
-        let children = self.list_children(placeholder.task_number).await?;
-        let bindings = self.list_input_bindings(placeholder.task_number).await?;
-
+    ) -> Result<Option<Vec<i64>>> {
         // The branches are work, not shape — they must not look like
         // placeholders to the next pass.
         let mut metadata = placeholder.metadata.clone();
@@ -3463,6 +3559,96 @@ impl TaskStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .context("failed to open fan-out expansion transaction")?;
+
+        // The graph position is read inside the transaction, under the write
+        // lock: a second expander that was already past its own candidate
+        // query must see the position as it is at claim time, not as it was
+        // before the winner rewrote it.
+        let parents: Vec<i64> = sqlx::query_scalar(
+            "SELECT parent_task_number FROM task_dependencies \
+             WHERE child_task_number = ? ORDER BY parent_task_number ASC",
+        )
+        .bind(placeholder.task_number)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to list a fan-out placeholder's parents")?;
+        let children: Vec<i64> = sqlx::query_scalar(
+            "SELECT child_task_number FROM task_dependencies \
+             WHERE parent_task_number = ? ORDER BY child_task_number ASC",
+        )
+        .bind(placeholder.task_number)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to list a fan-out placeholder's children")?;
+        let binding_rows = sqlx::query(
+            "SELECT child_task_number, input_key, source_task_number, source_pointer, \
+                    literal_value, fan_in_step_key \
+             FROM task_input_bindings WHERE child_task_number = ? ORDER BY input_key ASC",
+        )
+        .bind(placeholder.task_number)
+        .fetch_all(&mut *tx)
+        .await
+        .context("failed to list a fan-out placeholder's input bindings")?;
+        let bindings: Vec<TaskInputBinding> = binding_rows
+            .into_iter()
+            .map(|row| {
+                Ok(TaskInputBinding {
+                    child_task_number: row
+                        .try_get("child_task_number")
+                        .context("failed to read binding child_task_number")?,
+                    input_key: row
+                        .try_get("input_key")
+                        .context("failed to read binding input_key")?,
+                    source_task_number: row.try_get("source_task_number").ok().flatten(),
+                    source_pointer: row.try_get("source_pointer").ok().flatten(),
+                    literal_value: row
+                        .try_get::<Option<String>, _>("literal_value")
+                        .ok()
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
+                    fan_in_step_key: row.try_get("fan_in_step_key").ok().flatten(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Claimed before anything is allocated. Deleting the placeholder under
+        // the write lock, conditional on it still being a placeholder, is the
+        // claim: zero rows means another expander reached it first, and the
+        // only safe answer is to emit nothing at all — a second set of
+        // branches gets fresh task numbers, so nothing downstream dedupes it.
+        //
+        // The placeholder's own rows go with it. `delete` only touches
+        // `tasks`, and an edge whose parent no longer exists is invisible to
+        // every join the scheduler makes — present in the table, absent from
+        // the graph, which is the worst of both.
+        sqlx::query(
+            "DELETE FROM task_dependencies \
+             WHERE parent_task_number = ? OR child_task_number = ?",
+        )
+        .bind(placeholder.task_number)
+        .bind(placeholder.task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to remove a fan-out placeholder's edges")?;
+
+        sqlx::query("DELETE FROM task_input_bindings WHERE child_task_number = ?")
+            .bind(placeholder.task_number)
+            .execute(&mut *tx)
+            .await
+            .context("failed to remove a fan-out placeholder's bindings")?;
+
+        let claimed =
+            sqlx::query("DELETE FROM tasks WHERE task_number = ? AND fan_out_placeholder = 1")
+                .bind(placeholder.task_number)
+                .execute(&mut *tx)
+                .await
+                .context("failed to claim a fan-out placeholder")?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .context("failed to roll back a fan-out expansion somebody else claimed")?;
+            return Ok(None);
+        }
 
         let mut branches = Vec::with_capacity(items.len());
         for (index, (branch_key, item)) in items.iter().enumerate() {
@@ -3642,37 +3828,11 @@ impl TaskStore {
             branches.push(task_number);
         }
 
-        // The placeholder's own rows go with it. `delete` only touches `tasks`,
-        // and an edge whose parent no longer exists is invisible to every join
-        // the scheduler makes — present in the table, absent from the graph,
-        // which is the worst of both.
-        sqlx::query(
-            "DELETE FROM task_dependencies \
-             WHERE parent_task_number = ? OR child_task_number = ?",
-        )
-        .bind(placeholder.task_number)
-        .bind(placeholder.task_number)
-        .execute(&mut *tx)
-        .await
-        .context("failed to remove a fan-out placeholder's edges")?;
-
-        sqlx::query("DELETE FROM task_input_bindings WHERE child_task_number = ?")
-            .bind(placeholder.task_number)
-            .execute(&mut *tx)
-            .await
-            .context("failed to remove a fan-out placeholder's bindings")?;
-
-        sqlx::query("DELETE FROM tasks WHERE task_number = ?")
-            .bind(placeholder.task_number)
-            .execute(&mut *tx)
-            .await
-            .context("failed to remove a fan-out placeholder")?;
-
         tx.commit()
             .await
             .context("failed to commit fan-out expansion")?;
 
-        Ok(branches)
+        Ok(Some(branches))
     }
 
     // -- Bounded loops ------------------------------------------------------
@@ -3798,7 +3958,7 @@ impl TaskStore {
             {
                 return Ok(None);
             }
-            self.block_task(terminal.task_number, BlockKind::NeedsInput, reason)
+            self.park_settled_task(terminal.task_number, BlockKind::NeedsInput, reason)
                 .await?;
             return Ok(Some(LoopOutcome::ExhaustedBlocked {
                 terminal_task_number: terminal.task_number,
@@ -3914,7 +4074,7 @@ impl TaskStore {
         {
             return Ok(None);
         }
-        self.block_task(terminal.task_number, BlockKind::NeedsInput, &reason)
+        self.park_settled_task(terminal.task_number, BlockKind::NeedsInput, &reason)
             .await?;
 
         Ok(Some(LoopOutcome::ExhaustedBlocked {
@@ -4123,10 +4283,11 @@ impl TaskStore {
                  on_exhausted edge to follow — {detail}",
                 spec.group
             );
-            // Sticky, so no sweep resurrects it. It also leaves `done`, which is
-            // the honest state for a body whose result nothing downstream is
-            // allowed to use.
-            self.block_task(terminal.task_number, BlockKind::NeedsInput, &reason)
+            // Sticky, so no sweep resurrects it. It also moves off `done`,
+            // which is the honest state for a loop that gave up: leaving
+            // `done` would let the steps after the loop proceed as though it
+            // had succeeded.
+            self.park_settled_task(terminal.task_number, BlockKind::NeedsInput, &reason)
                 .await?;
             return Ok(Some(LoopOutcome::ExhaustedBlocked {
                 terminal_task_number: terminal.task_number,
@@ -4479,21 +4640,26 @@ impl TaskStore {
         // Everything outside the loop that read the old pass now reads the new
         // one. An edge moved without its binding is the failure this codebase
         // would not notice: the graph waits correctly and the value is stale.
-        let inside: Vec<String> = emitted
+        let inside: Vec<i64> = emitted
             .iter()
-            .flat_map(|(previous, current)| [previous.to_string(), current.to_string()])
+            .flat_map(|(previous, current)| [*previous, *current])
             .collect();
-        let inside = inside.join(",");
+        let placeholders = std::iter::repeat_n("?", inside.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let repoint_sql = format!(
+            "UPDATE task_input_bindings SET source_task_number = ? \
+             WHERE source_task_number = ? AND child_task_number NOT IN ({placeholders})"
+        );
         for (previous, current) in &emitted {
-            sqlx::query(&format!(
-                "UPDATE task_input_bindings SET source_task_number = ? \
-                 WHERE source_task_number = ? AND child_task_number NOT IN ({inside})"
-            ))
-            .bind(current)
-            .bind(previous)
-            .execute(&mut *tx)
-            .await
-            .context("failed to repoint a downstream binding at the newest loop iteration")?;
+            let mut query = sqlx::query(&repoint_sql).bind(current).bind(previous);
+            for number in &inside {
+                query = query.bind(number);
+            }
+            query
+                .execute(&mut *tx)
+                .await
+                .context("failed to repoint a downstream binding at the newest loop iteration")?;
         }
 
         tx.commit()
@@ -4615,7 +4781,15 @@ impl TaskStore {
     ///
     /// Replaces any existing binding for the same key, so re-pointing an input
     /// is one call rather than delete-then-add.
+    ///
+    /// A binding whose source task belongs to a different agent than the child
+    /// is refused: resolving it would embed one agent's outputs into another
+    /// agent's prompt. The check lives at write time so every filing path —
+    /// worker tools, the API, workflow launch — gets the same answer, and so
+    /// the refusal names the input key while it is still in hand.
     pub async fn set_input_binding(&self, binding: &TaskInputBinding) -> Result<()> {
+        self.enforce_binding_ownership(binding).await?;
+
         sqlx::query(
             "INSERT INTO task_input_bindings \
                  (child_task_number, input_key, source_task_number, source_pointer, literal_value, \
@@ -4636,6 +4810,54 @@ impl TaskStore {
         .execute(&self.pool)
         .await
         .context("failed to set task input binding")?;
+
+        Ok(())
+    }
+
+    /// Refuse a binding that would hand one agent's outputs to another agent's
+    /// task.
+    ///
+    /// A missing endpoint is *not* refused here: binding to a task that does
+    /// not exist yet is tolerated everywhere else and answered at resolution
+    /// time (`SourceMissing`), so the join finding no row is not this check's
+    /// concern. Resolution re-checks ownership, which covers both that case
+    /// and bindings written before this rule existed.
+    async fn enforce_binding_ownership(&self, binding: &TaskInputBinding) -> Result<()> {
+        let Some(source) = binding.source_task_number else {
+            return Ok(());
+        };
+
+        let row = sqlx::query(
+            "SELECT c.owner_agent_id AS child_owner, s.owner_agent_id AS source_owner \
+             FROM tasks c JOIN tasks s ON s.task_number = ? \
+             WHERE c.task_number = ?",
+        )
+        .bind(source)
+        .bind(binding.child_task_number)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to check binding ownership")?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+
+        let child_owner: String = row
+            .try_get("child_owner")
+            .context("failed to read binding child owner")?;
+        let source_owner: String = row
+            .try_get("source_owner")
+            .context("failed to read binding source owner")?;
+
+        if source_owner != child_owner {
+            return Err(anyhow::Error::new(BindingError::CrossAgent {
+                input_key: binding.input_key.clone(),
+                source_task_number: source,
+                source_agent: source_owner,
+                child_agent: child_owner,
+            })
+            .into());
+        }
 
         Ok(())
     }
@@ -4807,7 +5029,7 @@ impl TaskStore {
             return self.resolve_fan_in(child, binding, step_key).await;
         }
 
-        self.resolve_direct_binding(binding).await
+        self.resolve_direct_binding(child, binding).await
     }
 
     /// Collect every branch of a fan-out step into one object.
@@ -4923,7 +5145,11 @@ impl TaskStore {
         BindingResolution::Resolved(Value::Object(collected))
     }
 
-    async fn resolve_direct_binding(&self, binding: &TaskInputBinding) -> BindingResolution {
+    async fn resolve_direct_binding(
+        &self,
+        child: &Task,
+        binding: &TaskInputBinding,
+    ) -> BindingResolution {
         // A literal needs no upstream task at all.
         let Some(source) = binding.source_task_number else {
             return match binding.literal_value.clone() {
@@ -4949,6 +5175,17 @@ impl TaskStore {
                 });
             }
         };
+
+        // Resolving here would embed one agent's outputs into another agent's
+        // prompt. Refused at write time too; this guard is the backstop for
+        // bindings written before that rule, and for a task number that named
+        // nothing at write time and somebody else's task now.
+        if task.owner_agent_id != child.owner_agent_id {
+            return BindingResolution::Problem(ContractProblem::CrossAgentSource {
+                input_key: binding.input_key.clone(),
+                source_task_number: source,
+            });
+        }
 
         // The source will never produce anything, so this input is *absent*
         // rather than missing. Distinct from `SourceHasNoOutputs`, which says a
@@ -5294,6 +5531,10 @@ impl TaskStore {
         // `transient` block: repeated failures nobody classified further.
         // Requeued tasks clear any stale reason so the card does not keep
         // showing why a previous attempt stopped.
+        //
+        // `last_block_kind` moves only when the block does: the recurrence
+        // limiter reads it to tell a repeat offence from a first one, and a
+        // requeue is neither, so it must not stamp or erase the memory.
         let block_kind = exhausted.then_some(BlockKind::Transient.as_str());
         let block_reason = exhausted.then_some(error);
 
@@ -5310,6 +5551,7 @@ impl TaskStore {
         sqlx::query(
             "UPDATE tasks SET consecutive_failures = ?, last_error = ?, status = ?, \
              block_kind = ?, block_reason = ?, \
+             last_block_kind = COALESCE(?, last_block_kind), \
              assigned_agent_id = CASE WHEN required_capabilities IS NULL \
                THEN assigned_agent_id ELSE '' END, \
              worker_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
@@ -5320,6 +5562,7 @@ impl TaskStore {
         .bind(next_status.as_str())
         .bind(block_kind)
         .bind(block_reason)
+        .bind(block_kind)
         .bind(task_number)
         .execute(&mut *tx)
         .await
@@ -5369,6 +5612,19 @@ pub enum DependencyError {
     Storage(String),
 }
 
+/// Why a block was refused.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum BlockTaskError {
+    #[error(
+        "task #{task_number} is {status} — a settled task cannot be blocked, because \
+         unsettling it would quietly demote every child promoted on its result"
+    )]
+    Terminal {
+        task_number: i64,
+        status: TaskStatus,
+    },
+}
+
 /// What [`TaskStore::block_task`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockOutcome {
@@ -5406,6 +5662,22 @@ pub struct TaskInputBinding {
     pub fan_in_step_key: Option<String>,
 }
 
+/// Why an input binding was refused at write time.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BindingError {
+    #[error(
+        "input `{input_key}` reads from task #{source_task_number}, which belongs to agent \
+         `{source_agent}` — a task may only read outputs from tasks owned by its own agent \
+         (`{child_agent}`)"
+    )]
+    CrossAgent {
+        input_key: String,
+        source_task_number: i64,
+        source_agent: String,
+        child_agent: String,
+    },
+}
+
 /// Which half of a contract a problem came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -5426,6 +5698,13 @@ pub enum ContractProblem {
     TaskMissing { task_number: i64 },
     #[error("input `{input_key}` is bound to task #{source_task_number}, which does not exist")]
     SourceMissing {
+        input_key: String,
+        source_task_number: i64,
+    },
+    #[error(
+        "input `{input_key}` reads from task #{source_task_number}, which belongs to a different agent"
+    )]
+    CrossAgentSource {
         input_key: String,
         source_task_number: i64,
     },
@@ -6021,24 +6300,19 @@ pub enum OutputSubmission {
 /// silently skipped: a task declaring an unusable contract is misconfigured,
 /// and quietly accepting anything would hide that.
 fn validation_problems(schema: &Value, value: &Value, side: ContractSide) -> Vec<ContractProblem> {
-    let validator = match jsonschema::validator_for(schema) {
-        Ok(validator) => validator,
-        Err(error) => {
-            return vec![ContractProblem::InvalidSchema {
-                side,
-                message: error.to_string(),
-            }];
-        }
-    };
-
-    validator
-        .iter_errors(value)
-        .map(|error| ContractProblem::SchemaViolation {
+    crate::validate_json_schema(
+        schema,
+        value,
+        |error| ContractProblem::SchemaViolation {
             side,
             path: error.instance_path().to_string(),
             message: error.to_string(),
-        })
-        .collect()
+        },
+        |error| ContractProblem::InvalidSchema {
+            side,
+            message: error.to_string(),
+        },
+    )
 }
 
 /// One dependency edge, as a pair rather than a count.
@@ -6726,195 +7000,38 @@ fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Optio
         .map(|v| v.and_utc().to_rfc3339())
 }
 
-/// Create the task tables in a test pool.
+/// Create the instance-database tables in a test pool by running the real
+/// migrations.
 ///
 /// This is the single definition of the test schema — `cortex.rs` and any other
 /// module that needs a bare pool with task tables calls this rather than
-/// hand-rolling its own `CREATE TABLE`. Keep it in sync with
-/// `migrations/global/`; when a migration adds a column, add it here too and
-/// every test site picks it up.
+/// hand-rolling its own `CREATE TABLE`. Running `migrations/global/` makes
+/// drift between the tests and the real database impossible: a hand-written
+/// schema can only drift silently, a migrator cannot. The pool gets every
+/// instance table, not just the task ones.
+///
+/// Two accommodations keep the fixture a drop-in for existing callers.
+/// Foreign-key enforcement is switched back off, because tests bind tasks to
+/// projects, repos, and worktrees that exist only as ids; every caller uses a
+/// single-connection pool, so the pragma covers the whole pool. And the
+/// migration's `task_number_seq` seed row is removed, because callers seed it
+/// themselves with a plain `INSERT ... VALUES (1, 1)` after this returns.
 #[cfg(test)]
 pub(crate) async fn create_task_schema(pool: &SqlitePool) {
-    sqlx::query(
-        r#"
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            task_number INTEGER NOT NULL UNIQUE,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL DEFAULT 'backlog',
-            priority TEXT NOT NULL DEFAULT 'medium',
-            owner_agent_id TEXT NOT NULL,
-            assigned_agent_id TEXT NOT NULL,
-            required_capabilities TEXT,
-            subtasks TEXT,
-            metadata TEXT,
-            source_memory_id TEXT,
-            worker_id TEXT,
-            created_by TEXT NOT NULL,
-            approved_at TEXT,
-            approved_by TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            completed_at TEXT,
-            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-            max_retries INTEGER,
-            last_error TEXT,
-            project_id TEXT,
-            repo_id TEXT,
-            worktree_id TEXT,
-            block_kind TEXT,
-            block_reason TEXT,
-            block_recurrences INTEGER NOT NULL DEFAULT 0,
-            last_block_kind TEXT,
-            input_schema TEXT,
-            output_schema TEXT,
-            inputs TEXT,
-            outputs TEXT,
-            workflow_run_id TEXT,
-            workflow_step_key TEXT,
-            system_prompt TEXT,
-            fan_out_branch_key TEXT,
-            fan_out_placeholder INTEGER NOT NULL DEFAULT 0,
-            loop_group TEXT,
-            loop_iteration INTEGER,
-            loop_terminal INTEGER NOT NULL DEFAULT 0,
-            loop_resolution TEXT,
-            awaiting_loop_group TEXT,
-            awaiting_loop_arm TEXT,
-            skip_reason TEXT,
-            kind TEXT NOT NULL DEFAULT 'agent',
-            command TEXT,
-            command_timeout_secs INTEGER,
-            expect_exit_code INTEGER,
-            worktree_mode TEXT NOT NULL DEFAULT 'inherit',
-            worktree_base_ref TEXT,
-            decision_question TEXT,
-            decision_asked_of TEXT,
-            decision_timeout_action TEXT NOT NULL DEFAULT 'wait',
-            decision_timeout_secs INTEGER,
-            decision_default_answer TEXT,
-            decision_ask TEXT NOT NULL DEFAULT 'each_pass',
-            decision_asked_at TEXT,
-            decision_outcome TEXT,
-            decision_answered_by TEXT,
-            decision_answered_at TEXT
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("tasks schema should be created");
+    sqlx::migrate!("./migrations/global")
+        .run(pool)
+        .await
+        .expect("instance migrations should apply");
 
-    // Not decoration: this is the second guard against a loop body being
-    // emitted twice for one iteration, and a test pool without it would pass
-    // while the real database refused.
-    sqlx::query(
-        "CREATE UNIQUE INDEX idx_tasks_loop_iteration \
-             ON tasks(workflow_run_id, workflow_step_key, loop_iteration) \
-             WHERE loop_iteration IS NOT NULL",
-    )
-    .execute(pool)
-    .await
-    .expect("loop iteration index should be created");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(pool)
+        .await
+        .expect("foreign_keys pragma should switch off");
 
-    sqlx::query(
-        r#"
-        CREATE TABLE task_runs (
-            id TEXT PRIMARY KEY NOT NULL,
-            task_number INTEGER NOT NULL,
-            attempt INTEGER NOT NULL,
-            worker_id TEXT,
-            outcome TEXT,
-            summary TEXT,
-            error TEXT,
-            started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            ended_at TEXT,
-            UNIQUE (task_number, attempt)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("task_runs schema should be created");
-
-    sqlx::query(
-        r#"
-        CREATE TABLE task_dependencies (
-            parent_task_number INTEGER NOT NULL,
-            child_task_number INTEGER NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (parent_task_number, child_task_number)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("task_dependencies schema should be created");
-
-    sqlx::query(
-        r#"
-        CREATE TABLE task_input_bindings (
-            child_task_number INTEGER NOT NULL,
-            input_key TEXT NOT NULL,
-            source_task_number INTEGER,
-            source_pointer TEXT,
-            literal_value TEXT,
-            fan_in_step_key TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (child_task_number, input_key)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("task_input_bindings schema should be created");
-
-    sqlx::query(
-        r#"
-        CREATE TABLE task_gates (
-            id TEXT PRIMARY KEY NOT NULL,
-            task_number INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            config TEXT NOT NULL,
-            label TEXT,
-            poll_interval_secs INTEGER NOT NULL DEFAULT 60,
-            last_checked_at TEXT,
-            last_result TEXT NOT NULL DEFAULT 'pending',
-            last_detail TEXT,
-            consecutive_errors INTEGER NOT NULL DEFAULT 0,
-            disposition TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("task_gates schema should be created");
-
-    sqlx::query(
-        "CREATE TABLE task_number_seq (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            next_number INTEGER NOT NULL DEFAULT 1
-        )",
-    )
-    .execute(pool)
-    .await
-    .expect("task_number_seq should be created");
-
-    // Not decoration either: the claim query joins this table, so a test pool
-    // without it would fail every claim rather than exercising the match. It
-    // lives with the tasks schema because the claim is what reads it.
-    sqlx::query(
-        "CREATE TABLE agent_capabilities (
-            agent_id TEXT NOT NULL,
-            capability TEXT NOT NULL,
-            PRIMARY KEY (agent_id, capability)
-        )",
-    )
-    .execute(pool)
-    .await
-    .expect("agent_capabilities schema should be created");
+    sqlx::query("DELETE FROM task_number_seq")
+        .execute(pool)
+        .await
+        .expect("sequence seed should be cleared");
 }
 
 #[cfg(test)]
@@ -7200,6 +7317,10 @@ mod tests {
         assert_eq!(after_first.status, TaskStatus::Ready);
         assert_eq!(after_first.consecutive_failures, 1);
         assert_eq!(after_first.last_error.as_deref(), Some("attempt 1 failed"));
+        assert_eq!(
+            after_first.last_block_kind, None,
+            "a requeue is not a block, so it must not stamp the recurrence memory"
+        );
 
         // The requeued task gets picked up again before it can fail again —
         // `record_failure` only acts on a task that is actually running.
@@ -8335,6 +8456,93 @@ mod tests {
         );
     }
 
+    /// Blocking a settled task would unsettle it: `done` flips back to
+    /// `blocked` and the next sweep demotes every child that was promoted on
+    /// the strength of its result. Refused, and the graph left exactly as it
+    /// was.
+    #[tokio::test]
+    async fn a_settled_task_cannot_be_blocked() {
+        let store = setup_store().await;
+        let parent = task_at(&store, "shipped", TaskStatus::InProgress).await;
+        let child = task_at(&store, "follow-up", TaskStatus::Backlog).await;
+        store
+            .link_tasks(parent.task_number, child.task_number)
+            .await
+            .expect("link");
+        finish(&store, parent.task_number).await;
+
+        let error = store
+            .block_task(parent.task_number, BlockKind::NeedsInput, "reconsider")
+            .await
+            .expect_err("a settled task must refuse a block");
+        let crate::Error::Other(report) = &error else {
+            panic!("expected a typed refusal, got {error}");
+        };
+        assert!(
+            matches!(
+                report.downcast_ref::<BlockTaskError>(),
+                Some(BlockTaskError::Terminal {
+                    status: TaskStatus::Done,
+                    ..
+                })
+            ),
+            "the refusal must name the terminal state: {error}"
+        );
+
+        let parent_after = store
+            .get_by_number(parent.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(parent_after.status, TaskStatus::Done);
+        assert!(parent_after.block_kind.is_none());
+
+        let child_after = store
+            .get_by_number(child.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(
+            child_after.status,
+            TaskStatus::Backlog,
+            "the refusal must not ripple into the children"
+        );
+    }
+
+    /// `skipped` is settled too — a task that will never run has nothing a
+    /// block can hold back.
+    #[tokio::test]
+    async fn a_skipped_task_cannot_be_blocked() {
+        let store = setup_store().await;
+        let task = task_at(&store, "not taken", TaskStatus::Backlog).await;
+        store
+            .skip_task(task.task_number, "that branch did not run")
+            .await
+            .expect("skip");
+
+        let error = store
+            .block_task(task.task_number, BlockKind::NeedsInput, "reconsider")
+            .await
+            .expect_err("a skipped task must refuse a block");
+        let crate::Error::Other(report) = &error else {
+            panic!("expected a typed refusal, got {error}");
+        };
+        assert!(matches!(
+            report.downcast_ref::<BlockTaskError>(),
+            Some(BlockTaskError::Terminal {
+                status: TaskStatus::Skipped,
+                ..
+            })
+        ));
+
+        let after = store
+            .get_by_number(task.task_number)
+            .await
+            .expect("fetch")
+            .expect("exists");
+        assert_eq!(after.status, TaskStatus::Skipped);
+    }
+
     /// Different obstacles in sequence are progress, not a loop — escalating
     /// those would be noise.
     #[tokio::test]
@@ -8533,6 +8741,7 @@ mod tests {
             .expect("exists");
         assert_eq!(after.status, TaskStatus::Blocked);
         assert_eq!(after.block_kind, Some(BlockKind::Transient));
+        assert_eq!(after.last_block_kind, Some(BlockKind::Transient));
         assert_eq!(after.block_reason.as_deref(), Some("boom"));
     }
     #[tokio::test]
@@ -8588,6 +8797,138 @@ mod tests {
             "required": ["tag"],
             "properties": {"tag": {"type": "string"}},
         })
+    }
+
+    async fn other_agent_task(store: &TaskStore, title: &str, status: TaskStatus) -> Task {
+        store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-other".to_string(),
+                assigned_agent_id: "agent-other".to_string(),
+                title: title.to_string(),
+                status,
+                created_by: "branch".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create source")
+    }
+
+    /// A card bound to another agent's task is a read of that agent's context:
+    /// the resolved outputs land in the claiming worker's prompt. Refused at
+    /// write time, before the wiring exists.
+    #[tokio::test]
+    async fn a_binding_to_another_agents_task_is_refused() {
+        let store = setup_store().await;
+        let source = other_agent_task(&store, "somebody else's output", TaskStatus::Done).await;
+        let child = task_at(&store, "reader", TaskStatus::Backlog).await;
+
+        let error = store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "loot".into(),
+                source_task_number: Some(source.task_number),
+                source_pointer: None,
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect_err("a cross-agent binding must be refused");
+        let crate::Error::Other(report) = &error else {
+            panic!("expected a typed refusal, got {error}");
+        };
+        assert!(
+            matches!(
+                report.downcast_ref::<BindingError>(),
+                Some(BindingError::CrossAgent { .. })
+            ),
+            "the refusal must say why: {error}"
+        );
+        assert!(
+            store
+                .list_input_bindings(child.task_number)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a refused binding must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_binding_within_the_same_agent_is_accepted() {
+        let store = setup_store().await;
+        let source = finished_source(&store, serde_json::json!({"tag": "v1.4.2"})).await;
+        let child = task_at(&store, "reader", TaskStatus::Backlog).await;
+
+        store
+            .set_input_binding(&TaskInputBinding {
+                child_task_number: child.task_number,
+                input_key: "tag".into(),
+                source_task_number: Some(source.task_number),
+                source_pointer: Some("/tag".into()),
+                literal_value: None,
+                fan_in_step_key: None,
+            })
+            .await
+            .expect("a same-agent binding should be accepted");
+
+        match store
+            .resolve_inputs(child.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Resolved { inputs } => {
+                assert_eq!(inputs["tag"], serde_json::json!("v1.4.2"));
+            }
+            other => panic!("expected resolved inputs, got {other:?}"),
+        }
+    }
+
+    /// The write-time refusal cannot help a binding already on disk — one
+    /// written before the rule, or aimed at a task number that later became
+    /// somebody else's. Resolution is the backstop, and it must not hand the
+    /// outputs over either.
+    #[tokio::test]
+    async fn a_cross_agent_binding_on_disk_does_not_resolve() {
+        let store = setup_store().await;
+        let source =
+            other_agent_task(&store, "somebody else's output", TaskStatus::InProgress).await;
+        store
+            .submit_outputs(source.task_number, &serde_json::json!({"token": "hunter2"}))
+            .await
+            .expect("submit outputs");
+        finish(&store, source.task_number).await;
+        let child = task_at(&store, "reader", TaskStatus::Backlog).await;
+
+        // Straight to the table, around the write-time refusal — the state a
+        // database from before the rule can be in.
+        sqlx::query(
+            "INSERT INTO task_input_bindings (child_task_number, input_key, source_task_number) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(child.task_number)
+        .bind("loot")
+        .bind(source.task_number)
+        .execute(store.pool())
+        .await
+        .expect("plant binding");
+
+        match store
+            .resolve_inputs(child.task_number)
+            .await
+            .expect("resolve")
+        {
+            ContractResolution::Unresolved { problems } => {
+                assert!(
+                    problems.iter().any(|problem| matches!(
+                        problem,
+                        ContractProblem::CrossAgentSource { source_task_number, .. }
+                            if *source_task_number == source.task_number
+                    )),
+                    "the cross-agent read must be the reported problem: {problems:?}"
+                );
+            }
+            other => panic!("expected an unresolved contract, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -9505,6 +9846,149 @@ mod tests {
                 .is_empty(),
             "a parked placeholder must not be retried on every sweep"
         );
+    }
+
+    /// The sweep and the completion path both expand, and both select their
+    /// candidates before either opens a transaction. Whichever claims the
+    /// placeholder first must be the only one that emits: a second pass gets
+    /// fresh task numbers, so nothing downstream would dedupe it.
+    #[tokio::test]
+    async fn concurrent_fan_out_expansion_emits_one_set_of_branches() {
+        let store = setup_store().await;
+        let source = finished_source(
+            &store,
+            serde_json::json!({"repos": [{"name": "alpha"}, {"name": "beta"}, {"name": "gamma"}]}),
+        )
+        .await;
+        let placeholder = placeholder_for(
+            &store,
+            &FanOutSpec {
+                source_task_number: source.task_number,
+                pointer: "/repos".into(),
+                key: Some("/name".into()),
+            },
+        )
+        .await;
+        store
+            .link_tasks(source.task_number, placeholder.task_number)
+            .await
+            .expect("link source");
+
+        let (from_completion, from_sweep) = tokio::join!(
+            store.expand_fan_outs_for(source.task_number),
+            store.expand_fan_outs("agent-test"),
+        );
+        let mut outcomes = from_completion.expect("completion expansion");
+        outcomes.extend(from_sweep.expect("sweep expansion"));
+
+        let expansions: Vec<_> = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, FanOutOutcome::Expanded { .. }))
+            .collect();
+        assert_eq!(
+            expansions.len(),
+            1,
+            "exactly one caller may expand a placeholder: {outcomes:?}"
+        );
+
+        let branch_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE fan_out_branch_key IS NOT NULL")
+                .fetch_one(store.pool())
+                .await
+                .expect("count branches");
+        assert_eq!(branch_count, 3, "one task per item, not one per expander");
+
+        assert!(
+            store
+                .get_by_number(placeholder.task_number)
+                .await
+                .expect("fetch")
+                .is_none(),
+            "the placeholder is gone once either expander claims it"
+        );
+    }
+
+    /// A task waiting on a loop boundary must not be claimed, however it
+    /// reached `ready` — the boundary has not said whether this pass runs.
+    #[tokio::test]
+    async fn a_task_awaiting_a_loop_boundary_is_not_claimable() {
+        let store = setup_store().await;
+        let task = task_at(&store, "rollback", TaskStatus::Ready).await;
+        sqlx::query(
+            "UPDATE tasks SET awaiting_loop_group = 'fix', awaiting_loop_arm = 'give_up' \
+             WHERE task_number = ?",
+        )
+        .bind(task.task_number)
+        .execute(store.pool())
+        .await
+        .expect("hold at the loop boundary");
+
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a held task must not be handed to a worker"
+        );
+
+        // And once the boundary clears it, it is ordinary work again.
+        sqlx::query(
+            "UPDATE tasks SET awaiting_loop_group = NULL, awaiting_loop_arm = NULL \
+             WHERE task_number = ?",
+        )
+        .bind(task.task_number)
+        .execute(store.pool())
+        .await
+        .expect("release the hold");
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("the released task is claimable");
+        assert_eq!(claimed.task_number, task.task_number);
+    }
+
+    /// An unsatisfied gate holds a task exactly as an unfinished parent does,
+    /// and `ready` is reachable through paths the sweep never sees — so the
+    /// hold has to live at the claim, not only in the promote query.
+    #[tokio::test]
+    async fn a_ready_task_with_an_unsatisfied_gate_is_not_claimable() {
+        let store = setup_store().await;
+        let task = task_at(&store, "deploy", TaskStatus::Ready).await;
+        let gates = crate::tasks::gates::GateStore::new(store.pool().clone());
+        let gate = gates
+            .create(
+                task.task_number,
+                crate::tasks::gates::GateKind::Http,
+                &serde_json::json!({"url": "https://ci.example.test/status"}),
+                None,
+                60,
+                None,
+            )
+            .await
+            .expect("create gate");
+
+        assert!(
+            store
+                .claim_next_ready("agent-test")
+                .await
+                .expect("claim")
+                .is_none(),
+            "a pending gate must hold the task out of the claim"
+        );
+
+        sqlx::query("UPDATE task_gates SET last_result = 'satisfied' WHERE id = ?")
+            .bind(&gate.id)
+            .execute(store.pool())
+            .await
+            .expect("satisfy the gate");
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim")
+            .expect("a satisfied gate releases the task");
+        assert_eq!(claimed.task_number, task.task_number);
     }
 
     /// A placeholder looks exactly like a promotable task — backlog, parents

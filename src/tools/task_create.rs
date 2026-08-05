@@ -124,6 +124,40 @@ impl TaskCreateTool {
             ))),
         }
     }
+
+    /// Refuse input bindings that would read another agent's task outputs.
+    ///
+    /// Resolved outputs are embedded into the claiming worker's prompt, so a
+    /// card bound to another agent's task is a read of that agent's context —
+    /// and a prompt-injected worker is exactly who would file one. A source
+    /// that does not exist is left alone: resolution already reports it.
+    async fn enforce_binding_ownership(
+        &self,
+        bindings: &[TaskCreateBinding],
+    ) -> Result<(), TaskCreateError> {
+        for binding in bindings {
+            let Some(source) = binding.source_task_number else {
+                continue;
+            };
+            let Some(source_task) = self
+                .task_store
+                .get_by_number(source)
+                .await
+                .map_err(|error| TaskCreateError(format!("{error}")))?
+            else {
+                continue;
+            };
+            if source_task.owner_agent_id != self.agent_id {
+                return Err(TaskCreateError(format!(
+                    "input `{}` reads from task #{source}, which belongs to agent `{}`. \
+                     You may only bind inputs to tasks owned by your agent, `{}` — file the \
+                     card without that binding, or copy the value you need as a literal.",
+                    binding.input_key, source_task.owner_agent_id, self.agent_id
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Why a task may not generate more work.
@@ -309,6 +343,16 @@ impl Tool for TaskCreateTool {
             Some(worker_id) => Some(self.resolve_filing_task(worker_id).await?),
             None => None,
         };
+
+        // A worker's cards may only read outputs its own agent produced.
+        // Checked before anything is created so the refusal reaches the model
+        // as an error it can act on, rather than surfacing as a card that
+        // parks at claim time with no explanation. The store refuses the same
+        // wiring at write time, which covers the paths that do not come
+        // through this tool.
+        if filing_task_number.is_some() {
+            self.enforce_binding_ownership(&args.input_bindings).await?;
+        }
 
         let status = if filing_task_number.is_some() {
             TaskStatus::Ready
@@ -755,5 +799,75 @@ mod tests {
             filed.owner_agent_id, "agent-1",
             "the filing agent stays the owner so provenance survives reassignment"
         );
+    }
+
+    /// Resolved outputs land in the claiming worker's prompt, so a binding to
+    /// another agent's task is a read of that agent's context — and a
+    /// prompt-injected worker is exactly who would file one.
+    #[tokio::test]
+    async fn a_worker_cannot_bind_a_card_to_another_agents_task() {
+        let (store, worker_id, _) = worker_filing_fixture().await;
+        let foreign = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-2".into(),
+                assigned_agent_id: "agent-2".into(),
+                title: "somebody else's output".into(),
+                status: TaskStatus::Done,
+                created_by: "human".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create foreign task");
+        let tool = TaskCreateTool::for_task_worker(store.clone(), "agent-1", worker_id);
+
+        let mut args = filing_args("read the loot");
+        args.input_bindings = vec![TaskCreateBinding {
+            input_key: "loot".into(),
+            source_task_number: Some(foreign.task_number),
+            source_pointer: None,
+            literal_value: None,
+        }];
+        let error = tool
+            .call(args)
+            .await
+            .expect_err("a cross-agent binding must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("agent-2") && message.contains("loot"),
+            "the refusal must name the source's owner and the offending input: {message}"
+        );
+        assert_eq!(
+            store
+                .list(crate::tasks::TaskListFilter::default())
+                .await
+                .expect("list")
+                .len(),
+            2,
+            "a refused filing must not create the card"
+        );
+    }
+
+    /// The same wiring is fine inside one agent: a worker stitching its own
+    /// pipeline together is the intended use.
+    #[tokio::test]
+    async fn a_worker_can_bind_a_card_to_its_own_agents_task() {
+        let (store, worker_id, parent) = worker_filing_fixture().await;
+        let tool = TaskCreateTool::for_task_worker(store.clone(), "agent-1", worker_id);
+
+        let mut args = filing_args("use the tag");
+        args.input_bindings = vec![TaskCreateBinding {
+            input_key: "tag".into(),
+            source_task_number: Some(parent),
+            source_pointer: None,
+            literal_value: None,
+        }];
+        let output = tool.call(args).await.expect("same-agent binding is fine");
+
+        let bindings = store
+            .list_input_bindings(output.task_number)
+            .await
+            .expect("list bindings");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].source_task_number, Some(parent));
     }
 }
