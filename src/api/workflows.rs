@@ -357,11 +357,15 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::MissingRunInput { .. }
         | LaunchError::UnknownForEachStep { .. }
         | LaunchError::ForEachNotWaiting { .. }
+        | LaunchError::FanOutOnLoopBody { .. }
         | LaunchError::FanInNotFanOut { .. }
         | LaunchError::FanInNotWaiting { .. }
+        | LaunchError::FanInWithPointer { .. }
         | LaunchError::StepBindingOnFanOut { .. }
+        | LaunchError::StepBindingNotWaiting { .. }
         | LaunchError::LoopBodyNotSingleExit { .. }
         | LaunchError::LoopSettingOffExitStep { .. }
+        | LaunchError::LoopSettingsWithoutLoop { .. }
         | LaunchError::LoopWithoutExitCondition { .. }
         | LaunchError::LoopExitConditionInvalid { .. }
         | LaunchError::LoopMaxIterationsOutOfRange { .. }
@@ -374,6 +378,8 @@ fn launch_status(error: &LaunchError) -> StatusCode {
         | LaunchError::UnknownGateStep { .. }
         | LaunchError::UnknownGateSource { .. }
         | LaunchError::GateReadsItsOwnStep { .. }
+        | LaunchError::GateOnFanOut { .. }
+        | LaunchError::GateOnLoopBody { .. }
         | LaunchError::GateConfigInvalid { .. }
         // A template bigger than one run may hold. `422` with the rest: the
         // template is what has to change, and the message says by how much.
@@ -540,6 +546,7 @@ pub(super) async fn get_workflow(
     responses(
         (status = 200, body = WorkflowResponse),
         (status = 404, description = "No such workflow"),
+        (status = 409, description = "A workflow with that name already exists"),
     ),
     tag = "workflows",
 )]
@@ -549,6 +556,8 @@ pub(super) async fn update_workflow(
     Json(request): Json<SaveWorkflowRequest>,
 ) -> Result<Json<WorkflowResponse>, (StatusCode, String)> {
     let store = get_store(&state).map_err(|code| (code, "unavailable".to_string()))?;
+    // The store types the duplicate, so the rename gets the same answer the
+    // create does: a user mistake, not a server fault.
     let workflow = store
         .update_workflow(
             &id,
@@ -557,7 +566,12 @@ pub(super) async fn update_workflow(
             request.input_schema.as_ref(),
         )
         .await
-        .map_err(internal)?
+        .map_err(|error| match error {
+            crate::workflows::WorkflowSaveError::DuplicateName { .. } => {
+                (StatusCode::CONFLICT, error.to_string())
+            }
+            other => internal(other),
+        })?
         .ok_or((StatusCode::NOT_FOUND, format!("no workflow {id}")))?;
     Ok(Json(WorkflowResponse { workflow }))
 }
@@ -1401,5 +1415,416 @@ pub(super) async fn delete_run(
         crate::workflows::DeleteRunOutcome::NotFound => {
             Err((StatusCode::NOT_FOUND, format!("no run {run_id}")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        ))
+    }
+
+    /// Both stores share one pool: launching a workflow writes tasks, so the
+    /// fixture mirrors how the instance wires them together.
+    async fn state_with_stores() -> Arc<ApiState> {
+        let state = test_api_state();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        crate::tasks::store::create_task_schema(&pool).await;
+        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
+            .execute(&pool)
+            .await
+            .expect("seed sequence");
+        crate::workflows::store::create_workflow_schema(&pool).await;
+
+        state.set_task_store(Arc::new(crate::tasks::TaskStore::new(pool.clone())));
+        state.set_workflow_store(Arc::new(crate::workflows::WorkflowStore::new(pool)));
+        state
+    }
+
+    fn save_request(name: &str) -> SaveWorkflowRequest {
+        SaveWorkflowRequest {
+            name: name.to_string(),
+            description: None,
+            input_schema: None,
+        }
+    }
+
+    fn step_request(title: &str) -> SaveStepRequest {
+        SaveStepRequest {
+            title: title.to_string(),
+            description: None,
+            assigned_agent_id: None,
+            required_capabilities: None,
+            priority: None,
+            input_schema: None,
+            output_schema: None,
+            system_prompt: None,
+            repo_id: None,
+            position: None,
+            for_each_step_key: None,
+            for_each_pointer: None,
+            for_each_key: None,
+            loop_group: None,
+            loop_max_iterations: None,
+            loop_until: None,
+            kind: None,
+            command: None,
+            command_timeout_secs: None,
+            expect_exit_code: None,
+            worktree_mode: None,
+            worktree_base_ref: None,
+            decision_question: None,
+            decision_asked_of: None,
+            decision_timeout_action: None,
+            decision_timeout_secs: None,
+            decision_default_answer: None,
+            decision_ask: None,
+        }
+    }
+
+    async fn create_one(state: &Arc<ApiState>, name: &str) -> crate::workflows::Workflow {
+        create_workflow(State(state.clone()), Json(save_request(name)))
+            .await
+            .expect("workflow should be created")
+            .0
+            .workflow
+    }
+
+    async fn put_one_step(state: &Arc<ApiState>, workflow_id: &str, step_key: &str) {
+        let _detail = put_step(
+            State(state.clone()),
+            Path((workflow_id.to_string(), step_key.to_string())),
+            Json(step_request(&format!("step {step_key}"))),
+        )
+        .await
+        .expect("step should be saved");
+    }
+
+    fn launch_request(inputs: serde_json::Value) -> LaunchRequest {
+        LaunchRequest {
+            inputs,
+            launched_by: "agent-test".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_workflows_without_store_is_service_unavailable() {
+        let state = test_api_state();
+        let result = list_workflows(State(state)).await;
+        assert!(matches!(result, Err((StatusCode::SERVICE_UNAVAILABLE, _))));
+    }
+
+    #[tokio::test]
+    async fn create_get_and_list_round_trip() {
+        let state = state_with_stores().await;
+
+        let workflow = create_one(&state, "deploy").await;
+        assert_eq!(workflow.name, "deploy");
+
+        let detail = get_workflow(State(state.clone()), Path(workflow.id.clone()))
+            .await
+            .expect("workflow should be found")
+            .0;
+        assert_eq!(detail.workflow.id, workflow.id);
+        assert!(detail.steps.is_empty());
+        assert!(detail.edges.is_empty());
+
+        let listed = list_workflows(State(state))
+            .await
+            .expect("workflows should list")
+            .0;
+        assert!(listed.workflows.iter().any(|w| w.id == workflow.id));
+    }
+
+    #[tokio::test]
+    async fn create_workflow_duplicate_name_is_conflict() {
+        let state = state_with_stores().await;
+        create_one(&state, "deploy").await;
+
+        let result = create_workflow(State(state), Json(save_request("deploy"))).await;
+        assert!(matches!(result, Err((StatusCode::CONFLICT, _))));
+    }
+
+    #[tokio::test]
+    async fn update_workflow_duplicate_name_is_conflict() {
+        let state = state_with_stores().await;
+        create_one(&state, "deploy").await;
+        let other = create_one(&state, "release").await;
+
+        let result = update_workflow(
+            State(state.clone()),
+            Path(other.id.clone()),
+            Json(save_request("deploy")),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::CONFLICT, _))));
+
+        // A rename to oneself is not a collision.
+        let renamed = update_workflow(
+            State(state),
+            Path(other.id.clone()),
+            Json(save_request("release")),
+        )
+        .await
+        .expect("renaming to oneself should succeed")
+        .0;
+        assert_eq!(renamed.workflow.name, "release");
+    }
+
+    #[tokio::test]
+    async fn delete_workflow_then_not_found() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "ephemeral").await;
+
+        let deleted = delete_workflow(State(state.clone()), Path(workflow.id.clone()))
+            .await
+            .expect("delete should succeed")
+            .0;
+        assert!(deleted.success);
+
+        let again = delete_workflow(State(state.clone()), Path(workflow.id.clone())).await;
+        assert!(matches!(again, Err((StatusCode::NOT_FOUND, _))));
+
+        let fetched = get_workflow(State(state), Path(workflow.id)).await;
+        assert!(matches!(fetched, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn put_step_unknown_workflow_is_not_found() {
+        let state = state_with_stores().await;
+        let result = put_step(
+            State(state),
+            Path(("missing".to_string(), "one".to_string())),
+            Json(step_request("step one")),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn put_step_rejects_unknown_priority() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "priorities").await;
+
+        let mut request = step_request("step one");
+        request.priority = Some("whenever".to_string());
+        let result = put_step(
+            State(state),
+            Path((workflow.id, "one".to_string())),
+            Json(request),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::UNPROCESSABLE_ENTITY, _))));
+    }
+
+    #[tokio::test]
+    async fn put_step_rejects_fan_out_over_missing_or_own_step() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "fan-outs").await;
+        put_one_step(&state, &workflow.id, "source").await;
+
+        let mut missing = step_request("iterate");
+        missing.for_each_step_key = Some("ghost".to_string());
+        let result = put_step(
+            State(state.clone()),
+            Path((workflow.id.clone(), "branch".to_string())),
+            Json(missing),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::UNPROCESSABLE_ENTITY, _))));
+
+        let mut own = step_request("iterate over myself");
+        own.for_each_step_key = Some("selfish".to_string());
+        let result = put_step(
+            State(state),
+            Path((workflow.id, "selfish".to_string())),
+            Json(own),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::UNPROCESSABLE_ENTITY, _))));
+    }
+
+    #[tokio::test]
+    async fn put_step_gate_rejects_bad_references() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "conditions").await;
+        put_one_step(&state, &workflow.id, "one").await;
+
+        // Unknown gate kind.
+        let unknown_kind = put_step_gate(
+            State(state.clone()),
+            Path((workflow.id.clone(), "one".to_string(), "ci".to_string())),
+            Json(SaveStepGateRequest {
+                kind: "smoke_signal".to_string(),
+                source_step_key: None,
+                config: serde_json::json!({}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            unknown_kind,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+
+        // A task_output condition must name the step it reads.
+        let no_source = put_step_gate(
+            State(state),
+            Path((workflow.id, "one".to_string(), "ci".to_string())),
+            Json(SaveStepGateRequest {
+                kind: "task_output".to_string(),
+                source_step_key: None,
+                config: serde_json::json!({"pointer": "/ok", "equals": true}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            no_source,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+    }
+
+    #[tokio::test]
+    async fn launch_unknown_workflow_is_not_found() {
+        let state = state_with_stores().await;
+        let result = launch_workflow(
+            State(state),
+            Path("missing".to_string()),
+            Json(launch_request(serde_json::json!({}))),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn launch_without_steps_is_unprocessable() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "empty").await;
+
+        let result = launch_workflow(
+            State(state),
+            Path(workflow.id),
+            Json(launch_request(serde_json::json!({}))),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::UNPROCESSABLE_ENTITY, _))));
+    }
+
+    #[tokio::test]
+    async fn launch_with_input_missing_required_field_is_unprocessable() {
+        let state = state_with_stores().await;
+
+        let workflow = create_workflow(
+            State(state.clone()),
+            Json(SaveWorkflowRequest {
+                name: "tagged".to_string(),
+                description: None,
+                input_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["tag"],
+                    "properties": {"tag": {"type": "string"}},
+                })),
+            }),
+        )
+        .await
+        .expect("workflow should be created")
+        .0
+        .workflow;
+        put_one_step(&state, &workflow.id, "release").await;
+
+        let result = launch_workflow(
+            State(state),
+            Path(workflow.id),
+            Json(launch_request(serde_json::json!({}))),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::UNPROCESSABLE_ENTITY, _))));
+    }
+
+    #[tokio::test]
+    async fn edge_closing_a_cycle_is_refused_at_save() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "cyclic").await;
+        put_one_step(&state, &workflow.id, "a").await;
+        put_one_step(&state, &workflow.id, "b").await;
+
+        let _detail = add_edge(
+            State(state.clone()),
+            Path(workflow.id.clone()),
+            Json(StepEdgeRequest {
+                parent_step_key: "a".to_string(),
+                child_step_key: "b".to_string(),
+                kind: None,
+            }),
+        )
+        .await
+        .expect("first edge should be saved");
+
+        // b -> a would close a -> b -> a. Refused here, while the author is
+        // still looking at the canvas, rather than at launch.
+        let closing = add_edge(
+            State(state),
+            Path(workflow.id),
+            Json(StepEdgeRequest {
+                parent_step_key: "b".to_string(),
+                child_step_key: "a".to_string(),
+                kind: None,
+            }),
+        )
+        .await;
+        assert!(matches!(closing, Err((StatusCode::CONFLICT, _))));
+    }
+
+    #[tokio::test]
+    async fn launch_minimal_pipeline_emits_tasks() {
+        let state = state_with_stores().await;
+        let workflow = create_one(&state, "pipeline").await;
+        put_one_step(&state, &workflow.id, "build").await;
+        put_one_step(&state, &workflow.id, "ship").await;
+        let _detail = add_edge(
+            State(state.clone()),
+            Path(workflow.id.clone()),
+            Json(StepEdgeRequest {
+                parent_step_key: "build".to_string(),
+                child_step_key: "ship".to_string(),
+                kind: None,
+            }),
+        )
+        .await
+        .expect("edge should be saved");
+
+        let launched = launch_workflow(
+            State(state),
+            Path(workflow.id),
+            Json(launch_request(serde_json::json!({}))),
+        )
+        .await
+        .expect("launch should succeed")
+        .0;
+
+        assert_eq!(launched.task_numbers.len(), 2);
+        assert!(launched.task_numbers.contains_key("build"));
+        assert!(launched.task_numbers.contains_key("ship"));
     }
 }

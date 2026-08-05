@@ -20,8 +20,8 @@ pub mod worktrees;
 pub use store::{
     BindingSource, CancelOutcome, DeleteRunOutcome, InstantiatedRun, LaunchError, LaunchIdentity,
     MAX_DECISION_TIMEOUT_SECS, RunAssessment, RunStatus, RunTransition, StepBinding, StepEdge,
-    StepEdgeKind, StepGate, StepKind, Workflow, WorkflowRun, WorkflowStep, WorkflowStore,
-    validate_step_gate,
+    StepEdgeKind, StepGate, StepKind, Workflow, WorkflowRun, WorkflowSaveError, WorkflowStep,
+    WorkflowStore, validate_step_gate,
 };
 pub use triggers::{
     DeliveryOutcome, ScheduleFire, ScheduleOutcome, WEBHOOK_SECRET_HEADER, WebhookRejection,

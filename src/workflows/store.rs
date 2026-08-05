@@ -3,9 +3,8 @@
 use crate::agent::command_step::MAX_COMMAND_TIMEOUT_SECS;
 use crate::error::Result;
 use crate::tasks::{
-    ContractProblem, ContractResolution, ContractSide, CreateTaskInput, GateConfigError,
-    GateDisposition, GateKind, Task, TaskInputBinding, TaskPriority, TaskProjectBinding,
-    TaskStatus, TaskStore,
+    ContractProblem, ContractResolution, ContractSide, GateConfigError, GateDisposition, GateKind,
+    Task, TaskInputBinding, TaskPriority, TaskStatus, TaskStore,
 };
 use crate::workflows::worktrees::{self, PreparedWorktree, WorktreeError, WorktreeMode};
 use anyhow::Context as _;
@@ -706,11 +705,33 @@ pub enum LaunchError {
         source_step_key: String,
     },
     #[error(
+        "step `{step_key}` binds `{input_key}` to every branch of step `{source_step_key}` with \
+         a `source_pointer`, but a fan-in collects each branch's whole output — there is no \
+         single document for the pointer to select from, so it would be dropped at launch. \
+         Drop the pointer"
+    )]
+    FanInWithPointer {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
+    #[error(
         "step `{step_key}` binds `{input_key}` to step `{source_step_key}`'s output, but \
          `{source_step_key}` is a fan-out and produces one output per branch — bind with source \
          `fan_in` instead"
     )]
     StepBindingOnFanOut {
+        step_key: String,
+        input_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "step `{step_key}` binds `{input_key}` to step `{source_step_key}`'s output but does \
+         not wait for it — add an edge {source_step_key} -> {step_key}. Without it the binding \
+         races the step it reads: a run that loses has every parent settled and the input still \
+         missing, which the sweep reports as a stalled graph on every pass"
+    )]
+    StepBindingNotWaiting {
         step_key: String,
         input_key: String,
         source_step_key: String,
@@ -735,6 +756,12 @@ pub enum LaunchError {
         loop_group: String,
         exit_step_key: String,
     },
+    #[error(
+        "step `{step_key}` sets `loop_until` or `loop_max_iterations` but is in no loop — those \
+         are read off a loop's exit step and nowhere else, so set here they look configured and \
+         change nothing. Give the step a `loop_group`, or drop the setting"
+    )]
+    LoopSettingsWithoutLoop { step_key: String },
     #[error(
         "loop `{loop_group}` has no `loop_until` on its exit step `{step_key}` — a loop with no \
          exit condition always runs its full budget, which is a retry, not a loop"
@@ -763,6 +790,16 @@ pub enum LaunchError {
          launch, and one step doing both has no single answer for what an iteration contains"
     )]
     LoopStepIsAlsoFanOut { step_key: String },
+    #[error(
+        "step `{step_key}` iterates over step `{source_step_key}`, but `{source_step_key}` is in \
+         a loop body and runs once per iteration — the fan-out would expand from the first pass \
+         and be deleted, so every branch would iterate the first pass's outputs forever. Iterate \
+         a step outside the loop instead"
+    )]
+    FanOutOnLoopBody {
+        step_key: String,
+        source_step_key: String,
+    },
     #[error(
         "edge {parent} -> {child} is an on_exhausted edge, but `{parent}` is not the exit step of \
          a loop — only a loop can run out of attempts"
@@ -821,6 +858,27 @@ pub enum LaunchError {
          the condition for whether it runs"
     )]
     GateReadsItsOwnStep { step_key: String, gate_key: String },
+    #[error(
+        "gate `{gate_key}` on step `{step_key}` reads the output of step `{source_step_key}`, but \
+         `{source_step_key}` is a fan-out — the task it compiles to is a placeholder that \
+         expansion deletes, so the gate could never be answered and `{step_key}` would wait \
+         forever"
+    )]
+    GateOnFanOut {
+        step_key: String,
+        gate_key: String,
+        source_step_key: String,
+    },
+    #[error(
+        "gate `{gate_key}` on step `{step_key}` reads the output of step `{source_step_key}`, but \
+         `{source_step_key}` is in a loop body and runs once per iteration — a gate compiles to \
+         one task number and would keep reading the first pass, never the one that just ran"
+    )]
+    GateOnLoopBody {
+        step_key: String,
+        gate_key: String,
+        source_step_key: String,
+    },
     #[error(
         "this workflow has {steps} steps and one run may hold at most {ceiling} tasks (limit: \
          MAX_RUN_TASKS) — a template already over the ceiling at launch would be parked the \
@@ -987,6 +1045,22 @@ pub enum LaunchError {
     Storage(String),
 }
 
+/// Why a template write was refused.
+///
+/// Distinct from [`LaunchError`]: nothing here needs a run to exist — these
+/// are knowable from the template table alone.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowSaveError {
+    /// `workflows.name` is UNIQUE, and it is the table's only unique column,
+    /// so a unique violation on a rename can only be a taken name. Caught
+    /// from the constraint rather than checked first: a check-then-write can
+    /// race another writer between the two statements, the constraint cannot.
+    #[error("a workflow named `{name}` already exists")]
+    DuplicateName { name: String },
+    #[error("workflow storage error: {0}")]
+    Storage(String),
+}
+
 pub struct WorkflowStore {
     pool: SqlitePool,
 }
@@ -1028,13 +1102,17 @@ impl WorkflowStore {
 
     /// Replace a template's own fields. Steps, edges, and bindings are
     /// addressed separately and are untouched by this.
+    ///
+    /// A rename onto a taken name is a [`WorkflowSaveError::DuplicateName`],
+    /// not a generic storage failure: the constraint is caught and typed here
+    /// so a caller can report it as the user mistake it is.
     pub async fn update_workflow(
         &self,
         id: &str,
         name: &str,
         description: Option<&str>,
         input_schema: Option<&Value>,
-    ) -> Result<Option<Workflow>> {
+    ) -> std::result::Result<Option<Workflow>, WorkflowSaveError> {
         let result = sqlx::query(
             "UPDATE workflows SET name = ?, description = ?, input_schema = ?, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?",
@@ -1045,12 +1123,21 @@ impl WorkflowStore {
         .bind(id)
         .execute(&self.pool)
         .await
-        .context("failed to update workflow")?;
+        .map_err(|error| match &error {
+            sqlx::Error::Database(database) if database.is_unique_violation() => {
+                WorkflowSaveError::DuplicateName {
+                    name: name.to_string(),
+                }
+            }
+            _ => WorkflowSaveError::Storage(error.to_string()),
+        })?;
 
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_workflow(id).await
+        self.get_workflow(id)
+            .await
+            .map_err(|error| WorkflowSaveError::Storage(error.to_string()))
     }
 
     pub async fn get_workflow(&self, id: &str) -> Result<Option<Workflow>> {
@@ -1078,6 +1165,11 @@ impl WorkflowStore {
         rows.into_iter().map(workflow_from_row).collect()
     }
 
+    /// Delete a template. Steps, edges, bindings, gates, schedules and
+    /// webhooks cascade — they describe the recipe and are meaningless without
+    /// it. The runs do not: a run is the history of work that was actually
+    /// done, and it keeps naming the template it came from after the template
+    /// is gone.
     pub async fn delete_workflow(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM workflows WHERE id = ?")
             .bind(id)
@@ -1538,8 +1630,9 @@ impl WorkflowStore {
     /// graph is worse than none: the scheduler would immediately start running
     /// the part that exists. Validation cannot be the whole story though —
     /// writing spans two stores and can still fail on its own (a closed pool, a
-    /// disk error), so a failure part-way through unwinds what it emitted
-    /// before returning. See `rollback_run`.
+    /// disk error), so the emission itself is one transaction: the run row, the
+    /// tasks, their edges, bindings, and gates appear together or not at all,
+    /// and no sweep can ever see half a graph.
     /// Launch on behalf of an agent, which is also what asked for the run.
     ///
     /// The shape every caller wanted before triggers existed, kept as its own
@@ -1656,6 +1749,21 @@ impl WorkflowStore {
             }
         }
 
+        // Steps whose compiled task is not a stable thing to read: a fan-out's
+        // placeholder is deleted the moment it expands, and a loop-body step's
+        // task is superseded every iteration. Computed before the gate check,
+        // which refuses both, and reused by the fan-out wiring below.
+        let fan_outs: HashSet<&str> = steps
+            .iter()
+            .filter(|step| step.for_each_step_key.is_some())
+            .map(|step| step.step_key.as_str())
+            .collect();
+        let loop_members: HashSet<&str> = steps
+            .iter()
+            .filter(|step| step.loop_group.is_some())
+            .map(|step| step.step_key.as_str())
+            .collect();
+
         // 2a. Gates. Same shape of check as bindings, and for the same reason:
         //     a gate naming a step that is not here can never be answered, and
         //     a gate whose config will not evaluate would error once a minute
@@ -1685,6 +1793,28 @@ impl WorkflowStore {
                         gate_key: gate.gate_key.clone(),
                     });
                 }
+                // A gate compiles its source step key to one task number at
+                // launch and nothing ever rewrites it. Two kinds of step have
+                // no stable task to point at, and each fails differently:
+                // a fan-out's placeholder is deleted on expansion, so the gate
+                // is Pending forever; a loop-body step is re-emitted each
+                // iteration, so the gate reads the first pass for the loop's
+                // whole life. Both are refused the same way the binding layer
+                // refuses a step binding onto a fan-out.
+                if fan_outs.contains(target) {
+                    return Err(LaunchError::GateOnFanOut {
+                        step_key: gate.step_key.clone(),
+                        gate_key: gate.gate_key.clone(),
+                        source_step_key: target.to_string(),
+                    });
+                }
+                if loop_members.contains(target) {
+                    return Err(LaunchError::GateOnLoopBody {
+                        step_key: gate.step_key.clone(),
+                        gate_key: gate.gate_key.clone(),
+                        source_step_key: target.to_string(),
+                    });
+                }
             }
             if let Err(error) = validate_step_gate(gate) {
                 return Err(LaunchError::GateConfigInvalid {
@@ -1707,12 +1837,6 @@ impl WorkflowStore {
         //     Reachability rather than a direct edge: a fan-out that waits on
         //     its source through an intervening step is wired correctly, and
         //     demanding the shortcut edge would reject a legitimate template.
-        let fan_outs: HashSet<&str> = steps
-            .iter()
-            .filter(|step| step.for_each_step_key.is_some())
-            .map(|step| step.step_key.as_str())
-            .collect();
-
         for step in &steps {
             let Some(source) = step.for_each_step_key.as_deref() else {
                 continue;
@@ -1721,6 +1845,18 @@ impl WorkflowStore {
                 return Err(LaunchError::UnknownForEachStep {
                     step_key: step.step_key.clone(),
                     missing: source.to_string(),
+                });
+            }
+            // A fan-out's placeholder expands the moment its source settles
+            // and is deleted as it does. A source in a loop body settles at
+            // the end of pass 1, so the branches would be built from pass-1
+            // outputs and their `item` inputs would hold that data for the
+            // loop's whole life — the same refusal the gate layer makes for
+            // the same shape of step.
+            if loop_members.contains(source) {
+                return Err(LaunchError::FanOutOnLoopBody {
+                    step_key: step.step_key.clone(),
+                    source_step_key: source.to_string(),
                 });
             }
             if !precedes(&edges, source, &step.step_key) {
@@ -1752,6 +1888,22 @@ impl WorkflowStore {
                             source_step_key: target.to_string(),
                         });
                     }
+                    // A fan-in resolves to every branch's whole output keyed
+                    // by branch key — no single document exists for a pointer
+                    // to select from, and the translation below would drop it
+                    // without a word. An empty pointer selects the whole
+                    // document, which is exactly what a fan-in already reads.
+                    if binding
+                        .source_pointer
+                        .as_deref()
+                        .is_some_and(|pointer| !pointer.is_empty())
+                    {
+                        return Err(LaunchError::FanInWithPointer {
+                            step_key: binding.step_key.clone(),
+                            input_key: binding.input_key.clone(),
+                            source_step_key: target.to_string(),
+                        });
+                    }
                 }
                 // The mirror image: a plain step binding onto a fan-out points
                 // at the placeholder, which expansion deletes. It would resolve
@@ -1759,6 +1911,19 @@ impl WorkflowStore {
                 BindingSource::Step => {
                     if fan_outs.contains(target) {
                         return Err(LaunchError::StepBindingOnFanOut {
+                            step_key: binding.step_key.clone(),
+                            input_key: binding.input_key.clone(),
+                            source_step_key: target.to_string(),
+                        });
+                    }
+                    // The same wait a fan-in owes its fan-out: without an
+                    // edge, nothing orders the read after the write, and a run
+                    // that loses the race has every parent settled with the
+                    // input still missing — which the sweep reports as a
+                    // stalled graph on every pass, for a template that was
+                    // never broken-looking at save time.
+                    if !precedes(&edges, target, &binding.step_key) {
+                        return Err(LaunchError::StepBindingNotWaiting {
                             step_key: binding.step_key.clone(),
                             input_key: binding.input_key.clone(),
                             source_step_key: target.to_string(),
@@ -2039,29 +2204,23 @@ impl WorkflowStore {
             );
         }
 
-        // 6. Emit. Everything above passed, so this should not fail on content.
+        // 6. Provision, then emit. Everything above passed, so this should not
+        //    fail on content.
+        //
+        //    The disk half of `per_run` provisioning runs first, because git
+        //    work has no business holding a database write lock; the rows that
+        //    make a checkout visible are written inside the emission
+        //    transaction below. A checkout left behind by a launch that never
+        //    produced a runnable graph is an orphan by construction — nothing
+        //    will ever own it — so a failed emit undoes the disk as well.
         let run_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO workflow_runs (id, workflow_id, inputs, launched_by) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&run_id)
-        .bind(workflow_id)
-        .bind(inputs.to_string())
-        .bind(&identity.launched_by)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| LaunchError::Storage(error.to_string()))?;
+        let provisioned = self.provision_per_run(&run_id, &steps).await?;
 
-        let mut task_numbers: HashMap<String, i64> = HashMap::new();
-        // Tracked separately from the tasks because rolling back a launch has to
-        // undo the disk as well as the database. A checkout left behind by a
-        // launch that never produced a runnable graph is an orphan by
-        // construction — nothing will ever own it.
-        let mut provisioned: Vec<PreparedWorktree> = Vec::new();
-        if let Err(error) = self
+        let task_numbers = match self
             .emit_graph(
-                task_store,
+                workflow_id,
                 &run_id,
+                inputs,
                 &steps,
                 &edges,
                 &bindings,
@@ -2069,15 +2228,16 @@ impl WorkflowStore {
                 &frozen,
                 &loops,
                 identity,
-                &mut task_numbers,
-                &mut provisioned,
+                &provisioned,
             )
             .await
         {
-            worktrees::discard_checkouts(&provisioned).await;
-            self.rollback_run(task_store, &run_id, &task_numbers).await;
-            return Err(error);
-        }
+            Ok(task_numbers) => task_numbers,
+            Err(error) => {
+                discard_provisioned(&provisioned).await;
+                return Err(error);
+            }
+        };
 
         let run = self
             .get_run(&run_id)
@@ -2088,15 +2248,90 @@ impl WorkflowStore {
         Ok(InstantiatedRun { run, task_numbers })
     }
 
-    /// Write the tasks, edges, and bindings for a validated launch.
+    /// Create the on-disk checkout for every `per_run` step, ahead of the
+    /// emission transaction.
     ///
-    /// `task_numbers` is an out-parameter rather than a return value so the
-    /// caller can clean up whatever was emitted before a failure.
+    /// `create_checkout` runs git and writes nothing to the database; the
+    /// split is deliberate, and the reason the checkouts can be prepared here
+    /// and recorded inside the emission transaction — a task and the worktree
+    /// rows it runs in commit together or not at all. Any failure discards
+    /// what was prepared before it.
+    async fn provision_per_run(
+        &self,
+        run_id: &str,
+        steps: &[WorkflowStep],
+    ) -> std::result::Result<Vec<(String, PreparedWorktree)>, LaunchError> {
+        let wanted = steps
+            .iter()
+            .filter(|step| step.worktree_mode == WorktreeMode::PerRun)
+            .count() as i64;
+        if wanted > 0 {
+            worktrees::check_cap(&self.pool, run_id, wanted)
+                .await
+                .map_err(|error| LaunchError::WorktreeUnavailable {
+                    step_key: "*".to_string(),
+                    details: error.to_string(),
+                })?;
+        }
+
+        let mut provisioned = Vec::new();
+        for step in steps {
+            if step.worktree_mode != WorktreeMode::PerRun {
+                continue;
+            }
+            let Some(repo_id) = step.repo_id.as_deref() else {
+                // Validation refused this already; reaching it means the rows
+                // changed underneath us and the launch is unwinding anyway.
+                discard_provisioned(&provisioned).await;
+                return Err(LaunchError::WorktreeWithoutRepo {
+                    step_key: step.step_key.clone(),
+                    mode: step.worktree_mode.to_string(),
+                });
+            };
+            match worktrees::create_checkout(
+                &self.pool,
+                run_id,
+                &step.step_key,
+                None,
+                repo_id,
+                step.worktree_base_ref.as_deref(),
+            )
+            .await
+            {
+                Ok(prepared) => provisioned.push((step.step_key.clone(), prepared)),
+                Err(error) => {
+                    discard_provisioned(&provisioned).await;
+                    return Err(LaunchError::WorktreeUnavailable {
+                        step_key: step.step_key.clone(),
+                        details: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(provisioned)
+    }
+
+    /// Write the run row, the tasks, their edges, bindings, and gates, and the
+    /// worktree records for a validated launch — in one transaction.
+    ///
+    /// The atomicity is the whole point. The ready sweep treats a task with a
+    /// `workflow_run_id` and no unsettled parents as promotable, so a launch
+    /// that emitted statement by statement gave a cortex tick a window in
+    /// which every step looked ready before its edges existed — a whole
+    /// pipeline promoted at once. One commit means no sweep can ever see half
+    /// a graph, and a write that fails mid-emission leaves nothing behind.
+    ///
+    /// Everything is written directly against the transaction rather than
+    /// through `TaskStore`'s methods (`create`, `link_tasks`,
+    /// `set_input_binding`, `GateStore::create`), because those open
+    /// transactions of their own and a transaction cannot nest.
     #[allow(clippy::too_many_arguments)]
     async fn emit_graph(
         &self,
-        task_store: &TaskStore,
+        workflow_id: &str,
         run_id: &str,
+        inputs: &Value,
         steps: &[WorkflowStep],
         edges: &[(String, String)],
         bindings: &[StepBinding],
@@ -2104,16 +2339,39 @@ impl WorkflowStore {
         frozen: &HashMap<(String, String), Value>,
         loops: &LoopWiring,
         identity: &LaunchIdentity,
-        task_numbers: &mut HashMap<String, i64>,
-        provisioned: &mut Vec<PreparedWorktree>,
-    ) -> std::result::Result<(), LaunchError> {
+        provisioned: &[(String, PreparedWorktree)],
+    ) -> std::result::Result<HashMap<String, i64>, LaunchError> {
+        // `BEGIN IMMEDIATE` takes the write lock up front: emission only ever
+        // writes, and deferring the lock to the first statement would invite a
+        // second writer in between the reads validation just did and the rows
+        // they were true of.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO workflow_runs (id, workflow_id, inputs, launched_by) VALUES (?, ?, ?, ?)",
+        )
+        .bind(run_id)
+        .bind(workflow_id)
+        .bind(inputs.to_string())
+        .bind(&identity.launched_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| LaunchError::Storage(error.to_string()))?;
+
+        let mut task_numbers: HashMap<String, i64> = HashMap::new();
         for step in steps {
             // A step that states a requirement names nobody: the emitted task
             // goes into the pool with `assigned_agent_id` empty, and the first
             // capable agent to ask stamps itself on it. Everything else — the
             // launching agent as the default assignee — is unchanged, which is
             // the whole point of the requirement being opt-in.
-            let requires = step.required_capabilities.clone().unwrap_or_default();
+            let requires = crate::tasks::normalise_capabilities(
+                &step.required_capabilities.clone().unwrap_or_default(),
+            );
             let assigned_agent_id = if requires.is_empty() {
                 step.assigned_agent_id
                     .clone()
@@ -2121,35 +2379,58 @@ impl WorkflowStore {
             } else {
                 crate::tasks::UNASSIGNED_AGENT_ID.to_string()
             };
-
-            let task = task_store
-                .create(CreateTaskInput {
-                    owner_agent_id: identity.agent_id.clone(),
-                    assigned_agent_id,
-                    required_capabilities: requires,
-                    title: step.title.clone(),
-                    description: step.description.clone(),
-                    // Every step starts in backlog, entry steps included. The
-                    // sweep decides what is eligible by the same rule it uses
-                    // for everything else, rather than the instantiator
-                    // guessing which step is first. A pipeline whose first step
-                    // has an unsatisfiable binding then stalls visibly instead
-                    // of being claimed and immediately blocked.
-                    status: TaskStatus::Backlog,
-                    priority: step.priority,
-                    // Provenance, not ownership. When a filing task launched
-                    // this run the value is `task:<n>`, which is exactly what
-                    // `filing_depth` walks — so the depth chain crosses the
-                    // launch boundary without a column that only launches use.
-                    created_by: identity.launched_by.clone(),
-                    binding: TaskProjectBinding {
-                        repo_id: step.repo_id.clone(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-                .await
+            let requirements_json = (!requires.is_empty())
+                .then(|| serde_json::to_string(&requires))
+                .transpose()
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
+
+            // The same row `TaskStore::create` writes, inlined so it lands in
+            // the emission transaction: the task number comes from the
+            // high-water-mark sequence, which makes number reuse after hard
+            // deletes impossible.
+            let task_number: i64 = sqlx::query_scalar(
+                "UPDATE task_number_seq SET next_number = next_number + 1 \
+                 WHERE id = 1 RETURNING next_number - 1",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+
+            sqlx::query(
+                "INSERT INTO tasks (id, task_number, title, description, status, priority, \
+                 owner_agent_id, assigned_agent_id, required_capabilities, subtasks, metadata, \
+                 source_memory_id, created_by, project_id, repo_id, worktree_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(task_number)
+            .bind(&step.title)
+            .bind(&step.description)
+            // Every step starts in backlog, entry steps included. The
+            // sweep decides what is eligible by the same rule it uses
+            // for everything else, rather than the instantiator
+            // guessing which step is first. A pipeline whose first step
+            // has an unsatisfiable binding then stalls visibly instead
+            // of being claimed and immediately blocked.
+            .bind(TaskStatus::Backlog.as_str())
+            .bind(step.priority.as_str())
+            .bind(&identity.agent_id)
+            .bind(&assigned_agent_id)
+            .bind(&requirements_json)
+            .bind("[]")
+            .bind("{}")
+            .bind(None::<String>)
+            // Provenance, not ownership. When a filing task launched
+            // this run the value is `task:<n>`, which is exactly what
+            // `filing_depth` walks — so the depth chain crosses the
+            // launch boundary without a column that only launches use.
+            .bind(&identity.launched_by)
+            .bind(None::<String>)
+            .bind(&step.repo_id)
+            .bind(None::<String>)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
             // The command and worktree columns are frozen onto the task here for
             // the reason the fan-out and loop specs are: a template edited
@@ -2196,72 +2477,31 @@ impl WorkflowStore {
                     .map(|value| value.to_string()),
             )
             .bind(step.decision_ask.as_str())
-            .bind(task.task_number)
-            .execute(&self.pool)
+            .bind(task_number)
+            .execute(&mut *tx)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
 
-            task_numbers.insert(step.step_key.clone(), task.task_number);
+            task_numbers.insert(step.step_key.clone(), task_number);
         }
 
-        // `per_run` provisioning: one checkout per step, made at launch.
+        // The rows that make each prepared checkout visible, written in the
+        // same transaction as the task that runs in it. A task committed with
+        // a `worktree_id` nobody recorded would resolve to the repo's own
+        // checkout — precisely the failure cwd enforcement was built to
+        // prevent — so the two were never allowed to commit apart.
         //
-        // `per_branch` is deliberately *not* done here — its width is not known
+        // `per_branch` is deliberately *not* here — its width is not known
         // until the fan-out expands, and its checkouts are created inside the
         // expansion transaction so a branch task can never exist without one.
-        let wanted = steps
-            .iter()
-            .filter(|step| step.worktree_mode == WorktreeMode::PerRun)
-            .count() as i64;
-        if wanted > 0 {
-            worktrees::check_cap(&self.pool, run_id, wanted)
-                .await
-                .map_err(|error| LaunchError::WorktreeUnavailable {
-                    step_key: "*".to_string(),
-                    details: error.to_string(),
-                })?;
-        }
-
-        for step in steps {
-            if step.worktree_mode != WorktreeMode::PerRun {
-                continue;
-            }
-            let Some(repo_id) = step.repo_id.as_deref() else {
-                // Validation refused this already; reaching it means the rows
-                // changed underneath us and the launch is unwinding anyway.
-                return Err(LaunchError::WorktreeWithoutRepo {
-                    step_key: step.step_key.clone(),
-                    mode: step.worktree_mode.to_string(),
-                });
-            };
-            let Some(task_number) = task_numbers.get(&step.step_key).copied() else {
+        for (step_key, prepared) in provisioned {
+            let Some(task_number) = task_numbers.get(step_key).copied() else {
                 continue;
             };
-
-            let prepared = worktrees::create_checkout(
-                &self.pool,
-                run_id,
-                &step.step_key,
-                None,
-                repo_id,
-                step.worktree_base_ref.as_deref(),
-            )
-            .await
-            .map_err(|error| LaunchError::WorktreeUnavailable {
-                step_key: step.step_key.clone(),
-                details: error.to_string(),
-            })?;
-            provisioned.push(prepared.clone());
-
-            let mut conn = self
-                .pool
-                .acquire()
-                .await
-                .map_err(|error| LaunchError::Storage(error.to_string()))?;
-            worktrees::record_worktree(&mut conn, run_id, &step.step_key, None, &prepared)
+            worktrees::record_worktree(&mut tx, run_id, step_key, None, prepared)
                 .await
                 .map_err(|error: WorktreeError| LaunchError::WorktreeUnavailable {
-                    step_key: step.step_key.clone(),
+                    step_key: step_key.clone(),
                     details: error.to_string(),
                 })?;
 
@@ -2273,7 +2513,7 @@ impl WorkflowStore {
                 .bind(&prepared.project_id)
                 .bind(&prepared.worktree_id)
                 .bind(task_number)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
@@ -2309,7 +2549,7 @@ impl WorkflowStore {
             )
             .bind(spec.to_metadata().to_string())
             .bind(task_number)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
@@ -2342,7 +2582,7 @@ impl WorkflowStore {
                 .bind(i64::from(is_exit))
                 .bind(is_exit.then(|| spec.to_metadata().to_string()))
                 .bind(task_number)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| LaunchError::Storage(error.to_string()))?;
             }
@@ -2374,7 +2614,7 @@ impl WorkflowStore {
                 "runs only if loop `{group}` {condition}; waiting to see whether it does"
             ))
             .bind(task_number)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
@@ -2383,16 +2623,25 @@ impl WorkflowStore {
         // decides *whether* the child runs, not whether it waits — and an edge
         // left out here would be an edge the canvas draws and the run does not
         // have.
+        //
+        // No cycle check, unlike `TaskStore::link_tasks`: both endpoints are
+        // tasks this launch just wrote, and `topologically_ordered` already
+        // proved the template acyclic, so the walk could never find one.
         for (parent, child) in edges {
             let (Some(parent_number), Some(child_number)) =
                 (task_numbers.get(parent), task_numbers.get(child))
             else {
                 continue;
             };
-            task_store
-                .link_tasks(*parent_number, *child_number)
-                .await
-                .map_err(|error| LaunchError::Storage(error.to_string()))?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO task_dependencies (parent_task_number, child_task_number) \
+                 VALUES (?, ?)",
+            )
+            .bind(parent_number)
+            .bind(child_number)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
         for binding in bindings {
@@ -2465,10 +2714,26 @@ impl WorkflowStore {
                 },
             };
 
-            task_store
-                .set_input_binding(&translated)
-                .await
-                .map_err(|error| LaunchError::Storage(error.to_string()))?;
+            sqlx::query(
+                "INSERT INTO task_input_bindings \
+                     (child_task_number, input_key, source_task_number, source_pointer, literal_value, \
+                      fan_in_step_key) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (child_task_number, input_key) DO UPDATE SET \
+                     source_task_number = excluded.source_task_number, \
+                     source_pointer = excluded.source_pointer, \
+                     literal_value = excluded.literal_value, \
+                     fan_in_step_key = excluded.fan_in_step_key",
+            )
+            .bind(translated.child_task_number)
+            .bind(&translated.input_key)
+            .bind(translated.source_task_number)
+            .bind(&translated.source_pointer)
+            .bind(translated.literal_value.as_ref().map(|value| value.to_string()))
+            .bind(&translated.fan_in_step_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
 
         // Gates compile last, once every step has a number to point at.
@@ -2484,7 +2749,6 @@ impl WorkflowStore {
         // than being resolved now: at launch every source step is still in the
         // backlog, so deriving it here would freeze every gate as `wait` and
         // no branch would ever route.
-        let gate_store = crate::tasks::GateStore::new(task_store.pool().clone());
         for gate in gates {
             let Some(task_number) = task_numbers.get(&gate.step_key) else {
                 continue;
@@ -2514,69 +2778,30 @@ impl WorkflowStore {
                 }
             };
 
-            gate_store
-                .create(
-                    *task_number,
-                    gate.kind,
-                    &config,
-                    gate.label.as_deref(),
-                    gate.poll_interval_secs,
-                    gate.disposition,
-                )
-                .await
-                .map_err(|error| LaunchError::Storage(error.to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    /// Undo a launch that failed part-way through emitting.
-    ///
-    /// Best-effort by necessity — the reason we are here is that writes are
-    /// failing. Every failure is logged rather than propagated, because the
-    /// caller already has the error that matters and replacing it with a
-    /// cleanup error would hide the cause.
-    ///
-    /// Tasks go first. A leftover `workflow_runs` row is an orphan nobody
-    /// reads; a leftover *task* gets picked up and run, which is the outcome
-    /// this whole path exists to prevent.
-    async fn rollback_run(
-        &self,
-        task_store: &TaskStore,
-        run_id: &str,
-        task_numbers: &HashMap<String, i64>,
-    ) {
-        // Gates first, then the tasks they hang off. A gate outliving its task
-        // is a stored, repeating, outbound request against a card that no
-        // longer exists — the one piece of a rolled-back launch that would keep
-        // costing something.
-        let gate_store = crate::tasks::GateStore::new(task_store.pool().clone());
-        for (step_key, number) in task_numbers {
-            if let Err(error) = gate_store.delete_for_task(*number).await {
-                tracing::error!(
-                    %error, run_id, step_key, task_number = number,
-                    "failed to remove the gates of a rolled-back workflow launch"
-                );
-            }
-        }
-
-        for (step_key, number) in task_numbers {
-            if let Err(error) = task_store.delete(*number).await {
-                tracing::error!(
-                    %error, run_id, step_key, task_number = number,
-                    "failed to remove a task from a rolled-back workflow launch; \
-                     it may run on its own"
-                );
-            }
-        }
-
-        if let Err(error) = sqlx::query("DELETE FROM workflow_runs WHERE id = ?")
-            .bind(run_id)
-            .execute(&self.pool)
+            // The same row `GateStore::create` writes, inlined for the same
+            // reason the task insert above is.
+            sqlx::query(
+                "INSERT INTO task_gates \
+                     (id, task_number, kind, config, label, poll_interval_secs, disposition) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(task_number)
+            .bind(gate.kind.as_str())
+            .bind(config.to_string())
+            .bind(gate.label.as_deref())
+            .bind(gate.poll_interval_secs)
+            .bind(gate.disposition.map(GateDisposition::as_str))
+            .execute(&mut *tx)
             .await
-        {
-            tracing::error!(%error, run_id, "failed to remove a rolled-back workflow run");
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
         }
+
+        tx.commit()
+            .await
+            .map_err(|error| LaunchError::Storage(error.to_string()))?;
+
+        Ok(task_numbers)
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<Option<WorkflowRun>> {
@@ -2608,13 +2833,13 @@ impl WorkflowStore {
 
     /// Runs still worth judging, oldest first.
     ///
-    /// `grace_secs` is the reaper's floor, for the reaper's reason. A launch
-    /// inserts the run row and then emits its graph, so a run examined in that
-    /// window has fewer tasks than it will have — possibly none — and would be
-    /// read as finished before it had started. The reaper solved the same
-    /// shape of race (a claim and its worker registration are separate writes)
-    /// with a grace period rather than a lock, and a second mechanism for one
-    /// problem is how the two drift apart.
+    /// `grace_secs` is the reaper's floor, kept as a margin rather than as
+    /// cover for a race: emission commits the run row and its graph in one
+    /// transaction, so a run that is visible at all already has every task it
+    /// will ever have. The reaper solved the same shape of race (a claim and
+    /// its worker registration are separate writes) with a grace period rather
+    /// than a lock, and a second mechanism for one problem is how the two
+    /// drift apart.
     pub async fn list_assessable_runs(&self, grace_secs: i64) -> Result<Vec<WorkflowRun>> {
         let rows = sqlx::query(&format!(
             "{RUN_SELECT_COLUMNS} FROM workflow_runs \
@@ -2938,6 +3163,14 @@ impl WorkflowStore {
     /// One transaction over both tables — they are one database — so a run
     /// cannot end up cancelled with claimable cards, or emptied without being
     /// cancelled.
+    ///
+    /// Cancelling also offers the run's provisioned worktrees for removal,
+    /// which nothing else will do: a cancelled run never passes through
+    /// `settle_run`, and the sweep's reaper is keyed on those transitions.
+    /// The offer goes out only once nothing of the run is still in flight —
+    /// a worker mid-task is writing in that checkout. A run cancelled with
+    /// work in the air keeps its checkouts until that work finishes, after
+    /// which `delete_run` reaps them.
     pub async fn cancel_run(&self, run_id: &str, cancelled_by: &str) -> Result<CancelOutcome> {
         let Some(run) = self.get_run(run_id).await? else {
             return Ok(CancelOutcome::NotFound);
@@ -3006,6 +3239,14 @@ impl WorkflowStore {
             .await
             .context("failed to commit a run cancellation")?;
 
+        // Every task of the run is now terminal except the ones left running.
+        // Only then is a provisioned checkout nobody's working directory —
+        // reaping under a live worker is the one outcome the reaper's whole
+        // design exists to prevent.
+        if running == 0 {
+            worktrees::reap_run(&self.pool, run_id).await;
+        }
+
         Ok(CancelOutcome::Cancelled {
             settled: settled as i64,
             left_running: running,
@@ -3027,6 +3268,10 @@ impl WorkflowStore {
     /// Gates go before tasks, exactly as in the launch rollback: a gate
     /// outliving its task is a stored, repeating, outbound request against a
     /// card that no longer exists.
+    ///
+    /// Worktrees go with it. A deleted run is the last chance to offer its
+    /// provisioned checkouts for removal — the sweep's reaper keys on run
+    /// transitions, and a deleted run makes none.
     pub async fn delete_run(
         &self,
         task_store: &TaskStore,
@@ -3085,6 +3330,13 @@ impl WorkflowStore {
 
             task_store.delete(task.task_number).await?;
         }
+
+        // The run's tasks are gone, so nothing can still write to a checkout
+        // the run provisioned. The sweep's reaper only sees runs that settle
+        // on their own; a deleted run gets the same offer here or its
+        // worktrees leak. Git's refusal on a dirty tree is recorded against
+        // the worktree row and respected, exactly as in the sweep.
+        worktrees::reap_run(&self.pool, run_id).await;
 
         sqlx::query("DELETE FROM workflow_runs WHERE id = ?")
             .bind(run_id)
@@ -3348,6 +3600,20 @@ fn loop_wiring(
             return Err(LaunchError::PreviousIterationOutsideLoop {
                 step_key: binding.step_key.clone(),
                 input_key: binding.input_key.clone(),
+            });
+        }
+    }
+
+    // The same pre-check for the loop's own settings: `loop_until` and
+    // `loop_max_iterations` are read off a loop's exit step and nowhere else.
+    // On a step in no loop nothing ever reads them, and a setting nothing
+    // reads is worse than a missing one — it looks configured.
+    for step in steps {
+        if group_of(&step.step_key).is_none()
+            && (step.loop_until.is_some() || step.loop_max_iterations.is_some())
+        {
+            return Err(LaunchError::LoopSettingsWithoutLoop {
+                step_key: step.step_key.clone(),
             });
         }
     }
@@ -3638,21 +3904,33 @@ fn precedes(edges: &[(String, String)], parent: &str, child: &str) -> bool {
     false
 }
 
+/// Undo the disk side of a launch that is not going to emit.
+///
+/// The database side needs no equivalent: emission is one transaction, so a
+/// failure leaves no row pointing at these checkouts. The checkouts themselves
+/// are on disk outside any transaction, so they are removed by hand.
+async fn discard_provisioned(provisioned: &[(String, PreparedWorktree)]) {
+    let prepared: Vec<PreparedWorktree> = provisioned
+        .iter()
+        .map(|(_, prepared)| prepared.clone())
+        .collect();
+    worktrees::discard_checkouts(&prepared).await;
+}
+
 fn validate(schema: &Value, value: &Value) -> Vec<String> {
-    match jsonschema::validator_for(schema) {
-        Ok(validator) => validator
-            .iter_errors(value)
-            .map(|error| {
-                ContractProblem::SchemaViolation {
-                    side: ContractSide::Input,
-                    path: error.instance_path().to_string(),
-                    message: error.to_string(),
-                }
-                .to_string()
-            })
-            .collect(),
-        Err(error) => vec![format!("schema is not valid JSON Schema: {error}")],
-    }
+    crate::validate_json_schema(
+        schema,
+        value,
+        |error| {
+            ContractProblem::SchemaViolation {
+                side: ContractSide::Input,
+                path: error.instance_path().to_string(),
+                message: error.to_string(),
+            }
+            .to_string()
+        },
+        |error| format!("schema is not valid JSON Schema: {error}"),
+    )
 }
 
 fn read_json(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<Value> {
@@ -3849,83 +4127,25 @@ fn run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
 /// for the same reason: it is the single definition of the workflow test
 /// schema, and every module that needs a bare pool with workflow tables — the
 /// `launch_workflow` tool, the trigger store, the API handlers — calls this
-/// rather than hand-rolling its own `CREATE TABLE`. Keep it in step with
-/// `migrations/global/`; when a migration adds a column, add it here too and
-/// every test site picks it up at once.
+/// rather than hand-rolling its own `CREATE TABLE`. The workflow tables live
+/// in the same instance database as the task tables, so the same migrator
+/// produces both; running `migrations/global/` makes drift between the tests
+/// and the real database impossible.
+///
+/// Unlike the task fixture this leaves `task_number_seq` alone: callers seed
+/// the sequence between the two calls, and wiping it here would undo their
+/// seed.
 #[cfg(test)]
 pub(crate) async fn create_workflow_schema(pool: &SqlitePool) {
-    for statement in [
-        "CREATE TABLE workflows (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, \
-         description TEXT, input_schema TEXT, \
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
-         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-        "CREATE TABLE workflow_steps (workflow_id TEXT NOT NULL, step_key TEXT NOT NULL, \
-         title TEXT NOT NULL, description TEXT, assigned_agent_id TEXT, \
-         required_capabilities TEXT, \
-         priority TEXT NOT NULL DEFAULT 'medium', input_schema TEXT, output_schema TEXT, \
-         system_prompt TEXT, repo_id TEXT, position INTEGER NOT NULL DEFAULT 0, \
-         for_each_step_key TEXT, for_each_pointer TEXT, for_each_key TEXT, \
-         loop_group TEXT, loop_max_iterations INTEGER, loop_until TEXT, \
-         kind TEXT NOT NULL DEFAULT 'agent', command TEXT, \
-         command_timeout_secs INTEGER, expect_exit_code INTEGER, \
-         worktree_mode TEXT NOT NULL DEFAULT 'inherit', worktree_base_ref TEXT, \
-         decision_question TEXT, decision_asked_of TEXT, \
-         decision_timeout_action TEXT NOT NULL DEFAULT 'wait', \
-         decision_timeout_secs INTEGER, decision_default_answer TEXT, \
-         decision_ask TEXT NOT NULL DEFAULT 'each_pass', \
-         PRIMARY KEY (workflow_id, step_key))",
-        "CREATE TABLE workflow_step_edges (workflow_id TEXT NOT NULL, \
-         parent_step_key TEXT NOT NULL, child_step_key TEXT NOT NULL, \
-         kind TEXT NOT NULL DEFAULT 'normal', \
-         PRIMARY KEY (workflow_id, parent_step_key, child_step_key))",
-        "CREATE TABLE workflow_step_bindings (workflow_id TEXT NOT NULL, \
-         step_key TEXT NOT NULL, input_key TEXT NOT NULL, source TEXT NOT NULL, \
-         source_step_key TEXT, source_pointer TEXT, literal_value TEXT, \
-         PRIMARY KEY (workflow_id, step_key, input_key))",
-        "CREATE TABLE workflow_step_gates (workflow_id TEXT NOT NULL, \
-         step_key TEXT NOT NULL, gate_key TEXT NOT NULL, kind TEXT NOT NULL, \
-         source_step_key TEXT, config TEXT NOT NULL, label TEXT, \
-         poll_interval_secs INTEGER NOT NULL DEFAULT 60, disposition TEXT, \
-         PRIMARY KEY (workflow_id, step_key, gate_key))",
-        // `status`, `finished_at` and `status_reason` are as much a part of
-        // this table as the columns it was created with — a pool without
-        // them passes tests the real database would refuse.
-        "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY NOT NULL, workflow_id TEXT NOT NULL, \
-         inputs TEXT NOT NULL, launched_by TEXT NOT NULL, \
-         status TEXT NOT NULL DEFAULT 'running', finished_at TEXT, status_reason TEXT, \
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-        // Triggers. `enabled` defaults to 1 for a schedule and **0** for a
-        // webhook, and that asymmetry is the security posture rather than an
-        // oversight: a schedule is written by somebody who wants it to run, and
-        // a webhook is an unauthenticated inbound trigger that has to be turned
-        // on deliberately. A test pool that defaulted it to 1 would let the
-        // fail-closed tests pass against a database that fails open.
-        "CREATE TABLE workflow_schedules (id TEXT PRIMARY KEY NOT NULL, \
-         workflow_id TEXT NOT NULL, name TEXT NOT NULL, cron_expr TEXT, \
-         interval_secs INTEGER NOT NULL DEFAULT 3600, inputs TEXT NOT NULL DEFAULT '{}', \
-         agent_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, \
-         last_fired_at TEXT, last_outcome TEXT, last_detail TEXT, last_run_id TEXT, \
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-        "CREATE TABLE workflow_webhooks (workflow_id TEXT PRIMARY KEY NOT NULL, \
-         secret_hash TEXT NOT NULL, input_pointers TEXT NOT NULL DEFAULT '{}', \
-         agent_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, \
-         last_delivery_at TEXT, last_outcome TEXT, last_detail TEXT, last_run_id TEXT, \
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
-        // What a run provisioned, and what became of it. The reaper's entire
-        // worklist — a test pool without it would let the reaping tests pass
-        // against a database that never recorded anything to reap.
-        "CREATE TABLE workflow_run_worktrees (id TEXT PRIMARY KEY NOT NULL, \
-         run_id TEXT NOT NULL, step_key TEXT NOT NULL, branch_key TEXT, \
-         repo_id TEXT NOT NULL, worktree_id TEXT NOT NULL, path TEXT NOT NULL, \
-         branch TEXT NOT NULL, \
-         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), \
-         reaped_at TEXT, reap_outcome TEXT, reap_detail TEXT)",
-    ] {
-        sqlx::query(statement)
-            .execute(pool)
-            .await
-            .expect("workflow schema should be created");
-    }
+    sqlx::migrate!("./migrations/global")
+        .run(pool)
+        .await
+        .expect("instance migrations should apply");
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(pool)
+        .await
+        .expect("foreign_keys pragma should switch off");
 }
 
 #[cfg(test)]
@@ -4353,13 +4573,15 @@ mod tests {
             .expect("a workflow with a step removed must still launch");
     }
 
-    /// A launch that dies part-way through must not leave runnable tasks.
+    /// A launch that dies part-way through emitting must leave nothing.
     ///
     /// Validation catches bad templates, but emitting spans two stores and can
-    /// fail on its own. Whatever is left behind gets *picked up and run*, which
-    /// is worse than the failure itself.
+    /// fail on its own. Emission is one transaction, so a write that fails —
+    /// here the gate insert, the last thing emission does — rolls the run row,
+    /// the tasks, and their edges back with it. Whatever is left behind gets
+    /// *picked up and run*, which is worse than the failure itself.
     #[tokio::test]
-    async fn a_launch_that_fails_while_emitting_leaves_nothing_runnable() {
+    async fn a_launch_that_fails_while_emitting_leaves_nothing_behind() {
         let (workflows, tasks, id) = fixture().await;
         for (index, key) in ["build", "test"].iter().enumerate() {
             workflows
@@ -4371,41 +4593,26 @@ mod tests {
             .link_steps(&id, "build", "test")
             .await
             .expect("link");
-
-        // Emit half a graph by hand, then roll it back — the same call the
-        // launch path makes when a write fails under it.
-        let run_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO workflow_runs (id, workflow_id, inputs, launched_by) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&run_id)
-        .bind(&id)
-        .bind("{}")
-        .bind("agent-1")
-        .execute(workflows.pool())
-        .await
-        .expect("insert run");
-
-        let mut emitted = HashMap::new();
         workflows
-            .emit_graph(
-                &tasks,
-                &run_id,
-                &workflows.list_steps(&id).await.expect("steps"),
-                &workflows.list_edges(&id).await.expect("edges"),
-                &[],
-                &[],
-                &HashMap::new(),
-                &LoopWiring::default(),
-                &LaunchIdentity::agent("agent-1"),
-                &mut emitted,
-                &mut Vec::new(),
-            )
+            .put_gate(&condition(&id, "test", "build", "red"))
             .await
-            .expect("emit");
-        assert_eq!(emitted.len(), 2);
+            .expect("put gate");
 
-        workflows.rollback_run(&tasks, &run_id, &emitted).await;
+        // Break the last write emission makes. Everything before it — the run
+        // row, both tasks, the edge — must roll back with it.
+        sqlx::query("DROP TABLE task_gates")
+            .execute(workflows.pool())
+            .await
+            .expect("drop");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a gate that cannot be stored fails the launch");
+        assert!(
+            matches!(error, LaunchError::Storage(_)),
+            "a mid-emission write failure surfaces as storage, got {error:?}"
+        );
 
         assert!(
             tasks
@@ -4413,12 +4620,17 @@ mod tests {
                 .await
                 .expect("list")
                 .is_empty(),
-            "a rolled-back launch must leave no task the sweep could promote"
+            "a failed emission must leave no task the sweep could promote"
         );
         assert!(
-            workflows.get_run(&run_id).await.expect("run").is_none(),
-            "the run row goes too"
+            workflows.list_runs(&id).await.expect("runs").is_empty(),
+            "the run row rolls back too"
         );
+        let edges: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dependencies")
+            .fetch_one(workflows.pool())
+            .await
+            .expect("count edges");
+        assert_eq!(edges, 0, "the dependency edge rolls back too");
     }
 
     /// A step that says it needs an input, with nothing wired to it, is a
@@ -4876,6 +5088,44 @@ mod tests {
             .expect("waiting through an intermediate step is waiting");
     }
 
+    /// A fan-out over a loop-body step would expand from the first pass's
+    /// outputs the moment pass 1 settles, and the placeholder would be deleted
+    /// as it did — every branch's `item` input would hold pass-1 data for the
+    /// loop's whole life. Refused at launch, the same way a gate on a
+    /// loop-body step is.
+    #[tokio::test]
+    async fn a_fan_out_over_a_loop_body_step_is_refused_naming_the_step() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(3)).await;
+        let mut widen = step(&id, "widen", 4);
+        widen.for_each_step_key = Some("test".into());
+        widen.for_each_pointer = Some("/candidates".into());
+        workflows.put_step(&widen).await.expect("step");
+        workflows
+            .link_steps(&id, "test", "widen")
+            .await
+            .expect("link");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a fan-out over a loop-body step expands from stale data");
+        match &error {
+            LaunchError::FanOutOnLoopBody {
+                step_key,
+                source_step_key,
+            } => {
+                assert_eq!(step_key, "widen");
+                assert_eq!(source_step_key, "test");
+            }
+            other => panic!("expected FanOutOnLoopBody, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("widen") && error.to_string().contains("test"),
+            "the refusal names both steps: {error}"
+        );
+    }
+
     /// The whole pipeline, and the distinction the fan-in turns on: a branch
     /// that has not finished is a *wait*, and reporting it as an unresolvable
     /// contract parks the report on the first sweep of a healthy run.
@@ -5042,6 +5292,84 @@ mod tests {
             matches!(error, LaunchError::FanInNotFanOut { .. }),
             "{error:?}"
         );
+    }
+
+    /// A fan-in collects whole branch outputs keyed by branch key, so a
+    /// pointer on it has no document to select from. Accepted at save and
+    /// dropped at launch is the worst answer: the template says one thing and
+    /// the run does another.
+    #[tokio::test]
+    async fn a_fan_in_with_a_pointer_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "report".into(),
+                input_key: "results".into(),
+                source: BindingSource::FanIn,
+                source_step_key: Some("build".into()),
+                source_pointer: Some("/ok".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a pointer into a collection of branches must be refused");
+        assert!(
+            matches!(error, LaunchError::FanInWithPointer { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A binding with no edge behind it is a race: some runs resolve, others
+    /// stall with every parent settled and the input still missing. Refused
+    /// at launch, while the template is still the thing being edited.
+    #[tokio::test]
+    async fn a_step_binding_that_does_not_wait_for_its_source_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+        workflows
+            .put_step(&step(&id, "build", 0))
+            .await
+            .expect("step");
+        workflows
+            .put_step(&step(&id, "deploy", 1))
+            .await
+            .expect("step");
+        workflows
+            .put_binding(&StepBinding {
+                workflow_id: id.clone(),
+                step_key: "deploy".into(),
+                input_key: "artifact".into(),
+                source: BindingSource::Step,
+                source_step_key: Some("build".into()),
+                source_pointer: Some("/artifact".into()),
+                literal_value: None,
+            })
+            .await
+            .expect("bind");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("reading a step the graph does not order first must be refused");
+        assert!(
+            matches!(error, LaunchError::StepBindingNotWaiting { .. }),
+            "{error:?}"
+        );
+
+        // The refusal names the fix; making it must launch.
+        workflows
+            .link_steps(&id, "build", "deploy")
+            .await
+            .expect("link");
+        workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("with the edge, the same binding launches");
     }
 
     /// The mirror image: a plain step binding onto a fan-out points at the
@@ -5780,6 +6108,29 @@ mod tests {
         }
     }
 
+    /// The same refusal one step earlier: the settings on a step in no loop at
+    /// all are read by nothing anywhere, launch after launch.
+    #[tokio::test]
+    async fn a_loop_setting_on_a_step_in_no_loop_is_refused() {
+        let (workflows, tasks, id) = fixture().await;
+
+        let mut build = step(&id, "build", 0);
+        build.loop_until = Some(serde_json::json!({"pointer": "/green", "equals": true}));
+        build.loop_max_iterations = Some(5);
+        workflows.put_step(&build).await.expect("step");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("settings nothing reads must be refused");
+        match error {
+            LaunchError::LoopSettingsWithoutLoop { step_key } => {
+                assert_eq!(step_key, "build");
+            }
+            other => panic!("expected LoopSettingsWithoutLoop, got {other:?}"),
+        }
+    }
+
     /// Every pass is a live model call, so the ceiling is enforced where a
     /// person is still watching rather than trusted to a number in a row.
     #[tokio::test]
@@ -6104,6 +6455,104 @@ mod tests {
             error.to_string().contains("rollback") && error.to_string().contains("check"),
             "the refusal names both steps: {error}"
         );
+    }
+
+    /// A condition reading a fan-out step compiles to the placeholder, which
+    /// expansion deletes — the gate would be Pending forever and the gated
+    /// step would never run. Refused at launch, the same way a step binding
+    /// onto a fan-out is.
+    #[tokio::test]
+    async fn a_condition_reading_a_fan_out_is_refused_naming_the_step() {
+        let (workflows, tasks, id) = fixture().await;
+        fan_out_template(&workflows, &id).await;
+        workflows
+            .put_gate(&condition(&id, "report", "build", "red"))
+            .await
+            .expect("put gate");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a condition on a deleted placeholder can never be answered");
+        match &error {
+            LaunchError::GateOnFanOut {
+                step_key,
+                gate_key,
+                source_step_key,
+            } => {
+                assert_eq!(step_key, "report");
+                assert_eq!(gate_key, "runs-when");
+                assert_eq!(source_step_key, "build");
+            }
+            other => panic!("expected GateOnFanOut, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("report") && error.to_string().contains("build"),
+            "the refusal names both steps: {error}"
+        );
+    }
+
+    /// A condition reading a loop-body step compiles to the first pass's task
+    /// and nothing ever repoints it, so it would judge every later pass by the
+    /// first one's output. Refused at launch rather than answered with stale
+    /// data for the loop's whole life.
+    #[tokio::test]
+    async fn a_condition_reading_a_loop_body_step_is_refused_naming_the_step() {
+        let (workflows, tasks, id) = fixture().await;
+        loop_template(&workflows, &id, Some(3)).await;
+        workflows
+            .put_gate(&condition(&id, "ship", "patch", "red"))
+            .await
+            .expect("put gate");
+
+        let error = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect_err("a condition on a loop-body step reads only the first pass");
+        match &error {
+            LaunchError::GateOnLoopBody {
+                step_key,
+                gate_key,
+                source_step_key,
+            } => {
+                assert_eq!(step_key, "ship");
+                assert_eq!(gate_key, "runs-when");
+                assert_eq!(source_step_key, "patch");
+            }
+            other => panic!("expected GateOnLoopBody, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("ship") && error.to_string().contains("patch"),
+            "the refusal names both steps: {error}"
+        );
+    }
+
+    /// The refusals above are about steps with no stable task to read, not
+    /// about conditions: an ordinary step's task lives from launch to done, so
+    /// a condition on it launches and compiles.
+    #[tokio::test]
+    async fn a_condition_reading_an_ordinary_step_still_launches() {
+        let (workflows, tasks, id) = fixture().await;
+        for (index, key) in ["check", "rollback"].iter().enumerate() {
+            workflows
+                .put_step(&step(&id, key, index as i64))
+                .await
+                .expect("put step");
+        }
+        workflows
+            .link_steps(&id, "check", "rollback")
+            .await
+            .expect("link");
+        workflows
+            .put_gate(&condition(&id, "rollback", "check", "red"))
+            .await
+            .expect("put gate");
+
+        let launched = workflows
+            .launch(&tasks, &id, &serde_json::json!({"tag": "v1"}), "agent-1")
+            .await
+            .expect("a condition on an ordinary step is launchable");
+        assert_eq!(launched.task_numbers.len(), 2);
     }
 
     /// A condition whose config will not evaluate would error once a minute
@@ -7355,6 +7804,326 @@ mod tests {
         assert!(
             tasks.get_by_number(deploy).await.expect("fetch").is_none(),
             "the cards go with it, or the next board view shows work from a run that is gone"
+        );
+    }
+
+    /// A pool with the real migrations applied and sqlx's default foreign-key
+    /// enforcement left on. The shared fixtures switch enforcement off, and
+    /// both bugs pinned below lived in the constraints — a test pool without
+    /// them would pass either way.
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        sqlx::migrate!("./migrations/global")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    /// A migrated pool plus a real git repo under a real project root, both
+    /// registered. Real git rather than a fake, as in the worktrees module's
+    /// own tests: the assertions are about what git did to a real directory.
+    async fn migrated_git_fixture() -> (
+        WorkflowStore,
+        TaskStore,
+        SqlitePool,
+        tempfile::TempDir,
+        String,
+    ) {
+        let pool = migrated_pool().await;
+
+        let root = tempfile::tempdir().expect("temp project root");
+        let repo_path = root.path().join("app");
+        std::fs::create_dir_all(&repo_path).expect("repo dir");
+        git_in(&repo_path, &["init", "-b", "main"]);
+        git_in(&repo_path, &["config", "user.email", "test@example.com"]);
+        git_in(&repo_path, &["config", "user.name", "Test"]);
+        std::fs::write(repo_path.join("README.md"), "hello\n").expect("seed file");
+        git_in(&repo_path, &["add", "."]);
+        git_in(&repo_path, &["commit", "-m", "first"]);
+
+        let projects = crate::projects::ProjectStore::new(pool.clone());
+        let project = projects
+            .create_project(crate::projects::CreateProjectInput {
+                name: "sandbox".into(),
+                description: String::new(),
+                icon: String::new(),
+                tags: Vec::new(),
+                root_path: root.path().to_string_lossy().to_string(),
+                settings: serde_json::json!({}),
+            })
+            .await
+            .expect("project");
+        let repo = projects
+            .create_repo(crate::projects::CreateRepoInput {
+                project_id: project.id.clone(),
+                name: "app".into(),
+                path: "app".into(),
+                remote_url: String::new(),
+                default_branch: "main".into(),
+                current_branch: Some("main".into()),
+                description: String::new(),
+            })
+            .await
+            .expect("repo");
+
+        (
+            WorkflowStore::new(pool.clone()),
+            TaskStore::new(pool.clone()),
+            pool,
+            root,
+            repo.id,
+        )
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should be installed for worktree tests");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Deleting the recipe must not delete the history of work that was done.
+    ///
+    /// `workflow_runs.workflow_id` was declared `ON DELETE CASCADE`, which
+    /// made `delete_workflow` erase every run the template ever launched —
+    /// while the endpoint's own doc promised the opposite. If this regresses,
+    /// throwing a template away destroys the only record of what it did.
+    #[tokio::test]
+    async fn deleting_a_workflow_keeps_the_runs_it_launched() {
+        let pool = migrated_pool().await;
+        let workflows = WorkflowStore::new(pool.clone());
+        let tasks = TaskStore::new(pool.clone());
+
+        let workflow = workflows
+            .create_workflow("deploy", None, None)
+            .await
+            .expect("create");
+        workflows
+            .put_step(&step(&workflow.id, "build", 0))
+            .await
+            .expect("step");
+        let launched = workflows
+            .launch(&tasks, &workflow.id, &serde_json::json!({}), "agent-1")
+            .await
+            .expect("launch");
+
+        assert!(
+            workflows
+                .delete_workflow(&workflow.id)
+                .await
+                .expect("delete")
+        );
+
+        let surviving: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs WHERE id = ?")
+            .bind(&launched.run.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(
+            surviving, 1,
+            "the run is the record of work that happened; the recipe going away changes nothing"
+        );
+
+        // And it still names the template it came from — a run that cannot
+        // say what produced it cannot be explained.
+        let kept = workflows
+            .get_run(&launched.run.id)
+            .await
+            .expect("fetch")
+            .expect("run survives");
+        assert_eq!(kept.workflow_id, workflow.id);
+
+        // The template-scoped rows still go with the template.
+        let steps: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workflow_steps WHERE workflow_id = ?")
+                .bind(&workflow.id)
+                .fetch_one(&pool)
+                .await
+                .expect("count steps");
+        assert_eq!(steps, 0, "steps describe the recipe; they cascade with it");
+    }
+
+    /// A rename onto a taken name is the caller's mistake, so it surfaces as
+    /// a typed refusal rather than a wrapped constraint violation — the
+    /// generic mapping turns the latter into a 500, which says server fault.
+    #[tokio::test]
+    async fn renaming_a_workflow_onto_a_taken_name_is_a_typed_refusal() {
+        let (workflows, _tasks, id) = fixture().await;
+        let other = workflows
+            .create_workflow("release", None, None)
+            .await
+            .expect("create");
+
+        let error = workflows
+            .update_workflow(&other.id, "deploy", None, None)
+            .await
+            .expect_err("the name is taken");
+        match error {
+            WorkflowSaveError::DuplicateName { name } => assert_eq!(name, "deploy"),
+            other => panic!("expected DuplicateName, got {other:?}"),
+        }
+
+        // Renaming to oneself is not a collision, and a fresh name still saves.
+        assert!(
+            workflows
+                .update_workflow(&other.id, "release", None, None)
+                .await
+                .expect("rename to itself")
+                .is_some()
+        );
+        let renamed = workflows
+            .update_workflow(&other.id, "ship", Some("the pipeline"), None)
+            .await
+            .expect("rename")
+            .expect("exists");
+        assert_eq!(renamed.name, "ship");
+
+        // The fixture's own workflow is untouched by all of it.
+        let deploy = workflows
+            .get_workflow(&id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert_eq!(deploy.name, "deploy");
+    }
+
+    /// A cancelled run never passes through `settle_run`, so the sweep's
+    /// reaper — keyed on run transitions — never sees it. Without the offer
+    /// cancel itself makes, every checkout a cancelled run provisioned stays
+    /// on disk forever.
+    #[tokio::test]
+    async fn cancelling_a_run_offers_its_worktrees_for_removal() {
+        let (workflows, tasks, pool, _root, repo_id) = migrated_git_fixture().await;
+
+        let workflow = workflows
+            .create_workflow("isolated", None, None)
+            .await
+            .expect("create");
+        let mut isolated = step(&workflow.id, "build", 0);
+        isolated.repo_id = Some(repo_id);
+        isolated.worktree_mode = WorktreeMode::PerRun;
+        workflows.put_step(&isolated).await.expect("step");
+
+        let launched = workflows
+            .launch(&tasks, &workflow.id, &serde_json::json!({}), "agent-1")
+            .await
+            .expect("launch");
+
+        let path: String =
+            sqlx::query_scalar("SELECT path FROM workflow_run_worktrees WHERE run_id = ?")
+                .bind(&launched.run.id)
+                .fetch_one(&pool)
+                .await
+                .expect("one checkout");
+        assert!(
+            std::path::Path::new(&path).is_dir(),
+            "provisioned at launch: {path}"
+        );
+
+        let outcome = workflows
+            .cancel_run(&launched.run.id, "pat")
+            .await
+            .expect("cancel");
+        assert_eq!(
+            outcome,
+            CancelOutcome::Cancelled {
+                settled: 1,
+                left_running: 0
+            },
+            "the only task never started, so nothing is left writing in the checkout"
+        );
+
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "a cancelled run's checkout is nobody's working directory: {path}"
+        );
+        let recorded: Option<String> =
+            sqlx::query_scalar("SELECT reap_outcome FROM workflow_run_worktrees WHERE run_id = ?")
+                .bind(&launched.run.id)
+                .fetch_one(&pool)
+                .await
+                .expect("reap row");
+        assert_eq!(recorded.as_deref(), Some("removed"));
+    }
+
+    /// The other half: a run cancelled with a task in flight keeps its
+    /// checkout, because that checkout is the worker's working directory and
+    /// reaping it mid-write is the one outcome the reaper exists to prevent.
+    /// The leftover goes when the run is deleted, after the worker is done.
+    #[tokio::test]
+    async fn cancelling_a_run_with_work_in_flight_keeps_the_checkout_until_delete() {
+        let (workflows, tasks, pool, _root, repo_id) = migrated_git_fixture().await;
+
+        let workflow = workflows
+            .create_workflow("isolated", None, None)
+            .await
+            .expect("create");
+        let mut isolated = step(&workflow.id, "build", 0);
+        isolated.repo_id = Some(repo_id);
+        isolated.worktree_mode = WorktreeMode::PerRun;
+        workflows.put_step(&isolated).await.expect("step");
+
+        let launched = workflows
+            .launch(&tasks, &workflow.id, &serde_json::json!({}), "agent-1")
+            .await
+            .expect("launch");
+        let build = launched.task_numbers["build"];
+
+        let path: String =
+            sqlx::query_scalar("SELECT path FROM workflow_run_worktrees WHERE run_id = ?")
+                .bind(&launched.run.id)
+                .fetch_one(&pool)
+                .await
+                .expect("one checkout");
+
+        // A worker holds the task when the cancel lands.
+        tasks.recompute_ready("agent-1").await.expect("sweep");
+        let claimed = tasks
+            .claim_next_ready("agent-1")
+            .await
+            .expect("claim")
+            .expect("the one task was ready");
+        assert_eq!(claimed.task_number, build);
+
+        let outcome = workflows
+            .cancel_run(&launched.run.id, "pat")
+            .await
+            .expect("cancel");
+        assert_eq!(
+            outcome,
+            CancelOutcome::Cancelled {
+                settled: 0,
+                left_running: 1
+            }
+        );
+        assert!(
+            std::path::Path::new(&path).is_dir(),
+            "still the worker's working directory: {path}"
+        );
+
+        // The worker finishes; now nothing can still write there, and
+        // deleting the run is the last chance to offer the checkout up.
+        complete(&tasks, build, serde_json::json!({})).await;
+        match workflows
+            .delete_run(&tasks, &launched.run.id)
+            .await
+            .expect("delete")
+        {
+            DeleteRunOutcome::Deleted { tasks_removed } => assert_eq!(tasks_removed, 1),
+            other => panic!("expected the run to be deleted, got {other:?}"),
+        }
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "a deleted run must not leave its checkouts on disk: {path}"
         );
     }
 

@@ -447,7 +447,37 @@ pub async fn discard_checkouts(prepared: &[PreparedWorktree]) {
 /// step-scoped reap would find no checkout. Git's refusal on a dirty tree is
 /// recorded and respected — it is the expected outcome for any run that failed
 /// with work in progress, and the whole reason it is worth keeping.
+///
+/// "Over" is judged by the run's tasks, not the run row. A run can settle as
+/// stuck or failed while a task it emitted is still runnable — blocked and
+/// waiting on a person is the usual one — and reaping its checkout would send
+/// the resumed task into the repo's shared checkout, the isolation break the
+/// binding exists to prevent. Terminal means `done` or `skipped`, the same
+/// rule the dependency graph settles on.
 pub async fn reap_run(pool: &SqlitePool, run_id: &str) -> Vec<ReapedWorktree> {
+    let runnable: i64 = match sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks \
+         WHERE workflow_run_id = ? AND status NOT IN ('done', 'skipped')",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, run_id, "failed to check for runnable tasks before reaping");
+            return Vec::new();
+        }
+    };
+    if runnable > 0 {
+        tracing::info!(
+            run_id,
+            runnable,
+            "leaving the run's worktrees in place: it still has runnable tasks"
+        );
+        return Vec::new();
+    }
+
     let rows = match sqlx::query(
         "SELECT id, step_key, branch_key, repo_id, worktree_id, path \
          FROM workflow_run_worktrees WHERE run_id = ? AND reaped_at IS NULL",
@@ -734,6 +764,37 @@ mod tests {
         }
     }
 
+    /// Drive every runnable task a run emitted to `done`, the way a finished
+    /// pipeline leaves them. The reaper refuses to touch a run that still has
+    /// work in it, so a test that wants a reap has to finish the work first.
+    async fn finish_run(pool: &SqlitePool, tasks: &TaskStore, run_id: &str) {
+        let numbers: Vec<i64> = sqlx::query_scalar(
+            "SELECT task_number FROM tasks \
+             WHERE workflow_run_id = ? AND status NOT IN ('done', 'skipped') \
+             ORDER BY task_number",
+        )
+        .bind(run_id)
+        .fetch_all(pool)
+        .await
+        .expect("run tasks");
+        for number in numbers {
+            // `Ready` is reachable from every non-terminal status, and
+            // `Ready -> InProgress -> Done` from there.
+            for status in [TaskStatus::Ready, TaskStatus::InProgress, TaskStatus::Done] {
+                tasks
+                    .update(
+                        number,
+                        crate::tasks::UpdateTaskInput {
+                            status: Some(status),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("status update");
+            }
+        }
+    }
+
     /// The plainest case, and the one every other worktree behaviour is built
     /// on: a step that asks for its own checkout gets exactly one, and the task
     /// it became is *bound* to it — not merely told about it in a prompt, which
@@ -814,6 +875,8 @@ mod tests {
                 .await
                 .expect("path");
 
+        finish_run(&pool, &tasks, &run.run.id).await;
+
         let reaped = reap_run(&pool, &run.run.id).await;
         assert_eq!(reaped.len(), 1);
         assert_eq!(reaped[0].outcome, ReapOutcome::Removed);
@@ -869,6 +932,8 @@ mod tests {
         )
         .expect("dirty the tree");
 
+        finish_run(&pool, &tasks, &run.run.id).await;
+
         let reaped = reap_run(&pool, &run.run.id).await;
         assert_eq!(reaped.len(), 1);
         assert_eq!(
@@ -909,6 +974,89 @@ mod tests {
         .await
         .expect("count");
         assert_eq!(still_listed, 1);
+    }
+
+    /// A run can be over — stuck, failed, cancelled — while a task it emitted
+    /// is still runnable, and blocked waiting on a person is the usual shape of
+    /// that. The reaper takes its cue from the tasks, not the run row, because
+    /// a resumed task whose checkout was deleted underneath it falls through to
+    /// the repo's shared checkout — the isolation break the binding exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_run_with_runnable_tasks_keeps_its_worktrees_until_they_settle() {
+        let (pool, _root, _project_id, repo_id) = fixture().await;
+        let workflows = WorkflowStore::new(pool.clone());
+        let tasks = TaskStore::new(pool.clone());
+
+        let workflow = workflows
+            .create_workflow("build", None, None)
+            .await
+            .expect("workflow");
+        let mut step = base_step(&workflow.id, "build", &repo_id);
+        step.worktree_mode = WorktreeMode::PerRun;
+        workflows.put_step(&step).await.expect("put step");
+        let run = workflows
+            .launch(&tasks, &workflow.id, &serde_json::json!({}), "agent-1")
+            .await
+            .expect("launch");
+
+        let path: String =
+            sqlx::query_scalar("SELECT path FROM workflow_run_worktrees WHERE run_id = ?")
+                .bind(&run.run.id)
+                .fetch_one(&pool)
+                .await
+                .expect("path");
+
+        // Park the task the way a stuck run leaves one: blocked, waiting on a
+        // person who can still unblock it later.
+        let number = run.task_numbers["build"];
+        for status in [
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            tasks
+                .update(
+                    number,
+                    crate::tasks::UpdateTaskInput {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("park the task");
+        }
+
+        let reaped = reap_run(&pool, &run.run.id).await;
+        assert!(
+            reaped.is_empty(),
+            "a runnable task holds the reap: {reaped:?}"
+        );
+        assert!(
+            Path::new(&path).is_dir(),
+            "the checkout the blocked task is bound to is still there: {path}"
+        );
+        let reaped_at: Option<String> =
+            sqlx::query_scalar("SELECT reaped_at FROM workflow_run_worktrees WHERE run_id = ?")
+                .bind(&run.run.id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(
+            reaped_at.is_none(),
+            "a held reap leaves no outcome recorded against the run"
+        );
+
+        // The person unblocks it, the work finishes, and only then does the
+        // reap take.
+        finish_run(&pool, &tasks, &run.run.id).await;
+        let reaped = reap_run(&pool, &run.run.id).await;
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].outcome, ReapOutcome::Removed);
+        assert!(
+            !Path::new(&path).exists(),
+            "with every task terminal, a clean checkout goes: {path}"
+        );
     }
 
     /// A branch task that exists without its checkout runs in the wrong
@@ -1024,7 +1172,9 @@ mod tests {
             "two branches sharing one checkout is the trampling this exists to stop"
         );
 
-        // The reaper takes them all, and they are clean, so they all go.
+        // The reaper takes them all, and they are clean, so they all go — once
+        // the branches themselves have finished.
+        finish_run(&pool, &tasks, &run.run.id).await;
         let reaped = reap_run(&pool, &run.run.id).await;
         assert_eq!(reaped.len(), 2);
         assert!(reaped.iter().all(|r| r.outcome == ReapOutcome::Removed));
