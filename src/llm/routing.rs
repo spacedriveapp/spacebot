@@ -60,6 +60,31 @@ impl RoutingConfig {
             cortex_thinking_effort: "auto".into(),
         }
     }
+
+    /// Create a routing config with no models assigned.
+    ///
+    /// Used when the configured provider's model catalog is unknown (LiteLLM,
+    /// vLLM, Ollama, …): an empty route fails completion with an explicit
+    /// "no model configured" error, which beats silently calling a provider
+    /// that was never set up.
+    pub fn empty() -> Self {
+        Self {
+            channel: String::new(),
+            branch: String::new(),
+            worker: String::new(),
+            compactor: String::new(),
+            cortex: String::new(),
+            voice: String::new(),
+            task_overrides: HashMap::new(),
+            fallbacks: HashMap::new(),
+            rate_limit_cooldown_secs: 60,
+            channel_thinking_effort: "auto".into(),
+            branch_thinking_effort: "auto".into(),
+            worker_thinking_effort: "auto".into(),
+            compactor_thinking_effort: "auto".into(),
+            cortex_thinking_effort: "auto".into(),
+        }
+    }
 }
 
 impl RoutingConfig {
@@ -82,20 +107,30 @@ impl RoutingConfig {
         }
     }
 
+    /// Resolve the thinking effort for the process whose route serves
+    /// `model_name`. Routing entries keep the `provider/model` form while
+    /// callers pass the provider-stripped model name, so both forms match.
     pub fn thinking_effort_for_model(&self, model_name: &str) -> &str {
-        if self.channel == model_name {
+        fn route_matches(route: &str, model_name: &str) -> bool {
+            route == model_name
+                || route
+                    .split_once('/')
+                    .is_some_and(|(_, model)| model == model_name)
+        }
+
+        if route_matches(&self.channel, model_name) {
             return &self.channel_thinking_effort;
         }
-        if self.branch == model_name {
+        if route_matches(&self.branch, model_name) {
             return &self.branch_thinking_effort;
         }
-        if self.worker == model_name {
+        if route_matches(&self.worker, model_name) {
             return &self.worker_thinking_effort;
         }
-        if self.compactor == model_name {
+        if route_matches(&self.compactor, model_name) {
             return &self.compactor_thinking_effort;
         }
-        if self.cortex == model_name {
+        if route_matches(&self.cortex, model_name) {
             return &self.cortex_thinking_effort;
         }
         "auto"
@@ -163,12 +198,13 @@ pub fn is_context_overflow_error(error_message: &str) -> bool {
 /// provider whose catalog Spacebot targets natively. For every other provider
 /// the model catalog is whatever the operator configured upstream (LiteLLM
 /// aliases, vLLM served-model names, Ollama tags), so guessing a model string
-/// would produce a config that looks right and 404s on first use. Those get the
-/// standard defaults, which the operator is expected to override.
+/// would produce a config that looks right and 404s on first use. Those get
+/// empty routing, which fails completion with an explicit "no model configured"
+/// error until the operator sets `[defaults.routing]`.
 pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
     match provider {
         "anthropic" => RoutingConfig::for_model("anthropic/claude-sonnet-4".into()),
-        _ => RoutingConfig::default(),
+        _ => RoutingConfig::empty(),
     }
 }
 
@@ -272,5 +308,76 @@ mod tests {
         // Other transient errors should not be rate limited
         assert!(!is_rate_limit_error("503 Service Unavailable"));
         assert!(!is_rate_limit_error("timeout"));
+    }
+
+    #[test]
+    fn defaults_for_anthropic_use_sonnet() {
+        let routing = defaults_for_provider("anthropic");
+        assert_eq!(routing.channel, "anthropic/claude-sonnet-4");
+        assert_eq!(routing.branch, "anthropic/claude-sonnet-4");
+        assert_eq!(routing.worker, "anthropic/claude-sonnet-4");
+        assert_eq!(routing.compactor, "anthropic/claude-sonnet-4");
+        assert_eq!(routing.cortex, "anthropic/claude-sonnet-4");
+    }
+
+    #[test]
+    fn thinking_effort_matches_provider_stripped_model_name() {
+        let mut routing = RoutingConfig::for_model("anthropic/claude-sonnet-4".into());
+        routing.channel_thinking_effort = "low".into();
+
+        // Callers pass the provider-stripped model name while routing
+        // entries keep the `provider/model` form; both must match.
+        assert_eq!(routing.thinking_effort_for_model("claude-sonnet-4"), "low");
+        assert_eq!(
+            routing.thinking_effort_for_model("anthropic/claude-sonnet-4"),
+            "low"
+        );
+
+        // OpenRouter routes nest the upstream provider after `openrouter/`;
+        // stripping the first segment still lines up with the model name.
+        let mut openrouter =
+            RoutingConfig::for_model("openrouter/anthropic/claude-sonnet-4".into());
+        openrouter.channel = "openrouter/anthropic/claude-haiku".into();
+        openrouter.branch = "openrouter/anthropic/claude-haiku".into();
+        openrouter.worker_thinking_effort = "high".into();
+        assert_eq!(
+            openrouter.thinking_effort_for_model("anthropic/claude-sonnet-4"),
+            "high"
+        );
+
+        // Bare routes and unknown models behave as before.
+        let mut bare = RoutingConfig::for_model("claude-sonnet-4".into());
+        bare.channel_thinking_effort = "medium".into();
+        assert_eq!(bare.thinking_effort_for_model("claude-sonnet-4"), "medium");
+        assert_eq!(routing.thinking_effort_for_model("other-model"), "auto");
+    }
+
+    #[test]
+    fn defaults_for_non_anthropic_providers_are_empty() {
+        // Non-Anthropic catalogs are operator-defined, so defaults must not
+        // smuggle in an anthropic model that fails with UnknownProvider.
+        for provider in ["litellm", "vllm"] {
+            let routing = defaults_for_provider(provider);
+            assert!(
+                routing.channel.is_empty(),
+                "{provider} channel route should be empty"
+            );
+            assert!(
+                routing.branch.is_empty(),
+                "{provider} branch route should be empty"
+            );
+            assert!(
+                routing.worker.is_empty(),
+                "{provider} worker route should be empty"
+            );
+            assert!(
+                routing.compactor.is_empty(),
+                "{provider} compactor route should be empty"
+            );
+            assert!(
+                routing.cortex.is_empty(),
+                "{provider} cortex route should be empty"
+            );
+        }
     }
 }

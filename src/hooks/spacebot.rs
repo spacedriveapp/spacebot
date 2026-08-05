@@ -1471,6 +1471,7 @@ mod tests {
             usage: Usage::default(),
             raw_response: RawResponse {
                 body: serde_json::json!({}),
+                usage_recorded: false,
             },
         }
     }
@@ -1486,6 +1487,7 @@ mod tests {
             usage: Usage::default(),
             raw_response: RawResponse {
                 body: serde_json::json!({}),
+                usage_recorded: false,
             },
         }
     }
@@ -2129,6 +2131,7 @@ mod tests {
             usage: Usage::default(),
             raw_response: RawResponse {
                 body: serde_json::json!({}),
+                usage_recorded: false,
             },
         };
 

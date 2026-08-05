@@ -25,6 +25,10 @@ const STREAM_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawResponse {
     pub body: serde_json::Value,
+    /// True when the stream generator already recorded this body's usage in
+    /// the accumulator, so the completion() epilogue must not count it again.
+    #[serde(skip)]
+    pub usage_recorded: bool,
 }
 
 /// Streaming response wrapper for token usage and raw provider payload.
@@ -32,6 +36,10 @@ pub struct RawResponse {
 pub struct RawStreamingResponse {
     pub body: serde_json::Value,
     pub usage: Option<completion::Usage>,
+    /// True when the generator recorded this body's usage before yielding
+    /// the final response.
+    #[serde(skip)]
+    pub usage_recorded: bool,
 }
 
 impl GetTokenUsage for RawStreamingResponse {
@@ -101,6 +109,16 @@ impl SpacebotModel {
     }
 
     async fn provider_config_for_current_model(&self) -> Result<ProviderConfig, CompletionError> {
+        // An empty route means no model was ever configured for this process
+        // (non-Anthropic providers infer empty routing). Name the fix instead
+        // of falling through to a misleading `unknown provider: anthropic`.
+        if self.model_name.trim().is_empty() {
+            return Err(CompletionError::ProviderError(
+                "no model configured — set [defaults.routing] in config.toml or SPACEBOT_MODEL"
+                    .to_string(),
+            ));
+        }
+
         let provider_id = self
             .full_model_name
             .split_once('/')
@@ -140,19 +158,25 @@ impl SpacebotModel {
 
     /// Try a model with retries and exponential backoff on transient errors.
     ///
-    /// Returns `Ok(response)` on success, or `Err((last_error, was_rate_limit))`
-    /// after exhausting retries. `was_rate_limit` indicates the final failure was
-    /// a 429/rate-limit (as opposed to a timeout or server error), so the caller
-    /// can decide whether to record cooldown.
+    /// Returns the response and the identity of the model that produced it on
+    /// success, or `Err((last_error, was_rate_limit))` after exhausting
+    /// retries. `was_rate_limit` indicates the final failure was a 429/rate-
+    /// limit (as opposed to a timeout or server error), so the caller can
+    /// decide whether to record cooldown.
     async fn attempt_with_retries(
         &self,
         model_name: &str,
         request: &CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, (CompletionError, bool)> {
+    ) -> Result<AnsweredResponse, (CompletionError, bool)> {
         let model = if model_name == self.full_model_name {
             self.clone()
         } else {
-            SpacebotModel::make(&self.llm_manager, model_name)
+            // A fallback must share the primary's accumulator — its stream
+            // flags the response as recorded, so without one the usage is
+            // neither counted inline nor caught by the completion() epilogue.
+            let mut fallback = SpacebotModel::make(&self.llm_manager, model_name);
+            fallback.usage_accumulator = self.usage_accumulator.clone();
+            fallback
         };
 
         let mut last_error = None;
@@ -169,7 +193,13 @@ impl SpacebotModel {
             }
 
             match model.attempt_completion(request.clone()).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    return Ok(AnsweredResponse {
+                        response,
+                        model_name: model.full_model_name.clone(),
+                        provider: model.provider.clone(),
+                    });
+                }
                 Err(error) => {
                     let error_str = error.to_string();
                     if !routing::is_retriable_error(&error_str) {
@@ -196,6 +226,15 @@ impl SpacebotModel {
             was_rate_limit,
         ))
     }
+}
+
+/// A completed response plus the identity of the model that produced it.
+/// With a fallback chain the answering model is not always the requested
+/// one; usage, cost, and metrics belong to the model that answered.
+struct AnsweredResponse {
+    response: completion::CompletionResponse<RawResponse>,
+    model_name: String,
+    provider: String,
 }
 
 impl CompletionModel for SpacebotModel {
@@ -241,7 +280,14 @@ impl CompletionModel for SpacebotModel {
         let result = async move {
             let Some(routing) = &self.routing else {
                 // No routing config — just call the model directly, no fallback/retry
-                return self.attempt_completion(request).await;
+                return self
+                    .attempt_completion(request)
+                    .await
+                    .map(|response| AnsweredResponse {
+                        response,
+                        model_name: self.full_model_name.clone(),
+                        provider: self.provider.clone(),
+                    });
             };
 
             let cooldown = routing.rate_limit_cooldown_secs;
@@ -267,7 +313,7 @@ impl CompletionModel for SpacebotModel {
                     .attempt_with_retries(&self.full_model_name, &request)
                     .await
                 {
-                    Ok(response) => return Ok(response),
+                    Ok(answered) => return Ok(answered),
                     Err((error, was_rate_limit)) => {
                         if was_rate_limit {
                             self.llm_manager
@@ -302,14 +348,14 @@ impl CompletionModel for SpacebotModel {
                 }
 
                 match self.attempt_with_retries(fallback_name, &request).await {
-                    Ok(response) => {
+                    Ok(answered) => {
                         tracing::info!(
                             original = %self.full_model_name,
                             fallback = %fallback_name,
                             attempt = index + 1,
                             "fallback model succeeded"
                         );
-                        return Ok(response);
+                        return Ok(answered);
                     }
                     Err((error, was_rate_limit)) => {
                         if was_rate_limit {
@@ -330,6 +376,22 @@ impl CompletionModel for SpacebotModel {
         }
         .await;
 
+        // The model that answered is not always the model that was asked;
+        // usage, cost, and metrics are attributed to whichever one did. A
+        // failed request has no answer, so it stays under the primary.
+        let (result, answering_model_name, answering_provider) = match result {
+            Ok(answered) => (
+                Ok(answered.response),
+                answered.model_name,
+                answered.provider,
+            ),
+            Err(error) => (
+                Err(error),
+                self.full_model_name.clone(),
+                self.provider.clone(),
+            ),
+        };
+
         #[cfg(feature = "metrics")]
         {
             let elapsed = start.elapsed().as_secs_f64();
@@ -343,21 +405,21 @@ impl CompletionModel for SpacebotModel {
             let metrics = crate::telemetry::Metrics::global();
             metrics
                 .llm_requests_total
-                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
+                .with_label_values(&[agent_label, &answering_model_name, tier_label, worker_label])
                 .inc();
             metrics
                 .llm_request_duration_seconds
-                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
+                .with_label_values(&[agent_label, &answering_model_name, tier_label, worker_label])
                 .observe(elapsed);
 
-            if let Ok(ref response) = result {
+            if let Ok(response) = &result {
                 let usage = &response.usage;
                 if usage.input_tokens > 0 || usage.output_tokens > 0 {
                     metrics
                         .llm_tokens_total
                         .with_label_values(&[
                             agent_label,
-                            &self.full_model_name,
+                            &answering_model_name,
                             tier_label,
                             "input",
                             worker_label,
@@ -367,7 +429,7 @@ impl CompletionModel for SpacebotModel {
                         .llm_tokens_total
                         .with_label_values(&[
                             agent_label,
-                            &self.full_model_name,
+                            &answering_model_name,
                             tier_label,
                             "output",
                             worker_label,
@@ -378,7 +440,7 @@ impl CompletionModel for SpacebotModel {
                             .llm_tokens_total
                             .with_label_values(&[
                                 agent_label,
-                                &self.full_model_name,
+                                &answering_model_name,
                                 tier_label,
                                 "cached_input",
                                 worker_label,
@@ -387,7 +449,7 @@ impl CompletionModel for SpacebotModel {
                     }
 
                     let cost = crate::llm::pricing::estimate_cost(
-                        &self.full_model_name,
+                        &answering_model_name,
                         usage.input_tokens,
                         usage.output_tokens,
                         usage.cached_input_tokens,
@@ -397,7 +459,7 @@ impl CompletionModel for SpacebotModel {
                             .llm_estimated_cost_dollars
                             .with_label_values(&[
                                 agent_label,
-                                &self.full_model_name,
+                                &answering_model_name,
                                 tier_label,
                                 worker_label,
                             ])
@@ -414,7 +476,7 @@ impl CompletionModel for SpacebotModel {
                 }
             }
 
-            if let Err(ref error) = result {
+            if let Err(error) = &result {
                 let error_type = match error {
                     rig::completion::CompletionError::ProviderError(msg) => {
                         if msg.contains("rate") || msg.contains("429") {
@@ -443,22 +505,20 @@ impl CompletionModel for SpacebotModel {
             }
         }
 
-        // Record usage in the accumulator (if attached).
-        if let Some(ref accumulator) = self.usage_accumulator
-            && let Ok(ref response) = result
+        // Record usage in the accumulator (if attached), under the model that
+        // actually answered. OpenAI-compatible completions are collected from
+        // a stream that records usage as it yields; those responses are
+        // flagged so they are not counted twice.
+        if let Some(accumulator) = &self.usage_accumulator
+            && let Ok(response) = &result
         {
-            let body = &response.raw_response.body;
-            let extended = if self.provider == "anthropic" {
-                crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
-            } else {
-                crate::llm::usage::ExtendedUsage::from_openai_body(body)
-            };
-            let cost =
-                crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
-            accumulator
-                .lock()
-                .await
-                .add(extended, &self.full_model_name, &self.provider, cost);
+            record_completion_usage(
+                accumulator,
+                response,
+                &answering_model_name,
+                &answering_provider,
+            )
+            .await;
         }
 
         result
@@ -473,10 +533,17 @@ impl CompletionModel for SpacebotModel {
         match provider_config.api_type {
             ApiType::OpenAiCompatible => self.stream_openai(request, &provider_config).await,
             // The Anthropic path is non-streaming today; wrap the completed
-            // response so callers see a uniform stream.
+            // response so callers see a uniform stream. The wrapper records
+            // usage itself, since stream() callers bypass the completion()
+            // epilogue.
             ApiType::Anthropic => {
                 let response = self.attempt_completion(request).await?;
-                Ok(stream_from_completion_response(response))
+                Ok(stream_from_completion_response(
+                    response,
+                    self.usage_accumulator.clone(),
+                    self.full_model_name.clone(),
+                    self.provider.clone(),
+                ))
             }
         }
     }
@@ -787,6 +854,7 @@ impl SpacebotModel {
                 yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                     body: response_body,
                     usage: Some(parsed_response.usage),
+                    usage_recorded: true,
                 }));
                 return;
             }
@@ -821,6 +889,7 @@ impl SpacebotModel {
             yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
                 body: response_body,
                 usage: Some(parsed_response.usage),
+                usage_recorded: true,
             }));
         };
 
@@ -828,6 +897,32 @@ impl SpacebotModel {
     }
 }
 // --- Helpers ---
+
+/// Record a completed response's usage into the accumulator. Responses the
+/// stream generator already recorded (OpenAI-compatible completions are
+/// collected from such a stream) are flagged and skipped here, so each API
+/// call is counted exactly once.
+async fn record_completion_usage(
+    accumulator: &Arc<Mutex<crate::llm::usage::UsageAccumulator>>,
+    response: &completion::CompletionResponse<RawResponse>,
+    model_name: &str,
+    provider: &str,
+) {
+    if response.raw_response.usage_recorded {
+        return;
+    }
+    let body = &response.raw_response.body;
+    let extended = if provider == "anthropic" {
+        crate::llm::usage::ExtendedUsage::from_anthropic_body(body)
+    } else {
+        crate::llm::usage::ExtendedUsage::from_openai_body(body)
+    };
+    let cost = crate::llm::pricing::estimate_cost_extended(model_name, &extended);
+    accumulator
+        .lock()
+        .await
+        .add(extended, model_name, provider, cost);
+}
 
 /// Record usage from a streaming response's raw body into the accumulator.
 async fn record_streaming_usage(
@@ -1125,9 +1220,14 @@ fn truncate_body(body: &str) -> &str {
     }
 }
 
+/// Enable streaming on an OpenAI-compatible chat completion body.
+/// `stream_options.include_usage` asks the server to send a final usage
+/// chunk — without it OpenAI-style servers omit usage from the stream
+/// entirely, which silently undercounts token accounting.
 fn with_streaming_enabled(request_body: &serde_json::Value) -> serde_json::Value {
     let mut body = request_body.clone();
     body["stream"] = serde_json::json!(true);
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
     body
 }
 
@@ -1161,6 +1261,9 @@ impl Default for OpenAiStreamingToolCall {
 
 fn stream_from_completion_response(
     response: completion::CompletionResponse<RawResponse>,
+    usage_accumulator: Option<Arc<Mutex<crate::llm::usage::UsageAccumulator>>>,
+    model_name: String,
+    provider: String,
 ) -> StreamingCompletionResponse<RawStreamingResponse> {
     let usage = response.usage;
     let message_id = response.message_id;
@@ -1205,9 +1308,16 @@ fn stream_from_completion_response(
             }
         }
 
+        // This wrapper exists so direct stream consumers of the non-streaming
+        // Anthropic path see a uniform stream; recording here keeps their
+        // usage accounting on par with the OpenAI streaming generator. The
+        // flag mirrors that path too, so a collected response can never be
+        // counted a second time by the completion() epilogue.
+        record_streaming_usage(&usage_accumulator, &raw_body, &model_name, &provider).await;
         yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
             body: raw_body,
             usage: Some(usage),
+            usage_recorded: true,
         }));
     };
 
@@ -1224,6 +1334,7 @@ async fn collect_streaming_completion_response(
     let raw_response = stream.response.unwrap_or(RawStreamingResponse {
         body: serde_json::json!({}),
         usage: None,
+        usage_recorded: false,
     });
 
     Ok(completion::CompletionResponse {
@@ -1231,6 +1342,7 @@ async fn collect_streaming_completion_response(
         usage: raw_response.usage.unwrap_or_default(),
         raw_response: RawResponse {
             body: raw_response.body,
+            usage_recorded: raw_response.usage_recorded,
         },
         message_id: stream.message_id,
     })
@@ -1279,10 +1391,9 @@ fn completion_choice_to_streaming_choices(
 fn extract_sse_block(buffer: &mut String) -> Option<String> {
     let (block_end, separator_len) = if let Some(index) = buffer.find("\n\n") {
         (index, 2)
-    } else if let Some(index) = buffer.find("\r\n\r\n") {
-        (index, 4)
     } else {
-        return None;
+        let index = buffer.find("\r\n\r\n")?;
+        (index, 4)
     };
 
     let block = buffer[..block_end].to_string();
@@ -1922,7 +2033,10 @@ fn parse_anthropic_response(
             total_tokens: input_tokens + output_tokens,
             cached_input_tokens: cached,
         },
-        raw_response: RawResponse { body },
+        raw_response: RawResponse {
+            body,
+            usage_recorded: false,
+        },
         message_id: None,
     })
 }
@@ -2023,7 +2137,10 @@ fn parse_openai_response(
             total_tokens: input_tokens + output_tokens,
             cached_input_tokens: cached,
         },
-        raw_response: RawResponse { body },
+        raw_response: RawResponse {
+            body,
+            usage_recorded: false,
+        },
         message_id: None,
     })
 }
@@ -2218,6 +2335,7 @@ mod tests {
             },
             raw_response: RawResponse {
                 body: serde_json::json!({}),
+                usage_recorded: false,
             },
             message_id: None,
         };
@@ -2759,6 +2877,7 @@ mod tests {
         let response = RawStreamingResponse {
             body: serde_json::json!({"ok": true}),
             usage: Some(usage),
+            usage_recorded: false,
         };
 
         assert_eq!(response.token_usage(), Some(usage));
@@ -2818,5 +2937,419 @@ mod tests {
         let msg = format_api_error(status, &body);
         assert!(msg.contains("Google"));
         assert!(msg.contains("invalid schema"));
+    }
+
+    fn completion_response_with_openai_usage(
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        usage_recorded: bool,
+    ) -> completion::CompletionResponse<RawResponse> {
+        completion::CompletionResponse {
+            choice: OneOrMany::one(AssistantContent::text("hello")),
+            usage: completion::Usage {
+                input_tokens: prompt_tokens,
+                output_tokens: completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                cached_input_tokens: 0,
+            },
+            raw_response: RawResponse {
+                body: serde_json::json!({
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    }
+                }),
+                usage_recorded,
+            },
+            message_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_completion_usage_skips_stream_recorded_response() {
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let response = completion_response_with_openai_usage(10, 5, true);
+
+        record_completion_usage(&accumulator, &response, "litellm/test-model", "litellm").await;
+
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 0);
+        assert_eq!(totals.input_tokens, 0);
+        assert_eq!(totals.output_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn record_completion_usage_counts_unflagged_response() {
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let response = completion_response_with_openai_usage(10, 5, false);
+
+        record_completion_usage(&accumulator, &response, "litellm/test-model", "litellm").await;
+
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.input_tokens, 10);
+        assert_eq!(totals.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn collect_propagates_usage_recorded_flag() {
+        let flagged = StreamingCompletionResponse::stream(Box::pin(async_stream::stream! {
+            yield Ok::<_, CompletionError>(RawStreamingChoice::FinalResponse(
+                RawStreamingResponse {
+                    body: serde_json::json!({"usage": {"prompt_tokens": 3, "completion_tokens": 2}}),
+                    usage: Some(completion::Usage {
+                        input_tokens: 3,
+                        output_tokens: 2,
+                        total_tokens: 5,
+                        cached_input_tokens: 0,
+                    }),
+                    usage_recorded: true,
+                },
+            ));
+        }));
+        let collected = collect_streaming_completion_response(flagged)
+            .await
+            .expect("flagged stream should collect");
+        assert!(collected.raw_response.usage_recorded);
+
+        let unflagged = StreamingCompletionResponse::stream(Box::pin(async_stream::stream! {
+            yield Ok::<_, CompletionError>(RawStreamingChoice::FinalResponse(
+                RawStreamingResponse {
+                    body: serde_json::json!({}),
+                    usage: None,
+                    usage_recorded: false,
+                },
+            ));
+        }));
+        let collected = collect_streaming_completion_response(unflagged)
+            .await
+            .expect("unflagged stream should collect");
+        assert!(!collected.raw_response.usage_recorded);
+    }
+
+    #[test]
+    fn streaming_body_requests_usage_chunk() {
+        let body = with_streaming_enabled(&serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+        }));
+
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::json!(true),
+            "OpenAI-compatible servers omit usage from SSE unless asked"
+        );
+        assert_eq!(body["model"], serde_json::json!("test-model"));
+    }
+
+    /// Direct consumers of the Anthropic stream() wrapper bypass the
+    /// completion() epilogue, so the wrapper itself must record usage —
+    /// exactly once, flagged so a collected response cannot double-count.
+    #[tokio::test]
+    async fn anthropic_stream_wrapper_records_usage_once() {
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let response = completion::CompletionResponse {
+            choice: OneOrMany::one(AssistantContent::text("hello")),
+            usage: completion::Usage {
+                input_tokens: 12,
+                output_tokens: 7,
+                total_tokens: 19,
+                cached_input_tokens: 0,
+            },
+            raw_response: RawResponse {
+                body: serde_json::json!({
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 7,
+                    }
+                }),
+                usage_recorded: false,
+            },
+            message_id: None,
+        };
+
+        let mut stream = stream_from_completion_response(
+            response,
+            Some(accumulator.clone()),
+            "anthropic/claude-sonnet-4".to_string(),
+            "anthropic".to_string(),
+        );
+        while let Some(chunk) = stream.next().await {
+            chunk.expect("stream chunk");
+        }
+
+        let final_response = stream.response.expect("final response");
+        assert!(final_response.usage_recorded);
+
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.input_tokens, 12);
+        assert_eq!(totals.output_tokens, 7);
+    }
+
+    /// End-to-end regression test: an OpenAI-compatible (LiteLLM-style)
+    /// streaming completion must be recorded exactly once. The stream
+    /// generator records usage as it yields the final response; the
+    /// completion() epilogue used to add the same usage a second time.
+    #[tokio::test]
+    async fn openai_compatible_completion_records_usage_once() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "connection closed before full request");
+                received.extend_from_slice(&buffer[..read]);
+                let Some(headers_end) =
+                    received.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&received[..headers_end]).into_owned();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .expect("content-length header");
+                if received.len() - (headers_end + 4) >= content_length {
+                    break;
+                }
+            }
+
+            let sse = concat!(
+                "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "litellm".to_string(),
+            crate::config::ProviderConfig {
+                api_type: crate::config::ApiType::OpenAiCompatible,
+                base_url: format!("http://{address}/v1"),
+                api_key: "test-key".to_string(),
+                name: None,
+                use_bearer_auth: false,
+                extra_headers: Vec::new(),
+            },
+        );
+        let manager = Arc::new(
+            LlmManager::new(crate::config::LlmConfig { providers })
+                .await
+                .expect("manager"),
+        );
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let model = SpacebotModel::make(&manager, "litellm/test-model")
+            .with_accumulator(accumulator.clone());
+
+        let request = CompletionRequest {
+            preamble: None,
+            chat_history: OneOrMany::one(Message::user("hi")),
+            tools: Vec::new(),
+            documents: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            additional_params: None,
+            model: None,
+            output_schema: None,
+            tool_choice: None,
+        };
+
+        let response = model.completion(request).await.expect("completion");
+        server.await.expect("server task");
+
+        assert!(response.raw_response.usage_recorded);
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.input_tokens, 10);
+        assert_eq!(totals.output_tokens, 5);
+    }
+
+    /// Read one HTTP request (headers plus content-length body), then write
+    /// the canned response. Just enough HTTP for the OpenAI-compatible client.
+    async fn serve_openai_request(socket: &mut tokio::net::TcpStream, response: &str) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut received = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut buffer).await.expect("read request");
+            assert!(read > 0, "connection closed before full request");
+            received.extend_from_slice(&buffer[..read]);
+            let Some(headers_end) = received.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&received[..headers_end]).into_owned();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .expect("content-length header");
+            if received.len() - (headers_end + 4) >= content_length {
+                break;
+            }
+        }
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+    }
+
+    /// SSE chat-completion stream whose final chunk carries usage.
+    fn sse_usage_response(prompt_tokens: u64, completion_tokens: u64) -> String {
+        let sse = format!(
+            "data: {{\"id\":\"chatcmpl-1\",\"choices\":[{{\"delta\":{{\"content\":\"Hello\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"chatcmpl-1\",\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{prompt_tokens},\"completion_tokens\":{completion_tokens}}}}}\n\ndata: [DONE]\n\n"
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            sse.len(),
+            sse
+        )
+    }
+
+    /// A non-retriable rejection: 400 is outside the retriable status set and
+    /// the body names no retriable keyword, so the attempt fails over to the
+    /// fallback chain immediately instead of retrying.
+    fn bad_request_response() -> String {
+        let body = "{\"error\":{\"message\":\"bad request: unknown model\"}}";
+        format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    async fn litellm_manager(base_url: String) -> Arc<LlmManager> {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "litellm".to_string(),
+            crate::config::ProviderConfig {
+                api_type: crate::config::ApiType::OpenAiCompatible,
+                base_url,
+                api_key: "test-key".to_string(),
+                name: None,
+                use_bearer_auth: false,
+                extra_headers: Vec::new(),
+            },
+        );
+        Arc::new(
+            LlmManager::new(crate::config::LlmConfig { providers })
+                .await
+                .expect("manager"),
+        )
+    }
+
+    fn simple_completion_request() -> CompletionRequest {
+        CompletionRequest {
+            preamble: None,
+            chat_history: OneOrMany::one(Message::user("hi")),
+            tools: Vec::new(),
+            documents: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            additional_params: None,
+            model: None,
+            output_schema: None,
+            tool_choice: None,
+        }
+    }
+
+    /// A fallback attempt must report which model actually answered, and it
+    /// must record into the primary's accumulator — otherwise the stream
+    /// flags the response as recorded while counting into nothing.
+    #[tokio::test]
+    async fn attempt_with_retries_reports_fallback_identity_and_records_usage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            serve_openai_request(&mut socket, &sse_usage_response(10, 5)).await;
+        });
+
+        let manager = litellm_manager(format!("http://{address}/v1")).await;
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let model = SpacebotModel::make(&manager, "litellm/primary-model")
+            .with_accumulator(accumulator.clone());
+
+        let answered = model
+            .attempt_with_retries("litellm/fallback-model", &simple_completion_request())
+            .await
+            .map_err(|(error, _)| error)
+            .expect("fallback attempt");
+        server.await.expect("server task");
+
+        assert_eq!(answered.model_name, "litellm/fallback-model");
+        assert_eq!(answered.provider, "litellm");
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.input_tokens, 10);
+        assert_eq!(totals.output_tokens, 5);
+    }
+
+    /// End to end: the primary rejects the request, the fallback answers, and
+    /// the usage is recorded exactly once. Before the attribution fix it was
+    /// dropped entirely — the fallback's stream flagged the response as
+    /// recorded while the fallback model carried no accumulator, and the
+    /// completion() epilogue skipped the flagged response.
+    #[tokio::test]
+    async fn fallback_completion_records_usage_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept primary");
+            serve_openai_request(&mut socket, &bad_request_response()).await;
+            let (mut socket, _) = listener.accept().await.expect("accept fallback");
+            serve_openai_request(&mut socket, &sse_usage_response(10, 5)).await;
+        });
+
+        let manager = litellm_manager(format!("http://{address}/v1")).await;
+        let mut routing = RoutingConfig::empty();
+        routing.fallbacks.insert(
+            "litellm/primary-model".to_string(),
+            vec!["litellm/fallback-model".to_string()],
+        );
+        let accumulator = Arc::new(Mutex::new(crate::llm::usage::UsageAccumulator::new()));
+        let model = SpacebotModel::make(&manager, "litellm/primary-model")
+            .with_routing(routing)
+            .with_accumulator(accumulator.clone());
+
+        let response = model
+            .completion(simple_completion_request())
+            .await
+            .expect("completion via fallback");
+        server.await.expect("server task");
+
+        assert!(response.raw_response.usage_recorded);
+        let totals = accumulator.lock().await;
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.input_tokens, 10);
+        assert_eq!(totals.output_tokens, 5);
     }
 }

@@ -314,6 +314,7 @@ async fn completion_hooks_work() {
         usage: Usage::default(),
         raw_response: spacebot::llm::model::RawResponse {
             body: serde_json::json!({}),
+            usage_recorded: false,
         },
     };
 

@@ -91,3 +91,52 @@ pub(super) fn resolve_routing(
             .unwrap_or_else(|| base.cortex_thinking_effort.clone()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ApiType;
+
+    fn provider() -> ProviderConfig {
+        ProviderConfig {
+            api_type: ApiType::OpenAiCompatible,
+            base_url: "http://localhost:4000/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            name: None,
+            use_bearer_auth: false,
+            extra_headers: vec![],
+        }
+    }
+
+    #[test]
+    fn infer_routing_from_litellm_only_is_empty() {
+        // LiteLLM's model catalog is operator-defined, so inference must not
+        // fall back to the anthropic default — every route stays empty and
+        // completion fails with an explicit "no model configured" error.
+        let mut providers = HashMap::new();
+        providers.insert("litellm".to_string(), provider());
+
+        let routing = infer_routing_from_providers(&providers).expect("litellm should infer");
+        assert!(routing.channel.is_empty());
+        assert!(routing.branch.is_empty());
+        assert!(routing.worker.is_empty());
+        assert!(routing.compactor.is_empty());
+        assert!(routing.cortex.is_empty());
+    }
+
+    #[test]
+    fn infer_routing_prefers_anthropic_defaults() {
+        let mut providers = HashMap::new();
+        providers.insert("litellm".to_string(), provider());
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_type: ApiType::Anthropic,
+                ..provider()
+            },
+        );
+
+        let routing = infer_routing_from_providers(&providers).expect("anthropic should infer");
+        assert_eq!(routing.channel, "anthropic/claude-sonnet-4");
+    }
+}

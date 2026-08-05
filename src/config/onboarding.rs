@@ -4,6 +4,27 @@ use anyhow::Context as _;
 
 use super::Config;
 
+/// Escape a string for embedding in a TOML basic string literal. The config
+/// writer below interpolates user input (API keys, URLs, IDs) with `format!`,
+/// so a quote or backslash would corrupt the file and break the next boot.
+fn toml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if (ch as u32) < 0x20 || ch as u32 == 0x7f => {
+                escaped.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Interactive first-run onboarding. Creates ~/.spacebot with a minimal config.
 ///
 /// Returns `Some(path)` if the CLI wizard created a config file, or `None` if
@@ -124,6 +145,16 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         if provider_id.is_empty() {
             anyhow::bail!("Provider name cannot be empty");
         }
+        // The name lands in a TOML table header (`[llm.provider.<name>]`), so
+        // it must stay a bare key — escaping can't help there.
+        if !provider_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        {
+            anyhow::bail!(
+                "Provider name may only contain letters, numbers, dashes, and underscores"
+            );
+        }
 
         // base_url is the full path prefix — nothing is appended but the
         // endpoint, so most OpenAI-compatible servers need the trailing /v1.
@@ -240,54 +271,59 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
 
     let mut config_content = String::new();
     config_content.push_str(&format!("[llm.provider.{provider_id}]\n"));
-    config_content.push_str(&format!("api_type = \"{api_type}\"\n"));
-    config_content.push_str(&format!("base_url = \"{base_url}\"\n"));
+    config_content.push_str(&format!("api_type = \"{}\"\n", toml_escape(api_type)));
+    config_content.push_str(&format!("base_url = \"{}\"\n", toml_escape(&base_url)));
     if anthropic_oauth.is_some() {
         config_content.push_str("# Authenticated via OAuth — see `spacebot auth login`\n");
         config_content.push_str("api_key = \"\"\n");
     } else {
-        config_content.push_str(&format!("api_key = \"{api_key}\"\n"));
+        config_content.push_str(&format!("api_key = \"{}\"\n", toml_escape(&api_key)));
     }
     config_content.push('\n');
 
     // Routing defaults. Only Anthropic has model names we can pick for the
     // user; an OpenAI-compatible endpoint serves whatever its operator
-    // configured, so leave those blank rather than writing a model that 404s.
+    // configured, so leave [defaults.routing] out entirely and let config
+    // load infer an empty routing rather than writing a model that 404s.
     let routing = crate::llm::routing::defaults_for_provider(&provider_id);
-    config_content.push_str("[defaults.routing]\n");
     if routing.channel.is_empty() {
         config_content.push_str(&format!(
-            "# Set these to models your endpoint serves, e.g. \"{provider_id}/claude-sonnet-4\"\n"
+            "# [defaults.routing]\n\
+             # No routing written: \"{provider_id}\" serves its own model names.\n\
+             # Set each role to a model your endpoint serves, e.g.\n\
+             # channel = \"{provider_id}/claude-sonnet-4\"\n\n"
         ));
+    } else {
+        config_content.push_str("[defaults.routing]\n");
+        config_content.push_str(&format!("channel = \"{}\"\n", routing.channel));
+        config_content.push_str(&format!("branch = \"{}\"\n", routing.branch));
+        config_content.push_str(&format!("worker = \"{}\"\n", routing.worker));
+        config_content.push_str(&format!("compactor = \"{}\"\n", routing.compactor));
+        config_content.push_str(&format!("cortex = \"{}\"\n", routing.cortex));
+        config_content.push('\n');
     }
-    config_content.push_str(&format!("channel = \"{}\"\n", routing.channel));
-    config_content.push_str(&format!("branch = \"{}\"\n", routing.branch));
-    config_content.push_str(&format!("worker = \"{}\"\n", routing.worker));
-    config_content.push_str(&format!("compactor = \"{}\"\n", routing.compactor));
-    config_content.push_str(&format!("cortex = \"{}\"\n", routing.cortex));
-    config_content.push('\n');
 
     config_content.push_str("[[agents]]\n");
-    config_content.push_str(&format!("id = \"{agent_id}\"\n"));
+    config_content.push_str(&format!("id = \"{}\"\n", toml_escape(&agent_id)));
     config_content.push_str("default = true\n");
 
     if let Some(discord) = &discord {
         config_content.push_str("\n[messaging.discord]\n");
         config_content.push_str("enabled = true\n");
-        config_content.push_str(&format!("token = \"{}\"\n", discord.token));
+        config_content.push_str(&format!("token = \"{}\"\n", toml_escape(&discord.token)));
 
         // Write the binding
         config_content.push_str("\n[[bindings]]\n");
-        config_content.push_str(&format!("agent_id = \"{agent_id}\"\n"));
+        config_content.push_str(&format!("agent_id = \"{}\"\n", toml_escape(&agent_id)));
         config_content.push_str("channel = \"discord\"\n");
         if let Some(guild_id) = &discord.guild_id {
-            config_content.push_str(&format!("guild_id = \"{guild_id}\"\n"));
+            config_content.push_str(&format!("guild_id = \"{}\"\n", toml_escape(guild_id)));
         }
         if !discord.channel_ids.is_empty() {
             let ids: Vec<String> = discord
                 .channel_ids
                 .iter()
-                .map(|id| format!("\"{id}\""))
+                .map(|id| format!("\"{}\"", toml_escape(id)))
                 .collect();
             config_content.push_str(&format!("channel_ids = [{}]\n", ids.join(", ")));
         }
@@ -295,7 +331,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             let ids: Vec<String> = discord
                 .dm_user_ids
                 .iter()
-                .map(|id| format!("\"{id}\""))
+                .map(|id| format!("\"{}\"", toml_escape(id)))
                 .collect();
             config_content.push_str(&format!("dm_allowed_users = [{}]\n", ids.join(", ")));
         }
@@ -359,4 +395,24 @@ fn write_skeleton_config(config_path: &std::path::Path, agent_id: &str) -> anyho
         toml::to_string_pretty(&skeleton).with_context(|| "failed to serialize skeleton config")?;
     std::fs::write(config_path, content)
         .with_context(|| format!("failed to write {}", config_path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_escape;
+
+    #[test]
+    fn escaped_credentials_round_trip_through_toml() {
+        // A credential containing quotes, backslashes, and a newline must not
+        // corrupt the config file — the parsed value must equal the original.
+        let nasty = "sk-\"quoted\"\\path\nwith\ttabs\r\nand\u{7}bell";
+        let document = format!("api_key = \"{}\"\n", toml_escape(nasty));
+        let parsed: toml::Value = toml::from_str(&document).expect("escaped config must parse");
+        assert_eq!(parsed["api_key"].as_str(), Some(nasty));
+    }
+
+    #[test]
+    fn control_characters_are_unicode_escaped() {
+        assert_eq!(toml_escape("\u{0}\u{1f}\u{7f}"), "\\u0000\\u001F\\u007F");
+    }
 }

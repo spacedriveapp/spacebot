@@ -51,6 +51,7 @@ fn messages_url(base_url: &str) -> String {
 ///
 /// `thinking_effort` controls adaptive thinking: "auto" picks max for Opus /
 /// high for others, or pass "max", "high", "medium", "low" explicitly.
+#[allow(clippy::too_many_arguments)]
 pub fn build_anthropic_request(
     http_client: &reqwest::Client,
     api_key: &str,

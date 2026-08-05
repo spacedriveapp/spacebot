@@ -554,7 +554,8 @@ impl Config {
             })
     }
 
-    /// Check whether a first-run onboarding is needed (no config file and no env keys/providers).
+    /// Check whether a first-run onboarding is needed (no config file, no
+    /// OAuth credentials, and no env vars that bootstrap a provider).
     pub fn needs_onboarding() -> bool {
         let instance_dir = Self::default_instance_dir();
         let config_path = instance_dir.join("config.toml");
@@ -567,19 +568,26 @@ impl Config {
             return false;
         }
 
-        // Check if we have any provider-specific env variables (provider.<name>.*)
-        let has_provider_env_vars = std::env::vars().any(|(key, _)| {
-            key.starts_with("SPACEBOT_PROVIDER_")
-                || key.starts_with("PROVIDER_")
-                || key.contains("PROVIDER") && key.contains("API_KEY")
-        });
+        !Self::env_bootstraps_provider(std::env::vars().map(|(key, _)| key))
+    }
 
-        // The two env vars that can bootstrap a working provider on their own.
-        let has_bootstrap_vars = std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
-            || std::env::var("LITELLM_API_KEY").is_ok();
-
-        !has_provider_env_vars && !has_bootstrap_vars
+    /// True when the given env var names can bootstrap a working provider
+    /// without a config file. Only `ANTHROPIC_API_KEY` /
+    /// `ANTHROPIC_AUTH_TOKEN` and `LITELLM_API_KEY` can — `load_from_env`
+    /// reads nothing else (see `report_retired_env_vars`), so nothing else
+    /// may suppress onboarding. `PROVIDER_*` and retired `*_API_KEY` vars are
+    /// inert and must not count.
+    fn env_bootstraps_provider<I, S>(env_var_names: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        env_var_names.into_iter().any(|name| {
+            matches!(
+                name.as_ref(),
+                "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "LITELLM_API_KEY"
+            )
+        })
     }
 
     /// Load configuration from the default config file, falling back to env vars.
@@ -2071,5 +2079,34 @@ fn load_human_md(human_dir: &std::path::Path) -> Option<String> {
     match std::fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => Some(content),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A deployment setting only `PROVIDER_FOO_API_KEY` gets no provider from
+    /// `load_from_env`, so those vars must not suppress onboarding either.
+    #[test]
+    fn provider_prefixed_env_vars_do_not_bootstrap_a_provider() {
+        assert!(!Config::env_bootstraps_provider(["PROVIDER_FOO_API_KEY"]));
+        assert!(!Config::env_bootstraps_provider([
+            "PROVIDER_FOO_API_KEY",
+            "PROVIDER_FOO_BASE_URL",
+        ]));
+        assert!(!Config::env_bootstraps_provider([
+            "SPACEBOT_PROVIDER_FOO_API_KEY"
+        ]));
+        // Retired single-provider vars are inert too.
+        assert!(!Config::env_bootstraps_provider(["OPENROUTER_API_KEY"]));
+    }
+
+    /// The two env-var pairs `load_from_env` actually reads count as configured.
+    #[test]
+    fn known_bootstrap_env_vars_count_as_configured() {
+        assert!(Config::env_bootstraps_provider(["ANTHROPIC_API_KEY"]));
+        assert!(Config::env_bootstraps_provider(["ANTHROPIC_AUTH_TOKEN"]));
+        assert!(Config::env_bootstraps_provider(["LITELLM_API_KEY"]));
     }
 }
