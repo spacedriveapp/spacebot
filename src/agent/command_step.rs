@@ -235,8 +235,23 @@ pub async fn execute_command(
 
     let started = Instant::now();
     let timeout = tokio::time::Duration::from_secs(spec.timeout_secs);
-    let output = match tokio::time::timeout(timeout, cmd.output()).await {
+    // Spawn manually rather than `cmd.output()`: on timeout we need the pid
+    // to take the whole process group down — kill_on_drop alone would leave
+    // grandchildren running past the timeout.
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return CommandExecution::NotRun(CommandNotRun::SpawnFailed {
+                detail: error.to_string(),
+            });
+        }
+    };
+    let pid = child.id();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Err(_) => {
+            if let Some(pid) = pid {
+                crate::sandbox::kill_process_group(pid);
+            }
             return CommandExecution::NotRun(CommandNotRun::TimedOut {
                 after_secs: spec.timeout_secs,
             });

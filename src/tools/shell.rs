@@ -235,6 +235,9 @@ fn spawn_quiesce_watchdog(
                     tokio::time::timeout(std::time::Duration::from_secs(1), child.lock()).await;
                 match lock_result {
                     Ok(mut child_guard) => {
+                        if let Some(pid) = child_guard.id() {
+                            crate::sandbox::kill_process_group(pid);
+                        }
                         if let Err(err) = child_guard.kill().await {
                             tracing::warn!(%err, "failed to kill child process during quiesce detection");
                         }
@@ -426,8 +429,21 @@ async fn run_batch(
     mut cmd: Command,
     timeout: std::time::Duration,
 ) -> Result<ShellOutput, ShellError> {
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
+    // Spawn manually rather than `cmd.output()`: on timeout we need the pid to
+    // take the whole process group down — kill_on_drop alone would leave
+    // grandchildren running past the timeout.
+    let child = cmd.spawn().map_err(|e| ShellError {
+        message: format!("Failed to execute command: {e}"),
+        exit_code: -1,
+    })?;
+    let pid = child.id();
+    let output = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    if output.is_err()
+        && let Some(pid) = pid
+    {
+        crate::sandbox::kill_process_group(pid);
+    }
+    let output = output
         .map_err(|_| ShellError {
             message: "Command timed out".to_string(),
             exit_code: -1,
@@ -436,7 +452,10 @@ async fn run_batch(
             message: format!("Failed to execute command: {e}"),
             exit_code: -1,
         })?;
+    Ok(finished_shell_output(output))
+}
 
+fn finished_shell_output(output: std::process::Output) -> ShellOutput {
     let stdout = crate::tools::truncate_output(
         &String::from_utf8_lossy(&output.stdout),
         crate::tools::MAX_TOOL_OUTPUT_BYTES,
@@ -450,14 +469,14 @@ async fn run_batch(
 
     let summary = format_shell_output(exit_code, &stdout, &stderr, false);
 
-    Ok(ShellOutput {
+    ShellOutput {
         success,
         exit_code,
         stdout,
         stderr,
         summary,
         waiting_for_input: false,
-    })
+    }
 }
 
 #[instrument(skip(cmd, tool_output_tx), fields(process_id = ?process_id))]
@@ -551,6 +570,9 @@ async fn run_streaming(
                 tokio::time::timeout(std::time::Duration::from_secs(1), child_arc.lock()).await;
             match lock_result {
                 Ok(mut child_guard) => {
+                    if let Some(pid) = child_guard.id() {
+                        crate::sandbox::kill_process_group(pid);
+                    }
                     if let Err(err) = child_guard.kill().await {
                         tracing::warn!(%err, "failed to kill child process during timeout handling");
                     }

@@ -976,6 +976,14 @@ impl Sandbox {
             cmd.env(name, value);
         }
 
+        // Mirror the sandboxed path's process isolation (bwrap's
+        // --new-session): the child leads its own process group, so the
+        // worker's whole tree stays addressable as a single unit and
+        // signals aimed at spacebot's group (e.g. terminal SIGINT) don't
+        // reach workers that outlive the request that spawned them.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         // Worker keyring isolation (Linux) — give the child a fresh empty
         // session keyring even in passthrough (no sandbox) mode.
         #[cfg(target_os = "linux")]
@@ -1214,6 +1222,29 @@ fn detect_sandbox_exec() -> InternalBackend {
     }
 }
 
+/// Signal the process group led by `pid` (Unix only).
+///
+/// tokio's `kill`/`kill_on_drop` only signal the direct child, so a worker
+/// that forked grandchildren — a shell that launched a server, a build that
+/// spawned compilers — leaks them past a timeout. Children spawned through
+/// `Sandbox::wrap` lead their own group (`process_group(0)` in passthrough,
+/// `--new-session` under bwrap), which makes the whole tree addressable as
+/// one unit. A missing group (already exited, or a backend whose outermost
+/// process leads no group) is not an error: the caller's direct kill remains
+/// the fallback.
+#[cfg(unix)]
+pub fn kill_process_group(pid: u32) {
+    // A negative pid signals the whole group. ESRCH — the group is already
+    // gone — is the expected failure and needs no escalation.
+    if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
+        tracing::debug!(pid, "process group already gone or pid leads no group");
+    }
+}
+
+/// No process groups on this platform; the direct kill is all there is.
+#[cfg(not(unix))]
+pub fn kill_process_group(_pid: u32) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,6 +1424,74 @@ mod tests {
             ContainmentUnavailable.to_string().contains(remediation),
             "the startup refusal must carry the fix, not just the fault"
         );
+    }
+
+    /// A passthrough child leads its own process group, mirroring the
+    /// sandboxed path's `--new-session`: the worker tree stays addressable as
+    /// one unit rather than dissolving into spacebot's group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_child_leads_its_own_process_group() {
+        let sandbox = sandbox_without_backend(SandboxMode::Enabled, false);
+        let mut command = sandbox.wrap("sleep", &["30"], Path::new("/tmp"), &HashMap::new());
+        command.kill_on_drop(true);
+        let child = command.spawn().expect("spawn passthrough child");
+        let pid = child.id().expect("child pid") as libc::pid_t;
+
+        let pgid = unsafe { libc::getpgid(pid) };
+
+        assert_eq!(pgid, pid, "child must be its own process-group leader");
+    }
+
+    /// kill_process_group must take the whole tree: tokio's kill_on_drop only
+    /// signals the direct child, so a shell that forked a grandchild would
+    /// leak it past a timeout without the group kill.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_process_group_reaps_grandchildren() {
+        let sandbox = sandbox_without_backend(SandboxMode::Enabled, false);
+        let mut command = sandbox.wrap(
+            "sh",
+            &["-c", "sleep 300 & echo $!; wait"],
+            Path::new("/tmp"),
+            &HashMap::new(),
+        );
+        command.kill_on_drop(true);
+        command.stdout(std::process::Stdio::piped());
+        let mut child = command.spawn().expect("spawn passthrough child");
+        let pid = child.id().expect("child pid");
+
+        // The shell prints the grandchild's pid as its first line.
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        use tokio::io::AsyncBufReadExt as _;
+        let mut line = String::new();
+        tokio::io::BufReader::new(&mut stdout)
+            .read_line(&mut line)
+            .await
+            .expect("read grandchild pid");
+        let grandchild_pid: libc::pid_t = line.trim().parse().expect("pid line");
+        assert_eq!(
+            unsafe { libc::kill(grandchild_pid, 0) },
+            0,
+            "grandchild alive"
+        );
+
+        kill_process_group(pid);
+        // Reap the direct child so the assert below races nothing.
+        child.wait().await.expect("reap killed child");
+
+        // The grandchild's parent died in the same volley, so init must adopt
+        // and reap it — poll rather than assert instantly: a not-yet-reaped
+        // zombie still answers kill(pid, 0).
+        let mut reaped = false;
+        for _ in 0..50 {
+            if unsafe { libc::kill(grandchild_pid, 0) } == -1 {
+                reaped = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(reaped, "grandchild must be gone after the group kill");
     }
 
     #[test]
