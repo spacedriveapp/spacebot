@@ -27,9 +27,8 @@
 <p align="center">
   <a href="https://spacebot.sh"><strong>spacebot.sh</strong></a> •
   <a href="#how-it-works">How It Works</a> •
-  <a href="#goals-and-tasks">Goals & Tasks</a> •
+  <a href="#the-task-board">Task Board</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#spacebot--spacedrive">Spacedrive</a> •
   <a href="https://docs.spacebot.sh">Docs</a>
 </p>
 
@@ -103,19 +102,23 @@ Channel context hits 80%
     → Channel never interrupted
 ```
 
-For process capabilities, tool access by type, memory internals, cron, and multi-agent isolation, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For process capabilities, tool access by type, memory internals, cron, and multi-agent isolation, see the [architecture guide](<docs/content/docs/(core)/architecture.mdx>).
 
 ---
 
-## Goals and Tasks
+## The Task Board
 
-Spacebot is built around a task system. Goals set direction. Tasks carry work. The agent executes, remembers, and improves whether or not you're present.
+Spacebot is built around an instance-level task board. Every agent on the instance shares it, every task carries a globally unique number, and it is the substrate through which agents delegate work to each other.
 
-On a configured interval, the **autonomy channel** wakes with full context: identity, memory, working memory, the complete task state, active goals, and a summary of its last few runs. It picks the most important ready task, executes it with full tool access, and exits.
+A task moves through seven states — `pending_approval` → `backlog` → `ready` → `in_progress` → `done`, with `blocked` (waiting on a person) and `skipped` (settled without running) off the main line — at one of four priorities. Two agent IDs sit on every task: the **owner** (who created it) and the **assignee** (who executes it). Reassigning is how work changes hands.
 
-State lives in tasks. Progress notes go on the task itself. After a crash, the next wake reads task metadata and picks up where things left off. At the end of each run the autonomy channel writes a summary of what happened. On next wake, that summary is the first thing it reads.
+**Agents delegate by creating tasks.** When one agent calls `send_agent_message` on another, that is not a chat message — it opens a task on the target agent's board, owned by the sender and assigned to the recipient, at `ready`. The board is the inter-agent protocol, and who may message whom is constrained by the communication graph.
 
-**The agent proposes. You decide.** Tasks the autonomy channel creates land in `pending_approval`. Nothing runs autonomously until you approve it.
+**Pickup is autonomous.** The cortex runs a background loop that claims the highest-priority `ready` task assigned to its agent, flips it to `in_progress`, and hands it to a worker with full tool access. The claim is a conditional `UPDATE ... WHERE status = 'ready'`, so two agents racing the same task can't both win it. Progress notes go on the task itself, so after a crash the next pass reads task metadata and resumes.
+
+**The agent proposes. You decide.** Tasks the cortex creates land in `pending_approval` and raise a dashboard notification. Nothing runs autonomously until you approve it.
+
+Goals live in the memory graph as `Goal`-typed memories rather than as board rows — they set direction and get recalled into context, but they aren't scheduled or executed the way tasks are.
 
 ---
 
@@ -167,6 +170,47 @@ Workers come loaded with tools for real work:
 - **[OpenCode](https://opencode.ai)** — spawn a full coding agent as a persistent worker with codebase exploration, LSP awareness, and deep context management
 - **[Brave](https://brave.com/search/api/) web search** — search the web with freshness filters, localization, and configurable result count
 
+### Projects and Repos
+
+Projects are how agents get pointed at real codebases. A project is a root directory registered once at the instance level and usable by every agent — no re-registering the same repo per agent.
+
+- **Multi-repo by design** — one project holds many git repos, each tracked with its remote URL, default branch, current branch, and disk usage
+- **Worktrees** — git worktrees are first-class rows linked to their repo, so parallel branch work gets its own directory instead of fighting over one checkout
+- **Worker targeting** — `spawn_worker` accepts a `project_id` or `worktree_id`; the worker's working directory and prompt context are set from it automatically
+- **Sandbox integration** — registering a project refreshes the sandbox allowlist so workers can reach project paths outside the agent workspace
+
+### Wiki
+
+An instance-wide, permanently versioned knowledge base that sits alongside the memory graph. Memories are atomic facts that decay and get auto-injected into prompts; wiki pages are authored long-form documents that don't decay and are read on demand.
+
+- **Versioned forever** — every edit writes a new version, nothing is destructive
+- **Wiki-link navigation** — pages reference each other and resolve as a graph
+- **Agent-writable** — `wiki_create`, `wiki_edit`, `wiki_read`, `wiki_search`, `wiki_list`, `wiki_history` are available to workers and branches
+- **Shared** — one wiki per instance, across all agents and humans
+
+### Multi-Agent and the Org Graph
+
+Run many agents on one binary. Each gets its own soul, workspace, databases, cortex, conversations, and messaging bindings — fully isolated.
+
+- **Communication graph** — explicit directed links define which agents may message which. Org-level humans are nodes too, so agents know who manages them
+- **Agent factory** — agents create and configure other agents at runtime from presets, via `factory_*` tools
+- **Per-agent permissions** — a `[permissions]` block per agent controls tool access and inter-agent data boundaries, checked at tool registration, at execution, and again on output. Denials return a structured error the LLM can reason about rather than a hidden tool or a silent failure
+
+### Dashboard, Portal, and Desktop
+
+- **Web dashboard** — React SPA embedded directly in the binary via `rust-embed`. Channels, workers, memories, tasks, cron, projects, wiki, cortex, skills, ingest, and settings
+- **Notifications** — task approvals, worker failures, and cortex observations surface as actionable items pushed over SSE, each deep-linked to its source entity
+- **Portal** — embeddable public chat with SSE streaming and per-agent session isolation
+- **Desktop app** — Tauri 2 shell wrapping the same interface, with the `spacebot` binary bundled as a sidecar it can launch locally
+- **Self-update** — checks GitHub releases and can update in place, including rewriting its own Docker image tag when `/var/run/docker.sock` is mounted
+
+### Observability
+
+- **Prometheus metrics** — LLM cost, token usage, agent activity, and memory operations, behind the `metrics` cargo feature so it compiles out entirely when unused
+- **Token accounting** — per-call usage and cost estimates persisted to SQLite and surfaced in the dashboard
+- **Worker transcripts** — every worker's turns and tool calls are recorded and replayable from the Workers tab
+- **Loop guard** — programmatic detection of stuck tool loops (repeated identical calls, ping-pong patterns, global circuit breaker) with thresholds tuned per process type, so a spinning worker gets interrupted instead of burning budget
+
 ### Messaging
 
 Native adapters for Discord, Slack, Telegram, Twitch, Signal, Mattermost, Email, and Webchat, plus a generic Webhook receiver:
@@ -180,9 +224,9 @@ Native adapters for Discord, Slack, Telegram, Twitch, Signal, Mattermost, Email,
 
 ### Model Routing
 
-Four-level routing picks the right model for every call. Channels get the best conversational model. Workers get something fast and cheap. Coding workers upgrade automatically. Simple user messages are downgraded to cheaper models by a sub-millisecond prompt scorer with no external calls. Voice messages route to a dedicated voice model.
+Three-level routing picks the right model for every call, decided explicitly from the process type and task type — no keyword scoring, no classifier, no content analysis. Channels get the best conversational model. Workers, the compactor, and the cortex get something fast and cheap. Task-type overrides upgrade coding workers automatically. Per-model fallback chains retry on a different model when one fails, with rate-limit cooldown.
 
-Any OpenAI-compatible or Anthropic-compatible endpoint works, including Ollama for local models, Z.ai GLM models, Azure OpenAI, and custom providers. Built-in support for Kilo Gateway, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Go, and more.
+Two provider types, not twenty: Anthropic's Messages API natively — required for OAuth, prompt caching, and extended thinking — and any OpenAI-compatible endpoint for everything else. That second one covers LiteLLM, vLLM, Ollama, TGI, OpenRouter, OpenAI, and anything else that speaks `/chat/completions`. A provider is a `base_url` plus a key, so adding one never needs a Spacebot release. LiteLLM is the recommended way to fan out to many upstreams, but it is not required.
 
 ### MCP Integration
 
@@ -217,33 +261,9 @@ Spacebot builds on itself over time through four specific mechanisms.
 
 **Memory deepens with every interaction.** Each conversation adds facts, preferences, decisions, and observations to a typed graph with importance scoring and graph edges. The cortex synthesizes this into a briefing every future conversation benefits from.
 
-**Goals drive autonomous work between conversations.** The autonomy channel wakes on its interval, picks up ready tasks, and works through them. Working memory records what happened, so the next conversation picks up where things left off.
+**The board drives autonomous work between conversations.** The cortex's pickup loop claims ready tasks and runs them through workers without anyone asking. Working memory records what happened, so the next conversation picks up where things left off. Dormant-mode agents skip the loop entirely and run only when an external trigger wakes them.
 
 Everything goes through typed tools into structured storage. Nothing drifts.
-
----
-
-## Spacebot + Spacedrive
-
-Spacebot pairs with [Spacedrive](https://github.com/spacedriveapp/spacedrive), an open-source cross-platform file manager built on a virtual distributed filesystem. Neither requires the other. When paired, Spacebot is the only agent harness with direct integration into a cross-device filesystem.
-
-### What Pairing Enables Today
-
-**Multi-device access:** one Spacebot instance, all your devices. Talk to your agent from your phone while a worker executes on your server. Spacedrive's P2P layer (Iroh/QUIC) routes from every device through the paired node to Spacebot. No separate SDK, no separate auth.
-
-**Remote execution:** workers can target any device in your library. A task that needs your home server's GPU, your work laptop's local repos, or your phone's camera routes through Spacedrive's permission system to the target device. From the agent's perspective, the tool call is identical.
-
-**File system intelligence:** every directory can carry context nodes describing what it contains and what policies apply. When the agent navigates your filesystem it gets that context, not a blind listing.
-
-**Safe data access:** Spacedrive indexes external sources (Gmail, Slack, Obsidian, GitHub, Apple Notes, contacts, calendar, browser history) as searchable data the agent can query. Every record passes through a local prompt injection classifier (Prompt Guard 2) before reaching the agent. The agent can search your emails without a malicious email hijacking it.
-
-### Where This Is Going
-
-A company deploys Spacebot + Spacedrive on their infrastructure. Employees install Spacedrive on their devices and join the company library. The company agent has access to employee devices through Spacedrive's permission system, with individual-level controls. The org graph in Spacebot defines hierarchy and delegation: which agents report to which, who can approve what, how tasks flow.
-
-An employee talks to the company agent from their MacBook. The agent knows their projects, their device, their role, and can spawn workers on any authorized machine. They switch to their personal Spacedrive library and connect to their home Spacebot, with personal data and personal context. The app is the same. The agent is different.
-
-No other agent harness is building this. It's a category.
 
 ---
 
@@ -252,7 +272,8 @@ No other agent harness is building this. It's a category.
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Zen, OpenCode Go), or use `spacebot auth login` for Anthropic OAuth
+- **protoc** (protobuf compiler) — required by LanceDB's build scripts. `apt install protobuf-compiler`, `brew install protobuf`, or use the included nix flake
+- An Anthropic API key, or any OpenAI-compatible endpoint (LiteLLM recommended for reaching multiple vendors) — or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 
@@ -312,7 +333,7 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh before each A
 | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | Language        | **Rust** (edition 2024) — single binary, no runtime dependencies, no GC pauses                                  |
 | Async runtime   | **Tokio**                                                                                                       |
-| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.31 — agentic loop, tool execution, hooks                     |
+| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.33 — agentic loop, tool execution, hooks                     |
 | Relational data | **SQLite** (sqlx) — conversations, memory graph, tasks, goals, cron jobs                                        |
 | Vector + FTS    | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
 | Key-value       | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets                                       |
@@ -323,6 +344,9 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh before each A
 | Telegram        | **teloxide** — long-poll, media attachments, group/DM support                                                   |
 | Twitch          | **twitch-irc** — chat integration with trigger prefix                                                           |
 | Browser         | **Chromiumoxide** — headless Chrome via CDP                                                                     |
+| HTTP API        | **axum** + **utoipa** — control API with a generated OpenAPI spec                                              |
+| Dashboard       | **React** + **Vite**, embedded into the binary via **rust-embed**                                              |
+| Desktop         | **Tauri 2** — native shell with the server bundled as a sidecar                                                |
 | CLI             | **Clap** — command line interface                                                                               |
 
 Single binary, no server dependencies. All data lives in embedded databases in a local directory.
@@ -335,16 +359,32 @@ Single binary, no server dependencies. All data lives in embedded databases in a
 | ------------------------------------------------------------------- | --------------------------------------------------------- |
 | [Quick Start](<docs/content/docs/(getting-started)/quickstart.mdx>) | Setup, config, first run                                  |
 | [Config Reference](<docs/content/docs/(configuration)/config.mdx>)  | Full `config.toml` reference                              |
-| [Architecture](ARCHITECTURE.md)                                     | Process types, tool access, memory internals, multi-agent |
+| [Architecture](<docs/content/docs/(core)/architecture.mdx>)         | Process types, tool access, memory internals, multi-agent |
 | [Memory](<docs/content/docs/(core)/memory.mdx>)                     | Memory system design                                      |
 | [Tools](<docs/content/docs/(features)/tools.mdx>)                   | All available LLM tools                                   |
 | [Routing](<docs/content/docs/(core)/routing.mdx>)                   | Model routing and fallback chains                         |
 | [Secrets](<docs/content/docs/(configuration)/secrets.mdx>)          | Credential storage, encryption, output scrubbing          |
 | [Sandbox](<docs/content/docs/(configuration)/sandbox.mdx>)          | Process containment and environment sanitization          |
 | [Cron Jobs](<docs/content/docs/(features)/cron.mdx>)                | Scheduled recurring tasks                                 |
-| [MCP](<docs/content/docs/(features)/mcp.mdx>)                       | External tool servers via Model Context Protocol          |
 | [OpenCode](<docs/content/docs/(features)/opencode.mdx>)             | OpenCode as a worker backend                              |
 | [Messaging](<docs/content/docs/(messaging)/messaging.mdx>)          | Adapter architecture and platform setup                   |
+| [Agents](<docs/content/docs/(core)/agents.mdx>)                     | Multi-agent setup, isolation, and the communication graph |
+| [Tasks](<docs/content/docs/(features)/tasks.mdx>)                   | The instance-level task board and autonomous pickup       |
+| [Workers](<docs/content/docs/(features)/workers.mdx>)               | Worker lifecycle, segments, timeouts, and transcripts     |
+| [Projects](<docs/content/docs/(features)/projects.mdx>)             | Repos, worktrees, and pointing workers at codebases       |
+| [Wiki](<docs/content/docs/(features)/wiki.mdx>)                     | Versioned instance-wide knowledge base                    |
+| [Permissions](<docs/content/docs/(configuration)/permissions.mdx>)  | Per-agent tool access and inter-agent boundaries          |
+| [Cortex](<docs/content/docs/(core)/cortex.mdx>)                     | The system observer and working-memory assembly           |
+| [Compaction](<docs/content/docs/(core)/compaction.mdx>)             | How context stays under the window                        |
+| [Prompts](<docs/content/docs/(core)/prompts.mdx>)                   | Prompt templates and per-agent overrides                  |
+| [Browser](<docs/content/docs/(features)/browser.mdx>)               | Headless Chrome automation                                |
+| [Ingestion](<docs/content/docs/(features)/ingestion.mdx>)           | Bulk file import into the memory graph                    |
+| [Portal](<docs/content/docs/(features)/portal.mdx>)                 | Embeddable public chat                                    |
+| [Notifications](<docs/content/docs/(features)/notifications.mdx>)   | Actionable events and SSE delivery                        |
+| [Skills](<docs/content/docs/(features)/skills.mdx>)                 | Authoring, capture, and the skills.sh registry            |
+| [Desktop](<docs/content/docs/(getting-started)/desktop.mdx>)        | Tauri desktop app and the sidecar binary                  |
+| [Docker](<docs/content/docs/(getting-started)/docker.mdx>)          | Container deployment and updates                          |
+| [Metrics](<docs/content/docs/(deployment)/metrics.mdx>)             | Prometheus metrics behind the `metrics` feature           |
 
 ---
 

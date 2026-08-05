@@ -4,6 +4,8 @@ import {cx} from "class-variance-authority";
 import {Button, Input} from "@spacedrive/primitives";
 import {api} from "@/api/client";
 import {ProfileAvatar, seedGradient} from "@/components/ProfileAvatar";
+import {CapabilityPicker} from "@/components/CapabilityPicker";
+import {fleetCapabilities} from "@/lib/capabilities";
 import {GRADIENT_PRESETS} from "./constants";
 import type {GeneralEditorProps} from "./types";
 
@@ -13,6 +15,8 @@ export function GeneralEditor({
 	role,
 	gradientStart,
 	gradientEnd,
+	capabilities,
+	agents,
 	detail,
 	onDirtyChange,
 	saveHandlerRef,
@@ -23,6 +27,7 @@ export function GeneralEditor({
 	const [localRole, setLocalRole] = useState(role);
 	const [localGradientStart, setLocalGradientStart] = useState(gradientStart);
 	const [localGradientEnd, setLocalGradientEnd] = useState(gradientEnd);
+	const [localCapabilities, setLocalCapabilities] = useState(capabilities);
 	const [localDirty, setLocalDirty] = useState(false);
 	const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -66,8 +71,9 @@ export function GeneralEditor({
 			setLocalRole(role);
 			setLocalGradientStart(gradientStart);
 			setLocalGradientEnd(gradientEnd);
+			setLocalCapabilities(capabilities);
 		}
-	}, [displayName, role, gradientStart, gradientEnd, localDirty]);
+	}, [displayName, role, gradientStart, gradientEnd, capabilities, localDirty]);
 
 	useEffect(() => {
 		onDirtyChange(localDirty);
@@ -79,17 +85,31 @@ export function GeneralEditor({
 			role: localRole,
 			gradient_start: localGradientStart || undefined,
 			gradient_end: localGradientEnd || undefined,
+			// Always sent, empty included. `capabilities` replaces the set
+			// wholesale on the server, and an empty list is the documented way to
+			// take an agent out of every pool — so it must not be collapsed to
+			// `undefined` the way the gradients are, which would silently make
+			// "remove the last label" do nothing.
+			capabilities: localCapabilities,
 		});
 		setLocalDirty(false);
-	}, [onSave, localDisplayName, localRole, localGradientStart, localGradientEnd]);
+	}, [
+		onSave,
+		localDisplayName,
+		localRole,
+		localGradientStart,
+		localGradientEnd,
+		localCapabilities,
+	]);
 
 	const handleRevert = useCallback(() => {
 		setLocalDisplayName(displayName);
 		setLocalRole(role);
 		setLocalGradientStart(gradientStart);
 		setLocalGradientEnd(gradientEnd);
+		setLocalCapabilities(capabilities);
 		setLocalDirty(false);
-	}, [displayName, role, gradientStart, gradientEnd]);
+	}, [displayName, role, gradientStart, gradientEnd, capabilities]);
 
 	useEffect(() => {
 		saveHandlerRef.current.save = handleSave;
@@ -109,6 +129,24 @@ export function GeneralEditor({
 		uploadAvatarMutation.mutate(file);
 	};
 
+	// Suggestions come from the *other* agents. Offering this agent's own
+	// labels back to it would just be the chips it is already showing.
+	const otherFleetLabels = fleetCapabilities(
+		agents.filter((agent) => agent.id !== agentId),
+	);
+
+	// Naming who already declares a label is what makes reuse the easy path —
+	// "pick the one `main` has" is a decision, "pick from a list of strings" is
+	// a guess.
+	const describeLabel = (label: string) => {
+		const holders = agents
+			.filter(
+				(agent) => agent.id !== agentId && (agent.capabilities ?? []).includes(label),
+			)
+			.map((agent) => agent.display_name ?? agent.id);
+		return holders.length > 0 ? `Declared by ${holders.join(", ")}` : undefined;
+	};
+
 	const [seedC1, seedC2] = seedGradient(agentId);
 	const previewC1 = localGradientStart || seedC1;
 	const previewC2 = localGradientEnd || seedC2;
@@ -121,7 +159,7 @@ export function GeneralEditor({
 					<span className="text-tiny text-ink-faint">Agent metadata</span>
 				</div>
 				{localDirty ? (
-					<span className="text-tiny text-amber-400">Unsaved changes</span>
+					<span className="text-tiny text-status-warning">Unsaved changes</span>
 				) : (
 					<span className="text-tiny text-ink-faint/50">
 						Changes saved to config.toml
@@ -174,6 +212,53 @@ export function GeneralEditor({
 						/>
 					</div>
 
+					{/* Capabilities */}
+					<div className="flex flex-col gap-1.5">
+						<label
+							htmlFor="agent-capabilities"
+							className="text-sm font-medium text-ink"
+						>
+							Capabilities
+						</label>
+						<p className="text-tiny text-ink-faint">
+							What this agent declares it can do. A task may name an agent, or
+							state a requirement instead and wait in a pool — any agent holding{" "}
+							<em>every</em> label a pooled task asks for may claim it.
+						</p>
+						<CapabilityPicker
+							value={localCapabilities}
+							onChange={(next) => {
+								setLocalCapabilities(next);
+								setLocalDirty(true);
+							}}
+							suggestions={otherFleetLabels}
+							describeSuggestion={describeLabel}
+							placeholder="e.g. rust, typescript, review"
+							inputId="agent-capabilities"
+						/>
+						{localCapabilities.length === 0 && (
+							<p className="text-tiny text-ink-faint">
+								Declaring nothing is valid — this agent simply never claims
+								pooled work. Tasks that name it directly still run.
+							</p>
+						)}
+						{/* Two authorities, and it is worth saying which wins, because the
+						    obvious guess — that the UI and the file race — is wrong.
+						    `PUT /agents` rewrites the `capabilities` array in config.toml
+						    *and* the table the scheduler matches against, and a file the
+						    watcher sees change is re-projected the same way. So the file
+						    is always the record and neither path leaves a stale set
+						    behind. */}
+						<p className="text-tiny text-ink-faint/60">
+							Also settable as <span className="font-mono">capabilities</span> in
+							config.toml. Saving here rewrites that array, and editing the file
+							directly is picked up live — the file is the record either way, and
+							the last edit wins. Labels are case-sensitive:{" "}
+							<span className="font-mono">rust</span> and{" "}
+							<span className="font-mono">Rust</span> are two capabilities.
+						</p>
+					</div>
+
 					{/* Avatar */}
 					<div className="flex flex-col gap-1.5">
 						<label className="text-sm font-medium text-ink">Avatar</label>
@@ -207,7 +292,7 @@ export function GeneralEditor({
 											variant="bare"
 											size="sm"
 											onClick={() => deleteAvatarMutation.mutate()}
-											className="text-ink-faint hover:text-red-400"
+											className="text-ink-faint hover:text-status-error"
 										>
 											Remove
 										</Button>

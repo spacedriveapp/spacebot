@@ -111,43 +111,62 @@ function KiloIcon({ size = 24, className }: IconProps) {
 	);
 }
 
+/// Provider ids are user-chosen now, so there is no fixed id-to-brand table to
+/// look up. Match on what the operator called it — someone who names a provider
+/// "openrouter" or "my-groq-proxy" gets the right logo — and fall back to a
+/// neutral endpoint glyph rather than mislabelling an unknown gateway as OpenAI.
+const BRAND_MATCHERS: [RegExp, React.ComponentType<IconProps>][] = [
+	[/anthropic|claude/, Anthropic],
+	[/openrouter/, OpenRouter],
+	[/openai|chatgpt|gpt/, OpenAI],
+	[/kilo/, KiloIcon],
+	[/groq/, Groq],
+	[/mistral/, Mistral],
+	[/gemini|google/, Google],
+	[/deepseek/, DeepSeek],
+	[/fireworks/, Fireworks],
+	[/together/, Together],
+	[/xai|grok/, XAI],
+	[/zhipu|glm|z\.?ai/, ZAI],
+	[/ollama/, OllamaIcon],
+	[/opencode/, OpenCodeZenIcon],
+	[/nvidia|nim/, NvidiaIcon],
+	[/minimax/, Minimax],
+	[/moonshot|kimi/, Kimi],
+	[/copilot/, GithubCopilot],
+];
+
+function GenericProviderIcon({ size = 24, className }: IconProps) {
+	return (
+		<svg
+			width={size}
+			height={size}
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			xmlns="http://www.w3.org/2000/svg"
+			className={className}
+			aria-hidden="true"
+			focusable="false"
+		>
+			<rect x="3" y="3" width="18" height="18" rx="4" />
+			<path d="M8 12h8M12 8v8" />
+		</svg>
+	);
+}
+
 export function ProviderIcon({ provider, className = "text-ink-faint", size = 24 }: ProviderIconProps) {
 	const iconProps: Partial<IconProps> = {
 		size,
 		className,
 	};
 
-	const iconMap: Record<string, React.ComponentType<IconProps>> = {
-		anthropic: Anthropic,
-		openai: OpenAI,
-		"openai-chatgpt": OpenAI,
-		openrouter: OpenRouter,
-		kilo: KiloIcon,
-		groq: Groq,
-		mistral: Mistral,
-		gemini: Google,
-		deepseek: DeepSeek,
-		fireworks: Fireworks,
-		together: Together,
-		xai: XAI,
-		zhipu: ZAI,
-		"zai-coding-plan": ZAI,
-		ollama: OllamaIcon,
-		"opencode-zen": OpenCodeZenIcon,
-		"opencode-go": OpenCodeZenIcon,
-		nvidia: NvidiaIcon,
-		minimax: Minimax,
-		"minimax-cn": Minimax,
-		moonshot: Kimi, // Kimi is Moonshot AI's product brand
-		"github-copilot": GithubCopilot,
-		azure: OpenAI,
-	};
-
-	const IconComponent = iconMap[provider.toLowerCase()];
-
-	if (!IconComponent) {
-		return <OpenAI {...iconProps} />;
-	}
+	const normalized = provider.toLowerCase();
+	const match = BRAND_MATCHERS.find(([pattern]) => pattern.test(normalized));
+	const IconComponent = match ? match[1] : GenericProviderIcon;
 
 	return <IconComponent {...iconProps} />;
 }

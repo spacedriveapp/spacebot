@@ -248,14 +248,118 @@ pub async fn create_worktree(
     );
 }
 
+/// What `git worktree remove` did, as four outcomes rather than one boolean.
+///
+/// `Refused` is the one this type exists for, and it is **not** an error. It
+/// means the tree had uncommitted changes and git declined to delete them —
+/// which is the behaviour we want and are deliberately not overriding. Folding
+/// it into a generic failure would put it in front of whoever handles errors,
+/// who would reasonably reach for the flag that makes it go away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeRemoval {
+    /// The checkout was clean and is gone. The branch and its commits survive:
+    /// `git worktree remove` deletes the working tree, not the branch.
+    Removed,
+    /// Git declined because the tree is dirty. Expected, recorded, left alone.
+    Refused { detail: String },
+    /// There was nothing there to remove — already gone, or never created.
+    Missing { detail: String },
+    /// Git failed for some other reason (a broken repo, a locked worktree).
+    Failed { detail: String },
+}
+
+/// Offer a worktree for removal and classify what git decided.
+///
+/// # Never pass `--force`. Never add a flag that would.
+///
+/// Uncommitted work left by a failed run is **evidence** — it is the thing you
+/// want when the question is "what did it actually do before it broke". Git
+/// already refuses to delete a dirty tree, so the safety here is not something
+/// this function implements; it is something this function must not take away.
+/// Someone will hit a reaper that keeps reporting the same stuck worktree and
+/// reach for `--force`. That is the moment this comment exists for: the correct
+/// fix is a person looking at the diff, never a flag that deletes it.
+pub async fn offer_worktree_removal(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> anyhow::Result<WorktreeRemoval> {
+    let worktree_str = worktree_path
+        .to_str()
+        .context("worktree path is not valid UTF-8")?;
+
+    // No `--force`, and nothing that expands to one. See the doc comment above.
+    let output = Command::new("git")
+        .args(["worktree", "remove", worktree_str])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to run `git worktree remove` in {}",
+                repo_path.display()
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(WorktreeRemoval::Removed);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let lowered = stderr.to_ascii_lowercase();
+    // Git's own wording for "this tree has work in it". Matched on the phrases
+    // rather than the exit code because git returns 1 for every refusal, and a
+    // dirty tree and a corrupt repo need completely different responses.
+    if lowered.contains("contains modified or untracked files")
+        || lowered.contains("use --force")
+        || lowered.contains("is dirty")
+    {
+        return Ok(WorktreeRemoval::Refused { detail: stderr });
+    }
+    if lowered.contains("is not a working tree")
+        || lowered.contains("no such file or directory")
+        || lowered.contains("not a valid path")
+    {
+        return Ok(WorktreeRemoval::Missing { detail: stderr });
+    }
+
+    Ok(WorktreeRemoval::Failed { detail: stderr })
+}
+
+/// Resolve a ref to a commit sha, or `None` if it does not name one.
+///
+/// Used to check a step's `worktree_base_ref` at launch. A base ref that does
+/// not exist is knowable from the template, and refusing it while a person is
+/// still watching is worth far more than discovering it three steps into a run.
+pub async fn resolve_ref(repo_path: &Path, reference: &str) -> Option<String> {
+    let spec = format!("{reference}^{{commit}}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &spec])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
 /// Remove a git worktree.
 ///
-/// Runs `git worktree remove <worktree_path>`.
+/// Runs `git worktree remove <worktree_path>` — **without `--force`**, so git
+/// refuses on a tree with uncommitted changes. See
+/// [`offer_worktree_removal`] for why that refusal is load-bearing.
 pub async fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     let worktree_str = worktree_path
         .to_str()
         .context("worktree path is not valid UTF-8")?;
 
+    // No `--force`. A dirty worktree is evidence from a failed run, and git's
+    // refusal here is the only thing standing between it and a background
+    // process that deletes directories.
     let output = Command::new("git")
         .args(["worktree", "remove", worktree_str])
         .current_dir(repo_path)

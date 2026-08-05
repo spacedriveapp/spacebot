@@ -4,7 +4,8 @@ use super::state::ApiState;
 use super::{
     activity, agents, attachments, bindings, channels, config, cortex, cron, factory, ingest,
     links, mcp, memories, messaging, models, notifications, opencode_proxy, portal, projects,
-    providers, secrets, settings, skills, ssh, system, tasks, tools, usage, wiki, workers,
+    providers, secrets, settings, skills, ssh, system, tasks, tools, triggers, usage, wiki,
+    workers, workflows,
 };
 
 use axum::Json;
@@ -142,6 +143,60 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::approve_task))
         .routes(routes!(tasks::execute_task))
         .routes(routes!(tasks::assign_task))
+        .routes(routes!(tasks::list_task_runs))
+        .routes(routes!(tasks::retry_task))
+        .routes(routes!(
+            tasks::list_task_dependencies,
+            tasks::add_task_dependency
+        ))
+        .routes(routes!(tasks::remove_task_dependency))
+        .routes(routes!(tasks::list_task_transitions))
+        .routes(routes!(tasks::get_task_provenance))
+        .routes(routes!(tasks::get_task_contract, tasks::set_task_contract))
+        .routes(routes!(tasks::set_task_binding, tasks::remove_task_binding))
+        .routes(routes!(tasks::block_task))
+        .routes(routes!(tasks::unblock_task))
+        .routes(routes!(tasks::answer_decision))
+        .routes(routes!(tasks::get_task_graph))
+        .routes(routes!(tasks::list_task_gates, tasks::create_task_gate))
+        .routes(routes!(tasks::delete_task_gate))
+        // Workflow routes
+        .routes(routes!(
+            workflows::list_workflows,
+            workflows::create_workflow
+        ))
+        .routes(routes!(
+            workflows::get_workflow,
+            workflows::update_workflow,
+            workflows::delete_workflow
+        ))
+        .routes(routes!(workflows::put_step, workflows::delete_step))
+        .routes(routes!(workflows::add_edge, workflows::remove_edge))
+        .routes(routes!(workflows::put_binding, workflows::delete_binding))
+        .routes(routes!(
+            workflows::put_step_gate,
+            workflows::delete_step_gate
+        ))
+        .routes(routes!(workflows::launch_workflow))
+        // Trigger configuration. Bearer-protected like everything else here;
+        // the one trigger route that is not is mounted separately below.
+        .routes(routes!(triggers::list_schedules, triggers::put_schedule))
+        .routes(routes!(triggers::delete_schedule))
+        // The one inbound route a stranger is expected to reach. It is
+        // registered here so it appears in the OpenAPI document like every
+        // other endpoint, and exempted from the bearer token in
+        // `api_auth_middleware` — its authentication is the per-workflow shared
+        // secret, which is the whole reason it exists: CI cannot be handed a
+        // token that grants the entire API.
+        .routes(routes!(triggers::workflow_webhook_delivery))
+        .routes(routes!(
+            triggers::get_webhook,
+            triggers::put_webhook,
+            triggers::delete_webhook
+        ))
+        .routes(routes!(workflows::list_runs))
+        .routes(routes!(workflows::get_run, workflows::delete_run))
+        .routes(routes!(workflows::cancel_run))
         // Wiki routes
         .routes(routes!(wiki::list_pages, wiki::create_page))
         .routes(routes!(wiki::search_pages))
@@ -162,6 +217,16 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(projects::disk_usage))
         .routes(routes!(projects::create_repo))
         .routes(routes!(projects::delete_repo))
+        .routes(routes!(
+            projects::list_repo_dependencies,
+            projects::declare_repo_dependency
+        ))
+        .routes(routes!(
+            projects::update_repo_dependency,
+            projects::delete_repo_dependency
+        ))
+        .routes(routes!(projects::repo_dependency_suggestions))
+        .routes(routes!(projects::list_worktree_orphans))
         .routes(routes!(projects::create_worktree))
         .routes(routes!(projects::delete_worktree))
         // Ingest routes
@@ -198,11 +263,8 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
             providers::get_providers,
             providers::update_provider
         ))
-        .routes(routes!(providers::start_openai_browser_oauth))
-        .routes(routes!(providers::openai_browser_oauth_status))
         .routes(routes!(providers::test_provider_model))
         .routes(routes!(providers::delete_provider))
-        .routes(routes!(providers::get_provider_config))
         // Model routes
         .routes(routes!(models::get_models))
         .routes(routes!(models::refresh_models))
@@ -344,6 +406,32 @@ pub async fn start_http_server(
     Ok(handle)
 }
 
+/// Whether a request path is the inbound workflow webhook delivery route.
+///
+/// The only route in this process reachable without the instance bearer token,
+/// and the exemption is written as an exact shape rather than a prefix on
+/// purpose. A prefix test says "anything under here is open", which is a
+/// standing invitation for the next handler mounted nearby to become open
+/// without anybody deciding that it should; matching the five segments of the
+/// one route that is meant to be open cannot acquire a second member by
+/// accident.
+///
+/// No normalisation happens here and none is wanted. Axum matches the raw path
+/// against its router, so a `..` segment is a literal segment that routes
+/// nowhere rather than an escape — and a path this function accepts is a path
+/// the router will hand to the webhook handler, which authenticates it.
+fn is_webhook_delivery_path(path: &str) -> bool {
+    let mut segments = path.split('/');
+    segments.next() == Some("")
+        && segments.next() == Some("api")
+        && segments.next() == Some("webhooks")
+        && segments.next() == Some("workflow")
+        && segments
+            .next()
+            .is_some_and(|id| !id.is_empty() && id != "." && id != "..")
+        && segments.next().is_none()
+}
+
 async fn api_auth_middleware(
     State(state): State<Arc<ApiState>>,
     request: Request,
@@ -355,6 +443,21 @@ async fn api_auth_middleware(
 
     let path = request.uri().path();
     if path == "/api/health" || path == "/health" {
+        return next.run(request).await;
+    }
+
+    // Inbound webhook deliveries carry a per-workflow shared secret instead of
+    // the instance token, and are verified against it in the handler before any
+    // work happens. They have to: a webhook exists so CI can start a pipeline,
+    // and CI cannot be handed a token that grants the whole API.
+    //
+    // This is less a hole in the auth model than an admission of one. The
+    // instance authentication this trigger was supposed to ship behind does not
+    // exist yet, which is exactly why the handler behind here refuses unless
+    // somebody has explicitly configured *and* enabled a secret for that one
+    // workflow — no row, no delivery, and no row is the state every workflow
+    // starts in.
+    if is_webhook_delivery_path(path) {
         return next.run(request).await;
     }
 
@@ -443,6 +546,8 @@ fn normalize_api_path(path: &str) -> String {
                             | "skills"
                             | "tools"
                             | "links"
+                            | "projects"
+                            | "avatar"
                     ) =>
                 {
                     normalized.push("{id}")
@@ -466,7 +571,38 @@ fn normalize_api_path(path: &str) -> String {
     normalized.join("/")
 }
 
+/// Whether a path belongs to the API rather than to the dashboard.
+///
+/// `/api` itself counts, so a request one segment short of a real route is not
+/// answered with a web page either.
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
 async fn static_handler(uri: Uri) -> Response {
+    // An unmatched `/api` path is a wrong URL, not a page request.
+    //
+    // This is the router's fallback, so it catches every path no handler
+    // claimed — including API paths. Serving `index.html` for those answered
+    // "200 OK" to requests nothing understood: a client probing for an endpoint
+    // its server does not have got a success, and a *mutating* call to a
+    // mistyped route reported that it had worked while doing nothing. That last
+    // one cost real time three separate occasions before it was fixed.
+    //
+    // Checked here rather than by giving the nested `/api` router its own
+    // fallback, because `/api/docs` and `/api/openapi.json` are merged in
+    // separately at the top level and a nested fallback would shadow them.
+    if is_api_path(uri.path()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "not found",
+                "detail": format!("no API route matches {}", uri.path()),
+            })),
+        )
+            .into_response();
+    }
+
     let path = uri.path().trim_start_matches('/');
 
     if let Some(content) = InterfaceAssets::get(path) {
@@ -484,4 +620,107 @@ async fn static_handler(uri: Uri) -> Response {
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_api_path;
+    use super::is_webhook_delivery_path;
+
+    /// An unmatched API path must not be answered with the dashboard.
+    ///
+    /// Serving `index.html` there returns 200 for a request nothing
+    /// understood. A read looks like an empty result, and a mutating call to a
+    /// mistyped route looks like it succeeded — which is how a capability
+    /// update once silently did nothing while reporting 200.
+    #[test]
+    fn an_api_path_is_never_answered_with_the_dashboard() {
+        for path in [
+            "/api",
+            "/api/",
+            "/api/status",
+            "/api/agents/main",
+            "/api/tasks/38/graph",
+            "/api/definitely/not/a/route",
+        ] {
+            assert!(is_api_path(path), "{path} should be treated as an API path");
+        }
+    }
+
+    /// ...and a dashboard route must still reach the dashboard, including one
+    /// that merely starts with the same letters.
+    #[test]
+    fn a_dashboard_route_is_still_served_the_dashboard() {
+        for path in [
+            "/",
+            "/tasks",
+            "/workflows",
+            "/apiary",
+            "/api-docs",
+            "/assets/index.js",
+        ] {
+            assert!(
+                !is_api_path(path),
+                "{path} is a page route and must not 404 as an API path"
+            );
+        }
+    }
+
+    /// The unauthenticated surface is exactly one route shape and nothing else.
+    ///
+    /// If this ever widens, every handler that happens to sit near it becomes
+    /// reachable without the instance token — which on this instance means
+    /// reachable by anyone who can make an HTTP request. The cases below are
+    /// the ones a prefix test would have let through.
+    #[test]
+    fn only_the_workflow_webhook_delivery_route_skips_the_bearer_token() {
+        assert!(is_webhook_delivery_path("/api/webhooks/workflow/abc-123"));
+
+        // Anything else under the same prefix, including a route somebody adds
+        // later without thinking about this function.
+        assert!(!is_webhook_delivery_path("/api/webhooks/secrets"));
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow"));
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow/"));
+        assert!(!is_webhook_delivery_path(
+            "/api/webhooks/workflow/abc/extra"
+        ));
+
+        // Traversal-shaped ids. Axum routes these nowhere, but the exemption
+        // must not depend on that being true of every future router.
+        assert!(!is_webhook_delivery_path("/api/webhooks/workflow/.."));
+        assert!(!is_webhook_delivery_path(
+            "/api/webhooks/workflow/../agents"
+        ));
+
+        // And the rest of the API, which is the point.
+        assert!(!is_webhook_delivery_path("/api/agents"));
+        assert!(!is_webhook_delivery_path("/api/secrets"));
+        assert!(!is_webhook_delivery_path("/api/workflows/abc/webhook"));
+    }
+
+    /// Static agent subroutes are not agent IDs. Folding "avatar" or
+    /// "projects" into {id} would mislabel their metrics and merge them with
+    /// real per-agent traffic — while a genuine agent id must still collapse.
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn static_agent_subroutes_are_not_collapsed_into_id_placeholders() {
+        use super::normalize_api_path;
+
+        assert_eq!(
+            normalize_api_path("/api/agents/avatar"),
+            "/api/agents/avatar"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/projects"),
+            "/api/agents/projects"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/projects/reorder"),
+            "/api/agents/projects/reorder"
+        );
+        assert_eq!(
+            normalize_api_path("/api/agents/some-agent/config"),
+            "/api/agents/{id}/config"
+        );
+    }
 }

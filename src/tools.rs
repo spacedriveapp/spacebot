@@ -20,6 +20,8 @@
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
 //! - `task_update` — scoped to the worker's assigned task
+//! - `task_complete` — structured, schema-validated result for that task
+//! - `task_create` — files follow-up cards, bounded by fan-out and depth caps
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
@@ -39,6 +41,7 @@ pub mod cron;
 pub mod email_search;
 pub mod file;
 pub mod install_skill;
+pub mod launch_workflow;
 pub mod mcp;
 pub mod memory_delete;
 pub mod memory_persistence_complete;
@@ -60,6 +63,7 @@ pub mod skills_search;
 pub mod skip;
 pub mod spacebot_docs;
 pub mod spawn_worker;
+pub mod task_complete;
 pub mod task_create;
 pub mod task_list;
 pub mod task_update;
@@ -103,6 +107,9 @@ pub use file::{
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
+};
+pub use launch_workflow::{
+    LaunchWorkflowArgs, LaunchWorkflowError, LaunchWorkflowOutput, LaunchWorkflowTool,
 };
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
@@ -148,6 +155,9 @@ pub use spacebot_docs::{
 };
 pub use spawn_worker::{
     DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
+};
+pub use task_complete::{
+    TaskCompleteArgs, TaskCompleteError, TaskCompleteOutput, TaskCompleteTool,
 };
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
@@ -962,10 +972,11 @@ pub fn create_worker_tool_server(
             ),
         )
         .tool(TaskUpdateTool::for_worker(
-            task_store,
+            task_store.clone(),
             agent_id.clone(),
             worker_id,
         ))
+        .tool(TaskCompleteTool::new(task_store.clone(), worker_id))
         .tool({
             let mut status_tool =
                 SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx.clone());
@@ -977,6 +988,40 @@ pub fn create_worker_tool_server(
         .tool(ReadSkillTool::new(runtime_config.clone()));
 
     server = register_file_tools(server, workspace, sandbox);
+
+    // Workers file cards rather than spawning sub-workers. The pickup loop
+    // already schedules, observes, and recovers those, so decomposition reuses
+    // machinery instead of adding a second execution path. Gated because it is
+    // the one tool that lets a worker generate work for the whole instance.
+    //
+    // `launch_workflow` is behind the same switch and not a second one, because
+    // it is the same capability: both make cards the whole instance will then
+    // execute, both are bounded by the same fan-out and depth caps, and an
+    // operator who has turned off "this worker may generate work" has not asked
+    // a question that a second flag would answer differently. A separate switch
+    // would be one an operator could set to the safe value on one and the unsafe
+    // value on the other while believing they had locked the worker down.
+    if runtime_config.cortex.load().worker_task_create {
+        server = server
+            .tool(TaskCreateTool::for_task_worker(
+                task_store.clone(),
+                agent_id.to_string(),
+                worker_id,
+            ))
+            .tool(LaunchWorkflowTool::for_task_worker(
+                // Same pool as the task store, exactly as `cortex.rs` builds
+                // its `WorkflowStore` and `GateStore`: the workflow tables live
+                // in the instance database, and threading another store through
+                // every construction site to reach them would be ceremony
+                // around a clone.
+                Arc::new(crate::workflows::WorkflowStore::new(
+                    task_store.pool().clone(),
+                )),
+                task_store,
+                agent_id.to_string(),
+                worker_id,
+            ));
+    }
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
         server = server.tool(SecretSetTool::new(store.clone(), agent_id.clone()));
@@ -1125,7 +1170,22 @@ pub fn create_cortex_chat_tool_server(
         .tool(spawn_tool)
         .tool(
             TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "cortex")
-                .with_api_state(api_state),
+                .with_api_state(api_state.clone()),
+        )
+        // The sharpest gap the design doc named: workflows were reusable
+        // procedures that the autonomous path could not reuse, so an agent
+        // deciding "this needs the full release process" re-derived the steps
+        // by hand. Not depth-bounded here and it does not need to be — this
+        // construction is not part of a filing chain, so it is a root.
+        .tool(
+            LaunchWorkflowTool::new(
+                Arc::new(crate::workflows::WorkflowStore::new(
+                    task_store.pool().clone(),
+                )),
+                task_store.clone(),
+                agent_id.to_string(),
+            )
+            .with_api_state(api_state),
         )
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
@@ -1569,6 +1629,45 @@ mod tests {
         assert!(!output.waiting_for_input);
         assert_eq!(output.exit_code, 0);
         assert!(output.stdout.contains("quiet-done"));
+    }
+
+    /// A worker that times out has its whole future dropped mid-command. The
+    /// subprocess must go with it — an orphan keeps burning CPU, keeps writing
+    /// to the workspace, and reports to nobody.
+    #[tokio::test]
+    async fn a_dropped_shell_call_reaps_its_subprocess() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace.clone(), sandbox);
+        let marker = workspace.join("survived");
+
+        let args = shell::ShellArgs {
+            command: format!("sleep 2; touch {}", marker.display()),
+            working_dir: None,
+            env: Vec::new(),
+            timeout_seconds: 30,
+        };
+
+        // Abandon the call the way a worker timeout does: drop the future.
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            rig::tool::Tool::call(&tool, args),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the command should still be running");
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "the subprocess outlived the future that owned it"
+        );
     }
 
     #[test]

@@ -21,6 +21,31 @@ pub enum NotificationKind {
     TaskApproval,
     WorkerFailed,
     CortexObservation,
+    /// A workflow run stopped without finishing — `stuck` or `failed`.
+    ///
+    /// Its own kind rather than a reuse of `worker_failed`, which is about one
+    /// process dying and is answered by looking at that process. A stopped run
+    /// is a pipeline that will not continue on its own; the thing to look at is
+    /// the run, the recovery is usually a template or a limit, and filtering
+    /// the inbox for one must not drag in the other.
+    WorkflowRunStopped,
+    /// A workflow schedule switched itself off after a refused fire.
+    ///
+    /// Its own kind rather than a reuse of `workflow_run_stopped`, because no
+    /// run exists to look at: the launch never happened. The thing to open is
+    /// the schedule, the recovery is a template or a stored input plus turning
+    /// it back on, and an inbox filter for stopped runs must not drag in
+    /// schedules that never started one.
+    WorkflowScheduleDisabled,
+    /// A decision step is waiting for a person to answer it.
+    ///
+    /// Its own kind rather than a reuse of `task_approval`, which asks whether a
+    /// task should *run*. This asks a question whose answer the pipeline then
+    /// uses, and the two are answered in different places and mean different
+    /// things if ignored: an unapproved task never starts, an unanswered
+    /// decision holds a run that has already done its work. Filtering an inbox
+    /// for one must not drag in the other.
+    DecisionRequested,
 }
 
 impl NotificationKind {
@@ -29,6 +54,9 @@ impl NotificationKind {
             NotificationKind::TaskApproval => "task_approval",
             NotificationKind::WorkerFailed => "worker_failed",
             NotificationKind::CortexObservation => "cortex_observation",
+            NotificationKind::WorkflowRunStopped => "workflow_run_stopped",
+            NotificationKind::WorkflowScheduleDisabled => "workflow_schedule_disabled",
+            NotificationKind::DecisionRequested => "decision_requested",
         }
     }
 }

@@ -1,4 +1,5 @@
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
+import {Link} from "@tanstack/react-router";
 import {
 	DialogRoot,
 	DialogContent,
@@ -9,7 +10,7 @@ import {
 	Button,
 } from "@spacedrive/primitives";
 import {TaskDetail} from "@spacedrive/ai";
-import {CheckCircle, XCircle, WarningCircle} from "@phosphor-icons/react";
+import {CheckCircle, XCircle, Warning, WarningCircle} from "@phosphor-icons/react";
 import {api, type NotificationItem, type NotificationKind} from "@/api/client";
 import {NOTIFICATIONS_QUERY_KEY} from "@/hooks/useNotifications";
 
@@ -22,6 +23,10 @@ const KIND_CONFIG: Record<NotificationKind, {icon: React.ElementType; iconClass:
 	task_approval: {icon: CheckCircle, iconClass: "text-status-warning", label: "Approval"},
 	worker_failed: {icon: XCircle, iconClass: "text-status-error", label: "Failed"},
 	cortex_observation: {icon: WarningCircle, iconClass: "text-status-warning", label: "Alert"},
+	// A stopped pipeline, not a dead process and not an agent's remark — the two
+	// kinds it would otherwise be read as. The triangle is the one shape no other
+	// kind here uses, and the footer gains a way to reach the run it names.
+	workflow_run_stopped: {icon: Warning, iconClass: "text-status-warning", label: "Run stopped"},
 };
 
 function timeAgo(isoString: string): string {
@@ -87,6 +92,15 @@ export function ApprovalModal({notification, onClose}: ApprovalModalProps) {
 
 	const isTaskApproval = kind === "task_approval" && taskNumber !== null;
 
+	// The run this notification is about, when there is one. Read from the
+	// `related_entity_*` pair the server sets rather than by parsing `action_url`,
+	// so a route rename is a compile error here instead of a dead link.
+	const stoppedRunId =
+		kind === "workflow_run_stopped" &&
+		notification?.related_entity_type === "workflow_run"
+			? (notification.related_entity_id ?? null)
+			: null;
+
 	return (
 		<DialogRoot open={open} onOpenChange={(v) => {if (!v) onClose();}}>
 			<DialogContent className="!flex max-h-[80vh] w-full max-w-xl !flex-col !gap-0 overflow-hidden !p-0">
@@ -122,6 +136,24 @@ export function ApprovalModal({notification, onClose}: ApprovalModalProps) {
 								<span className="text-xs text-ink-dull">Task not found</span>
 							</div>
 						)
+					) : stoppedRunId ? (
+						// The reason, set apart rather than run in as body text. It names
+						// the task and the hold — blocked for a person, a gate that can no
+						// longer open, a placeholder that will never expand, inputs that
+						// will never resolve — and it is the only thing here that says what
+						// to do next.
+						<div className="px-5 py-4">
+							<p className="mb-1 text-xs font-medium uppercase tracking-wide text-ink-dull">
+								Why it stopped
+							</p>
+							<p className="whitespace-pre-wrap rounded border border-status-warning/40 bg-status-warning/5 px-3 py-2 text-sm text-status-warning">
+								{notification?.body ?? "No reason was recorded."}
+							</p>
+							<p className="mt-3 text-xs text-ink-faint">
+								This run is not going to continue on its own. Open it to see
+								where it stopped, and to cancel or delete it.
+							</p>
+						</div>
 					) : (
 						<div className="px-5 py-4">
 							{notification?.body ? (
@@ -153,6 +185,17 @@ export function ApprovalModal({notification, onClose}: ApprovalModalProps) {
 							>
 								{approveMutation.isPending ? "Approving…" : "Approve"}
 							</Button>
+						)}
+						{stoppedRunId && (
+							<Link
+								to="/workflow-runs/$runId"
+								params={{runId: stoppedRunId}}
+								onClick={onClose}
+							>
+								<Button variant="accent" size="sm">
+									Open run
+								</Button>
+							</Link>
 						)}
 					</div>
 				</DialogFooter>

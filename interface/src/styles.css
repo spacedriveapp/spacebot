@@ -184,6 +184,70 @@ body {
 	opacity: 0 !important;
 }
 
+/* React Flow puts `light` (or `dark`) on its own root element, and
+   `@spacedrive/tokens` defines the light theme as `.light { --color-*: … }`.
+   The two collide: every token inside a React Flow canvas resolves to the
+   light palette regardless of the theme the app is actually wearing, which is
+   why an unpatched canvas renders as a white rectangle in a dark window.
+
+   Re-declaring the tokens the canvas uses as `inherit` is the fix, and it is
+   the theme-agnostic one — the values come from whichever theme class is on
+   the document, so this keeps working for `light`, `midnight`, `nord` and
+   anything added later. Pinning React Flow to `colorMode="dark"` would only
+   work by accident, because `dark.css` happens to be empty today. */
+.workflow-canvas .react-flow.light,
+.workflow-canvas .react-flow.dark {
+	--color-app: inherit;
+	--color-app-box: inherit;
+	--color-app-dark-box: inherit;
+	--color-app-darker-box: inherit;
+	--color-app-hover: inherit;
+	--color-app-line: inherit;
+	--color-ink: inherit;
+	--color-ink-dull: inherit;
+	--color-ink-faint: inherit;
+	--color-accent: inherit;
+	--color-status-error: inherit;
+	--color-status-warning: inherit;
+	--color-status-success: inherit;
+	--color-status-info: inherit;
+	--color-white: inherit;
+}
+
+/* React Flow, dressed in the app's tokens.
+   Every value here is a documented `--xy-*` variable, so the library's own CSS
+   still does the layout and only the colours change. Scoped to the workflow
+   canvas so the org graph keeps its own look. */
+.workflow-canvas .react-flow {
+	--xy-background-color: var(--color-app);
+	--xy-edge-stroke: var(--color-app-line);
+	--xy-edge-stroke-selected: var(--color-accent);
+	--xy-edge-stroke-width: 1.5;
+	--xy-connectionline-stroke: var(--color-accent);
+	--xy-connectionline-stroke-width: 1.5;
+	--xy-handle-background-color: var(--color-app-box);
+	--xy-handle-border-color: var(--color-ink-faint);
+	--xy-controls-button-background-color: var(--color-app-dark-box);
+	--xy-controls-button-background-color-hover: var(--color-app-hover);
+	--xy-controls-button-color: var(--color-ink-dull);
+	--xy-controls-button-color-hover: var(--color-ink);
+	--xy-controls-button-border-color: var(--color-app-line);
+	--xy-controls-box-shadow: none;
+	--xy-selection-background-color: color-mix(
+		in srgb,
+		var(--color-accent) 12%,
+		transparent
+	);
+	--xy-selection-border: 1px dotted var(--color-accent);
+}
+
+/* The library draws a focus ring on the node wrapper; the node itself already
+   shows selection on its own border, and two rings read as a bug. */
+.workflow-canvas .react-flow__node:focus,
+.workflow-canvas .react-flow__node:focus-visible {
+	outline: none;
+}
+
 /* Override React Flow's default group node styles */
 .react-flow__node-group {
 	background-color: transparent !important;

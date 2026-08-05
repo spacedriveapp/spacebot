@@ -46,7 +46,7 @@ export function ConfigSidebar({
 						>
 							<span className="flex-1">{section.label}</span>
 							{!hasContent && (
-								<span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">
+								<span className="rounded bg-status-warning/10 px-1 py-0.5 text-tiny text-status-warning/70">
 									empty
 								</span>
 							)}

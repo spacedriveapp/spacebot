@@ -12,7 +12,7 @@ use rig::agent::AgentBuilder;
 use rig::completion::CompletionModel;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
@@ -223,6 +223,51 @@ pub enum WorkerState {
 }
 
 /// A worker process that executes tasks independently.
+/// Why a requested worker working directory was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkingDirError {
+    #[error("working directory {} could not be resolved: {source}", .path.display())]
+    Unreadable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("working directory {} is not a directory", .path.display())]
+    NotADirectory { path: PathBuf },
+    #[error(
+        "working directory {} is outside the workspace and every allowed project path",
+        .path.display()
+    )]
+    NotAllowed { path: PathBuf },
+}
+
+/// Canonicalise `dir` and confirm the sandbox permits it as a worker root.
+///
+/// Split out from [`Worker::with_working_dir`] so the security property is
+/// testable without standing up an entire agent.
+pub fn resolve_worker_working_dir(
+    sandbox: &crate::sandbox::Sandbox,
+    dir: &Path,
+) -> std::result::Result<PathBuf, WorkingDirError> {
+    let canonical = dir
+        .canonicalize()
+        .map_err(|source| WorkingDirError::Unreadable {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+
+    if !canonical.is_dir() {
+        return Err(WorkingDirError::NotADirectory { path: canonical });
+    }
+
+    // When the sandbox is off there is no allowlist to consult and no boundary
+    // to bypass, so any readable directory is fair game.
+    if sandbox.mode_enabled() && !sandbox.is_path_allowed(&canonical) {
+        return Err(WorkingDirError::NotAllowed { path: canonical });
+    }
+
+    Ok(canonical)
+}
+
 pub struct Worker {
     pub id: WorkerId,
     pub channel_id: Option<ChannelId>,
@@ -259,6 +304,16 @@ pub struct Worker {
     pub wiki_write: bool,
     /// Model override from conversation settings (per-process or blanket).
     pub model_override: Option<String>,
+    /// Root directory this worker's shell and file tools operate in.
+    ///
+    /// `None` means the agent workspace. A task bound to a repo sets this to
+    /// that repo's checkout so relative paths and bare shell commands land
+    /// there — telling the model to `cd` in the prompt is a suggestion, and a
+    /// worker that ignores it would otherwise write to the wrong tree.
+    ///
+    /// Set only through [`Worker::with_working_dir`], which refuses any path
+    /// the sandbox does not already allow.
+    pub working_dir: Option<PathBuf>,
     /// Wall-clock budget for the entire `run()` invocation. Distinct from
     /// the supervisor's `CortexConfig.worker_timeout_secs` (which is an
     /// idle-kill bound measured from `last_activity_at`). Resolution chain
@@ -336,6 +391,7 @@ impl Worker {
                 worker_memory_mode,
                 wiki_write,
                 model_override,
+                working_dir: None,
                 worker_wall_clock_timeout_secs,
                 segments_run: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 blocked_signal: new_block_signal(),
@@ -379,6 +435,20 @@ impl Worker {
             wiki_write,
             model_override,
         )
+    }
+
+    /// Point this worker's shell and file tools at `dir` instead of the
+    /// agent workspace.
+    ///
+    /// Returns an error unless `dir` is a real directory the sandbox already
+    /// permits. That check is the whole point: the tools treat their root as
+    /// trusted and skip the allowlist for paths under it, so accepting an
+    /// arbitrary root here would turn any caller into a sandbox bypass. The
+    /// caller decides what to do with a rejection — silently falling back to
+    /// the workspace would run the work in the wrong tree.
+    pub fn with_working_dir(mut self, dir: &Path) -> std::result::Result<Self, WorkingDirError> {
+        self.working_dir = Some(resolve_worker_working_dir(&self.deps.sandbox, dir)?);
+        Ok(self)
     }
 
     /// Create a new interactive worker.
@@ -573,7 +643,9 @@ impl Worker {
             self.browser_config.clone(),
             self.screenshot_dir.clone(),
             self.brave_search_key.clone(),
-            self.deps.runtime_config.workspace_dir.clone(),
+            self.working_dir
+                .clone()
+                .unwrap_or_else(|| self.deps.runtime_config.workspace_dir.clone()),
             self.deps.sandbox.clone(),
             mcp_tools,
             self.deps.runtime_config.clone(),
@@ -1530,5 +1602,123 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
         "No significant actions recorded in compacted history.".into()
     } else {
         recap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::{Sandbox, SandboxConfig, SandboxMode};
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+
+    async fn sandbox_with(
+        workspace: &Path,
+        mode: SandboxMode,
+        project_paths: Vec<PathBuf>,
+    ) -> Sandbox {
+        let config = SandboxConfig {
+            mode,
+            project_paths,
+            ..Default::default()
+        };
+        Sandbox::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            workspace.to_path_buf(),
+            workspace,
+            workspace.join("data"),
+            Arc::from("agent-test"),
+        )
+        .await
+    }
+
+    /// The tools treat their root as trusted — the default `working_dir` path
+    /// in the shell tool never consults the allowlist. So a root outside the
+    /// allowlist is a sandbox bypass, and must be refused here.
+    #[tokio::test]
+    async fn working_dir_outside_the_allowlist_is_refused() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let sandbox = sandbox_with(workspace.path(), SandboxMode::Enabled, Vec::new()).await;
+
+        let error = resolve_worker_working_dir(&sandbox, elsewhere.path())
+            .expect_err("a directory outside the workspace must be refused");
+        assert!(
+            matches!(error, WorkingDirError::NotAllowed { .. }),
+            "expected NotAllowed, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn working_dir_inside_a_registered_project_is_allowed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let project = tempfile::tempdir().expect("project");
+        let repo = project.path().join("services/api-gateway");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        // A registered project root puts every repo beneath it in the allowlist,
+        // which is exactly how a task binding reaches its checkout.
+        let sandbox = sandbox_with(
+            workspace.path(),
+            SandboxMode::Enabled,
+            vec![project.path().to_path_buf()],
+        )
+        .await;
+
+        let resolved = resolve_worker_working_dir(&sandbox, &repo)
+            .expect("a repo under a registered project must be allowed");
+        assert_eq!(resolved, repo.canonicalize().expect("canonicalize"));
+    }
+
+    #[tokio::test]
+    async fn working_dir_under_the_workspace_is_allowed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let nested = workspace.path().join("checkout");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        let sandbox = sandbox_with(workspace.path(), SandboxMode::Enabled, Vec::new()).await;
+
+        let resolved =
+            resolve_worker_working_dir(&sandbox, &nested).expect("workspace children are allowed");
+        assert_eq!(resolved, nested.canonicalize().expect("canonicalize"));
+    }
+
+    /// With the sandbox off there is no boundary to bypass, so the check must
+    /// not invent one and break unsandboxed deployments.
+    #[tokio::test]
+    async fn working_dir_is_unrestricted_when_the_sandbox_is_disabled() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let sandbox = sandbox_with(workspace.path(), SandboxMode::Disabled, Vec::new()).await;
+
+        resolve_worker_working_dir(&sandbox, elsewhere.path())
+            .expect("an unsandboxed agent may root a worker anywhere readable");
+    }
+
+    #[tokio::test]
+    async fn working_dir_must_exist() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sandbox = sandbox_with(workspace.path(), SandboxMode::Enabled, Vec::new()).await;
+
+        let error = resolve_worker_working_dir(&sandbox, &workspace.path().join("nope"))
+            .expect_err("a missing directory must be refused");
+        assert!(
+            matches!(error, WorkingDirError::Unreadable { .. }),
+            "expected Unreadable, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn working_dir_must_be_a_directory() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("README.md");
+        std::fs::write(&file, "not a directory").expect("write file");
+        let sandbox = sandbox_with(workspace.path(), SandboxMode::Enabled, Vec::new()).await;
+
+        let error = resolve_worker_working_dir(&sandbox, &file)
+            .expect_err("a file must be refused as a worker root");
+        assert!(
+            matches!(error, WorkingDirError::NotADirectory { .. }),
+            "expected NotADirectory, got {error:?}"
+        );
     }
 }

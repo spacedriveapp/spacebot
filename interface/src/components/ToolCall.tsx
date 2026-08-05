@@ -2,17 +2,15 @@ import {useState} from "react";
 import {cx} from "class-variance-authority";
 import type {OpenCodePart} from "@/api/client";
 import type { TranscriptStep as SchemaTranscriptStep } from "@/api/types";
+import type { components } from "@/api/schema";
 
-// Extended TranscriptStep with live_output for streaming shell output
-type ToolResultStatus = "pending" | "final" | "waiting_for_input";
+type ToolResultStatus = components["schemas"]["ToolResultStatus"];
 
-type ExtendedTranscriptStep = SchemaTranscriptStep & {
-	live_output?: string;
-	status?: ToolResultStatus;
-};
-
-// Use the extended type for pairing
-type TranscriptStep = ExtendedTranscriptStep;
+// `live_output` and `status` used to be declared here as a local augmentation
+// because the generated schema predated the streaming-shell API. The schema now
+// carries both, so the augmentation is gone — keeping it would contradict the
+// generated types (`string | null` vs `string | undefined`) and break assignment.
+type TranscriptStep = SchemaTranscriptStep;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,15 +59,16 @@ export function pairTranscriptSteps(steps: TranscriptStep[]): TranscriptItem[] {
 		{name: string; text: string; status: ToolResultStatus; liveOutput?: string}
 	>();
 
-	// First pass: index all tool_result steps by call_id
+	// First pass: index all tool_result steps by call_id.
+	// `live_output` arrives as `string | null` from the API; normalize the null
+	// away here so downstream consumers only deal with `string | undefined`.
 	for (const step of steps) {
 		if (step.type === "tool_result") {
-			const liveOutput = step.live_output;
 			resultsById.set(step.call_id, {
 				name: step.name,
 				text: step.text,
 				status: step.status ?? "final",
-				liveOutput,
+				liveOutput: step.live_output ?? undefined,
 			});
 		}
 	}
@@ -492,16 +491,16 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">Old</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
+							<p className="text-tiny font-medium text-status-error/70">Old</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-error/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
 						</div>
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">New</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
+							<p className="text-tiny font-medium text-status-success/70">New</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-success/60">
 								{truncate(String(newStr), 500)}
 							</pre>
 						</div>
@@ -668,16 +667,16 @@ const toolRenderers: Record<string, ToolRenderer> = {
 					</p>
 					{!!oldStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-red-400/70">Old</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-red-300/60">
+							<p className="text-tiny font-medium text-status-error/70">Old</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-error/60">
 								{truncate(String(oldStr), 500)}
 							</pre>
 						</div>
 					)}
 					{!!newStr && (
 						<div className="mt-1">
-							<p className="text-tiny font-medium text-emerald-400/70">New</p>
-							<pre className="max-h-20 overflow-auto font-mono text-tiny text-emerald-300/60">
+							<p className="text-tiny font-medium text-status-success/70">New</p>
+							<pre className="max-h-20 overflow-auto font-mono text-tiny text-status-success/60">
 								{truncate(String(newStr), 500)}
 							</pre>
 						</div>
@@ -962,7 +961,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 			{/* Exit code badge for non-zero */}
 			{isError && (
 				<div className="flex items-center gap-1.5 border-b border-app-line/20 px-3 py-1.5">
-					<span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-tiny font-medium text-red-400">
+					<span className="rounded bg-status-error/15 px-1.5 py-0.5 font-mono text-tiny font-medium text-status-error">
 						exit {exitCode}
 					</span>
 				</div>
@@ -982,7 +981,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 						<span
 							className={cx(
 								"text-tiny font-medium",
-								isError ? "text-red-400/70" : "text-yellow-500/70",
+								isError ? "text-status-error/70" : "text-status-warning/70",
 							)}
 						>
 							stderr
@@ -991,7 +990,7 @@ function ShellResultView({pair}: {pair: ToolCallPair}) {
 					<pre
 						className={cx(
 							"max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-tiny",
-							isError ? "text-red-300/60" : "text-yellow-300/50",
+							isError ? "text-status-error/60" : "text-status-warning/50",
 						)}
 					>
 						{stderr.replace(/\n$/, "")}
@@ -1017,7 +1016,7 @@ const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
 	completed: "text-status-success",
 	error: "text-status-error",
-	waiting_for_input: "text-blue-500",
+	waiting_for_input: "text-status-info",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1069,7 +1068,7 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 				pair.status === "error"
 					? "border-status-error/30"
 					: pair.status === "waiting_for_input"
-						? "border-blue-500/30"
+						? "border-status-info/30"
 						: "border-app-line/50",
 			)}
 		>
@@ -1097,7 +1096,7 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
 				)}
 				{pair.status === "waiting_for_input" && !expanded && (
-					<span className="text-tiny text-blue-500">Waiting for input</span>
+					<span className="text-tiny text-status-info">Waiting for input</span>
 				)}
 			</button>
 
@@ -1179,8 +1178,8 @@ function renderResult(
 
 	if (pair.status === "waiting_for_input" && !pair.resultRaw) {
 		return (
-			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-blue-500">
-				<span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+			<div className="flex items-center gap-2 px-3 py-2 text-tiny text-status-info">
+				<span className="h-1.5 w-1.5 rounded-full bg-status-info" />
 				Waiting for input
 			</div>
 		);

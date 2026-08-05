@@ -19,6 +19,7 @@ import {formatTimeAgo} from "@/lib/format";
 import {LiveDuration} from "@/components/LiveDuration";
 import {WorkerDetail, type LiveWorker} from "@/routes/AgentWorkers";
 import {cx} from "class-variance-authority";
+import {copyText} from "@/lib/clipboard";
 
 type Tab = "interactive" | "history";
 
@@ -304,7 +305,7 @@ function WorkerPanelRow({
 					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
 				)}
 				{isIdle && (
-					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+					<span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-status-info" />
 				)}
 				{!isRunning && !isIdle && (
 					<span
@@ -388,7 +389,7 @@ function WorkerDetailInline({
 		};
 	}, [detailData, liveWorker]);
 
-	const [copied, setCopied] = useState(false);
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 	const [cancelling, setCancelling] = useState(false);
 
 	const isActive = !!liveWorker;
@@ -427,9 +428,11 @@ function WorkerDetailInline({
 		}
 		if (detail?.result) lines.push(`\n---\nResult: ${detail.result}`);
 
-		navigator.clipboard.writeText(lines.join("\n")).then(() => {
-			setCopied(true);
-			setTimeout(() => setCopied(false), 2000);
+		// copyText reports whether the copy landed; claiming "copied" on a
+		// refusal would send the operator off with an empty clipboard.
+		void copyText(lines.join("\n")).then((ok) => {
+			setCopyState(ok ? "copied" : "failed");
+			setTimeout(() => setCopyState("idle"), 2000);
 		});
 	}, [detail, liveTranscript]);
 
@@ -454,8 +457,16 @@ function WorkerDetailInline({
 					/>
 				)}
 				<CircleButton
-					icon={copied ? Check : Copy}
-					title="Copy transcript"
+					icon={
+						copyState === "copied" ? Check
+						: copyState === "failed" ? XCircle
+						: Copy
+					}
+					title={
+						copyState === "failed"
+							? "Copy failed — the browser refused it"
+							: "Copy transcript"
+					}
 					onClick={copyTranscript}
 					variant="default"
 				/>

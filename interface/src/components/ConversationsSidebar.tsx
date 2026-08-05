@@ -162,7 +162,7 @@ export function ConversationsSidebar({
 											e.stopPropagation();
 											handleDelete(conv);
 										}}
-										className="rounded p-0.5 text-ink-faint hover:bg-red-500/20 hover:text-red-400"
+										className="rounded p-0.5 text-ink-faint hover:bg-status-error/20 hover:text-status-error"
 										title="Delete"
 									>
 										<svg

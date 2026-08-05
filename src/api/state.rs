@@ -209,6 +209,14 @@ pub struct AgentInfo {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// What this agent declares it can do. Published so the step editor can
+    /// offer the labels that already exist rather than inviting a fleet where
+    /// `rust` and `Rust` are two capabilities and one of them matches nothing.
+    ///
+    /// Always present, empty included: a client that has to distinguish "no
+    /// capabilities" from "this build does not report them" cannot, if the
+    /// field disappears when it is empty.
+    pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gradient_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,6 +265,9 @@ pub struct ApiState {
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
     /// Instance-level global task store shared across all agents.
     pub task_store: ArcSwap<Option<Arc<TaskStore>>>,
+    /// Workflow templates. Shares the instance pool with the task store,
+    /// because launching one writes tasks.
+    pub workflow_store: ArcSwap<Option<Arc<crate::workflows::WorkflowStore>>>,
     /// Instance-wide wiki knowledge base.
     pub wiki_store: ArcSwap<Option<Arc<crate::wiki::WikiStore>>>,
     /// Wake-dispatch sender for dormant-mode agent triggers. Set at startup
@@ -539,6 +550,7 @@ impl ApiState {
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_store: ArcSwap::from_pointee(None),
+            workflow_store: ArcSwap::from_pointee(None),
             wiki_store: ArcSwap::from_pointee(None),
             wake_tx: ArcSwap::from_pointee(None),
             wake_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -1152,6 +1164,11 @@ impl ApiState {
     /// Set the global task store.
     pub fn set_task_store(&self, store: Arc<TaskStore>) {
         self.task_store.store(Arc::new(Some(store)));
+    }
+
+    /// Set the workflow template store.
+    pub fn set_workflow_store(&self, store: Arc<crate::workflows::WorkflowStore>) {
+        self.workflow_store.store(Arc::new(Some(store)));
     }
 
     /// Set the instance-wide wiki store.

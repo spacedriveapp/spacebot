@@ -185,7 +185,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 						structured memories
 					</p>
 					{uploadMutation.isError && (
-						<p className="mt-2 text-xs text-red-400">
+						<p className="mt-2 text-xs text-status-error">
 							Upload failed. Please try again.
 						</p>
 					)}
@@ -213,7 +213,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 				)}
 
 				{error && (
-					<div className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-400">
+					<div className="rounded-xl bg-status-error/10 px-4 py-3 text-sm text-status-error">
 						Failed to load ingestion files
 					</div>
 				)}
@@ -284,7 +284,7 @@ function FileRow({
 					<div className="mt-1.5 flex items-center gap-2">
 						<div className="h-1 flex-1 overflow-hidden rounded-full bg-app-line">
 							<div
-								className="h-full rounded-full bg-blue-400 transition-all duration-500"
+								className="h-full rounded-full bg-accent transition-all duration-500"
 								style={{width: `${progress}%`}}
 							/>
 						</div>

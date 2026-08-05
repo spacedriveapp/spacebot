@@ -1,4 +1,10 @@
 {
   "title": "Configuration",
-  "pages": ["config", "secrets", "sandbox", "permissions"]
+  "pages": [
+    "config",
+    "litellm",
+    "secrets",
+    "sandbox",
+    "permissions"
+  ]
 }

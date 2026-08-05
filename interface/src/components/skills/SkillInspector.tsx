@@ -166,7 +166,7 @@ export function SkillInspector({
 							size="sm"
 							onClick={() => onRemove(selected.skill.name)}
 							disabled={isRemoving && removingName === selected.skill.name}
-							className="w-full text-red-400 hover:text-red-400"
+							className="w-full text-status-error hover:text-status-error"
 						>
 							<Trash className="size-3.5" weight="bold" />
 							{isRemoving && removingName === selected.skill.name

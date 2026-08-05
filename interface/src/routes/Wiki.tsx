@@ -136,7 +136,7 @@ function CreatePageForm({ onCreated, onCancel }: { onCreated: (slug: string) => 
 				</div>
 
 				{createMutation.error && (
-					<p className="text-xs text-red-400">{String(createMutation.error)}</p>
+					<p className="text-xs text-status-error">{String(createMutation.error)}</p>
 				)}
 
 				<div className="flex gap-2">

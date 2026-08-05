@@ -76,7 +76,7 @@ export function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps
 										Brave Search
 									</span>
 									{settings?.brave_search_key && (
-										<span className="text-tiny text-green-400">
+										<span className="text-tiny text-status-success">
 											● Configured
 										</span>
 									)}
@@ -117,8 +117,8 @@ export function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-status-success/20 bg-status-success/10 text-status-success"
+							: "border-status-error/20 bg-status-error/10 text-status-error"
 					}`}
 				>
 					{message.text}

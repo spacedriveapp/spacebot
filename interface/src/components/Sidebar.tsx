@@ -31,6 +31,7 @@ import {
 	TreeStructure,
 	Wrench,
 	CheckSquare,
+	FlowArrow,
 	GearSix,
 	DotsThree,
 	ChatCircleDots,
@@ -40,6 +41,7 @@ import {
 	CalendarDots,
 	SlidersHorizontal,
 	BookBookmark,
+	FolderOpen,
 } from "@phosphor-icons/react";
 import {
 	CircleButton,
@@ -120,7 +122,7 @@ function SortableAgentItem({
 						? "bg-sidebar-selected/40 text-sidebar-ink"
 						: isActive
 							? "text-sidebar-ink"
-							: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+							: "text-sidebar-ink-dull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
 				}`}
 				style={{pointerEvents: isDragging ? "none" : "auto"}}
 				{...attributes}
@@ -153,7 +155,7 @@ function SortableAgentItem({
 								className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm font-medium tracking-wide transition-colors ${
 									subActive
 										? "bg-sidebar-selected/40 text-sidebar-ink"
-										: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+										: "text-sidebar-ink-dull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
 								}`}
 							>
 								<div className="flex size-[22px] shrink-0 items-center justify-center">
@@ -174,6 +176,15 @@ const navItems = [
 	{to: "/", icon: TreeStructure, label: "Org Chart", exact: true},
 	{to: "/workbench", icon: Wrench, label: "Workbench", exact: true},
 	{to: "/tasks", icon: CheckSquare, label: "Tasks", exact: true},
+	// Not `exact`: the editor and the run view live under this section too, and
+	// an exact match would unhighlight the moment you opened a template.
+	{to: "/workflows", icon: FlowArrow, label: "Workflows", exact: false},
+	// In the main nav rather than only in the Projects section below, because
+	// that section is hidden while you have no projects — so the only route to
+	// the page where you create your first one appeared once you already had
+	// one. A fresh instance could not reach it at all, and projects are what
+	// repo and worktree bindings hang off.
+	{to: "/projects", icon: FolderOpen, label: "Projects", exact: false},
 	{to: "/wiki", icon: BookBookmark, label: "Wiki", exact: true},
 ] as const;
 
@@ -331,7 +342,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 							className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm font-medium tracking-wide outline-none ring-inset ring-transparent transition-colors focus:ring-1 focus:ring-accent ${
 								isActive
 									? "bg-sidebar-selected/40 text-sidebar-ink"
-									: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+									: "text-sidebar-ink-dull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
 							}`}
 						>
 							<div className="flex size-[22px] shrink-0 items-center justify-center">
@@ -346,7 +357,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 				{projects.length > 0 && (
 					<section className="mb-4">
 						<div className="mb-2 flex items-center justify-between px-2">
-							<div className="text-sidebar-inkDull text-[11px] font-semibold uppercase tracking-[0.16em]">
+							<div className="text-sidebar-ink-dull text-[11px] font-semibold uppercase tracking-[0.16em]">
 								Projects
 							</div>
 							<Link to="/projects">
@@ -368,7 +379,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 										className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
 											activeProjectId === project.id
 												? "bg-sidebar-selected/40 text-sidebar-ink"
-												: "text-sidebar-inkDull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
+												: "text-sidebar-ink-dull hover:bg-sidebar-selected/20 hover:text-sidebar-ink"
 										}`}
 									>
 										{logoUrl ? (
@@ -413,7 +424,7 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 				{/* Agents section */}
 				<section>
 					<div className="mb-2 flex items-center justify-between px-2">
-						<div className="text-sidebar-inkDull text-[11px] font-semibold uppercase tracking-[0.16em]">
+						<div className="text-sidebar-ink-dull text-[11px] font-semibold uppercase tracking-[0.16em]">
 							Agents
 						</div>
 						{hasProvider && (

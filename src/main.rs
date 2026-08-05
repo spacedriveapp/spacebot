@@ -1565,9 +1565,7 @@ fn has_provider_credentials(
     llm_config: &spacebot::config::LlmConfig,
     instance_dir: &std::path::Path,
 ) -> bool {
-    llm_config.has_any_key()
-        || spacebot::auth::credentials_path(instance_dir).exists()
-        || spacebot::openai_auth::credentials_path(instance_dir).exists()
+    llm_config.has_any_key() || spacebot::auth::credentials_path(instance_dir).exists()
 }
 
 fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::api::AgentInfo> {
@@ -1578,6 +1576,7 @@ fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::ap
             id: agent.id,
             display_name: agent.display_name,
             role: agent.role,
+            capabilities: agent.capabilities,
             gradient_start: agent.gradient_start,
             gradient_end: agent.gradient_end,
             workspace: agent.workspace.to_string_lossy().to_string(),
@@ -1630,6 +1629,32 @@ async fn run(
 
     let global_task_store = Arc::new(spacebot::tasks::TaskStore::new(instance_pool.clone()));
 
+    // Project every agent's declared capabilities into the task database.
+    //
+    // config.toml is the authority for what an agent can do; the scheduler
+    // needs the same facts inside a query, because "may this agent claim that
+    // task" and "can anything in the fleet claim it" are both predicates. Done
+    // on every start rather than only on change, so a config edited by hand
+    // while the daemon was down takes effect — and so a database that drifted
+    // for any reason is corrected by a restart.
+    //
+    // Wholesale per agent, so a capability deleted from the file disappears
+    // here too. Agents deleted from the file are not swept: an agent id that
+    // vanished from config still owns rows nothing else would clean up, and
+    // deleting one through the API already forgets it.
+    for agent in config.resolve_agents() {
+        if let Err(error) = global_task_store
+            .set_agent_capabilities(&agent.id, &agent.capabilities)
+            .await
+        {
+            tracing::error!(
+                %error,
+                agent_id = %agent.id,
+                "failed to record an agent's capabilities — it will claim no pooled work this run"
+            );
+        }
+    }
+
     // Instance-wide wiki knowledge base.
     let global_wiki_store = Arc::new(spacebot::wiki::WikiStore::new(instance_pool.clone()));
 
@@ -1656,8 +1681,16 @@ async fn run(
     );
     api_state.auth_token = config.api.auth_token.clone();
     api_state.set_task_store(global_task_store.clone());
+    api_state.set_workflow_store(Arc::new(spacebot::workflows::WorkflowStore::new(
+        instance_pool.clone(),
+    )));
     api_state.set_wiki_store(global_wiki_store.clone());
     api_state.set_notification_store(global_notification_store.clone());
+    // Wired here with the other instance-level stores rather than after agent
+    // startup: the project store only needs the instance pool, and the dashboard
+    // queries it on first paint. Deferring it left every load 404ing until
+    // agents finished booting — and forever in setup mode, where they never do.
+    api_state.set_project_store(global_project_store.clone());
     let api_state = Arc::new(api_state);
 
     // Keep the secrets API available in setup mode so encrypted stores can be
@@ -1848,6 +1881,7 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            Some(global_task_store.clone()),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -1866,6 +1900,9 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            // Setup mode: agents are not running yet and nothing can claim
+            // anything, so there is no pool to keep in step with.
+            None,
         );
     }
 
@@ -2632,6 +2669,7 @@ async fn run(
                                             new_llm_manager.clone(),
                                             agent_links.clone(),
                                             agent_humans.clone(),
+                                            Some(global_task_store.clone()),
                                         );
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -2987,6 +3025,16 @@ async fn initialize_agents(
             .await,
         );
 
+        // `require_containment` is the fail-closed switch. An operator who sets
+        // it has said that running unconfined is worse than not running, so the
+        // refusal belongs at startup: it happens once, in front of whoever ran
+        // the deploy, before any agent work exists to be run unsafely. Failing
+        // each unit of work instead would scatter the same fact across runtime
+        // logs, which is where it already goes unnoticed today.
+        if let Err(error) = sandbox.verify_required_containment() {
+            anyhow::bail!("agent `{}`: {error}", agent_config.id);
+        }
+
         // Wire the instance-level secrets store into the sandbox for tool secret injection.
         if let Some(secrets_store) = &bootstrapped_store {
             sandbox.set_secrets_store(secrets_store.clone());
@@ -3109,6 +3157,7 @@ async fn initialize_agents(
                 id: agent.config.id.clone(),
                 display_name: agent.config.display_name.clone(),
                 role: agent.config.role.clone(),
+                capabilities: agent.config.capabilities.clone(),
                 gradient_start: agent.config.gradient_start.clone(),
                 gradient_end: agent.config.gradient_end.clone(),
                 workspace: agent.config.workspace.to_string_lossy().to_string(),
@@ -3122,7 +3171,6 @@ async fn initialize_agents(
         api_state.set_agent_configs(agent_configs);
         api_state.set_memory_searches(memory_searches);
         api_state.set_mcp_managers(mcp_managers);
-        api_state.set_project_store(global_project_store.clone());
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_agent_identity_dirs(agent_identity_dirs);

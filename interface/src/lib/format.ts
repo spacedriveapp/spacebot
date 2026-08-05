@@ -27,7 +27,12 @@ export function formatDuration(seconds: number): string {
 	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-export function formatCronSchedule(cronExpr: string | null, intervalSecs: number): string {
+// Nullable server fields arrive as `null`, and an absent optional as
+// `undefined`. Accept both rather than making every caller normalise.
+export function formatCronSchedule(
+	cronExpr: string | null | undefined,
+	intervalSecs: number,
+): string {
 	if (cronExpr) return cronExpr;
 	if (intervalSecs % 86400 === 0) return `every ${intervalSecs / 86400}d`;
 	if (intervalSecs % 3600 === 0) return `every ${intervalSecs / 3600}h`;
@@ -47,15 +52,17 @@ export function platformIcon(platform: string): string {
 	}
 }
 
-export function platformColor(platform: string): string {
-	switch (platform) {
-		case "discord": return "bg-indigo-500/20 text-indigo-400";
-		case "slack": return "bg-green-500/20 text-green-400";
-		case "telegram": return "bg-blue-500/20 text-blue-400";
-		case "twitch": return "bg-purple-500/20 text-purple-400";
-		case "cron": return "bg-amber-500/20 text-amber-400";
-		default: return "bg-gray-500/20 text-gray-400";
-	}
+/**
+ * Platform chips used to be tinted one hue per platform — Discord indigo, Slack
+ * green, Telegram blue, Twitch purple, cron amber. The token palette has no
+ * decorative hues (only `accent`, the `ink`/`app` scales and the four status
+ * colours), and none of these platforms is a status, so tinting them would mean
+ * claiming e.g. Slack is a success and Twitch is an error. Every chip therefore
+ * uses the neutral surface; the chip already spells the platform out in its
+ * label (see `platformIcon`), so only the tint is lost.
+ */
+export function platformColor(_platform: string): string {
+	return "bg-app-box text-ink-dull";
 }
 
 // E.164 Phone Number Validation

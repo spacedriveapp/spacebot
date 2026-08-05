@@ -63,7 +63,7 @@ export function RegistrySkillRow({
 				className={cx(
 					"group shrink-0 rounded-md p-1.5 transition-colors",
 					isInstalled
-						? "text-green-400 hover:text-red-400"
+						? "text-status-success hover:text-status-error"
 						: "text-ink-faint hover:text-accent",
 				)}
 				title={isInstalled ? "Remove" : "Install"}

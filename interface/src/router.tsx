@@ -1,3 +1,4 @@
+import {lazy} from "react";
 import {
 	createRouter,
 	createRootRoute,
@@ -23,6 +24,10 @@ import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {GlobalTasks} from "@/routes/GlobalTasks";
+import {TaskGraphView} from "@/routes/TaskGraphView";
+import {Workflows} from "@/routes/Workflows";
+import {WorkflowDetail} from "@/routes/WorkflowDetail";
+import {WorkflowRunView} from "@/routes/WorkflowRunView";
 import {Wiki} from "@/routes/Wiki";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
@@ -112,10 +117,101 @@ const workbenchRoute = createRoute({
 const tasksRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/tasks",
+	// `?task=<number>` opens a task's drawer directly. The drawer is the task UI
+	// and it was previously reachable only by clicking a row, which left the run
+	// view with nowhere to link a task to.
+	validateSearch: (search: Record<string, unknown>): {task?: number} => {
+		const raw = search.task;
+		const parsed = typeof raw === "string" ? Number(raw) : raw;
+		return typeof parsed === "number" && Number.isInteger(parsed) && parsed > 0
+			? {task: parsed}
+			: {};
+	},
 	component: function TasksPage() {
-		return <GlobalTasks />;
+		const {task} = tasksRoute.useSearch();
+		return <GlobalTasks initialTaskNumber={task} />;
 	},
 });
+
+/**
+ * One task's dependency graph.
+ *
+ * Keyed on the task number rather than on a run or a workflow, because that is
+ * the only identifier that always exists: a graph can outlive the template it
+ * was compiled from, and plenty of graphs were never compiled from one at all.
+ * The number is what the drawer, the run view and every refusal already speak
+ * in, so `/tasks?task=N` and `/tasks/N/graph` are two views of the same thing
+ * and each links to the other.
+ */
+const taskGraphRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/tasks/$taskNumber/graph",
+	component: function TaskGraphPage() {
+		const {taskNumber} = taskGraphRoute.useParams();
+		const parsed = Number(taskNumber);
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			return (
+				<div className="flex flex-1 items-center justify-center">
+					<p className="text-sm text-ink-faint">
+						`{taskNumber}` is not a task number.
+					</p>
+				</div>
+			);
+		}
+		return <TaskGraphView taskNumber={parsed} />;
+	},
+});
+
+const workflowsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflows",
+	component: function WorkflowsPage() {
+		return <Workflows />;
+	},
+});
+
+const workflowDetailRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflows/$workflowId",
+	component: function WorkflowDetailPage() {
+		const {workflowId} = workflowDetailRoute.useParams();
+		return <WorkflowDetail workflowId={workflowId} />;
+	},
+});
+
+// Not nested under the workflow: a run outlives the template it came from, so
+// the URL must not require one that may have been deleted.
+const workflowRunRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/workflow-runs/$runId",
+	component: function WorkflowRunPage() {
+		const {runId} = workflowRunRoute.useParams();
+		return <WorkflowRunView runId={runId} />;
+	},
+});
+
+// Development-only visual harness for task components.
+//
+// Both the route *and* the import live inside the DEV branch, which is the
+// only arrangement that actually keeps the module out of production. Guarding
+// just the route entry leaves a static `import {UiLab}` at the top of this
+// file running unconditionally, and it cannot be tree-shaken because building
+// its fixtures is a top-level side effect — so it executed on every production
+// page load and threw, taking the whole app down with it.
+//
+// Vite folds `import.meta.env.DEV` to `false` when building for production, so
+// this collapses to `[]` and the dynamic import goes with it.
+const devOnlyRoutes = import.meta.env.DEV
+	? [
+			createRoute({
+				getParentRoute: () => rootRoute,
+				path: "/__uilab",
+				component: lazy(() =>
+					import("@/routes/UiLab").then((m) => ({default: m.UiLab})),
+				),
+			}),
+		]
+	: [];
 
 const wikiRoute = createRoute({
 	getParentRoute: () => rootRoute,
@@ -264,6 +360,10 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	workbenchRoute,
 	tasksRoute,
+	taskGraphRoute,
+	workflowsRoute,
+	workflowDetailRoute,
+	workflowRunRoute,
 	wikiRoute,
 	agentRoute,
 	agentChatRoute,
@@ -278,6 +378,7 @@ const routeTree = rootRoute.addChildren([
 	agentCronRoute,
 	agentConfigRoute,
 	channelRoute,
+	...devOnlyRoutes,
 ]);
 
 export const router = createRouter({

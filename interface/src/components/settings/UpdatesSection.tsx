@@ -2,6 +2,7 @@ import {useState} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api, type UpdateStatus} from "@/api/client";
 import {Button} from "@spacedrive/primitives";
+import {copyText} from "@/lib/clipboard";
 
 function formatCheckedAt(checkedAt: string | null): string {
 	if (!checkedAt) return "Never";
@@ -77,18 +78,10 @@ export function UpdatesSection() {
 
 	const handleCopy = async (label: string, content: string) => {
 		try {
-			if (navigator.clipboard?.writeText) {
-				await navigator.clipboard.writeText(content);
-			} else {
-				const textarea = document.createElement("textarea");
-				textarea.value = content;
-				textarea.setAttribute("readonly", "");
-				textarea.style.position = "absolute";
-				textarea.style.left = "-9999px";
-				document.body.appendChild(textarea);
-				textarea.select();
-				document.execCommand("copy");
-				document.body.removeChild(textarea);
+			// `copyText` owns the secure-context fallback that used to be
+			// duplicated here, and reports whether the copy actually landed.
+			if (!(await copyText(content))) {
+				throw new Error("the browser refused the copy");
 			}
 			setCopiedBlock(label);
 			setTimeout(
@@ -239,7 +232,7 @@ export function UpdatesSection() {
 								</p>
 							)}
 							{!data?.can_apply && data?.cannot_apply_reason && (
-								<p className="mt-3 text-xs text-yellow-300">
+								<p className="mt-3 text-xs text-status-warning">
 									{data.cannot_apply_reason}
 								</p>
 							)}
@@ -334,7 +327,7 @@ export function UpdatesSection() {
 					</div>
 
 					{data?.error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-md border border-status-error/20 bg-status-error/10 px-3 py-2 text-sm text-status-error">
 							Update check error: {data.error}
 						</div>
 					)}
@@ -345,8 +338,8 @@ export function UpdatesSection() {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-status-success/20 bg-status-success/10 text-status-success"
+							: "border-status-error/20 bg-status-error/10 text-status-error"
 					}`}
 				>
 					{message.text}

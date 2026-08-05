@@ -58,6 +58,13 @@ check-typegen:
     cargo run --bin openapi-spec > /tmp/spacebot-openapi-check.json
     cd interface && bunx openapi-typescript /tmp/spacebot-openapi-check.json -o /tmp/spacebot-schema-check.d.ts
     diff interface/src/api/schema.d.ts /tmp/spacebot-schema-check.d.ts
+    ./scripts/check-api-types.sh
+
+# Fail if the frontend hand-writes a type the schema already defines. Separate
+# from check-typegen, which only proves schema.d.ts matches the Rust — not that
+# the app actually consumes it.
+check-api-types:
+    ./scripts/check-api-types.sh
 
 typegen-package:
 	cargo run --bin openapi-spec > /tmp/spacebot-openapi-package.json

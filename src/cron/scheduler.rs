@@ -1247,21 +1247,52 @@ fn next_fire_after(
     };
 
     let (timezone, timezone_label) = resolve_cron_timezone(context);
-    let next_utc = if let Some(timezone) = timezone {
-        let after_local = after_utc.with_timezone(&timezone);
-        schedule
-            .after(&after_local)
-            .next()?
-            .with_timezone(&chrono::Utc)
-    } else {
-        let after_local = after_utc.with_timezone(&chrono::Local);
-        schedule
-            .after(&after_local)
-            .next()?
-            .with_timezone(&chrono::Utc)
+    let next_utc = match timezone {
+        Some(timezone) => next_fire_in_zone(&schedule, after_utc, timezone)?,
+        None => next_fire_in_zone(&schedule, after_utc, chrono::Local)?,
     };
 
     Some((next_utc, timezone_label))
+}
+
+/// Evaluate a parsed schedule in one zone and hand the answer back in UTC.
+///
+/// Split out so the wall-clock arithmetic has one definition. The zone matters
+/// and the conversion is easy to get subtly wrong in one of two places.
+fn next_fire_in_zone<Z>(
+    schedule: &Schedule,
+    after_utc: chrono::DateTime<chrono::Utc>,
+    zone: Z,
+) -> Option<chrono::DateTime<chrono::Utc>>
+where
+    Z: chrono::TimeZone,
+    Z::Offset: std::fmt::Display,
+{
+    let after_local = after_utc.with_timezone(&zone);
+    Some(
+        schedule
+            .after(&after_local)
+            .next()?
+            .with_timezone(&chrono::Utc),
+    )
+}
+
+/// Next fire of a 5-field cron expression, evaluated in an explicit zone.
+///
+/// The workflow-schedule sweep's entry into this module, and the reason it is
+/// here rather than reimplemented there: a `0 3 * * *` has to mean the same
+/// thing wherever it is written down, and two parsers with two ideas about
+/// field expansion is how "the same expression" stops being the same
+/// expression. Returns `None` for an expression that will not parse as well as
+/// for one with no future fire — the caller treats both as "cannot schedule
+/// this", because both leave it with no cursor to set.
+pub(crate) fn next_cron_fire(
+    cron_expr: &str,
+    after_utc: chrono::DateTime<chrono::Utc>,
+    zone: Tz,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let schedule = Schedule::from_str(&expand_cron_expr(cron_expr)).ok()?;
+    next_fire_in_zone(&schedule, after_utc, zone)
 }
 
 fn cron_period_secs(context: &CronContext, cron_expr: &str) -> Option<u64> {

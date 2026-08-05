@@ -1,21 +1,21 @@
 ---
 title: Tasks
-description: Task management with structured tracking, cortex pickup, and worker execution.
+description: The instance task board — dependencies, contracts, gates, fan-out, loops, and worker execution.
 ---
 
 # Tasks
 
-A task management system built into every agent. Tasks are spec-driven documents — the description is a full markdown spec that evolves through conversation, with pre-filled subtasks as an execution plan. Each task has a short title, rich description, status, priority, subtasks, and a numeric reference (`#42`). Each agent has its own independent task store backed by its own SQLite database.
+Spacebot is built around an instance-level task board. Every agent on the instance shares one store (a global `tasks.db`), every task carries a globally unique number, and the board is the substrate through which agents delegate work to each other. Each task has a short title, a rich markdown description, status, priority, subtasks, an **owner** agent (who filed it) and an **assignee** agent (who executes it), and a numeric reference (`#42`).
 
 Tasks are not tickets. They're living specs written for workers who have no conversation context. A good task description includes requirements, constraints, file paths, examples, and acceptance criteria. The branch refines the spec as the user clarifies scope, and moves it to `ready` when it's complete. The cortex picks it up and spawns a worker that executes against the spec.
 
-## Creation Paths
+A task can also declare what it waits on (dependencies, gates), what it consumes (input bindings wired to upstream outputs), and what it must produce (an output schema validated at completion). Those declarations are what turn a pile of cards into a graph.
 
-Tasks enter the system three ways:
+## Creation Paths
 
 ### 1. Conversational (via branch tools)
 
-The primary path. A user manages tasks through natural conversation — creating, listing, updating, approving, and closing tasks by talking to the agent. The channel delegates to a branch, and the branch uses `task_create`, `task_list`, and `task_update` tools.
+The primary path. A user manages tasks through natural conversation — the channel delegates to a branch, and the branch uses `task_create`, `task_list`, and `task_update`.
 
 ```
 User: "Create a task to refactor the auth module, high priority"
@@ -23,54 +23,55 @@ User: "Create a task to refactor the auth module, high priority"
     → Branch calls task_create(
         title: "Refactor auth module",
         priority: "high",
-        description: "## Goal\nExtract auth logic from ...\n\n## Requirements\n- ...\n## Constraints\n- ...",
-        subtasks: ["Audit current auth endpoints", "Extract shared middleware", "Update tests", "Verify CI passes"]
+        description: "## Goal\nExtract auth logic from ...",
+        subtasks: ["Audit current auth endpoints", "Extract shared middleware", ...]
       )
     → Branch returns: "Created task #7 with 4 subtasks"
-
-User: "Actually, we also need to migrate the session store to Redis"
-  → Channel branches
-    → Branch calls task_update(task_number: 7, description: "<updated spec with Redis section>")
-    → Branch returns: "Updated #7 — added Redis migration to the spec"
-
-User: "Looks good, run it"
-  → Channel branches
-    → Branch calls task_update(task_number: 7, status: "ready")
-    → Cortex ready-task loop picks it up → Worker executes against the spec → Done
 ```
 
-Tasks created conversationally default to `backlog` status. The branch writes a rich markdown description and pre-fills subtasks as an execution plan. The user refines scope through conversation, and the branch updates the spec accordingly. When the spec is complete, moving to `ready` triggers automatic execution.
+Branch-created tasks land in `pending_approval` and raise a dashboard notification — nothing an agent proposes runs autonomously until a person approves it. Approving moves the task to `ready`, which makes it eligible for automatic execution.
 
-### 2. Cortex promotion (from Todo memories)
+`task_create` can also file structured work in one call: `depends_on` (task numbers that must settle first), `input_bindings` (inputs wired to an upstream task's outputs, or literals), `output_schema` (a JSON Schema the outputs must satisfy), `assigned_agent_id` (delegate to another agent), and `project_id` / `repo_id` / `worktree_id` (scope the task to a codebase).
 
-The cortex bridges the gap between quick captures and structured work. A cortex loop scans recent `Todo` memories, evaluates whether they're actionable, and promotes them to tasks in `pending_approval` status. The human reviews and approves before execution begins.
+### 2. Worker-filed cards
 
-```
-Branch saves a Todo memory during conversation
-  → Cortex evaluates the todo (promotion loop)
-    → Cortex creates a Task in "pending_approval"
-      → Human approves on the kanban board
-        → Cortex ready-task loop picks it up
-          → Worker executes → Done
-```
-
-This path is for things the agent noticed were actionable but the user didn't explicitly ask to track — the cortex catches what falls through the cracks.
+Workers executing a task can file follow-up cards with `task_create` (enabled by `[defaults.cortex] worker_task_create`, default true). A worker's cards skip approval and go straight to `ready` — filing them *is* the decomposition, and approving each one would make the mechanism useless. The safety bound is numeric instead: one task may file at most 10 cards (`MAX_TASKS_FILED_PER_TASK`), and filing chains are capped at 3 hops deep (`MAX_FILING_DEPTH`). Cards a worker files are reported at completion via `task_complete`'s `created_tasks` and verified server-side.
 
 ### 3. UI / API
 
-Tasks can be created directly from the kanban board UI or via the REST API. These default to `backlog` status with `created_by: "human"`.
+Tasks can be created directly from the board UI or via the REST API (`POST /api/tasks`), with `created_by: "human"`. The default status is `pending_approval`; pass `status` to file straight into `backlog` or `ready`.
 
-## Status (Kanban Columns)
+### 4. Workflows
 
-Five columns on the board:
+A workflow launch compiles a template into a set of tasks wired with edges, bindings, and gates. See [Workflows](#workflows) below.
+
+## Status
+
+Seven statuses:
 
 | Status | Description |
 |--------|-------------|
-| `pending_approval` | Created by cortex, awaiting human sign-off |
-| `backlog` | Captured but not ready for work. Default for conversational and UI-created tasks |
-| `ready` | Approved and waiting for the cortex to pick up |
+| `pending_approval` | Proposed by an agent, awaiting human sign-off. Default for branch- and API-created tasks |
+| `backlog` | Captured but not eligible to run — either not promoted yet, or waiting on unsettled dependencies |
+| `ready` | Eligible for the cortex to claim |
 | `in_progress` | A worker is actively executing this task |
+| `blocked` | Stuck and waiting on a human. `block_kind` says why |
 | `done` | Completed |
+| `skipped` | Settled without running, and never will — e.g. a fan-out or gate branch that was ruled out. Terminal by design |
+
+A task waiting on its dependencies lives in `backlog`, not `blocked` — `blocked` is reserved for "what needs a person?", which is the only question the board exists to answer.
+
+### Block Kinds
+
+When a task is parked in `blocked`, `block_kind` records why, because the kinds recover differently:
+
+| Kind | Recovery |
+|------|----------|
+| `dependency` | Waiting on an upstream task. Clears itself via the ready sweep |
+| `transient` | Flaky failure or provider outage. Retried under the failure budget |
+| `needs_input` | Something only a person can repair. Sticky — an explicit unblock releases it |
+| `capability` | The agent lacks a tool, credential, or permission. Sticky |
+| `awaiting_decision` | A decision step asked a question and is waiting for a person's answer. The pipeline working as designed, not a fault |
 
 ### Status Transitions
 
@@ -79,14 +80,15 @@ Transitions are validated. You can't skip steps or go backwards (except to `back
 ```
 pending_approval → ready         (approval)
 pending_approval → backlog       (shelve)
-backlog → ready                  (manual promotion)
-ready → in_progress              (cortex pickup)
-in_progress → done               (worker success)
-in_progress → ready              (worker failure, re-queued)
+backlog → ready                  (manual promotion, or the sweep settling dependencies)
+ready → in_progress              (cortex claim)
+in_progress → done               (worker success via task_complete)
+in_progress → ready              (worker failure, re-queued under the failure budget)
+in_progress → blocked            (failure budget exhausted, or a sticky park)
 done → backlog                   (reopen)
 ```
 
-Attempting an invalid transition (e.g., `pending_approval → in_progress`, `ready → done`) returns an error.
+Attempting an invalid transition returns an error. `skipped` is terminal — a task that could come back would make "settled" mean nothing to the dependency rule below it.
 
 ## Priority
 
@@ -96,41 +98,107 @@ Four levels, ordered by urgency:
 critical > high > medium > low
 ```
 
-Default: `medium`. The cortex ready-task loop respects priority — a critical task is picked up before a low-priority one, regardless of creation order.
+Default: `medium`. The cortex claims the highest-priority eligible task first, regardless of creation order.
+
+## Dependencies
+
+`depends_on` creates an edge from this task to the tasks it waits on. A task with unsettled parents is not eligible: it sits in `backlog` (or `blocked` with `block_kind: dependency`), and the ready sweep promotes it once every parent is `done` or `skipped`. `done` and `skipped` are the two settled statuses — a parent that was ruled out still releases its children.
+
+Edges can also be managed after creation via the API (`POST/DELETE /api/tasks/{n}/dependencies`).
+
+## Contracts: Input and Output Schemas
+
+A task can carry two JSON Schemas:
+
+- `input_schema` — the task's resolved inputs must satisfy it before the task runs.
+- `output_schema` — the task's outputs must validate against it at completion. A worker completes its task by calling `task_complete` with a human-readable `summary` and machine-readable `outputs`; the outputs are validated against the schema before the task settles.
+
+Validated outputs are what downstream tasks read from. They are stored on the task (`outputs`) and remain readable after upstream changes.
+
+## Input Bindings
+
+An input binding says where one of a task's inputs comes from:
+
+- **Direct** — a pointer into an upstream task's outputs: `{ input_key, source_task_number, source_pointer }`, where `source_pointer` is an RFC 6901 JSON Pointer like `/image/tag`.
+- **Literal** — a fixed JSON value.
+- **Fan-in** — collect one field from every branch of a fan-out, keyed by branch.
+
+At claim time the bindings are resolved and the result is persisted on the task (`inputs`), so the value the worker actually saw survives a crash. Bindings are embedded into the claiming worker's prompt.
+
+## Gates
+
+A dependency edge says "wait for that task". A gate says "wait for that *fact*" — CI is green, the branch merged, an upstream task returned a particular value. A task with an unsatisfied gate is not promotable, exactly as a task with an unfinished parent is not.
+
+Two kinds:
+
+| Kind | What it waits on |
+|------|------------------|
+| `http` | Poll a URL; assert on the response status (`expect_status`) and/or a JSON Pointer into the body (`pointer`, optionally with `equals`). Covers GitHub, GitLab, Buildkite, Jenkins without vendor SDKs. Optional `headers` for authentication |
+| `task_output` | Read an upstream task's stored outputs and compare at a JSON Pointer. This is also where conditional steps live — "run the rollback only if deploy reported failure" |
+
+Gates are polled by the instance on an interval (`poll_interval_secs`, minimum 15 seconds) with a 10-second per-evaluation timeout. Every evaluation lands in one of five results:
+
+| Result | Meaning |
+|--------|---------|
+| `pending` | Not true yet. May become true on its own; keep polling |
+| `satisfied` | True. Latched — never re-evaluated |
+| `failed` | Definitively false. Polling will not fix it; a person must |
+| `erroring` | We could not tell — the endpoint was unreachable or the assertion malformed. Our problem, not the graph's |
+| `routed` | The condition did not hold, and this gate *routes* rather than waits — the task it guarded is settled as `skipped` |
+
+An erroring gate backs off (up to 15 minutes between polls) and gives up after 5 consecutive errors (`GATE_ERROR_LIMIT`) — an unreachable endpoint becomes visible instead of silently expensive.
+
+A gate's **disposition** decides what a false answer means: `wait` ("is CI green yet?" — keep polling) or `route` ("should this branch run?" — settle the task as `skipped`). Waiting forever is correct for the first and a deadlock for the second.
+
+## Fan-out
+
+A fan-out runs one task per item of a collection an upstream task produced. In a workflow, a step sets `for_each_step_key` plus a `for_each_pointer` selecting an array in that step's outputs; an optional `for_each_key` pointer labels each branch.
+
+At launch the step compiles to a **placeholder** task that carries the edges its branches will inherit. When the source task completes, the placeholder expands into one branch task per item, each with its item bound to the `item` input key, and is deleted. A fan-in binding downstream collects one field from every branch, keyed by branch name.
+
+Fan-out width is bounded: one fan-out may emit at most 50 branches (`MAX_FAN_OUT_BRANCHES`). A fan-out that would exceed the cap is refused outright rather than truncated — a truncated fan-out feeding a fan-in would report part of the collection as the whole of it.
+
+## Loops
+
+A loop is one or more workflow steps sharing a `loop_group`. The body runs, an exit predicate (`loop_until`, expressed as the same object a `task_output` gate takes: `{"pointer": "/tests/passed", "equals": true}`) is evaluated against the body's exit-point outputs, and the body either turns over for another pass or the loop settles.
+
+Iterations are bounded: `loop_max_iterations` per template (default 3, `DEFAULT_LOOP_MAX_ITERATIONS`), never more than 25 (`MAX_LOOP_ITERATIONS`). A task retried under the failure budget keeps its iteration — retrying is not looping.
+
+## Workflows
+
+A workflow is a reusable pipeline definition stored on the instance. Launching one compiles its steps into real tasks on the board — from that point on, the ordinary machinery (ready sweep, claim, failure budget, gates) runs them.
+
+Each step has a stable `step_key` and a kind:
+
+| Kind | What it is |
+|------|-----------|
+| `agent` | One task, claimed by a worker with a full tool loop |
+| `command` | A process, an exit code, and its output — a deterministic check, so downstream loop and branch predicates read a trustworthy value. Requires `command` and `command_timeout_secs`; optional `expect_exit_code` |
+| `decision` | A question put to a person, whose answer is the step's whole output. The run parks in `blocked` with `block_kind: awaiting_decision` until someone answers. Optional timeout behavior (`decision_timeout_action`: wait, fail, or apply a validated default) |
+
+Steps are wired with edges (dependencies), input bindings, and gates — the same concepts as ad-hoc tasks, declared on the template. Steps can fan out (`for_each_step_key`) and loop (`loop_group`). A step can also declare `worktree_mode` to run in its own git checkout: `per_run` (one worktree for the step, created at launch) or `per_branch` (one per fan-out branch). Dirty worktrees are never deleted by the reaper.
+
+A run can be started three ways, and all three just call launch:
+
+- **Manually** — the UI, the API (`POST /api/workflows/{id}/run`), or the `launch_workflow` LLM tool
+- **Schedule** — a stored cron expression (evaluated in UTC) firing the launch
+- **Webhook** — an inbound POST authenticated with a shared secret header (`x-spacebot-webhook-secret`), with a stored payload mapping
+
+Run history is inspectable per workflow (`GET /api/workflows/{id}/runs`, `GET /api/workflow-runs/{run_id}`), and a running run can be cancelled.
 
 ## Subtasks
 
-Simple checklist items stored as a JSON array. One level deep, no nesting.
-
-```json
-[
-  {"title": "Research existing API endpoints", "completed": false},
-  {"title": "Draft schema changes", "completed": true},
-  {"title": "Implement migration", "completed": false}
-]
-```
-
-Subtasks are included in the worker's prompt as an execution plan. Workers can mark subtasks complete via the `task_update` tool as they progress.
+Simple checklist items stored as a JSON array. One level deep, no nesting. Subtasks are included in the worker's prompt as an execution plan, and workers can mark them complete via `task_update` as they progress.
 
 ## Metadata
 
-Arbitrary key-value pairs stored as a JSON object. Used for linking to external resources.
-
-```json
-{
-  "github_issue": "https://github.com/org/repo/issues/123",
-  "estimated_effort": "small",
-  "worker_type": "opencode",
-  "skill": "rust-dev",
-  "notes": "Depends on the auth refactor landing first"
-}
-```
-
-No enforced schema. The UI renders known keys with special formatting (e.g., GitHub links become clickable) and displays unknown keys as plain key-value pairs.
+Arbitrary key-value pairs stored as a JSON object. Used for linking to external resources (GitHub issues, PRs). No enforced schema; the UI renders known keys with special formatting.
 
 ## Task Numbering
 
-Per-agent, monotonically increasing. The next number is `MAX(task_number) + 1` within the agent's task table. Tasks are referenced as `#1`, `#42`, etc. Numbers are never reused — deleting task `#5` doesn't free up the number.
+Instance-wide and monotonically increasing, allocated from a sequence — tasks are referenced as `#1`, `#42`, etc., and the same number means the same task to every agent on the instance. Numbers are never reused.
+
+Older installs kept per-agent task stores; on first boot after upgrade, a one-time idempotent migration moves every per-agent task into the global store with new globally unique numbers (the original number is preserved in metadata as `legacy_task_number`).
 
 ## Execution
 
@@ -138,20 +206,24 @@ Per-agent, monotonically increasing. The next number is `MAX(task_number) + 1` w
 
 The primary execution path. A background loop runs every `cortex.tick_interval_secs` (default 30 seconds):
 
-1. **Claim** — Atomically finds the oldest `ready` task with the highest priority and moves it to `in_progress`
-2. **Build prompt** — Renders the worker system prompt with the task title, description, and subtask checklist
-3. **Spawn worker** — Creates a new worker with full tool access (shell, file, exec, browser)
-4. **Bind** — Sets `worker_id` on the task, linking it to the executing worker
-5. **Execute** — The worker runs its loop, using subtasks as an execution plan
-6. **Complete** — On success, the task moves to `done` with `completed_at` set. On failure, the task moves back to `ready` with `worker_id` cleared, so it gets re-queued for another attempt
+1. **Claim** — Atomically finds the highest-priority eligible `ready` task assigned to its agent and moves it to `in_progress` (a conditional `UPDATE`, so two agents racing the same task can't both win it)
+2. **Resolve inputs** — Evaluates the task's input bindings and persists the resolved values
+3. **Build prompt** — Renders the worker system prompt with the task title, description, subtask checklist, and resolved inputs
+4. **Spawn worker** — Creates a worker with tool access, scoped to the task's project/repo/worktree when set
+5. **Bind** — Sets `worker_id` on the task, linking it to the executing worker
+6. **Complete** — The worker calls `task_complete` with a summary and outputs; outputs are validated against `output_schema` and stored
 
-Worker success/failure is determined by whether `worker.run()` returns `Ok` or `Err`. The cortex doesn't evaluate the quality of the work — a worker that completes without errors is considered successful.
+### Failure Budget
+
+On failure the task is re-queued to `ready` while it has budget left. The default budget is 2 consecutive failures (`DEFAULT_FAILURE_LIMIT`); a task can override it with `max_retries` (a failure limit, not a retry count — `max_retries = 1` allows one attempt and zero retries). When the budget is exhausted the task parks in `blocked` with `block_kind: transient`, carrying `last_error` so the board can show why without joining run history. An operator-initiated retry resets the counter.
+
+### Pooled Tasks and Capabilities
+
+A task normally names its assignee. Setting `required_capabilities` instead makes it *pooled*: any agent declaring all of those labels may claim it, and claiming stamps `assigned_agent_id` from that moment on.
 
 ### API Execute Endpoint
 
-The `/api/agents/tasks/:number/execute` endpoint moves a task to `ready` (if it's in `backlog` or `pending_approval`), letting the cortex loop pick it up. Tasks already in `ready` or `in_progress` are returned as-is.
-
-This means execution always flows through the cortex — the API doesn't spawn workers directly.
+The `POST /api/tasks/{n}/execute` endpoint moves a task to `ready` so the cortex loop picks it up. Tasks already `ready` or `in_progress` are returned as-is; `pending_approval` tasks are rejected — they must be approved first. Execution always flows through the cortex — the API doesn't spawn workers directly.
 
 ### Worker Scope
 
@@ -160,29 +232,19 @@ Workers executing a task get a restricted version of the `task_update` tool. The
 - Update subtasks (mark complete, replace the checklist)
 - Update metadata
 
-They cannot change the task's status, priority, title, description, or worker binding. These fields are managed by the cortex and the API. This prevents a worker from marking its own task as `done` — only the cortex does that based on whether the worker succeeded or failed.
+They cannot change the task's status, priority, title, description, or worker binding. A worker settles its own task exclusively through `task_complete`, whose outputs are validated against the task's output schema.
 
 ## Bulletin Integration
 
-Active tasks (non-done) are included in the cortex memory bulletin under an "Active Tasks" section. Each task is listed with its number, status, priority, title, and subtask progress:
-
-```
-### Active Tasks
-
-- #3 [in_progress] (high) Implement auth refactor [2/5]
-- #7 [ready] (medium) Update deployment docs
-- #12 [backlog] (low) Clean up unused dependencies
-```
-
-This gives every channel and branch awareness of the agent's current task board without querying the task store directly.
+Active (non-settled) tasks are included in the cortex memory bulletin under an "Active Tasks" section, with number, status, priority, title, and subtask progress. This gives every channel and branch awareness of the instance's task board without querying the store directly.
 
 ## LLM Tools
 
-Three tools available to branches and cortex chat sessions:
+Four task tools:
 
 ### task_create
 
-Creates a new task.
+Creates a new task. Available to branches, cortex chat, and (optionally, via `[defaults.cortex] worker_task_create`, default true) workers.
 
 | Argument | Type | Required | Default |
 |----------|------|----------|---------|
@@ -191,7 +253,13 @@ Creates a new task.
 | `priority` | string | no | `"medium"` |
 | `subtasks` | string[] | no | `[]` |
 | `metadata` | object | no | `{}` |
-| `status` | string | no | `"backlog"` |
+| `project_id` | string | no | - |
+| `repo_id` | string | no | - |
+| `worktree_id` | string | no | - |
+| `depends_on` | integer[] | no | `[]` |
+| `assigned_agent_id` | string | no | filing agent |
+| `output_schema` | object | no | - |
+| `input_bindings` | object[] | no | `[]` |
 
 Returns the created task number and status.
 
@@ -220,130 +288,91 @@ Updates an existing task. Available to branches (unrestricted) and workers (rest
 | `metadata` | object | no | Merged with existing |
 | `complete_subtask` | integer | no | Index to mark complete |
 
-## API Endpoints
+### task_complete
 
-All endpoints require `agent_id` as a query parameter or in the request body.
+Settles the calling worker's task as `done`. Worker-scope only.
+
+| Argument | Type | Required | Notes |
+|----------|------|----------|-------|
+| `task_number` | integer | yes | The task being settled |
+| `summary` | string | yes | Human-readable account of what was done |
+| `outputs` | object | yes | Machine-readable result, validated against the task's `output_schema` |
+| `created_tasks` | integer[] | no | Tasks filed while working — verified server-side |
+
+## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/agents/tasks` | List tasks (filterable by status, priority) |
-| `GET` | `/api/agents/tasks/:number` | Get single task by number |
-| `POST` | `/api/agents/tasks` | Create task |
-| `PUT` | `/api/agents/tasks/:number` | Update task |
-| `DELETE` | `/api/agents/tasks/:number` | Delete task |
-| `POST` | `/api/agents/tasks/:number/approve` | Approve (moves to `ready`) |
-| `POST` | `/api/agents/tasks/:number/execute` | Execute (moves to `ready` for cortex pickup) |
+| `GET` | `/api/tasks` | List tasks (filterable by status, priority, agent) |
+| `GET` | `/api/tasks/{n}` | Get single task |
+| `GET` | `/api/tasks/transitions` | List valid status transitions |
+| `POST` | `/api/tasks` | Create task |
+| `PUT` | `/api/tasks/{n}` | Update task |
+| `DELETE` | `/api/tasks/{n}` | Delete task |
+| `POST` | `/api/tasks/{n}/approve` | Approve (moves to `ready`) |
+| `POST` | `/api/tasks/{n}/execute` | Execute (moves to `ready` for cortex pickup) |
+| `POST` | `/api/tasks/{n}/retry` | Retry (resets the failure counter, re-queues) |
+| `POST` | `/api/tasks/{n}/assign` | Reassign to another agent |
+| `POST` | `/api/tasks/{n}/block` | Park with a `block_kind` and reason |
+| `POST` | `/api/tasks/{n}/unblock` | Release a sticky block |
+| `POST` | `/api/tasks/{n}/decision` | Answer a decision step's question |
+| `GET` | `/api/tasks/{n}/runs` | Attempt history for the task |
+| `GET/POST` | `/api/tasks/{n}/dependencies` | List / add dependency edges |
+| `DELETE` | `/api/tasks/{n}/dependencies/{parent}` | Remove a dependency edge |
+| `GET/PUT` | `/api/tasks/{n}/contract` | Read / set input and output schemas |
+| `PUT/DELETE` | `/api/tasks/{n}/bindings/{key}` | Set / remove an input binding |
+| `GET` | `/api/tasks/{n}/provenance` | Where this task's inputs came from |
+| `GET/POST` | `/api/tasks/{n}/gates` | List / create gates |
+| `DELETE` | `/api/tasks/{n}/gates/{gate_id}` | Remove a gate |
+| `GET` | `/api/tasks/{n}/graph` | The dependency graph centred on this task |
+
+Workflow endpoints live under `/api/workflows` and `/api/workflow-runs` — CRUD for templates and their steps/edges/bindings/gates, plus `run`, `runs`, and `cancel`.
 
 ### SSE Events
 
-Task state changes emit `task_updated` SSE events to connected clients:
-
-```json
-{
-  "type": "task_updated",
-  "agent_id": "main",
-  "task_number": 42,
-  "status": "in_progress",
-  "action": "updated"
-}
-```
-
-The `action` field is one of `"created"`, `"updated"`, or `"deleted"`. The kanban board UI uses these events for real-time updates.
+Task state changes emit `task_updated` SSE events to connected clients, which the board UI uses for real-time updates.
 
 ## Interface
 
-### Task List
-
-The **Tasks** tab renders a Linear-style task list. Each row shows:
-
-- `#N` task number and title
-- Status indicator
-- Priority badge (color-coded: red for critical, amber for high, default for medium, outline for low)
-- Subtask progress (if subtasks exist)
-- GitHub metadata badges (linked issues and PRs, rendered from metadata fields)
-- Worker badge (if a worker is bound)
-- Creation timestamp and author
-
-### Task Detail
-
-Clicking a task opens a detail view with the full markdown description, subtask checklist, metadata, timestamps, and action buttons (Approve, Execute, Mark Done). GitHub issue and PR links in metadata render as clickable badges with status indicators.
-
-### Create Task
-
-The create form has fields for title, description, priority, and initial status. Tasks created from the UI default to `backlog` status and `"human"` as the creator.
-
-### Real-Time Updates
-
-Task state changes are pushed to the UI via SSE events. When a worker completes a task, marks subtasks done, or a status transition occurs, the task list updates immediately without polling.
+The **Tasks** tab renders the board as a list, a kanban, or a dependency graph. The detail view shows the full markdown description, subtask checklist, metadata, dependencies, gates and their latest results, run history, and action buttons (Approve, Execute, Retry, Block/Unblock). Task state changes are pushed to the UI via SSE — no polling.
 
 ## Storage
 
-One SQLite table in the agent's database.
-
-```sql
-CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    task_number INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'backlog',
-    priority TEXT NOT NULL DEFAULT 'medium',
-    subtasks TEXT,                    -- JSON array
-    metadata TEXT,                    -- JSON object
-    source_memory_id TEXT,
-    worker_id TEXT,
-    created_by TEXT NOT NULL,
-    approved_at TIMESTAMP,
-    approved_by TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP,
-    UNIQUE(agent_id, task_number)
-);
-```
-
-Indexes on `agent_id`, `status`, `(agent_id, task_number)`, `source_memory_id`, and `worker_id`.
+One global SQLite database (`data/tasks.db`) shared by every agent on the instance, holding the `tasks` table plus dependency edges, input bindings, gates, run attempts (`task_runs`), workflow templates, and workflow runs.
 
 ## Module Layout
 
 ```
 src/
-├── tasks.rs                → tasks/
-│   └── store.rs            — TaskStore: CRUD, status transitions, claim_next_ready
+├── tasks/
+│   ├── store.rs            — TaskStore: CRUD, transitions, claim, dependencies,
+│   │                         contracts, bindings, fan-out, loops, run history
+│   ├── gates.rs            — gate storage, evaluation, polling, error backoff
+│   └── migration.rs        — one-time per-agent → global store migration
+│
+├── workflows/
+│   ├── store.rs            — WorkflowStore: templates, launch/compile, runs
+│   ├── triggers.rs         — schedules and webhooks firing launches
+│   └── worktrees.rs        — per-run / per-branch checkout lifecycle
 │
 ├── tools/
-│   ├── task_create.rs      — task_create LLM tool (branches + cortex chat)
-│   ├── task_list.rs        — task_list LLM tool (branches + cortex chat)
-│   └── task_update.rs      — task_update LLM tool (branches + workers, scoped)
+│   ├── task_create.rs      — task_create LLM tool
+│   ├── task_list.rs        — task_list LLM tool
+│   ├── task_update.rs      — task_update LLM tool (branches + workers, scoped)
+│   └── task_complete.rs    — task_complete LLM tool (workers)
 │
 ├── api/
-│   └── tasks.rs            — REST endpoints (list, get, create, update, delete,
-│                             approve, execute) with SSE event emission
+│   ├── tasks.rs            — task REST endpoints with SSE event emission
+│   └── workflows.rs        — workflow and run REST endpoints
 │
-├── agent/
-│   └── cortex.rs           — spawn_ready_task_loop, pickup_one_ready_task,
-│                             gather_active_tasks (bulletin integration)
-│
-└── migrations/
-    └── 20260219000001_tasks.sql
+└── agent/
+    └── cortex.rs           — ready sweep, claim, gate polling, run supervision
 ```
 
 ## Prompt Integration
 
 The channel, branch, and cortex chat prompts are all task-aware:
 
-- **Channel prompt** (`channel.md.j2`) — has a dedicated "Task Board" section explaining spec-driven tasks and the kanban board. The Delegation section tells the channel to branch for task management. Active tasks appear in the Memory Context via the bulletin.
-- **Branch prompt** (`branch.md.j2`) — documents all three task tools (`task_create`, `task_list`, `task_update`) with spec-driven guidance. `task_create` emphasizes rich markdown descriptions and pre-filled subtasks. `task_update` is framed as iterative spec refinement. Moving to `ready` triggers cortex auto-pickup.
-- **Cortex chat prompt** (`cortex_chat.md.j2`) — lists task board management as a core capability with spec-driven language. The cortex chat has all three task tools.
-- **Tool descriptions** — each task tool has a description template in `prompts/en/tools/` that reinforces the spec-driven philosophy: `task_create` tells the LLM to write full markdown specs with subtask execution plans, `task_update` tells it to refine specs as scope evolves.
-
-The channel itself has no task tools — it always branches to manage tasks. This keeps the channel responsive and ensures task operations go through a thinking process.
-
-## What's Not Implemented Yet
-
-- **Cortex todo-promotion loop** — the cortex loop that scans `Todo` memories and promotes them to `pending_approval` tasks. The data model and execution path are ready; the promotion evaluation prompt and loop are not yet built.
-- **Activity timeline** — the detail view doesn't show a history of status changes, approvals, and worker events.
-- **Task count badge** — the Tasks tab doesn't show a badge with the pending approval count yet.
-- **Task archival** — done tasks accumulate indefinitely. Options: auto-archive after N days, a separate `archived` status, or UI filtering.
-- **Rejection feedback** — when a human deletes a pending task, that signal isn't fed back to the cortex. Saving it as a memory would help the cortex learn what's not actionable.
+- **Channel prompt** (`channel.md.j2`) — has a dedicated "Task Board" section. The channel itself has no task tools; it always branches to manage tasks.
+- **Branch prompt** (`branch.md.j2`) — documents the task tools with spec-driven guidance: rich markdown descriptions, pre-filled subtask execution plans, iterative spec refinement.
+- **Tool descriptions** — each task tool has a description template in `prompts/en/tools/` reinforcing the spec-driven philosophy.

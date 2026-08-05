@@ -26,6 +26,36 @@ import {
 	GithubMetadataBadges,
 	getGithubReferences,
 } from "@/components/TaskUtils";
+import {BlockedTasksSection} from "@/components/tasks/BlockedTasksSection";
+import {UnclaimablePoolSection} from "@/components/tasks/UnclaimablePoolSection";
+import {UnclaimableBanner} from "@/components/tasks/UnclaimableBanner";
+import {indexEdges} from "@/components/tasks/DependencyBadges";
+import {TaskBoard} from "@/components/tasks/TaskBoard";
+import {
+	TaskViewToggle,
+	useTaskViewMode,
+} from "@/components/tasks/TaskViewToggle";
+import {
+	dependencyRefusal,
+	namedDependencyRefusal,
+} from "@/components/tasks/dependencyGate";
+import {ContractSection} from "@/components/tasks/ContractSection";
+import {toDesignSystemTask} from "@/components/tasks/designSystemTask";
+import {BlockedBanner} from "@/components/tasks/BlockedBanner";
+import {SkippedBanner} from "@/components/tasks/SkippedBanner";
+import {TaskConditionsSection} from "@/components/tasks/TaskConditionsSection";
+import {ProvenanceSection} from "@/components/tasks/ProvenanceSection";
+import {DependencySection} from "@/components/tasks/DependencySection";
+import {StatusMoves} from "@/components/tasks/StatusMoves";
+import {
+	planStatusChange,
+	useTaskTransitions,
+} from "@/components/tasks/taskTransitions";
+import {TaskRunHistory} from "@/components/tasks/TaskRunHistory";
+import {FailureBudgetSection} from "@/components/tasks/FailureBudgetSection";
+import {RepoChip} from "@/components/tasks/RepoChip";
+import {ALL_REPOS, RepoFilter} from "@/components/tasks/RepoFilter";
+import {useBindingNames} from "@/hooks/useBindingNames";
 
 const TASK_LIMIT = 200;
 
@@ -76,7 +106,19 @@ function AgentPicker({
 	);
 }
 
-export function GlobalTasks() {
+export function GlobalTasks({
+	initialTaskNumber,
+}: {
+	/**
+	 * Open this task's drawer once the list has loaded.
+	 *
+	 * The drawer keys off the task's uuid, but every other screen refers to a
+	 * task by its number — that is what the run view shows and what a person
+	 * reads in a refusal — so the link carries the number and it is resolved
+	 * here, where the list that maps one to the other already lives.
+	 */
+	initialTaskNumber?: number;
+} = {}) {
 	const queryClient = useQueryClient();
 	const {taskEventVersion} = useLiveContext();
 
@@ -122,13 +164,75 @@ export function GlobalTasks() {
 
 	const tasks = (data?.tasks ?? []) as unknown as Task[];
 
+	// Edge counts arrive with the list, so badges cost no extra requests.
+	const edgesByTask = useMemo(() => indexEdges(data?.edges), [data?.edges]);
+
+	const {names: bindingNames} = useBindingNames();
+	const [repoFilter, setRepoFilter] = useState<string>(ALL_REPOS);
+
+	const rawTasks = (data?.tasks ?? []) as TaskItem[];
+
+	// Repo ids present on the board, so the filter only lists repos with work.
+	const presentRepoIds = useMemo(() => {
+		const ids = new Set<string>();
+		for (const task of rawTasks) {
+			if (task.repo_id) ids.add(task.repo_id);
+		}
+		return ids;
+	}, [rawTasks]);
+
+	const matchesRepo = useCallback(
+		(task: TaskItem) => repoFilter === ALL_REPOS || task.repo_id === repoFilter,
+		[repoFilter],
+	);
+
+	// `blocked` is not in @spacedrive/ai's TaskStatus union, so those tasks are
+	// split out and rendered by BlockedTasksSection instead. This split is the
+	// list view's problem only — the board owns its own columns and gives
+	// `blocked` a real one, so it takes the unsplit set below.
+	const blockedTasks = useMemo(
+		() => rawTasks.filter((t) => t.status === "blocked" && matchesRepo(t)),
+		[rawTasks, matchesRepo],
+	);
+	const listViewTasks = useMemo(
+		() =>
+			tasks.filter((t) => {
+				const item = t as unknown as TaskItem;
+				return item.status !== "blocked" && matchesRepo(item);
+			}),
+		[tasks, matchesRepo],
+	);
+	const boardTasks = useMemo(
+		() => rawTasks.filter(matchesRepo),
+		[rawTasks, matchesRepo],
+	);
+
+	const [viewMode, setViewMode] = useTaskViewMode();
+
 	const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 	const [collapsedGroups, setCollapsedGroups] = useState<Set<UiTaskStatus>>(
 		() => new Set(),
 	);
+	const [blockedCollapsed, setBlockedCollapsed] = useState(false);
+	// Starts open: it only appears when something is wrong, and a report that
+	// hides itself is the failure it exists to fix.
+	const [unclaimableCollapsed, setUnclaimableCollapsed] = useState(false);
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const activeTask = tasks.find((t) => t.id === activeTaskId);
+
+	// Resolve `?task=<number>` once the list arrives. Guarded by a ref rather
+	// than by `activeTaskId`, so closing the drawer does not immediately have
+	// the deep link reopen it.
+	const linkedTaskResolved = useRef<number | null>(null);
+	useEffect(() => {
+		if (initialTaskNumber == null) return;
+		if (linkedTaskResolved.current === initialTaskNumber) return;
+		const target = rawTasks.find((t) => t.task_number === initialTaskNumber);
+		if (!target) return;
+		linkedTaskResolved.current = initialTaskNumber;
+		setActiveTaskId(target.id);
+	}, [initialTaskNumber, rawTasks]);
 
 	const invalidate = useCallback(
 		() => queryClient.invalidateQueries({queryKey}),
@@ -173,18 +277,169 @@ export function GlobalTasks() {
 		},
 	});
 
-	const handleStatusChange = useCallback(
-		(task: Task, status: UiTaskStatus) => {
-			const t = task as unknown as TaskItem;
-			if (t.status === "pending_approval" && status === "ready") {
-				approveMutation.mutate(t.task_number);
-			} else if (t.status === "backlog" && status === "in_progress") {
-				executeMutation.mutate(t.task_number);
-			} else {
-				updateMutation.mutate({taskNumber: t.task_number, status});
+	const retryMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.retryTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Its own mutation rather than a field on `updateMutation`: the request
+	// body carries `max_retries` and nothing else, so a status move can never
+	// drag a stale budget along with it, and `null` — the value that hands the
+	// task back to the instance default — stays distinguishable from absent.
+	const failureBudgetMutation = useMutation({
+		mutationFn: ({
+			taskNumber,
+			maxRetries,
+		}: {
+			taskNumber: number;
+			maxRetries: number | null;
+		}) => api.updateTask(taskNumber, {max_retries: maxRetries}),
+		onSuccess: () => void invalidate(),
+	});
+
+	// Distinct from retry: retry re-runs the work, unblock says the obstacle a
+	// human was asked about is gone. A missing credential is not fixed by
+	// running the same task again.
+	const unblockMutation = useMutation({
+		mutationFn: (taskNumber: number) => api.unblockTask(taskNumber),
+		onSuccess: () => void invalidate(),
+	});
+
+	// The store's legal moves. TaskList's row menu offers all five statuses it
+	// knows regardless of the one the card is in, so the table is what stops a
+	// doomed request from ever being sent.
+	const transitions = useTaskTransitions();
+	const [moveError, setMoveError] = useState<string | null>(null);
+
+	// A late-arriving refusal must not overwrite a newer one. The enrichment
+	// below is a request, so a second move can land while it is in flight.
+	const moveErrorToken = useRef(0);
+
+	/**
+	 * Replace a count-based refusal with one that names the parents.
+	 *
+	 * `edges` only carries `blocked_by` as a number, so the immediate refusal
+	 * can say "waiting on 2". The numbers live one request away, and "#3 Build
+	 * and publish the api-gateway image" is the difference between a refusal
+	 * someone can act on and one they can only be annoyed by. Shared query key
+	 * with `DependencySection`, so opening the drawer afterwards is free.
+	 */
+	const nameOutstandingParents = useCallback(
+		async (task: TaskItem, status: TaskStatus, token: number) => {
+			try {
+				const dependencies = await queryClient.fetchQuery({
+					queryKey: ["task-dependencies", task.task_number],
+					queryFn: () => api.listTaskDependencies(task.task_number),
+				});
+				const detailed = namedDependencyRefusal(
+					task,
+					status,
+					dependencies,
+					(number) =>
+						rawTasks.find((candidate) => candidate.task_number === number)
+							?.title,
+				);
+				if (detailed && moveErrorToken.current === token) {
+					setMoveError(detailed);
+				}
+			} catch {
+				// The count-based refusal is already on screen and is true. A
+				// failed lookup is not worth replacing it with an error.
 			}
 		},
-		[updateMutation, approveMutation, executeMutation],
+		[queryClient, rawTasks],
+	);
+
+	/**
+	 * Show why a move was turned down, wherever the refusal was decided.
+	 *
+	 * The board turns some moves down itself — it is the only view where the
+	 * target is a place the user pointed at — so this is shared rather than
+	 * being reached only through `handleMove`. Enrichment is attempted for the
+	 * dependency case alone, because it is the only refusal whose full text
+	 * costs a request.
+	 */
+	const refuseMove = useCallback(
+		(task: TaskItem, status: TaskStatus, reason: string) => {
+			const token = ++moveErrorToken.current;
+			setMoveError(reason);
+			if (dependencyRefusal(task, status, edgesByTask.get(task.task_number))) {
+				void nameOutstandingParents(task, status, token);
+			}
+		},
+		[edgesByTask, nameOutstandingParents],
+	);
+
+	const handleMove = useCallback(
+		(task: TaskItem, status: TaskStatus) => {
+			const move = planStatusChange(task, status, transitions);
+			if (move.action === "refuse") {
+				refuseMove(task, status, move.reason);
+				return;
+			}
+
+			// The second check, which nothing in this app made until now: the
+			// transition table says `backlog → ready` is legal and the API
+			// accepts it, but `claim_next_ready` re-checks the dependency
+			// invariant and skips the card, so it sits in Ready forever looking
+			// picked up. Refuse it here instead of letting the board lie.
+			//
+			// Unblock is exempt: it re-runs the same check server-side and lands
+			// the task in `backlog` rather than `ready` when a parent is
+			// outstanding, which is already the honest outcome.
+			if (move.action !== "unblock") {
+				const gated = dependencyRefusal(
+					task,
+					status,
+					edgesByTask.get(task.task_number),
+				);
+				if (gated) {
+					refuseMove(task, status, gated);
+					return;
+				}
+			}
+
+			setMoveError(null);
+			switch (move.action) {
+				// Leaving a blocked state is unblock's job, not a status write —
+				// it has to clear the reason and re-check dependencies.
+				case "unblock":
+					unblockMutation.mutate(task.task_number);
+					break;
+				case "approve":
+					approveMutation.mutate(task.task_number);
+					break;
+				case "execute":
+					executeMutation.mutate(task.task_number);
+					break;
+				case "update":
+					updateMutation.mutate({
+						taskNumber: task.task_number,
+						status: move.status,
+					});
+					break;
+			}
+		},
+		[
+			transitions,
+			edgesByTask,
+			refuseMove,
+			updateMutation,
+			approveMutation,
+			executeMutation,
+			unblockMutation,
+		],
+	);
+
+	const handleStatusChange = useCallback(
+		(task: Task, status: UiTaskStatus) => {
+			// Resolve the real task by id: a blocked task reaches the drawer with
+			// an adapted status, and branching on that would approve a task that
+			// was never awaiting approval.
+			const adapted = task as unknown as TaskItem;
+			handleMove(rawTasks.find((c) => c.id === adapted.id) ?? adapted, status);
+		},
+		[handleMove, rawTasks],
 	);
 
 	const handleDelete = useCallback(
@@ -234,9 +489,16 @@ export function GlobalTasks() {
 				{/* Toolbar */}
 				<div className="flex items-center justify-between border-b border-app-line px-4 py-2">
 					<div className="flex items-center gap-3">
+						<TaskViewToggle value={viewMode} onChange={setViewMode} />
 						<span className="text-sm text-ink-dull">
 							{tasks.length} task{tasks.length !== 1 ? "s" : ""}
 						</span>
+						<RepoFilter
+							names={bindingNames}
+							value={repoFilter}
+							onChange={setRepoFilter}
+							presentRepoIds={presentRepoIds}
+						/>
 						{agents.length > 1 && (
 							<AgentPicker
 								agents={agents}
@@ -263,13 +525,44 @@ export function GlobalTasks() {
 					</div>
 				)}
 
+				{/* The row menu comes from @spacedrive/ai and cannot be narrowed to
+				    the legal moves, so a refusal is explained here instead of
+				    being sent and bounced by the API as a bare 400. */}
+				{moveError && (
+					<div className="flex items-start gap-2 border-b border-status-warning/30 bg-status-warning/5 px-4 py-2">
+						<p className="min-w-0 flex-1 text-xs text-status-warning">
+							{moveError}
+						</p>
+						<button
+							type="button"
+							onClick={() => setMoveError(null)}
+							className="shrink-0 text-xs text-ink-faint hover:text-ink-dull"
+						>
+							Dismiss
+						</button>
+					</div>
+				)}
+
+				{/* A pooled task nothing can claim is `ready` forever and looks
+				    exactly like work about to start, so it goes above both views
+				    rather than inside a column — the repair is to the fleet, not
+				    to the task, and it is the one hold no status can express. */}
+				<UnclaimablePoolSection
+					tasks={boardTasks}
+					agents={agents}
+					collapsed={unclaimableCollapsed}
+					onToggle={() => setUnclaimableCollapsed((v) => !v)}
+					onTaskClick={(task) => setActiveTaskId(task.id)}
+					activeTaskId={activeTaskId}
+				/>
+
 				{/* Task list */}
 				{isLoading ? (
 					<div className="py-8 text-center text-sm text-ink-faint">
 						Loading tasks...
 					</div>
 				) : error ? (
-					<div className="py-8 text-center text-sm text-red-400">
+					<div className="py-8 text-center text-sm text-status-error">
 						Failed to load tasks.
 						<div className="mt-1 font-mono text-[10px] text-ink-faint">
 							{(error as Error).message}
@@ -284,10 +577,49 @@ export function GlobalTasks() {
 							</p>
 						</div>
 					</div>
+				) : viewMode === "board" ? (
+					/* The board renders every status itself, so it takes the
+					   unsplit set — no BlockedTasksSection, no adapted statuses.
+					   That workaround layer exists for TaskList alone. */
+					<div className="min-h-0 flex-1">
+						<TaskBoard
+							tasks={boardTasks}
+							edges={edgesByTask}
+							bindingNames={bindingNames}
+							transitions={transitions}
+							activeTaskId={activeTaskId}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							onMove={handleMove}
+							onRefuse={refuseMove}
+							resolveAgentName={resolveAgentName}
+							agents={agents}
+						/>
+					</div>
 				) : (
 					<div className="flex-1 overflow-y-auto">
+						{/* Blocked tasks render separately: TaskList groups by
+						    TASK_STATUS_ORDER and silently drops any status it
+						    doesn't know, so a blocked task handed to it would
+						    vanish from the board entirely. */}
+						<BlockedTasksSection
+							tasks={blockedTasks}
+							collapsed={blockedCollapsed}
+							onToggle={() => setBlockedCollapsed((v) => !v)}
+							onRetry={(task) => retryMutation.mutate(task.task_number)}
+							retryingTaskNumber={
+								retryMutation.isPending
+									? (retryMutation.variables ?? null)
+									: null
+							}
+							onTaskClick={(task) => setActiveTaskId(task.id)}
+							activeTaskId={activeTaskId}
+							resolveAgentName={resolveAgentName}
+							bindingNames={bindingNames}
+							edges={edgesByTask}
+							onUnblock={(task) => unblockMutation.mutate(task.task_number)}
+						/>
 						<TaskList
-							tasks={tasks}
+							tasks={listViewTasks}
 							activeTaskId={activeTaskId ?? undefined}
 							collapsedGroups={collapsedGroups}
 							onToggleGroup={handleToggleGroup}
@@ -303,24 +635,139 @@ export function GlobalTasks() {
 			{/* Detail panel */}
 			{activeTask && (
 				<div className="w-[400px] shrink-0 overflow-y-auto border-l border-app-line">
+					<BlockedBanner
+						task={activeTask as unknown as TaskItem}
+						onUnblock={(t) => unblockMutation.mutate(t.task_number)}
+						onRetry={(t) => retryMutation.mutate(t.task_number)}
+						busy={unblockMutation.isPending || retryMutation.isPending}
+					/>
+					<SkippedBanner task={activeTask as unknown as TaskItem} />
+					{/* Only renders for a pooled task nobody has claimed. Says who
+					    could take it, or — when nothing can — which of the two
+					    repairs this one needs. The panel below shows no assignee
+					    for such a task and cannot explain why. */}
+					<UnclaimableBanner
+						task={activeTask as unknown as TaskItem}
+						agents={agents}
+					/>
+					{/* No onStatusChange: TaskDetail would render a <select> of all
+					    five statuses it knows and offer moves the store refuses.
+					    StatusMoves below shows the legal ones and nothing else. */}
 					<TaskDetail
-						task={activeTask}
+						task={
+							toDesignSystemTask(
+								activeTask as unknown as TaskItem,
+							) as unknown as Task
+						}
 						resolveAgentName={resolveAgentName}
-						onStatusChange={handleStatusChange}
 						onSubtaskToggle={handleSubtaskToggle}
 						onDelete={handleDelete}
 						onClose={() => setActiveTaskId(null)}
 					/>
+					<StatusMoves
+						task={activeTask as unknown as TaskItem}
+						table={transitions}
+						onMove={handleMove}
+						busy={
+							updateMutation.isPending ||
+							approveMutation.isPending ||
+							executeMutation.isPending
+						}
+					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
 					/>
+					<DependencySection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
+					/>
+					{/* Directly after Dependencies: the two are the reasons a task is
+					    not running, and reading one without the other is how a task
+					    with every parent finished looks stuck for no reason. */}
+					<TaskConditionsSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						task={activeTask as unknown as TaskItem}
+					/>
+					<ContractSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
+					/>
+					<ProvenanceSection
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						onSelectTask={(number) => {
+							const target = rawTasks.find((t) => t.task_number === number);
+							if (target) setActiveTaskId(target.id);
+						}}
+					/>
+					<BindingSection
+						task={activeTask as unknown as TaskItem}
+						names={bindingNames}
+					/>
+					{/* Directly above the attempt log: the budget is what that list
+					    is spending, so the two read as one thing. */}
+					<FailureBudgetSection
+						task={activeTask as unknown as TaskItem}
+						defaultLimit={data?.default_failure_limit}
+						busy={failureBudgetMutation.isPending}
+						onChange={(maxRetries) =>
+							failureBudgetMutation.mutate({
+								taskNumber: (activeTask as unknown as TaskItem).task_number,
+								maxRetries,
+							})
+						}
+					/>
+					<div className="border-t border-app-line/40 px-4 py-3">
+						<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
+							Attempts
+						</h3>
+						<TaskRunHistory
+							taskNumber={(activeTask as unknown as TaskItem).task_number}
+						/>
+					</div>
 				</div>
 			)}
 		</div>
 	);
 }
 
-function GithubSection({metadata}: {metadata: Record<string, unknown>}) {
+/** Which codebase the selected task acts on. Hidden for unbound tasks. */
+function BindingSection({
+	task,
+	names,
+}: {
+	task: TaskItem;
+	names: ReturnType<typeof useBindingNames>["names"];
+}) {
+	if (!task.project_id && !task.repo_id && !task.worktree_id) return null;
+
+	const project = task.project_id
+		? (names.projects.get(task.project_id) ?? task.project_id)
+		: null;
+
+	return (
+		<div className="border-t border-app-line/40 px-4 py-3">
+			<h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-dull">
+				Codebase
+			</h3>
+			<div className="flex flex-wrap items-center gap-1.5">
+				<RepoChip task={task} names={names} />
+				{/* The chip shows the most specific binding; name the project too
+				    when it isn't already what's displayed. */}
+				{project && (task.repo_id || task.worktree_id) && (
+					<span className="text-[11px] text-ink-faint">in {project}</span>
+				)}
+			</div>
+		</div>
+	);
+}
+
+function GithubSection({metadata}: {metadata: unknown}) {
 	const refs = getGithubReferences(metadata);
 	if (refs.length === 0) return null;
 

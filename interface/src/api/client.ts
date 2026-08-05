@@ -71,8 +71,7 @@ export type {
 	ProvidersResponse,
 	ProviderUpdateResponse,
 	ProviderModelTestResponse,
-	OpenAiOAuthBrowserStartResponse,
-	OpenAiOAuthBrowserStatusResponse,
+	ProviderEntry,
 	ModelInfo,
 	ModelsResponse,
 	// Ingest
@@ -289,24 +288,9 @@ export type ApiEvent =
 
 // -- Timeline types (discriminated union parts) --
 
-export interface AttachmentMeta {
-	id: string;
-	filename: string;
-	saved_filename: string;
-	mime_type: string;
-	size_bytes: number;
-}
+export type AttachmentMeta = Types.SavedAttachmentMeta;
 
-export interface TimelineMessage {
-	type: "message";
-	id: string;
-	role: "user" | "assistant";
-	sender_name: string | null;
-	sender_id: string | null;
-	content: string;
-	created_at: string;
-	attachments?: AttachmentMeta[];
-}
+export type TimelineMessage = Types.TimelineItem;
 
 export interface TimelineBranchRun {
 	type: "branch_run";
@@ -335,6 +319,38 @@ async function fetchJson<T>(path: string): Promise<T> {
 		throw new Error(`API error: ${response.status}`);
 	}
 	return response.json();
+}
+
+/**
+ * A mutating call whose refusal text is the point.
+ *
+ * Every workflow endpoint answers a rejection with a plain-text body that names
+ * what is actually wrong — "step `draft` cannot wait for itself", "no step
+ * `nope` in this workflow", "the steps form a cycle and cannot be ordered:
+ * draft -> publish -> review". Those sentences are the whole diagnosis, and
+ * flattening them into "API error: 409" leaves the author with a number and no
+ * idea which edge to remove. So the body is the message; the status code is
+ * only the fallback for the rare empty one.
+ */
+async function mutateJson<T>(
+	path: string,
+	method: string,
+	body?: unknown,
+): Promise<T> {
+	const response = await fetch(`${getApiBase()}${path}`, {
+		method,
+		...(body === undefined
+			? {}
+			: {
+					headers: {"Content-Type": "application/json"},
+					body: JSON.stringify(body),
+				}),
+	});
+	if (!response.ok) {
+		const text = (await response.text().catch(() => "")).trim();
+		throw new Error(text || `API error: ${response.status}`);
+	}
+	return (await response.json()) as T;
 }
 
 /** channel_id -> StatusBlockSnapshot */
@@ -445,15 +461,7 @@ export interface PromptCaptureResponse {
 // --- Memory helper types (extended beyond schema) ---
 
 // Extended MemoryType with additional values not yet in schema
-export type MemoryType =
-	| "fact"
-	| "preference"
-	| "decision"
-	| "identity"
-	| "event"
-	| "observation"
-	| "goal"
-	| "todo";
+export type MemoryType = Types.MemoryType;
 
 export const MEMORY_TYPES: MemoryType[] = [
 	"fact", "preference", "decision", "identity",
@@ -463,34 +471,13 @@ export const MEMORY_TYPES: MemoryType[] = [
 export type MemorySort = "recent" | "importance" | "most_accessed";
 
 // Extended MemoryItem with forgotten field (not yet in schema)
-export interface MemoryItem {
-	id: string;
-	content: string;
-	memory_type: MemoryType;
-	importance: number;
-	created_at: string;
-	updated_at: string;
-	last_accessed_at: string;
-	access_count: number;
-	source: string | null;
-	channel_id: string | null;
-	forgotten: boolean;
-}
+export type MemoryItem = Types.Memory;
 
-export interface MemoriesListResponse {
-	memories: MemoryItem[];
-	total: number;
-}
+export type MemoriesListResponse = Types.MemoriesListResponse;
 
-export interface MemorySearchResultItem {
-	memory: MemoryItem;
-	score: number;
-	rank: number;
-}
+export type MemorySearchResultItem = Types.MemorySearchResult;
 
-export interface MemoriesSearchResponse {
-	results: MemorySearchResultItem[];
-}
+export type MemoriesSearchResponse = Types.MemoriesSearchResponse;
 
 export interface MemoryGraphParams {
 	limit?: number;
@@ -541,18 +528,9 @@ export const CORTEX_EVENT_TYPES: CortexEventType[] = [
 	"observation_created", "health_check",
 ];
 
-export interface CortexEvent {
-	id: string;
-	event_type: CortexEventType;
-	summary: string;
-	details: Record<string, unknown> | null;
-	created_at: string;
-}
+export type CortexEvent = Types.CortexEvent;
 
-export interface CortexEventsResponse {
-	events: CortexEvent[];
-	total: number;
-}
+export type CortexEventsResponse = Types.CortexEventsResponse;
 
 export interface CortexEventsParams {
 	limit?: number;
@@ -571,19 +549,9 @@ export type CortexChatSSEEvent =
 
 // -- Factory Presets --
 
-export interface PresetDefaults {
-	max_concurrent_workers: number | null;
-	max_turns: number | null;
-}
+export type PresetDefaults = Types.PresetDefaults;
 
-export interface PresetMeta {
-	id: string;
-	name: string;
-	description: string;
-	icon: string;
-	tags: string[];
-	defaults: PresetDefaults;
-}
+export type PresetMeta = Types.PresetMeta;
 
 export interface PresetsResponse {
 	presets: PresetMeta[];
@@ -591,262 +559,76 @@ export interface PresetsResponse {
 
 // -- Config types with frontend-specific extensions --
 
-export interface RoutingSection {
-	channel: string;
-	branch: string;
-	worker: string;
-	compactor: string;
-	cortex: string;
-	voice: string;
-	rate_limit_cooldown_secs: number;
-	channel_thinking_effort: string;
-	branch_thinking_effort: string;
-	worker_thinking_effort: string;
-	compactor_thinking_effort: string;
-	cortex_thinking_effort: string;
-}
+export type RoutingSection = Types.RoutingSection;
 
-export interface TuningSection {
-	max_concurrent_branches: number;
-	max_concurrent_workers: number;
-	max_turns: number;
-	branch_max_turns: number;
-	context_window: number;
-	history_backfill_count: number;
-}
+export type TuningSection = Types.TuningSection;
 
-export interface CompactionSection {
-	background_threshold: number;
-	aggressive_threshold: number;
-	emergency_threshold: number;
-}
+export type CompactionSection = Types.CompactionSection;
 
-export interface CortexSection {
-	tick_interval_secs: number;
-	worker_timeout_secs: number;
-	branch_timeout_secs: number;
-	circuit_breaker_threshold: number;
-	bulletin_interval_secs: number;
-	bulletin_max_words: number;
-	bulletin_max_turns: number;
-}
+export type CortexSection = Types.CortexSection;
 
-export interface CoalesceSection {
-	enabled: boolean;
-	debounce_ms: number;
-	max_wait_ms: number;
-	min_messages: number;
-	multi_user_only: boolean;
-}
+export type CoalesceSection = Types.CoalesceSection;
 
-export interface MemoryPersistenceSection {
-	enabled: boolean;
-	message_interval: number;
-}
+export type MemoryPersistenceSection = Types.MemoryPersistenceSection;
 
-export interface BrowserSection {
-	enabled: boolean;
-	headless: boolean;
-	evaluate_enabled: boolean;
-	persist_session: boolean;
-	close_policy: "close_browser" | "close_tabs" | "detach";
-}
+export type BrowserSection = Types.BrowserSection;
 
-export interface ChannelSection {
-	listen_only_mode: boolean;
-}
+export type ChannelSection = Types.ChannelSection;
 
-export interface SandboxSection {
-	mode: "enabled" | "disabled";
-	writable_paths: string[];
-}
+export type SandboxSection = Types.SandboxSection;
+/**
+ * What containment the host is actually providing, per agent.
+ *
+ * Three separate facts on purpose. `mode` is what the operator asked for and
+ * `containment_active` is what is in force; `requested_but_inert` is the state
+ * where those two disagree, and it is the one a command step refuses to run in.
+ */
+export type SandboxContainmentStatus = Types.SandboxContainmentStatus;
 
-export interface ProjectsSection {
-	use_worktrees: boolean;
-	worktree_name_template: string;
-	auto_create_worktrees: boolean;
-	auto_discover_repos: boolean;
-	auto_discover_worktrees: boolean;
-	disk_usage_warning_threshold: number;
-}
+export type ProjectsSection = Types.ProjectsSection;
 
-export interface DiscordSection {
-	enabled: boolean;
-	allow_bot_messages: boolean;
-}
+export type DiscordSection = Types.DiscordSection;
 
-export interface AgentConfigResponse {
-	routing: RoutingSection;
-	tuning: TuningSection;
-	compaction: CompactionSection;
-	cortex: CortexSection;
-	coalesce: CoalesceSection;
-	memory_persistence: MemoryPersistenceSection;
-	browser: BrowserSection;
-	channel: ChannelSection;
-	discord: DiscordSection;
-	sandbox: SandboxSection;
-	projects: ProjectsSection;
-}
+export type AgentConfigResponse = Types.AgentConfigResponse;
 
 // Partial update types - all fields are optional
-export interface RoutingUpdate {
-	channel?: string;
-	branch?: string;
-	worker?: string;
-	compactor?: string;
-	cortex?: string;
-	voice?: string;
-	rate_limit_cooldown_secs?: number;
-	channel_thinking_effort?: string;
-	branch_thinking_effort?: string;
-	worker_thinking_effort?: string;
-	compactor_thinking_effort?: string;
-	cortex_thinking_effort?: string;
-}
+export type RoutingUpdate = Types.RoutingUpdate;
 
-export interface TuningUpdate {
-	max_concurrent_branches?: number;
-	max_concurrent_workers?: number;
-	max_turns?: number;
-	branch_max_turns?: number;
-	context_window?: number;
-	history_backfill_count?: number;
-}
+export type TuningUpdate = Types.TuningUpdate;
 
-export interface CompactionUpdate {
-	background_threshold?: number;
-	aggressive_threshold?: number;
-	emergency_threshold?: number;
-}
+export type CompactionUpdate = Types.CompactionUpdate;
 
-export interface CortexUpdate {
-	tick_interval_secs?: number;
-	worker_timeout_secs?: number;
-	branch_timeout_secs?: number;
-	circuit_breaker_threshold?: number;
-	bulletin_interval_secs?: number;
-	bulletin_max_words?: number;
-	bulletin_max_turns?: number;
-}
+export type CortexUpdate = Types.CortexUpdate;
 
-export interface CoalesceUpdate {
-	enabled?: boolean;
-	debounce_ms?: number;
-	max_wait_ms?: number;
-	min_messages?: number;
-	multi_user_only?: boolean;
-}
+export type CoalesceUpdate = Types.CoalesceUpdate;
 
-export interface MemoryPersistenceUpdate {
-	enabled?: boolean;
-	message_interval?: number;
-}
+export type MemoryPersistenceUpdate = Types.MemoryPersistenceUpdate;
 
-export interface BrowserUpdate {
-	enabled?: boolean;
-	headless?: boolean;
-	evaluate_enabled?: boolean;
-	persist_session?: boolean;
-	close_policy?: "close_browser" | "close_tabs" | "detach";
-}
+export type BrowserUpdate = Types.BrowserUpdate;
 
-export interface ChannelUpdate {
-	listen_only_mode?: boolean;
-}
+export type ChannelUpdate = Types.ChannelUpdate;
 
-export interface SandboxUpdate {
-	mode?: "enabled" | "disabled";
-	writable_paths?: string[];
-}
+export type SandboxUpdate = Types.SandboxUpdate;
 
-export interface ProjectsUpdate {
-	use_worktrees?: boolean;
-	worktree_name_template?: string;
-	auto_create_worktrees?: boolean;
-	auto_discover_repos?: boolean;
-	auto_discover_worktrees?: boolean;
-	disk_usage_warning_threshold?: number;
-}
+export type ProjectsUpdate = Types.ProjectsUpdate;
 
-export interface DiscordUpdate {
-	allow_bot_messages?: boolean;
-}
+export type DiscordUpdate = Types.DiscordUpdate;
 
-export interface AgentConfigUpdateRequest {
-	agent_id: string;
-	routing?: RoutingUpdate;
-	tuning?: TuningUpdate;
-	compaction?: CompactionUpdate;
-	cortex?: CortexUpdate;
-	coalesce?: CoalesceUpdate;
-	memory_persistence?: MemoryPersistenceUpdate;
-	browser?: BrowserUpdate;
-	channel?: ChannelUpdate;
-	discord?: DiscordUpdate;
-	sandbox?: SandboxUpdate;
-	projects?: ProjectsUpdate;
-}
+export type AgentConfigUpdateRequest = Types.AgentConfigUpdateRequest;
 
 // -- Cron Types --
 
-export interface CronJobWithStats {
-	id: string;
-	prompt: string;
-	cron_expr: string | null;
-	interval_secs: number;
-	delivery_target: string;
-	enabled: boolean;
-	run_once: boolean;
-	active_hours: [number, number] | null;
-	timeout_secs: number | null;
-	execution_success_count: number;
-	execution_failure_count: number;
-	delivery_success_count: number;
-	delivery_failure_count: number;
-	delivery_skipped_count: number;
-	last_executed_at: string | null;
-}
+export type CronJobWithStats = Types.CronJobWithStats;
 
-export interface CronExecutionEntry {
-	id: string;
-	cron_id: string | null;
-	executed_at: string;
-	success: boolean;
-	execution_succeeded: boolean;
-	delivery_attempted: boolean;
-	delivery_succeeded: boolean | null;
-	result_summary: string | null;
-	execution_error: string | null;
-	delivery_error: string | null;
-}
+export type CronExecutionEntry = Types.CronExecutionEntry;
 
-export interface CronListResponse {
-	jobs: CronJobWithStats[];
-	timezone: string;
-}
+export type CronListResponse = Types.CronListResponse;
 
-export interface CronExecutionsResponse {
-	executions: CronExecutionEntry[];
-}
+export type CronExecutionsResponse = Types.CronExecutionsResponse;
 
-export interface CronActionResponse {
-	success: boolean;
-	message: string;
-}
+export type CronActionResponse = Types.CronActionResponse;
 
-export interface CreateCronRequest {
-	id: string;
-	prompt: string;
-	cron_expr?: string;
-	interval_secs?: number;
-	delivery_target: string;
-	active_start_hour?: number;
-	active_end_hour?: number;
-	enabled: boolean;
-	run_once: boolean;
-	timeout_secs?: number;
-}
+export type CreateCronRequest = Types.CreateCronRequest;
 
 export interface CronExecutionsParams {
 	cron_id?: string;
@@ -855,21 +637,9 @@ export interface CronExecutionsParams {
 
 // -- Update Types --
 
-export type Deployment = "docker" | "hosted" | "native";
+export type Deployment = Types.Deployment;
 
-export interface UpdateStatus {
-	current_version: string;
-	latest_version: string | null;
-	update_available: boolean;
-	release_url: string | null;
-	release_notes: string | null;
-	deployment: Deployment;
-	can_apply: boolean;
-	cannot_apply_reason: string | null;
-	docker_image: string | null;
-	checked_at: string | null;
-	error: string | null;
-}
+export type UpdateStatus = Types.UpdateStatus;
 
 export interface UpdateApplyResponse {
 	status: "updating" | "error";
@@ -878,212 +648,160 @@ export interface UpdateApplyResponse {
 
 // -- Global Settings Types --
 
-export interface OpenCodePermissions {
-	edit: string;
-	bash: string;
-	webfetch: string;
-}
+export type OpenCodePermissions = Types.OpenCodePermissionsResponse;
 
-export interface OpenCodeSettings {
-	enabled: boolean;
-	path: string;
-	max_servers: number;
-	server_startup_timeout_secs: number;
-	max_restart_retries: number;
-	permissions: OpenCodePermissions;
-}
+export type OpenCodeSettings = Types.OpenCodeSettingsResponse;
 
-export interface OpenCodeSettingsUpdate {
-	enabled?: boolean;
-	path?: string;
-	max_servers?: number;
-	server_startup_timeout_secs?: number;
-	max_restart_retries?: number;
-	permissions?: Partial<OpenCodePermissions>;
-}
+export type OpenCodeSettingsUpdate = Types.OpenCodeSettingsUpdate;
 
-export interface GlobalSettingsUpdate {
-	company_name?: string;
-	brave_search_key?: string | null;
-	api_enabled?: boolean;
-	api_port?: number;
-	api_bind?: string;
-	worker_log_mode?: string;
-	opencode?: OpenCodeSettingsUpdate;
-}
+export type GlobalSettingsUpdate = Types.GlobalSettingsUpdate;
 
 // -- Skills Types --
 
-export interface SkillInfo {
-	name: string;
-	description: string;
-	file_path: string;
-	base_dir: string;
-	source: "builtin" | "instance" | "workspace";
-	source_repo?: string;
-}
+export type SkillInfo = Types.SkillInfo;
 
-export interface SkillsListResponse {
-	skills: SkillInfo[];
-}
+export type SkillsListResponse = Types.SkillsListResponse;
 
-export interface InstallSkillRequest {
-	agent_id: string;
-	spec: string;
-	instance?: boolean;
-}
+export type InstallSkillRequest = Types.InstallSkillRequest;
 
-export interface InstallSkillResponse {
-	installed: string[];
-}
+export type InstallSkillResponse = Types.InstallSkillResponse;
 
-export interface RemoveSkillRequest {
-	agent_id: string;
-	name: string;
-}
+export type RemoveSkillRequest = Types.RemoveSkillRequest;
 
-export interface RemoveSkillResponse {
-	success: boolean;
-	path: string | null;
-}
+export type RemoveSkillResponse = Types.RemoveSkillResponse;
 
 // -- Skills Registry Types (skills.sh) --
 
 export type RegistryView = "all-time" | "trending" | "hot";
 
-export interface RegistrySkill {
-	source: string;
-	skillId: string;
-	name: string;
-	installs: number;
-	description?: string;
-	id?: string;
-}
+export type RegistrySkill = Types.RegistrySkill;
 
-export interface RegistryBrowseResponse {
-	skills: RegistrySkill[];
-	has_more: boolean;
-	total?: number;
-}
+export type RegistryBrowseResponse = Types.RegistryBrowseResponse;
 
-export interface RegistrySearchResponse {
-	skills: RegistrySkill[];
-	query: string;
-	count: number;
-}
+export type RegistrySearchResponse = Types.RegistrySearchResponse;
 
-export interface SkillContentResponse {
-	name: string;
-	description: string;
-	content: string;
-	file_path: string;
-	base_dir: string;
-	source: string;
-	source_repo?: string;
-}
+export type SkillContentResponse = Types.SkillContentResponse;
 
-export interface UploadSkillResponse {
-	installed: string[];
-}
+export type UploadSkillResponse = Types.UploadSkillResponse;
 
 // -- Task Types --
+//
+// Aliased straight from the generated OpenAPI schema rather than hand-written.
+// These used to be duplicated by hand here, which `check-typegen` cannot catch:
+// it only diffs `schema.d.ts` against the Rust, so a local redeclaration could
+// drift from the server indefinitely and the build stayed green.
+//
+// `TaskItem` is kept as the name most call sites use.
+export type Task = Types.Task;
+export type TaskStatus = Types.TaskStatus;
+export type TaskPriority = Types.TaskPriority;
+export type TaskSubtask = Types.TaskSubtask;
+export type TaskRun = Types.TaskRun;
+export type TaskRunOutcome = Types.TaskRunOutcome;
+export type TaskRunsResponse = Types.TaskRunsResponse;
+export type TaskListResponse = Types.TaskListResponse;
+export type TaskResponse = Types.TaskResponse;
+export type TaskActionResponse = Types.TaskActionResponse;
+export type BlockKind = Types.BlockKind;
+export type TaskEdgeSummary = Types.TaskEdgeSummary;
+export type TaskDependenciesResponse = Types.TaskDependenciesResponse;
+export type TaskTransition = Types.TaskTransition;
+export type TaskTransitionsResponse = Types.TaskTransitionsResponse;
+export type TaskGraph = Types.TaskGraph;
+export type TaskGraphEdge = Types.TaskGraphEdge;
+export type TaskGate = Types.TaskGate;
+export type TaskGatesResponse = Types.TaskGatesResponse;
+export type GateKind = Types.GateKind;
+export type GateResult = Types.GateResult;
+/** What a *false* answer means: `wait` holds the task, `route` skips it. */
+export type GateDisposition = Types.GateDisposition;
+export type ContractProblem = Types.ContractProblem;
+export type ContractSide = Types.ContractSide;
+export type TaskInputBinding = Types.TaskInputBinding;
+export type TaskContractResponse = Types.TaskContractResponse;
+export type TaskProvenanceResponse = Types.TaskProvenanceResponse;
+export type TaskItem = Types.Task;
 
-export type TaskStatus = "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
-export type TaskPriority = "critical" | "high" | "medium" | "low";
+export type CreateTaskRequest = Types.CreateTaskRequest;
 
-export interface TaskSubtask {
-	title: string;
-	completed: boolean;
-}
+export type UpdateTaskRequest = Types.UpdateTaskRequest;
 
-export interface TaskItem {
-	id: string;
-	task_number: number;
-	title: string;
-	description?: string;
-	status: TaskStatus;
-	priority: TaskPriority;
-	owner_agent_id: string;
-	assigned_agent_id: string;
-	subtasks: TaskSubtask[];
-	metadata: Record<string, unknown>;
-	source_memory_id?: string;
-	worker_id?: string;
-	created_by: string;
-	approved_at?: string;
-	approved_by?: string;
-	created_at: string;
-	updated_at: string;
-	completed_at?: string;
-}
+// -- Workflow Types --
+//
+// A workflow is the reusable template; a run is one launch of it, compiled into
+// real tasks with real dependency edges. Same rule as above: everything with a
+// server counterpart is aliased from the generated schema, never redeclared.
+export type Workflow = Types.Workflow;
+export type WorkflowStep = Types.WorkflowStep;
+export type WorkflowEdge = Types.WorkflowEdge;
+export type StepBinding = Types.StepBinding;
+/** A condition declared on a step, compiled into a `TaskGate` at launch. */
+export type StepGate = Types.StepGate;
+export type BindingSource = Types.BindingSource;
+/**
+ * Whether a step runs a model or a process: `agent | command`.
+ *
+ * `agent` is the default and describes every step that predates command steps,
+ * which is why it is optional on the wire.
+ */
+export type StepKind = Types.StepKind;
+/**
+ * Where a step gets its working directory: `inherit | per_run | per_branch`.
+ *
+ * `inherit` is today's behaviour — whatever the task binding already says.
+ */
+export type WorktreeMode = Types.WorktreeMode;
+/** Which way out of a loop an edge — and the task behind it — is on. */
+export type LoopArm = Types.LoopArm;
+export type LoopResolution = Types.LoopResolution;
+export type WorkflowListResponse = Types.WorkflowListResponse;
+export type WorkflowResponse = Types.WorkflowResponse;
+export type WorkflowDetailResponse = Types.WorkflowDetailResponse;
+export type WorkflowActionResponse = Types.WorkflowActionResponse;
+export type WorkflowRun = Types.WorkflowRun;
+/**
+ * How a run is going: `running | succeeded | failed | stuck | cancelled`.
+ *
+ * A property of the run, not a reduction over its tasks. `stuck` in particular
+ * is not derivable from any single task — every card in a wedged run looks
+ * individually reasonable — which is why the run carries a status of its own.
+ */
+export type RunStatus = Types.RunStatus;
+export type RunDetailResponse = Types.RunDetailResponse;
+export type RunListResponse = Types.RunListResponse;
+export type CancelRunRequest = Types.CancelRunRequest;
+export type CancelRunResponse = Types.CancelRunResponse;
 
-export interface TaskListResponse {
-	tasks: TaskItem[];
-}
-
-export interface TaskResponse {
-	task: TaskItem;
-}
-
-export interface TaskActionResponse {
-	success: boolean;
-	message: string;
-}
-
-export interface CreateTaskRequest {
-	owner_agent_id: string;
-	assigned_agent_id?: string;
-	title: string;
-	description?: string;
-	status?: TaskStatus;
-	priority?: TaskPriority;
-	subtasks?: TaskSubtask[];
-	metadata?: Record<string, unknown>;
-	source_memory_id?: string;
-	created_by?: string;
-}
-
-export interface UpdateTaskRequest {
-	title?: string;
-	description?: string;
-	status?: TaskStatus;
-	priority?: TaskPriority;
-	assigned_agent_id?: string;
-	subtasks?: TaskSubtask[];
-	metadata?: Record<string, unknown>;
-	complete_subtask?: number;
-	worker_id?: string;
-	approved_by?: string;
-}
+export type SaveWorkflowRequest = Types.SaveWorkflowRequest;
+export type SaveStepRequest = Types.SaveStepRequest;
+export type SaveBindingRequest = Types.SaveBindingRequest;
+export type SaveStepGateRequest = Types.SaveStepGateRequest;
+export type StepEdgeRequest = Types.StepEdgeRequest;
+export type LaunchRequest = Types.LaunchRequest;
+export type LaunchResponse = Types.LaunchResponse;
 
 // -- Notification Types --
 
-export type NotificationKind = "task_approval" | "worker_failed" | "cortex_observation";
+/**
+ * The kinds the inbox can style.
+ *
+ * `workflow_run_stopped` is its own kind rather than a `worker_failed`: that one
+ * is about a process dying and is answered by looking at the process, while this
+ * is a pipeline that will not continue on its own and is answered by looking at
+ * the run. Filtering the inbox for one must not drag in the other.
+ */
+export type NotificationKind =
+	| "task_approval"
+	| "worker_failed"
+	| "cortex_observation"
+	| "workflow_run_stopped";
 export type NotificationSeverity = "info" | "warn" | "error";
 
-export interface NotificationItem {
-	id: string;
-	kind: NotificationKind;
-	severity: NotificationSeverity;
-	title: string;
-	body?: string;
-	agent_id?: string;
-	related_entity_type?: string;
-	related_entity_id?: string;
-	action_url?: string;
-	metadata?: string;
-	created_at: string;
-	read_at?: string;
-	dismissed_at?: string;
-}
+export type NotificationItem = Types.Notification;
 
-export interface NotificationsResponse {
-	notifications: NotificationItem[];
-}
+export type NotificationsResponse = Types.NotificationsResponse;
 
-export interface UnreadCountResponse {
-	count: number;
-}
+export type UnreadCountResponse = Types.UnreadCountResponse;
 
 export interface NotificationCreatedEvent {
 	type: "notification_created";
@@ -1099,97 +817,21 @@ export interface NotificationUpdatedEvent {
 
 // -- Messaging / Bindings Types --
 
-export interface BindingInfo {
-	agent_id: string;
-	channel: string;
-	adapter: string | null;
-	guild_id: string | null;
-	workspace_id: string | null;
-	chat_id: string | null;
-	channel_ids: string[];
-	require_mention: boolean;
-	dm_allowed_users: string[];
-}
+export type BindingInfo = Types.BindingResponse;
 
-export interface BindingsListResponse {
-	bindings: BindingInfo[];
-}
+export type BindingsListResponse = Types.BindingsListResponse;
 
-export interface CreateBindingRequest {
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-	channel_ids?: string[];
-	require_mention?: boolean;
-	dm_allowed_users?: string[];
-	platform_credentials?: {
-		discord_token?: string;
-		slack_bot_token?: string;
-		slack_app_token?: string;
-		telegram_token?: string;
-		email_imap_host?: string;
-		email_imap_port?: number;
-		email_imap_username?: string;
-		email_imap_password?: string;
-		email_smtp_host?: string;
-		email_smtp_port?: number;
-		email_smtp_username?: string;
-		email_smtp_password?: string;
-		email_from_address?: string;
-		email_from_name?: string;
-		twitch_username?: string;
-		twitch_oauth_token?: string;
-		twitch_client_id?: string;
-		twitch_client_secret?: string;
-		twitch_refresh_token?: string;
-	};
-}
+export type CreateBindingRequest = Types.CreateBindingRequest;
 
-export interface CreateBindingResponse {
-	success: boolean;
-	restart_required: boolean;
-	message: string;
-}
+export type CreateBindingResponse = Types.CreateBindingResponse;
 
-export interface UpdateBindingRequest {
-	original_agent_id: string;
-	original_channel: string;
-	original_adapter?: string;
-	original_guild_id?: string;
-	original_workspace_id?: string;
-	original_chat_id?: string;
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-	channel_ids?: string[];
-	require_mention?: boolean;
-	dm_allowed_users?: string[];
-}
+export type UpdateBindingRequest = Types.UpdateBindingRequest;
 
-export interface UpdateBindingResponse {
-	success: boolean;
-	message: string;
-}
+export type UpdateBindingResponse = Types.UpdateBindingResponse;
 
-export interface DeleteBindingRequest {
-	agent_id: string;
-	channel: string;
-	adapter?: string;
-	guild_id?: string;
-	workspace_id?: string;
-	chat_id?: string;
-}
+export type DeleteBindingRequest = Types.DeleteBindingRequest;
 
-export interface DeleteBindingResponse {
-	success: boolean;
-	message: string;
-}
+export type DeleteBindingResponse = Types.DeleteBindingResponse;
 
 // -- Links & Topology Types --
 
@@ -1207,168 +849,67 @@ export interface LinksResponse {
 	links: AgentLinkResponse[];
 }
 
-export interface CreateHumanRequest {
-	id: string;
-	display_name?: string;
-	role?: string;
-	bio?: string;
-	description?: string;
-	discord_id?: string;
-	telegram_id?: string;
-	slack_id?: string;
-	email?: string;
-}
+export type CreateHumanRequest = Types.CreateHumanRequest;
 
-export interface UpdateHumanRequest {
-	display_name?: string;
-	role?: string;
-	bio?: string;
-	description?: string;
-	discord_id?: string;
-	telegram_id?: string;
-	slack_id?: string;
-	email?: string;
-}
+export type UpdateHumanRequest = Types.UpdateHumanRequest;
 
-export interface CreateGroupRequest {
-	name: string;
-	agent_ids?: string[];
-	color?: string;
-}
+export type CreateGroupRequest = Types.CreateGroupRequest;
 
-export interface UpdateGroupRequest {
-	name?: string;
-	agent_ids?: string[];
-	color?: string;
-}
+export type UpdateGroupRequest = Types.UpdateGroupRequest;
 
-export interface CreateLinkRequest {
-	from: string;
-	to: string;
-	direction?: LinkDirection;
-	kind?: LinkKind;
-}
+export type CreateLinkRequest = Types.CreateLinkRequest;
 
-export interface UpdateLinkRequest {
-	direction?: LinkDirection;
-	kind?: LinkKind;
-}
+export type UpdateLinkRequest = Types.UpdateLinkRequest;
 
 // -- Projects Types --
 
-export type ProjectStatus = "active" | "archived";
+export type ProjectStatus = Types.ProjectStatus;
 
-export interface Project {
-	id: string;
-	name: string;
-	description: string;
-	icon: string;
-	tags: string[];
-	root_path: string;
-	logo_path: string | null;
-	settings: Record<string, unknown>;
-	status: ProjectStatus;
-	sort_order: number;
-	created_at: string;
-	updated_at: string;
-}
+export type Project = Types.Project;
 
-export interface ProjectRepo {
-	id: string;
-	project_id: string;
-	name: string;
-	path: string;
-	remote_url: string;
-	default_branch: string;
-	current_branch: string | null;
-	description: string;
-	disk_usage_bytes: number | null;
-	created_at: string;
-	updated_at: string;
-}
+export type ProjectRepo = Types.ProjectRepo;
 
-export interface ProjectWorktree {
-	id: string;
-	project_id: string;
-	repo_id: string;
-	name: string;
-	path: string;
-	branch: string;
-	created_by: string;
-	disk_usage_bytes: number | null;
-	created_at: string;
-	updated_at: string;
-}
+export type ProjectWorktree = Types.ProjectWorktree;
 
-export interface ProjectWorktreeWithRepo extends ProjectWorktree {
-	repo_name: string;
-}
+export type ProjectWorktreeWithRepo = Types.ProjectWorktreeWithRepo;
+
+/**
+ * A checkout under `.worktrees/` that nothing alive owns.
+ *
+ * A report, not a sweep. There is deliberately no endpoint that deletes one —
+ * the one thing worse than a stale worktree is a background process that
+ * removes directories — so nothing here should offer to clean them up.
+ */
+export type OrphanWorktree = Types.OrphanWorktree;
+
+export type OrphanWorktreesResponse = Types.OrphanWorktreesResponse;
 
 /** GET /agents/projects response */
-export interface ProjectListResponse {
-	projects: Project[];
-}
+export type ProjectListResponse = Types.ProjectListResponse;
 
 /** GET /agents/projects/:id response — project fields are flattened */
-export interface ProjectWithRelations extends Project {
-	repos: ProjectRepo[];
-	worktrees: ProjectWorktreeWithRepo[];
-}
+export type ProjectWithRelations = Types.ProjectWithRelations;
 
 export interface ProjectActionResponse {
 	success: boolean;
 	message: string;
 }
 
-export interface DiskUsageEntry {
-	name: string;
-	bytes: number;
-	is_dir: boolean;
-}
+export type DiskUsageEntry = Types.DiskUsageEntry;
 
-export interface DiskUsageResponse {
-	total_bytes: number;
-	entries: DiskUsageEntry[];
-}
+export type DiskUsageResponse = Types.DiskUsageResponse;
 
-export interface CreateProjectRequest {
-	name: string;
-	description?: string;
-	icon?: string;
-	tags?: string[];
-	root_path: string;
-	settings?: Record<string, unknown>;
-	auto_discover?: boolean;
-}
+export type CreateProjectRequest = Types.CreateProjectRequest;
 
-export interface UpdateProjectRequest {
-	name?: string;
-	description?: string;
-	icon?: string;
-	tags?: string[];
-	logo_path?: string | null;
-	settings?: Record<string, unknown>;
-	status?: ProjectStatus;
-}
+export type UpdateProjectRequest = Types.UpdateProjectRequest;
 
-export interface CreateRepoRequest {
-	name: string;
-	path: string;
-	remote_url?: string;
-	default_branch?: string;
-	description?: string;
-}
+export type CreateRepoRequest = Types.CreateRepoRequest;
 
-export interface CreateWorktreeRequest {
-	repo_id: string;
-	branch: string;
-	worktree_name?: string;
-	start_point?: string;
-}
+export type CreateWorktreeRequest = Types.CreateWorktreeRequest;
 
 // -- Secrets Types --
 
-export type SecretCategory = "system" | "tool";
+export type SecretCategory = Types.SecretCategory;
 export type StoreState = "unencrypted" | "locked" | "unlocked";
 
 export interface SecretStoreStatus {
@@ -1380,33 +921,15 @@ export interface SecretStoreStatus {
 	platform_managed: boolean;
 }
 
-export interface SecretListItem {
-	name: string;
-	category: SecretCategory;
-	created_at: string;
-	updated_at: string;
-}
+export type SecretListItem = Types.SecretListItem;
 
-export interface SecretListResponse {
-	secrets: SecretListItem[];
-}
+export type SecretListResponse = Types.SecretListResponse;
 
-export interface PutSecretResponse {
-	name: string;
-	category: SecretCategory;
-	reload_required: boolean;
-	message: string;
-}
+export type PutSecretResponse = Types.PutSecretResponse;
 
-export interface DeleteSecretResponse {
-	deleted: string;
-	warning?: string;
-}
+export type DeleteSecretResponse = Types.DeleteSecretResponse;
 
-export interface EncryptResponse {
-	master_key: string;
-	message: string;
-}
+export type EncryptResponse = Types.EncryptResponse;
 
 export interface UnlockResponse {
 	state: string;
@@ -1414,17 +937,9 @@ export interface UnlockResponse {
 	message: string;
 }
 
-export interface MigrationItem {
-	config_key: string;
-	secret_name: string;
-	category: SecretCategory;
-}
+export type MigrationItem = Types.MigrationItem;
 
-export interface MigrateResponse {
-	migrated: MigrationItem[];
-	skipped: string[];
-	message: string;
-}
+export type MigrateResponse = Types.MigrateResponse;
 
 export const api = {
 	status: () => fetchJson<Types.StatusResponse>("/status"),
@@ -1564,7 +1079,7 @@ export const api = {
 		return response.json() as Promise<{ success: boolean; agent_id: string; message: string }>;
 	},
 
-	updateAgent: async (agentId: string, update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string }) => {
+	updateAgent: async (agentId: string, update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string; capabilities?: string[] }) => {
 		const response = await fetch(`${getApiBase()}/agents`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
@@ -1641,7 +1156,12 @@ export const api = {
 		return fetchJson<CronExecutionsResponse>(`/agents/cron/executions?${search}`);
 	},
 
-	createCronJob: async (agentId: string, request: CreateCronRequest) => {
+	// `agent_id` is supplied by the caller's route context and injected here,
+	// so the request object itself never carries it.
+	createCronJob: async (
+		agentId: string,
+		request: Omit<CreateCronRequest, "agent_id">,
+	) => {
 		const response = await fetch(`${getApiBase()}/agents/cron`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1702,65 +1222,39 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<Types.ProvidersResponse>("/providers"),
-	updateProvider: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
+	updateProvider: async (
+		provider: string,
+		apiKey: string,
+		model: string,
+		apiType: string,
+		baseUrl?: string,
+	) => {
 		const response = await fetch(`${getApiBase()}/providers`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, api_type: apiType, base_url: baseUrl }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderUpdateResponse>;
 	},
-	testProviderModel: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
+	testProviderModel: async (
+		provider: string,
+		apiKey: string,
+		model: string,
+		apiType: string,
+		baseUrl?: string,
+	) => {
 		const response = await fetch(`${getApiBase()}/providers/test-model`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, api_type: apiType, base_url: baseUrl }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderModelTestResponse>;
-	},
-	getProviderConfig: async (provider: string, options?: { signal?: AbortSignal }) => {
-		const response = await fetch(`${getApiBase()}/providers/${provider}/config`, {
-			method: "GET",
-			signal: options?.signal,
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<{
-			success: boolean;
-			message: string;
-			base_url?: string | null;
-			api_version?: string | null;
-			deployment?: string | null;
-		}>;
-	},
-	startOpenAiOAuthBrowser: async (params: {model: string}) => {
-		const response = await fetch(`${getApiBase()}/providers/openai/browser-oauth/start`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model: params.model,
-			}),
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<Types.OpenAiOAuthBrowserStartResponse>;
-	},
-	openAiOAuthBrowserStatus: async (state: string) => {
-		const response = await fetch(
-			`${getApiBase()}/providers/openai/browser-oauth/status?state=${encodeURIComponent(state)}`,
-		);
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<Types.OpenAiOAuthBrowserStatusResponse>;
 	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${getApiBase()}/providers/${encodeURIComponent(provider)}`, {
@@ -2334,6 +1828,302 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
+	/**
+	 * The whole connected component this task belongs to.
+	 *
+	 * Undirected: siblings of a fan-out are only reachable through the parent
+	 * they share, and "what else is running beside this" is most of the question
+	 * somebody has when they open one branch of three.
+	 *
+	 * Unlike the run view this owes nothing to a workflow template — the edges
+	 * are the task edges themselves — so it still draws after the template has
+	 * been deleted, and it draws graphs that never came from one.
+	 */
+	getTaskGraph: (taskNumber: number) =>
+		fetchJson<TaskGraph>(`/tasks/${taskNumber}/graph`),
+	/** Per-attempt execution log for a task, oldest first. */
+	listTaskRuns: (taskNumber: number) =>
+		fetchJson<TaskRunsResponse>(`/tasks/${taskNumber}/runs`),
+	/** Resolves live, so it shows what the task would get if it ran now. */
+	getTaskContract: (taskNumber: number) =>
+		fetchJson<TaskContractResponse>(`/tasks/${taskNumber}/contract`),
+	/** Where this card came from, and what it filed. */
+	getTaskProvenance: (taskNumber: number) =>
+		fetchJson<TaskProvenanceResponse>(`/tasks/${taskNumber}/provenance`),
+	/**
+	 * Declare what a task must produce (and may require).
+	 *
+	 * A human defines the *shape*; only a worker ever writes the *values*, via
+	 * `task_complete`. Setting an output schema is what makes that submission
+	 * checked rather than taken on trust.
+	 */
+	setTaskContract: async (
+		taskNumber: number,
+		body: {input_schema?: unknown; output_schema?: unknown},
+	) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/contract`,
+			{
+				method: "PUT",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify(body),
+			},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskContractResponse;
+	},
+	/**
+	 * Wire one input to where its value comes from.
+	 *
+	 * Keyed by input key rather than by an id, so setting the same key twice
+	 * rewires it instead of leaving two bindings fighting over one input.
+	 *
+	 * Exactly one source is meaningful: an upstream task's output at a JSON
+	 * Pointer, or a literal. The server rejects a body carrying neither.
+	 */
+	setTaskBinding: async (
+		taskNumber: number,
+		inputKey: string,
+		body: {
+			source_task_number?: number;
+			source_pointer?: string;
+			literal_value?: unknown;
+		},
+	) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/bindings/${encodeURIComponent(inputKey)}`,
+			{
+				method: "PUT",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify(body),
+			},
+		);
+		if (!response.ok) {
+			// 422 is the "neither a source nor a literal" rejection, and it comes
+			// back with an empty body — a bare status code would leave the caller
+			// with nothing to say, so name the rule that was broken.
+			if (response.status === 422) {
+				throw new Error(
+					"A binding must either read from a task or carry a literal value.",
+				);
+			}
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskContractResponse;
+	},
+	removeTaskBinding: async (taskNumber: number, inputKey: string) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/bindings/${encodeURIComponent(inputKey)}`,
+			{method: "DELETE"},
+		);
+		if (!response.ok) {
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskContractResponse;
+	},
+	listTaskDependencies: (taskNumber: number) =>
+		fetchJson<TaskDependenciesResponse>(`/tasks/${taskNumber}/dependencies`),
+	/** The legal status moves, so the board never offers one the API rejects. */
+	listTaskTransitions: () =>
+		fetchJson<TaskTransitionsResponse>("/tasks/transitions"),
+	addTaskDependency: async (taskNumber: number, parentTaskNumber: number) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/dependencies`,
+			{
+				method: "POST",
+				headers: {"Content-Type": "application/json"},
+				body: JSON.stringify({parent_task_number: parentTaskNumber}),
+			},
+		);
+		if (!response.ok) {
+			// The server explains cycles and self-loops in the body; surfacing
+			// only a status code would strip the one detail that helps.
+			throw new Error((await response.text()) || `API error: ${response.status}`);
+		}
+		return (await response.json()) as TaskDependenciesResponse;
+	},
+	removeTaskDependency: async (taskNumber: number, parentTaskNumber: number) => {
+		const response = await fetch(
+			`${getApiBase()}/tasks/${taskNumber}/dependencies/${parentTaskNumber}`,
+			{method: "DELETE"},
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskDependenciesResponse;
+	},
+	blockTask: async (taskNumber: number, kind: BlockKind, reason: string) => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/block`, {
+			method: "POST",
+			headers: {"Content-Type": "application/json"},
+			body: JSON.stringify({kind, reason}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskResponse;
+	},
+	unblockTask: async (taskNumber: number) => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/unblock`, {
+			method: "POST",
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return (await response.json()) as TaskResponse;
+	},
+	/** Clear the failure budget and requeue. Used by the manual retry action. */
+	retryTask: async (taskNumber: number): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/retry`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+
+	// Task gates — the conditions on one live task.
+	//
+	// Separate from the template's `StepGate`s: these are the compiled rows the
+	// poller actually evaluates, and they carry the verdict (`last_result`) the
+	// template cannot have. Deleting one is the escape hatch for a condition
+	// that will never open.
+	listTaskGates: (taskNumber: number) =>
+		fetchJson<TaskGatesResponse>(`/tasks/${taskNumber}/gates`),
+	removeTaskGate: (taskNumber: number, gateId: string) =>
+		mutateJson<TaskGatesResponse>(
+			`/tasks/${taskNumber}/gates/${encodeURIComponent(gateId)}`,
+			"DELETE",
+		),
+
+	// Workflows API
+	//
+	// A workflow is a reusable template; launching one compiles it into real
+	// tasks with real dependency edges and hands them to the same scheduler the
+	// board already shows. Every mutation below goes through `mutateJson` so the
+	// server's refusal text reaches the editor intact.
+	listWorkflows: () => fetchJson<WorkflowListResponse>("/workflows"),
+	/** The template plus its steps, edges and bindings — one round trip. */
+	getWorkflow: (id: string) =>
+		fetchJson<WorkflowDetailResponse>(`/workflows/${encodeURIComponent(id)}`),
+	createWorkflow: (body: SaveWorkflowRequest) =>
+		mutateJson<WorkflowResponse>("/workflows", "POST", body),
+	updateWorkflow: (id: string, body: SaveWorkflowRequest) =>
+		mutateJson<WorkflowResponse>(
+			`/workflows/${encodeURIComponent(id)}`,
+			"PUT",
+			body,
+		),
+	deleteWorkflow: (id: string) =>
+		mutateJson<WorkflowActionResponse>(
+			`/workflows/${encodeURIComponent(id)}`,
+			"DELETE",
+		),
+	/**
+	 * Add or replace a step.
+	 *
+	 * Keyed by `step_key` rather than an id, so saving the same key twice edits
+	 * the step instead of leaving two behind — the same rule task bindings use,
+	 * and the reason edges and bindings can reference a step by name at all.
+	 */
+	saveWorkflowStep: (id: string, stepKey: string, body: SaveStepRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}`,
+			"PUT",
+			body,
+		),
+	deleteWorkflowStep: (id: string, stepKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}`,
+			"DELETE",
+		),
+	addWorkflowEdge: (id: string, body: StepEdgeRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/edges`,
+			"POST",
+			body,
+		),
+	// The pair being removed identifies the edge, and there is no edge id to put
+	// in a path — hence a body on DELETE.
+	removeWorkflowEdge: (id: string, body: StepEdgeRequest) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/edges`,
+			"DELETE",
+			body,
+		),
+	setWorkflowBinding: (
+		id: string,
+		stepKey: string,
+		inputKey: string,
+		body: SaveBindingRequest,
+	) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/bindings/${encodeURIComponent(inputKey)}`,
+			"PUT",
+			body,
+		),
+	removeWorkflowBinding: (id: string, stepKey: string, inputKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/bindings/${encodeURIComponent(inputKey)}`,
+			"DELETE",
+		),
+	/**
+	 * Declare the condition under which a step runs.
+	 *
+	 * Keyed by `gate_key` for the same reason steps are keyed by `step_key`:
+	 * saving the same condition twice has to be an edit. A generated id would
+	 * leave the step held behind two copies of one condition, and the second
+	 * would be invisible in the editor that created it.
+	 */
+	setWorkflowStepGate: (
+		id: string,
+		stepKey: string,
+		gateKey: string,
+		body: SaveStepGateRequest,
+	) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/gates/${encodeURIComponent(gateKey)}`,
+			"PUT",
+			body,
+		),
+	removeWorkflowStepGate: (id: string, stepKey: string, gateKey: string) =>
+		mutateJson<WorkflowDetailResponse>(
+			`/workflows/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/gates/${encodeURIComponent(gateKey)}`,
+			"DELETE",
+		),
+	/** Compile the template into tasks. Returns the step → task number map. */
+	launchWorkflow: (id: string, body: LaunchRequest) =>
+		mutateJson<LaunchResponse>(
+			`/workflows/${encodeURIComponent(id)}/run`,
+			"POST",
+			body,
+		),
+	listWorkflowRuns: (id: string) =>
+		fetchJson<RunListResponse>(`/workflows/${encodeURIComponent(id)}/runs`),
+	// Not nested under the workflow: a run outlives the template it came from.
+	getWorkflowRun: (runId: string) =>
+		fetchJson<RunDetailResponse>(`/workflow-runs/${encodeURIComponent(runId)}`),
+	/**
+	 * Stop a run.
+	 *
+	 * Settles the tasks it never started; anything already in flight is left to
+	 * finish, because killing work mid-flight loses whatever it had done — which
+	 * is why the response reports `settled` and `left_running` separately rather
+	 * than one number the caller would have to interpret.
+	 */
+	cancelWorkflowRun: (runId: string, cancelledBy: string) =>
+		mutateJson<CancelRunResponse>(
+			`/workflow-runs/${encodeURIComponent(runId)}/cancel`,
+			"POST",
+			{cancelled_by: cancelledBy} satisfies CancelRunRequest,
+		),
+	/**
+	 * Remove a run and every task it emitted.
+	 *
+	 * Refused with a `409` while the run is live or a worker still holds one of
+	 * its cards. The body of that refusal is the whole diagnosis, and `mutateJson`
+	 * throws it verbatim — so callers surface the server's sentence rather than
+	 * re-deriving the rule and getting it subtly wrong.
+	 */
+	deleteWorkflowRun: (runId: string) =>
+		mutateJson<WorkflowActionResponse>(
+			`/workflow-runs/${encodeURIComponent(runId)}`,
+			"DELETE",
+		),
 
 	// Secrets API
 	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),
@@ -2464,6 +2254,18 @@ export const api = {
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 	},
+
+	/**
+	 * Checkouts under `.worktrees/` that no live run accounts for.
+	 *
+	 * Read-only by design. There is no companion endpoint that removes one, and
+	 * there should not be: the deterministic naming scheme exists so a person
+	 * can find these and decide, not so a sweeper can delete them.
+	 */
+	projectWorktreeOrphans: (projectId: string) =>
+		fetchJson<OrphanWorktreesResponse>(
+			`/agents/projects/${encodeURIComponent(projectId)}/worktree-orphans`,
+		),
 
 	projectDiskUsage: (projectId: string) =>
 		fetchJson<DiskUsageResponse>(
@@ -2652,146 +2454,38 @@ export const api = {
 	},
 }
 
-export interface UsageTotals {
-	input_tokens: number;
-	output_tokens: number;
-	cache_read_tokens: number;
-	cache_write_tokens: number;
-	reasoning_tokens: number;
-	request_count: number;
-	estimated_cost_usd: number | null;
-	cost_status: string;
-}
+export type UsageTotals = Types.UsageTotals;
 
-export interface UsageByModel {
-	model: string;
-	input_tokens: number;
-	output_tokens: number;
-	cache_read_tokens: number;
-	cache_write_tokens: number;
-	reasoning_tokens: number;
-	request_count: number;
-	estimated_cost_usd: number | null;
-}
+export type UsageByModel = Types.UsageByModel;
 
-export interface UsageResponse {
-	total: UsageTotals;
-	by_model?: UsageByModel[];
-	by_day?: Array<{ date: string } & UsageTotals>;
-	by_agent?: Array<{ agent_id: string } & UsageTotals>;
-};
+export type UsageResponse = Types.UsageResponse;;
 
 // Activity types
-export interface ProcessTokens {
-	input: number;
-	output: number;
-	cache_read: number;
-	reasoning: number;
-	cost_usd: number;
-}
+export type ProcessTokens = Types.ProcessTokens;
 
-export interface TokenSummary {
-	input: number;
-	output: number;
-	cache_read: number;
-	reasoning: number;
-	cost_usd: number;
-	by_process: Record<string, ProcessTokens>;
-}
+export type TokenSummary = Types.TokenSummary;
 
-export interface ActivityDay {
-	date: string;
-	messages: number;
-	branches: number;
-	workers: number;
-	cortex: number;
-	cron: number;
-	active_channels: number;
-	tokens: TokenSummary;
-}
+export type ActivityDay = Types.ActivityDay;
 
-export interface ActivityTotals {
-	messages: number;
-	branches: number;
-	workers: number;
-	cortex: number;
-	cron: number;
-	active_channels: number;
-	tokens: TokenSummary;
-}
+export type ActivityTotals = Types.ActivityTotals;
 
-export interface ActivityResponse {
-	daily: ActivityDay[];
-	totals: ActivityTotals;
-}
+export type ActivityResponse = Types.ActivityResponse;
 
 // Wiki types
 export type WikiPageType = "entity" | "concept" | "decision" | "project" | "reference";
 
-export interface WikiPageSummary {
-	id: string;
-	slug: string;
-	title: string;
-	page_type: string;
-	version: number;
-	updated_at: string;
-	updated_by: string;
-}
+export type WikiPageSummary = Types.WikiPageSummary;
 
-export interface WikiPage {
-	id: string;
-	slug: string;
-	title: string;
-	page_type: string;
-	content: string;
-	related: string[];
-	created_by: string;
-	updated_by: string;
-	version: number;
-	archived: boolean;
-	created_at: string;
-	updated_at: string;
-}
+export type WikiPage = Types.WikiPage;
 
-export interface WikiPageVersion {
-	id: string;
-	page_id: string;
-	version: number;
-	content: string;
-	edit_summary: string | null;
-	author_type: string;
-	author_id: string;
-	created_at: string;
-}
+export type WikiPageVersion = Types.WikiPageVersion;
 
-export interface WikiListResponse {
-	pages: WikiPageSummary[];
-	total: number;
-}
+export type WikiListResponse = Types.WikiListResponse;
 
-export interface WikiPageResponse {
-	page: WikiPage;
-}
+export type WikiPageResponse = Types.WikiPageResponse;
 
-export interface WikiHistoryResponse {
-	versions: WikiPageVersion[];
-}
+export type WikiHistoryResponse = Types.WikiHistoryResponse;
 
-export interface CreateWikiPageRequest {
-	title: string;
-	page_type: WikiPageType;
-	content: string;
-	related?: string[];
-	edit_summary?: string;
-	author_id?: string;
-	author_type?: string;
-}
+export type CreateWikiPageRequest = Types.CreatePageRequest;
 
-export interface EditWikiPageRequest {
-	old_string: string;
-	new_string: string;
-	replace_all?: boolean;
-	edit_summary?: string;
-	author_id?: string;
-	author_type?: string;
-}
+export type EditWikiPageRequest = Types.EditPageRequest;

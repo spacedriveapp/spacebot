@@ -438,6 +438,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{id}/repo-dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{id}/repo-dependencies — declared edges in a project.
+         * @description The same list travels inside `GET /agents/projects/{id}`; this exists for
+         *     callers refreshing only the graph.
+         */
+        get: operations["list_repo_dependencies"];
+        put?: never;
+        /**
+         * POST /agents/projects/{id}/repo-dependencies — declare that one repo
+         *     depends on another.
+         * @description Refuses a self-dependency, an unknown repo, a repo from another project,
+         *     and a duplicate. A cycle is allowed: mutual generation between two repos is
+         *     a real arrangement, and nothing derives an execution order from these edges.
+         */
+        post: operations["declare_repo_dependency"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{id}/repos": {
         parameters: {
             query?: never;
@@ -472,6 +500,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{id}/worktree-orphans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{id}/worktree-orphans — list, and only list.
+         * @description Deliberately a report rather than a sweep. The one thing worse than a stale
+         *     worktree is a background process that deletes directories, so this endpoint
+         *     has no counterpart that removes anything: a person reads the list, looks at
+         *     the diff, and decides. Most entries will be checkouts a failed run left
+         *     behind with uncommitted changes, which is exactly the work you want back.
+         */
+        get: operations["list_worktree_orphans"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{id}/worktrees": {
         parameters: {
             query?: never;
@@ -489,6 +541,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * PUT /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+         *     — relabel or annotate an existing declaration.
+         * @description Repointing an edge is a different statement about the repos, so it is a
+         *     delete and a fresh declaration rather than an update.
+         */
+        put: operations["update_repo_dependency"];
+        post?: never;
+        /**
+         * DELETE /agents/projects/{project_id}/repo-dependencies/{repo_id}/{depends_on_repo_id}
+         *     — withdraw a declaration.
+         */
+        delete: operations["delete_repo_dependency"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/projects/{project_id}/repos/{repo_id}": {
         parameters: {
             query?: never;
@@ -501,6 +579,34 @@ export interface paths {
         post?: never;
         /** DELETE /agents/projects/{project_id}/repos/{repo_id} — remove a repo. */
         delete: operations["delete_repo"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /agents/projects/{project_id}/repos/{repo_id}/dependency-suggestions
+         *     — what is declared around this repo, in both directions.
+         * @description This is the endpoint the workflow step editor calls: you are adding a step
+         *     that runs in `api`, and `dependents` is why it can say "`web` is generated
+         *     from `api` — add a step there too?".
+         *
+         *     It answers, and that is all it does. The reason this never becomes "and so
+         *     the server added the step for you" is written where the answer is produced,
+         *     in `ProjectStore::repo_dependency_suggestions`; read it before adding
+         *     anything here that writes.
+         */
+        get: operations["repo_dependency_suggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -685,7 +791,7 @@ export interface paths {
         };
         /**
          * Serve a saved attachment file.
-         * @description Streams the file from disk with the correct Content-Type.
+         * @description Reads the file from disk with the correct Content-Type.
          *     Use `?download=true` to force a download prompt.
          *     Use `?thumbnail=true` to request a thumbnail (currently serves full file).
          */
@@ -730,6 +836,28 @@ export interface paths {
          *     Returns an attachment ID to include in the subsequent message send request.
          */
         post: operations["upload_attachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{agent_id}/wake": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manually wake a (typically dormant) agent.
+         * @description Fires the same wake path that `send_agent_message`, cron, and other
+         *     trigger sources use. Useful for debugging dormant deployments and
+         *     recovering an agent stuck on a missed trigger.
+         */
+        post: operations["wake_agent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1655,38 +1783,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/providers/openai/browser-oauth/start": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["start_openai_browser_oauth"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/providers/openai/browser-oauth/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["openai_browser_oauth_status"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/providers/test-model": {
         parameters: {
             query?: never;
@@ -1714,22 +1810,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["delete_provider"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/providers/{provider}/config": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_provider_config"];
-        put?: never;
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2128,6 +2208,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/transitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/transitions` — every legal status move.
+         * @description The dashboard reads this instead of hand-maintaining a second transition
+         *     table in TypeScript, so a board can never offer a move the API rejects.
+         */
+        get: operations["list_task_transitions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}": {
         parameters: {
             query?: never;
@@ -2181,6 +2282,134 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/bindings/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** `PUT /tasks/{number}/bindings/{key}` — point one input at its source. */
+        put: operations["set_task_binding"];
+        post?: never;
+        /** `DELETE /tasks/{number}/bindings/{key}` — unbind one input. */
+        delete: operations["remove_task_binding"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/block": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /tasks/{number}/block` — park a task with a typed reason. */
+        post: operations["block_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/contract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/contract` — the declared contract, its bindings, and
+         *     what those bindings currently resolve to.
+         * @description Resolution runs live rather than being read back from the last claim, so the
+         *     page shows what the task *would* get if it ran now. A graph that has drifted
+         *     since the last attempt is exactly the case worth seeing.
+         */
+        get: operations["get_task_contract"];
+        /** `PUT /tasks/{number}/contract` — declare what a task needs and produces. */
+        put: operations["set_task_contract"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/decision` — answer a decision step.
+         * @description The only path by which a human-chosen value ever reaches a task's outputs,
+         *     and it works on exactly one kind of task. That is the constraint the whole
+         *     feature rests on: a person must not be able to set an *arbitrary* task's
+         *     outputs, because an agent task's outputs are the record of what that agent
+         *     produced. A decision step's outputs are the answer and nothing else, which is
+         *     what lets the run record distinguish "the operator approved this" from "a
+         *     model believed the operator approved this".
+         *
+         *     The answer is validated against the step's own `output_schema` by the same
+         *     validator that checks an agent's outputs — there is no second contract path.
+         */
+        post: operations["answer_decision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/dependencies` — the edges around a task. */
+        get: operations["list_task_dependencies"];
+        put?: never;
+        /**
+         * `POST /tasks/{number}/dependencies` — make this task wait on another.
+         * @description Rejects self-loops, unknown tasks, and any edge that would close a cycle.
+         *     The cycle response names the path so the caller can see which existing edge
+         *     conflicts, rather than being told only that something is wrong.
+         */
+        post: operations["add_task_dependency"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/dependencies/{parent}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** `DELETE /tasks/{number}/dependencies/{parent}` — drop an edge. */
+        delete: operations["remove_task_dependency"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/execute": {
         parameters: {
             query?: never;
@@ -2195,6 +2424,162 @@ export interface paths {
          *     Tasks already in `ready` or `in_progress` are returned as-is.
          */
         post: operations["execute_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/gates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/gates` — what this task is waiting on outside the graph. */
+        get: operations["list_task_gates"];
+        put?: never;
+        /**
+         * `POST /tasks/{number}/gates` — hold this task until something outside says go.
+         * @description The config is validated here rather than at first poll. A malformed gate
+         *     accepted now would error once a minute forever with nobody reading the log,
+         *     so the rejection has to land while a person is still looking at the form.
+         */
+        post: operations["create_task_gate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/gates/{gate_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /tasks/{number}/gates/{gate_id}` — stop waiting on it.
+         * @description Removing a gate is the escape hatch for one that has failed or cannot be
+         *     reached: the task becomes promotable again on the next sweep. It is a
+         *     deliberate act by a person, which is exactly what a `failed` gate is asking
+         *     for.
+         */
+        delete: operations["delete_task_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/graph` — every task connected to this one, and the
+         *     edges between them.
+         * @description Drawn from real dependency edges rather than from a workflow template,
+         *     which is what makes it answer the question in the three cases that matter:
+         *     the template has since been deleted, the step fanned out so one step is now
+         *     many tasks, or there was never a template at all because the graph was built
+         *     by hand or by a worker filing cards.
+         */
+        get: operations["get_task_graph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /tasks/{number}/provenance` — where this card came from and what it
+         *     spawned.
+         * @description A worker-filed card is otherwise indistinguishable from one a human wrote,
+         *     which makes a surprising board impossible to explain.
+         */
+        get: operations["get_task_provenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/retry` — clear the failure budget and requeue.
+         * @description A human looked at the task, so the budget starts over rather than
+         *     immediately re-parking it on the next failure.
+         */
+        post: operations["retry_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/runs` — the per-attempt execution log for a task. */
+        get: operations["list_task_runs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tasks/{number}/unblock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /tasks/{number}/unblock` — release a parked task.
+         * @description Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+         *
+         *     Refuses an unanswered decision with 409 and a sentence naming the endpoint
+         *     that does work. Unblocking says somebody acted, not what they decided —
+         *     releasing a decision through it would put the task back in the queue with
+         *     nothing in its outputs, which is the exact hole the decision step fills.
+         */
+        post: operations["unblock_task"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2298,6 +2683,41 @@ export interface paths {
         get: operations["get_conversation_usage"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhooks/workflow/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /webhooks/workflow/{id}` — an inbound trigger firing.
+         * @description **The one route here that is not behind the instance bearer token.** It has
+         *     to be: a webhook exists so that CI — which cannot be handed a token that
+         *     grants the whole API — can start a pipeline, and that is the loop the gate
+         *     machinery was built for and has never been able to close.
+         *
+         *     So the authentication is the per-workflow shared secret and nothing else,
+         *     and every part of this is arranged to fail closed:
+         *
+         *     - No row for the workflow means no. That is the default state of every
+         *       workflow that has ever existed, and it is not a check that can be
+         *       forgotten — it is the absence of the thing that would allow it.
+         *     - A configured webhook is off unless somebody set `enabled`.
+         *     - The secret is compared as a digest, in constant time, before the payload
+         *       is looked at, before the workflow is loaded, and before anything is
+         *       written. A delivery that does not authenticate causes no work.
+         *     - All three refusals render identically. See [`rejection_response`].
+         */
+        post: operations["workflow_webhook_delivery"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2408,6 +2828,282 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workflow-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /workflow-runs/{run_id}` — one run and the tasks it produced.
+         * @description Not nested under the workflow: a run outlives the template it came from, so
+         *     requiring the template's id to look one up would make deleted templates take
+         *     their history with them.
+         */
+        get: operations["get_run"];
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /workflow-runs/{run_id}` — remove a finished run and its tasks.
+         * @description The endpoint whose absence left empty run rows behind: cleanup had nothing
+         *     to call. Refused while the run is still going — `409` with the sentence
+         *     saying to cancel it first, because a delete is not a stop.
+         */
+        delete: operations["delete_run"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflow-runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /workflow-runs/{run_id}/cancel` — stop a run.
+         * @description Unstarted tasks are settled; anything already running is left to finish,
+         *     because killing work mid-flight loses whatever it had done. Cancelling a
+         *     `stuck` or `failed` run is allowed and is how the cards it left parked get
+         *     cleared; a `succeeded` run has nothing to clear.
+         */
+        post: operations["cancel_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflow-schedules/{schedule_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /workflow-schedules/{schedule_id}` — remove a schedule.
+         * @description Not nested under the workflow, matching the run routes: a caller holding a
+         *     schedule id from a listing should not have to also know which template it
+         *     belongs to in order to delete it.
+         */
+        delete: operations["delete_schedule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows` — list templates. */
+        get: operations["list_workflows"];
+        put?: never;
+        /** `POST /workflows` — create a template. */
+        post: operations["create_workflow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}` — a template with its steps, edges, and bindings. */
+        get: operations["get_workflow"];
+        /** `PUT /workflows/{id}` — rename or re-describe a template. */
+        put: operations["update_workflow"];
+        post?: never;
+        /**
+         * `DELETE /workflows/{id}` — delete a template.
+         * @description Runs already launched from it keep running: tasks carry the run id as plain
+         *     text, not a foreign key, so deleting the recipe never deletes the history of
+         *     work that was done from it.
+         */
+        delete: operations["delete_workflow"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/edges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /workflows/{id}/edges` — make one step wait for another. */
+        post: operations["add_edge"];
+        /** `DELETE /workflows/{id}/edges` — drop a wait. */
+        delete: operations["remove_edge"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /workflows/{id}/run` — launch a pipeline from one input. */
+        post: operations["launch_workflow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/runs` — launches of one template, newest first. */
+        get: operations["list_runs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/schedules` — the schedules attached to one template. */
+        get: operations["list_schedules"];
+        put?: never;
+        /** `POST /workflows/{id}/schedules` — create or replace a schedule. */
+        post: operations["put_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/steps/{step_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** `PUT /workflows/{id}/steps/{step_key}` — add or replace a step. */
+        put: operations["put_step"];
+        post?: never;
+        /** `DELETE /workflows/{id}/steps/{step_key}` — remove a step and its references. */
+        delete: operations["delete_step"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/steps/{step_key}/bindings/{input_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /workflows/{id}/steps/{step_key}/bindings/{input_key}` — declare where
+         *     one of a step's inputs comes from.
+         */
+        put: operations["put_binding"];
+        post?: never;
+        /** `DELETE /workflows/{id}/steps/{step_key}/bindings/{input_key}` */
+        delete: operations["delete_binding"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/steps/{step_key}/gates/{gate_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /workflows/{id}/steps/{step_key}/gates/{gate_key}` — declare the
+         *     condition under which a step runs.
+         * @description Idempotent on `gate_key`, so an editor saving the same condition twice edits
+         *     it. A generated id would leave the step held behind two copies of one gate,
+         *     which on the board reads as a condition that cannot be satisfied.
+         */
+        put: operations["put_step_gate"];
+        post?: never;
+        /**
+         * `DELETE /workflows/{id}/steps/{step_key}/gates/{gate_key}` — the step runs
+         *     unconditionally again.
+         */
+        delete: operations["delete_step_gate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/{id}/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /workflows/{id}/webhook` — the webhook config, without its secret. */
+        get: operations["get_webhook"];
+        /**
+         * `PUT /workflows/{id}/webhook` — configure the inbound trigger.
+         * @description The one place a secret is accepted, and the only way this endpoint can ever
+         *     start accepting deliveries. Both halves are deliberate: there is no global
+         *     enable, no default row, and no way to end up with a live webhook without
+         *     having chosen a secret and set `enabled` in the same call.
+         */
+        put: operations["put_webhook"];
+        post?: never;
+        /** `DELETE /workflows/{id}/webhook` — remove the inbound trigger entirely. */
+        delete: operations["delete_webhook"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2479,6 +3175,10 @@ export interface components {
             platform: string;
             runtime_key: string;
         };
+        AddDependencyRequest: {
+            /** Format: int64 */
+            parent_task_number: number;
+        };
         AgentConfigResponse: {
             browser: components["schemas"]["BrowserSection"];
             channel: components["schemas"]["ChannelSection"];
@@ -2510,6 +3210,16 @@ export interface components {
         };
         /** @description Summary of an agent's configuration, exposed via the API. */
         AgentInfo: {
+            /**
+             * @description What this agent declares it can do. Published so the step editor can
+             *     offer the labels that already exist rather than inviting a fleet where
+             *     `rust` and `Rust` are two capabilities and one of them matches nothing.
+             *
+             *     Always present, empty included: a client that has to distinguish "no
+             *     capabilities" from "this build does not report them" cannot, if the
+             *     field disappears when it is empty.
+             */
+            capabilities: string[];
             context_window: number;
             display_name?: string | null;
             gradient_end?: string | null;
@@ -2565,6 +3275,21 @@ export interface components {
         };
         AgentsResponse: {
             agents: components["schemas"]["AgentInfo"][];
+        };
+        /** @description An answer to a decision step. */
+        AnswerDecisionRequest: {
+            /**
+             * @description The answer, in whatever shape the step's `output_schema` declares. It
+             *     becomes the task's outputs verbatim, so a binding downstream reads it
+             *     with the pointers it already uses.
+             */
+            answer: unknown;
+            /**
+             * @description Who is answering. Required — an answer with no answerer has no
+             *     provenance, and provenance is the only thing a decision step has that an
+             *     agent step asking in a channel does not.
+             */
+            answered_by: string;
         };
         ApproveRequest: {
             approved_by?: string | null;
@@ -2626,11 +3351,35 @@ export interface components {
             team_id?: string | null;
             workspace_id?: string | null;
         };
+        /**
+         * @description Where a step's input comes from.
+         *
+         *     Named rather than inferred from which column is populated. The task-level
+         *     table infers "literal" from a NULL source, which works for rows the store
+         *     writes and is a trap for rows a human edits: a malformed binding is
+         *     indistinguishable from a deliberate one.
+         * @enum {string}
+         */
+        BindingSource: "step" | "literal" | "run_input" | "fan_in" | "previous_iteration";
         BindingsListResponse: {
             bindings: components["schemas"]["BindingResponse"][];
         };
+        /**
+         * @description Why a task is parked.
+         *
+         *     The kinds differ in how they recover, which is the entire reason the column
+         *     exists. `dependency` and `transient` clear themselves; `needs_input` and
+         *     `capability` are sticky and only an explicit unblock releases them.
+         * @enum {string}
+         */
+        BlockKind: "dependency" | "needs_input" | "capability" | "transient" | "awaiting_decision";
+        BlockTaskRequest: {
+            /** @description dependency | needs_input | capability | transient */
+            kind: string;
+            reason: string;
+        };
         BrowserSection: {
-            close_policy: string;
+            close_policy: components["schemas"]["ClosePolicy"];
             enabled: boolean;
             evaluate_enabled: boolean;
             headless: boolean;
@@ -2651,6 +3400,28 @@ export interface components {
         CancelProcessResponse: {
             message: string;
             success: boolean;
+        };
+        CancelRunRequest: {
+            /**
+             * @description Who stopped it. Recorded on the run and on every card it settles, so
+             *     "why did this stop" is answerable from the row rather than from memory.
+             */
+            cancelled_by: string;
+        };
+        /** @description A run that was stopped, and what that did to its tasks. */
+        CancelRunResponse: {
+            /**
+             * Format: int64
+             * @description Tasks left in flight. They are not killed: whatever they had already
+             *     done would be lost, so they finish or are reaped normally.
+             */
+            left_running: number;
+            run: components["schemas"]["WorkflowRun"];
+            /**
+             * Format: int64
+             * @description Unstarted tasks settled as `skipped`.
+             */
+            settled: number;
         };
         ChannelResponse: {
             agent_id: string;
@@ -2715,6 +3486,74 @@ export interface components {
             /** Format: float */
             emergency_threshold?: number | null;
         };
+        /**
+         * @description A specific reason a contract could not be satisfied.
+         *
+         *     Deliberately granular. "Validation failed" sends a human reading prompts and
+         *     guessing; naming the key and the upstream task that should have supplied it
+         *     points straight at the broken edge.
+         */
+        ContractProblem: {
+            /** @enum {string} */
+            kind: "task_missing";
+            /** Format: int64 */
+            task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "source_missing";
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "source_has_no_outputs";
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "pointer_missed";
+            pointer: string;
+            /** Format: int64 */
+            source_task_number: number;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "empty_literal";
+        } | {
+            /** @enum {string} */
+            kind: "schema_violation";
+            message: string;
+            /** @description JSON Pointer to the offending value, `""` for the document root. */
+            path: string;
+            side: components["schemas"]["ContractSide"];
+        } | {
+            /** @enum {string} */
+            kind: "invalid_schema";
+            message: string;
+            side: components["schemas"]["ContractSide"];
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "storage";
+            message: string;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "fan_in_outside_run";
+            step_key: string;
+        } | {
+            input_key: string;
+            /** @enum {string} */
+            kind: "fan_in_no_branches";
+            step_key: string;
+        };
+        /**
+         * @description Which half of a contract a problem came from.
+         * @enum {string}
+         */
+        ContractSide: "input" | "output";
         /** @description Response payload for conversation defaults endpoint. */
         ConversationDefaultsResponse: {
             /** @description All available models. */
@@ -2870,6 +3709,13 @@ export interface components {
         };
         CreateAgentRequest: {
             agent_id: string;
+            /**
+             * @description What this agent can do — the labels pooled tasks are matched against.
+             *
+             *     Opaque strings the operator chooses. Omit for none, which is right for
+             *     an agent that only ever takes work addressed to it by name.
+             */
+            capabilities?: string[] | null;
             display_name?: string | null;
             role?: string | null;
         };
@@ -2908,6 +3754,29 @@ export interface components {
             run_once?: boolean;
             /** Format: int64 */
             timeout_secs?: number | null;
+        };
+        CreateGateRequest: {
+            /** @description Shape depends on `kind`. See `crate::tasks::gates`. */
+            config: unknown;
+            /**
+             * @description `wait` | `route`, or omit to derive it.
+             *
+             *     What a *false* answer means. `wait` is a gate in the original sense —
+             *     poll again. `route` says the step does not apply and settles it as
+             *     `skipped`. Omitted is the right answer nearly always: a `task_output`
+             *     gate whose source has finished routes, everything else waits, and that
+             *     is a fact about whether the input can still change rather than a guess.
+             */
+            disposition?: string | null;
+            /** @description `http` | `task_output` */
+            kind: string;
+            /**
+             * @description What the board should call this gate. "waiting for CI on main" beats a
+             *     URL.
+             */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs?: number | null;
         };
         CreateGroupRequest: {
             agent_ids?: string[];
@@ -2984,17 +3853,44 @@ export interface components {
             remote_url?: string | null;
         };
         CreateTaskRequest: {
-            /** @description Agent assigned to execute. Defaults to `owner_agent_id`. */
+            /**
+             * @description Agent assigned to execute. Defaults to `owner_agent_id`, unless
+             *     `required_capabilities` is set — then the task is pooled and nobody is
+             *     named until an agent claims it.
+             */
             assigned_agent_id?: string | null;
             created_by?: string | null;
+            /** @description Task numbers that must finish before this one may run. */
+            depends_on?: number[];
             description?: string | null;
             metadata?: unknown;
             /** @description Agent that owns (created) this task. */
             owner_agent_id: string;
             priority?: string | null;
+            /** @description Project this task acts on. */
+            project_id?: string | null;
+            /** @description Repo within the project. A project holds many repos. */
+            repo_id?: string | null;
+            /**
+             * @description What this task needs, instead of who should do it.
+             *
+             *     Any agent declaring all of these may claim it. Mutually exclusive with
+             *     `assigned_agent_id`; sending both is rejected rather than resolved.
+             */
+            required_capabilities?: string[] | null;
             source_memory_id?: string | null;
+            /**
+             * @description Status to create the task in. Defaults to `pending_approval`.
+             *
+             *     The dashboard has always sent `backlog` here; the field simply did not
+             *     exist, so serde dropped it and every task created from the UI came back
+             *     awaiting an approval the creator had just given by clicking "create".
+             */
+            status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][];
             title: string;
+            /** @description Worktree to execute in. */
+            worktree_id?: string | null;
         };
         CreateWorktreeRequest: {
             branch: string;
@@ -3075,6 +3971,42 @@ export interface components {
             date: string;
         };
         /**
+         * @description What a decision inside a loop does on the second pass.
+         *
+         *     See the migration for the argument. The short version: `EachPass` is the
+         *     default because pass 2 exists precisely because the artefact changed, and
+         *     reusing pass 1's answer would credit a person with approving work they never
+         *     saw.
+         * @enum {string}
+         */
+        DecisionAsk: "each_pass" | "once";
+        /**
+         * @description How a decision was settled — the column the whole feature turns on.
+         *
+         *     A defaulted answer that looks identical to a human one in the run record is
+         *     the provenance problem returning through a side door, so these are four
+         *     values rather than a nullable `answered_by`.
+         * @enum {string}
+         */
+        DecisionOutcome: "answered" | "defaulted" | "timed_out" | "carried";
+        /**
+         * @description What happens to a decision nobody answers.
+         *
+         *     Three values because they have three recoveries, and the middle one is the
+         *     one the design doc says to get right.
+         * @enum {string}
+         */
+        DecisionTimeoutAction: "wait" | "default" | "fail";
+        DeclareRepoDependencyRequest: {
+            /** @description The repo depended upon. */
+            depends_on_repo_id: string;
+            /** @description Free-text label (`generated_from`, `consumes`, `vendors`, …). */
+            kind?: string | null;
+            note?: string | null;
+            /** @description The dependent repo — the one that has to change when the other does. */
+            repo_id: string;
+        };
+        /**
          * @description Delegation mode controls how the conversation handles tools.
          * @enum {string}
          */
@@ -3099,6 +4031,19 @@ export interface components {
         DeleteSecretResponse: {
             deleted: string;
             warning?: string | null;
+        };
+        /**
+         * @description What came of one accepted webhook delivery.
+         *
+         *     Only ever written for a delivery that authenticated. A rejected delivery
+         *     writes nothing at all — see [`WorkflowTriggerStore::authenticate_webhook`].
+         * @enum {string}
+         */
+        DeliveryOutcome: "launched" | "unmapped" | "refused" | "errored";
+        DeliveryResponse: {
+            detail: string;
+            outcome: string;
+            run_id?: string | null;
         };
         /**
          * @description Deployment environment, detected from SPACEBOT_DEPLOYMENT env var.
@@ -3160,10 +4105,40 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Scope this secret belongs to. Older exports without a `scope` field
+             *     import as `InstanceShared` so existing backups continue to load.
+             */
+            scope?: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
             value: string;
         };
+        /**
+         * @description What a *false* answer from a gate means.
+         *
+         *     The entire difference between "is CI green yet?" and "should this branch
+         *     run?". The two ask the same predicate with opposite failure modes: waiting
+         *     forever is correct for the first and a deadlock for the second.
+         * @enum {string}
+         */
+        GateDisposition: "wait" | "route";
+        /**
+         * @description What kind of fact a gate waits on.
+         *
+         *     Deliberately no vendor SDKs. `Http` covers GitHub, GitLab, Buildkite, and
+         *     Jenkins without knowing what any of them are.
+         * @enum {string}
+         */
+        GateKind: "http" | "task_output";
+        /**
+         * @description The state of a gate, and the reason the four are not three.
+         *
+         *     See the module docs. Each variant answers a different question: should we
+         *     poll again, should the task run, and whose problem is it?
+         * @enum {string}
+         */
+        GateResult: "pending" | "satisfied" | "failed" | "erroring" | "routed";
         GlobalSettingsResponse: {
             api_bind: string;
             api_enabled: boolean;
@@ -3291,6 +4266,41 @@ export interface components {
             uptime_seconds: number;
             version: string;
         };
+        LaunchRequest: {
+            /** @description The single payload the whole pipeline is driven from. */
+            inputs?: unknown;
+            /**
+             * @description Agent credited with the launch, and the default assignee for any step
+             *     that does not name one.
+             */
+            launched_by: string;
+        };
+        LaunchResponse: {
+            run: components["schemas"]["WorkflowRun"];
+            /** @description Emitted task numbers, keyed by the step they came from. */
+            task_numbers: {
+                [key: string]: number;
+            };
+        };
+        /**
+         * @description Which arm of a loop's exit a downstream task is on.
+         *
+         *     A loop's exit is a branch, not a join. Both arms wait on the same body and
+         *     exactly one of them runs, so they are told apart by name rather than by
+         *     which happens to be wired — "the loop finished" is not a condition anything
+         *     can act on.
+         * @enum {string}
+         */
+        LoopArm: "normal" | "on_exhausted";
+        /**
+         * @description What the boundary decided at the end of one iteration.
+         *
+         *     Four values rather than one "handled" flag, because they recover
+         *     differently: a run that gave up must not read like a run that succeeded, and
+         *     a run parked for a person must not read like one that took a branch.
+         * @enum {string}
+         */
+        LoopResolution: "converged" | "iterated" | "exhausted_routed" | "exhausted_blocked";
         McpAgentStatus: {
             agent_id: string;
             servers: components["schemas"]["McpServerInfo"][];
@@ -3473,22 +4483,6 @@ export interface components {
         NotificationsResponse: {
             notifications: components["schemas"]["Notification"][];
         };
-        OpenAiOAuthBrowserStartRequest: {
-            model: string;
-        };
-        OpenAiOAuthBrowserStartResponse: {
-            message: string;
-            state?: string | null;
-            success: boolean;
-            user_code?: string | null;
-            verification_url?: string | null;
-        };
-        OpenAiOAuthBrowserStatusResponse: {
-            done: boolean;
-            found: boolean;
-            message?: string | null;
-            success: boolean;
-        };
         OpenCodePermissionsResponse: {
             bash: string;
             edit: string;
@@ -3518,6 +4512,21 @@ export interface components {
             permissions?: null | components["schemas"]["OpenCodePermissionsUpdate"];
             /** Format: int64 */
             server_startup_timeout_secs?: number | null;
+        };
+        /** @description A directory under `.worktrees/` that nothing alive accounts for. */
+        OrphanWorktree: {
+            branch: string;
+            path: string;
+            project_id: string;
+            /** @description Why we think nobody owns it, in words. */
+            reason: string;
+            repo_id: string;
+            /** @description The run it appears to have belonged to, when the name still says so. */
+            run_id?: string | null;
+        };
+        /** @description Worktrees found on disk that no live run accounts for. */
+        OrphanWorktreesResponse: {
+            orphans: components["schemas"]["OrphanWorktree"][];
         };
         PlatformCredentials: {
             discord_token?: string | null;
@@ -3677,6 +4686,13 @@ export interface components {
         ProjectStatus: "active" | "archived";
         /** @description Full project with nested repos and worktrees for API responses. */
         ProjectWithRelations: components["schemas"]["Project"] & {
+            /**
+             * @description Declared repo-to-repo relationships (#29). Travels with the repos it
+             *     describes so the project view can draw the arrows without a second
+             *     request, and so a relationship is never something you have to know to
+             *     go and ask for.
+             */
+            repo_dependencies: components["schemas"]["RepoDependency"][];
             repos: components["schemas"]["ProjectRepo"][];
             worktrees: components["schemas"]["ProjectWorktreeWithRepo"][];
         };
@@ -3698,7 +4714,6 @@ export interface components {
             repo_name: string;
         };
         ProjectsSection: {
-            auto_create_worktrees: boolean;
             auto_discover_repos: boolean;
             auto_discover_worktrees: boolean;
             /** Format: int64 */
@@ -3707,7 +4722,6 @@ export interface components {
             worktree_name_template: string;
         };
         ProjectsUpdate: {
-            auto_create_worktrees?: boolean | null;
             auto_discover_repos?: boolean | null;
             auto_discover_worktrees?: boolean | null;
             /** Format: int64 */
@@ -3719,18 +4733,25 @@ export interface components {
             channel_id: string;
             enabled: boolean;
         };
-        ProviderConfigResponse: {
-            api_version?: string | null;
-            base_url?: string | null;
-            deployment?: string | null;
-            message: string;
-            success: boolean;
+        /** @description A configured provider, as reported to the UI. Never includes the API key. */
+        ProviderEntry: {
+            /** @description `"anthropic"` or `"openai_compatible"`. */
+            api_type: string;
+            base_url: string;
+            /** @description Optional human-readable label from `name`. */
+            display_name?: string | null;
+            /**
+             * @description Whether an API key resolves for this provider. False means the block
+             *     exists but its `secret:`/`env:` reference is unresolvable.
+             */
+            has_key: boolean;
+            /** @description Provider id — the prefix in `provider/model` routing strings. */
+            id: string;
         };
         ProviderModelTestRequest: {
             api_key: string;
-            api_version?: string | null;
+            api_type?: string | null;
             base_url?: string | null;
-            deployment?: string | null;
             model: string;
             provider: string;
         };
@@ -3741,37 +4762,18 @@ export interface components {
             sample?: string | null;
             success: boolean;
         };
-        ProviderStatus: {
-            anthropic: boolean;
-            azure: boolean;
-            deepseek: boolean;
-            fireworks: boolean;
-            gemini: boolean;
-            github_copilot: boolean;
-            groq: boolean;
-            kilo: boolean;
-            minimax: boolean;
-            minimax_cn: boolean;
-            mistral: boolean;
-            moonshot: boolean;
-            nvidia: boolean;
-            ollama: boolean;
-            openai: boolean;
-            openai_chatgpt: boolean;
-            opencode_go: boolean;
-            opencode_zen: boolean;
-            openrouter: boolean;
-            together: boolean;
-            xai: boolean;
-            zai_coding_plan: boolean;
-            zhipu: boolean;
-        };
         ProviderUpdateRequest: {
             api_key: string;
-            api_version?: string | null;
+            /** @description `"anthropic"` or `"openai_compatible"`. Defaults to `openai_compatible`. */
+            api_type?: string | null;
+            /** @description Full path prefix. Required unless `api_type` is `anthropic`. */
             base_url?: string | null;
-            deployment?: string | null;
+            /**
+             * @description Routing string to apply to defaults and the default agent, e.g.
+             *     `"litellm/claude-sonnet-4"`. Must be prefixed with `provider`.
+             */
             model: string;
+            /** @description Provider id to create or replace, e.g. `"litellm"`. */
             provider: string;
         };
         ProviderUpdateResponse: {
@@ -3779,8 +4781,13 @@ export interface components {
             success: boolean;
         };
         ProvidersResponse: {
+            /**
+             * @description Whether Anthropic OAuth credentials are on disk (`spacebot auth login`).
+             *     This authenticates the `anthropic` provider without an API key.
+             */
+            anthropic_oauth: boolean;
             has_any: boolean;
-            providers: components["schemas"]["ProviderStatus"];
+            providers: components["schemas"]["ProviderEntry"][];
         };
         PutSecretBody: {
             category?: null | components["schemas"]["SecretCategory"];
@@ -3848,6 +4855,52 @@ export interface components {
             /** @description Project IDs in the desired display order (first = sort_order 0). */
             ids: string[];
         };
+        /**
+         * @description One declared edge, with both repo names resolved so a caller can render it
+         *     without a second query.
+         */
+        RepoDependency: {
+            created_at: string;
+            /** @description The repo depended upon. */
+            depends_on_repo_id: string;
+            depends_on_repo_name: string;
+            /**
+             * @description Free-text label (`generated_from`, `consumes`, `vendors`, …). Nothing
+             *     branches on it; it is shown to people.
+             */
+            kind?: string | null;
+            /** @description Why the dependency exists, in the author's words. */
+            note?: string | null;
+            project_id: string;
+            /** @description The dependent repo — the one that has to change when the other does. */
+            repo_id: string;
+            repo_name: string;
+        };
+        RepoDependencyListResponse: {
+            dependencies: components["schemas"]["RepoDependency"][];
+        };
+        RepoDependencyResponse: {
+            dependency: components["schemas"]["RepoDependency"];
+        };
+        /**
+         * @description The declared neighbourhood of one repo, in both directions.
+         *
+         *     Returned by the suggestion query. The step editor holds a repo and needs
+         *     both halves: "you are editing a step in `api`; `web` depends on it" comes
+         *     from `dependents`, and "this step is in `web`, which is generated from
+         *     `api`" comes from `dependencies`.
+         */
+        RepoDependencySuggestions: {
+            /** @description Repos this one declares a dependency **on** — upstream. */
+            dependencies: components["schemas"]["RepoDependency"][];
+            /**
+             * @description Repos that declare a dependency **on** this one — downstream. Editing
+             *     this repo is a reason to offer a step in each of these.
+             */
+            dependents: components["schemas"]["RepoDependency"][];
+            /** @description The repo the question was asked about. */
+            repo_id: string;
+        };
         RepoResponse: {
             repo: components["schemas"]["ProjectRepo"];
         };
@@ -3864,23 +4917,84 @@ export interface components {
         };
         RoutingSection: {
             branch: string;
+            branch_thinking_effort: string;
             channel: string;
+            channel_thinking_effort: string;
             compactor: string;
+            compactor_thinking_effort: string;
             cortex: string;
+            cortex_thinking_effort: string;
             /** Format: int64 */
             rate_limit_cooldown_secs: number;
             voice: string;
             worker: string;
+            worker_thinking_effort: string;
         };
         RoutingUpdate: {
             branch?: string | null;
+            branch_thinking_effort?: string | null;
             channel?: string | null;
+            channel_thinking_effort?: string | null;
             compactor?: string | null;
+            compactor_thinking_effort?: string | null;
             cortex?: string | null;
+            cortex_thinking_effort?: string | null;
             /** Format: int64 */
             rate_limit_cooldown_secs?: number | null;
             voice?: string | null;
             worker?: string | null;
+            worker_thinking_effort?: string | null;
+        };
+        /** @description A run and the tasks it produced. */
+        RunDetailResponse: {
+            run: components["schemas"]["WorkflowRun"];
+            tasks: components["schemas"]["Task"][];
+        };
+        RunListResponse: {
+            runs: components["schemas"]["WorkflowRun"][];
+        };
+        /**
+         * @description How a run is going.
+         *
+         *     `stuck` is the value this enum exists for. The other four are reductions
+         *     over tasks that a caller could have computed itself; `stuck` is not
+         *     derivable from any single task, because every task in a wedged run looks
+         *     individually reasonable — a loop body parked for a person, a step behind a
+         *     gate that stopped polling, a placeholder that will never expand. Only the
+         *     run can see that none of them will ever move.
+         *
+         *     The distinction that matters most is the one this enum does *not* make:
+         *     `stuck` versus still `running`. A run waiting on a gate that can still open
+         *     is waiting, not stuck, and reporting it as stuck teaches people to ignore
+         *     the status — which is worse than the silence it replaced.
+         * @enum {string}
+         */
+        RunStatus: "running" | "succeeded" | "failed" | "stuck" | "cancelled";
+        /**
+         * @description Sandbox reporting for one agent, as three separate facts.
+         *
+         *     `mode` is what the operator asked for and `containment_active` is what the
+         *     host is actually doing; they are not the same question, and reporting only
+         *     the first is how an instance ends up running unconfined while its config
+         *     says `mode = "enabled"`. `backend` names the mechanism so the answer is
+         *     checkable rather than trusted.
+         */
+        SandboxContainmentStatus: {
+            agent_id: string;
+            /** @description Backend enforcing containment, or null when none was detected. */
+            backend?: string | null;
+            /** @description Whether OS-level containment is in force right now. */
+            containment_active: boolean;
+            /** @description Configured `sandbox.mode`: "enabled" or "disabled". */
+            mode: string;
+            /**
+             * @description Mode is enabled but no backend exists — the config claims containment
+             *     this host is not providing. Reported explicitly rather than left to be
+             *     derived, because deriving it wrong is the failure being fixed.
+             */
+            requested_but_inert: boolean;
+            /** @description Whether `sandbox.require_containment` is set for this agent. */
+            require_containment: boolean;
         };
         SandboxSection: {
             mode: string;
@@ -3892,6 +5006,230 @@ export interface components {
             passthrough_env?: string[] | null;
             writable_paths?: string[] | null;
         };
+        SaveBindingRequest: {
+            /** @description Required when `source` is `literal`. */
+            literal_value?: unknown;
+            /** @description `step` | `literal` | `run_input` | `fan_in` | `previous_iteration` */
+            source: string;
+            /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
+            source_pointer?: string | null;
+            /** @description Required when `source` is `step`. */
+            source_step_key?: string | null;
+        };
+        SaveScheduleRequest: {
+            /** @description The agent that owns and, absent a step assignment, executes the run. */
+            agent_id: string;
+            /** @description 5-field cron expression, read in UTC. Omit to use `interval_secs`. */
+            cron_expr?: string | null;
+            enabled?: boolean;
+            /** @description Omit to create. Supplying an existing id replaces that schedule. */
+            id?: string | null;
+            /** @description The launch payload. A literal, because a schedule cannot prompt. */
+            inputs?: unknown;
+            /** Format: int64 */
+            interval_secs?: number;
+            name: string;
+        };
+        /** @description A condition on a step: the predicate, and what a false answer means. */
+        SaveStepGateRequest: {
+            /**
+             * @description The predicate — an RFC 6901 `pointer` plus `equals` or `any_of`, in the
+             *     same shape a task gate takes. For `task_output`, `task_number` is filled
+             *     in by the launch and must not be set here.
+             */
+            config: unknown;
+            /**
+             * @description `wait` | `route`, or omit to derive it.
+             *
+             *     `wait` holds the step until the condition becomes true — a gate in the
+             *     original sense. `route` says a false answer means the step does not
+             *     apply, and settles it as skipped.
+             *
+             *     Omitting it is right nearly always: a `task_output` condition whose
+             *     source has settled routes, and everything else waits. That is a fact
+             *     about whether the answer can still change, not a guess. Set it for what
+             *     the derivation cannot see — an http endpoint whose answer really is
+             *     final, or a condition that should hold the pipeline rather than skip
+             *     past it.
+             */
+            disposition?: string | null;
+            /** @description `http` | `task_output` */
+            kind: string;
+            /** @description What the board should call this. "needs legal review" beats a pointer. */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs?: number | null;
+            /**
+             * @description Required when `kind` is `task_output`: whose output to read, by name.
+             *     Becomes a task number at launch.
+             */
+            source_step_key?: string | null;
+        };
+        SaveStepRequest: {
+            /** @description Omit to run the step as whoever launched the run. */
+            assigned_agent_id?: string | null;
+            /**
+             * @description The command line for a command step. Refused on an agent step, where
+             *     nothing would run it.
+             */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard timeout for a command step, in seconds. Required on one.
+             */
+            command_timeout_secs?: number | null;
+            /**
+             * @description `each_pass` (default) or `once`, for a decision inside a loop body.
+             *
+             *     `each_pass` re-asks on every pass, because pass 2 exists precisely
+             *     because the artefact changed and reusing pass 1's answer would credit a
+             *     person with approving work they never saw. `once` carries the first
+             *     answer forward, recorded as `carried` with the original answerer and
+             *     timestamp, for gates that are a property of the run rather than the pass.
+             */
+            decision_ask?: string | null;
+            /**
+             * @description Who may answer. Omit for anyone.
+             *
+             *     **Advisory in v1.** It is recorded on the task and shown alongside the
+             *     answerer, so an audit can compare them — but it is not enforced, because
+             *     this layer has no authenticated caller identity to enforce it against and
+             *     checking a self-declared name would be enforcement in name only.
+             */
+            decision_asked_of?: string[] | null;
+            /**
+             * @description The answer that applies on a `default` timeout. Validated against this
+             *     step's own `output_schema` at launch.
+             */
+            decision_default_answer?: unknown;
+            /**
+             * @description The question a decision step asks, as the person answering reads it.
+             *     Required on a decision step; refused on every other kind.
+             */
+            decision_question?: string | null;
+            /**
+             * @description `wait` (default), `default`, or `fail`.
+             *
+             *     `wait` parks until answered — the run is legitimately blocked and is not
+             *     reported as stuck. `default` applies `decision_default_answer` after
+             *     `decision_timeout_secs`, recorded *as* a default. `fail` fails the step
+             *     and lets the failure path route it.
+             */
+            decision_timeout_action?: string | null;
+            /**
+             * Format: int64
+             * @description How long to wait, in seconds, from the moment the decision is asked —
+             *     not from launch. Required by `default` and `fail`, refused by `wait`.
+             */
+            decision_timeout_secs?: number | null;
+            description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success, for steps where non-zero really is a
+             *     failure. Omit — the usual case — to treat the exit code as data: a
+             *     command that ran and reported a problem is a step that succeeded.
+             */
+            expect_exit_code?: number | null;
+            /** @description Pointer *within each item* naming its branch. Omit to key by index. */
+            for_each_key?: string | null;
+            /** @description RFC 6901 pointer into that step's outputs. Must select an array. */
+            for_each_pointer?: string | null;
+            /**
+             * @description Set to make this a fan-out: one task per item that step produced,
+             *     instead of one task.
+             *
+             *     Each branch receives its own item as the input key **`item`**. That is
+             *     the name to declare in this step's `input_schema` and to bind against —
+             *     there is no way to rename it, and a step that iterates without knowing
+             *     the key would declare a contract it never receives.
+             */
+            for_each_step_key?: string | null;
+            input_schema?: unknown;
+            /**
+             * @description `agent` (default) or `command`.
+             *
+             *     A command step runs a process instead of a model. Its outputs are
+             *     `{"exit_code", "stdout", "stderr", "duration_ms"}`, which bindings,
+             *     gates, `loop_until` and conditions read with the pointers they already
+             *     use.
+             */
+            kind?: string | null;
+            /**
+             * @description Set to put this step in a loop body. Every step sharing the name is one
+             *     body, and the whole body runs again until it converges or runs out.
+             */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description How many passes the body may run. Omit for 3.
+             *
+             *     Only read on the body's **exit step** — the one step with nothing after
+             *     it inside the body. Set anywhere else, launch refuses rather than
+             *     leaving a number that does nothing.
+             */
+            loop_max_iterations?: number | null;
+            /**
+             * @description The exit predicate, in the same shape a `task_output` gate takes:
+             *     `{"pointer": "/tests/passed", "equals": true}`. Required on the exit
+             *     step of a loop body.
+             */
+            loop_until?: unknown;
+            output_schema?: unknown;
+            /**
+             * Format: int64
+             * @description Display order only — execution order comes from the edges.
+             */
+            position?: number | null;
+            priority?: string | null;
+            repo_id?: string | null;
+            /**
+             * @description Say what the step needs instead of who should do it.
+             *
+             *     Set, and the emitted task is unassigned: any agent declaring all of
+             *     these claims it. Mutually exclusive with `assigned_agent_id`, and a
+             *     requirement no agent in the fleet can satisfy is refused at launch.
+             */
+            required_capabilities?: string[] | null;
+            /** @description Extra instructions appended to the worker prompt when this step runs. */
+            system_prompt?: string | null;
+            title: string;
+            /**
+             * @description What a provisioned worktree forks from — a branch, tag or sha. Omit for
+             *     the repo's current HEAD.
+             */
+            worktree_base_ref?: string | null;
+            /**
+             * @description `inherit` (default), `per_run`, or `per_branch`.
+             *
+             *     `per_branch` requires a fan-out and is refused at launch otherwise.
+             */
+            worktree_mode?: string | null;
+        };
+        SaveWebhookRequest: {
+            /** @description The agent that owns and executes the run. */
+            agent_id: string;
+            /**
+             * @description Off by default. An inbound trigger that turns itself on when configured
+             *     would make "I set this up to test it" and "I want strangers able to run
+             *     this pipeline" the same action.
+             */
+            enabled?: boolean;
+            /** @description `{ "<run input key>": "<JSON Pointer into the payload>" }`. */
+            input_pointers?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description The shared secret, in plaintext, once. It is hashed before storage and
+             *     there is no endpoint that reads it back.
+             */
+            secret: string;
+        };
+        SaveWorkflowRequest: {
+            description?: string | null;
+            /** @description JSON Schema for the input a whole run is launched with. */
+            input_schema?: unknown;
+            name: string;
+        };
         /** @description Metadata for a saved attachment, returned after persisting to disk and DB. */
         SavedAttachmentMeta: {
             filename: string;
@@ -3900,6 +5238,19 @@ export interface components {
             saved_filename: string;
             /** Format: int64 */
             size_bytes: number;
+        };
+        ScheduleListResponse: {
+            schedules: components["schemas"]["WorkflowSchedule"][];
+        };
+        /**
+         * @description What came of one schedule fire.
+         *
+         *     Three values because there are three recoveries. See the module docs.
+         * @enum {string}
+         */
+        ScheduleOutcome: "launched" | "refused" | "errored";
+        ScheduleResponse: {
+            schedule: components["schemas"]["WorkflowSchedule"];
         };
         /**
          * @description Secret category determines subprocess exposure.
@@ -3923,16 +5274,55 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             name: string;
+            /**
+             * @description Visibility scope. `InstanceShared` is the default for system /
+             *     admin-managed secrets; `Agent` rows are per-agent tool credentials.
+             */
+            scope: components["schemas"]["SecretScope"];
             /** Format: date-time */
             updated_at: string;
         };
         SecretListResponse: {
             secrets: components["schemas"]["SecretListItem"][];
         };
+        /**
+         * @description Secret scope determines visibility across agents on a shared instance.
+         *
+         *     Orthogonal to `SecretCategory` — `System` secrets are always
+         *     `InstanceShared` (singleton consumers like `LlmManager` /
+         *     `MessagingManager`); `Tool` secrets default to `Agent(...)` for
+         *     agentic-backend deployments where each tenant's worker subprocess must
+         *     not see another tenant's credentials, but can also be `InstanceShared`
+         *     when a single-tenant deployment legitimately wants every agent to share
+         *     the same `Tool` secret (e.g. one repo-wide `GH_TOKEN`).
+         */
+        SecretScope: {
+            /** @enum {string} */
+            kind: "instance_shared";
+        } | {
+            agent_id: string;
+            /** @enum {string} */
+            kind: "agent";
+        };
+        SetBindingRequest: {
+            /** @description Literal JSON value, used when no source task is given. */
+            literal_value?: unknown;
+            /** @description RFC 6901 JSON Pointer into that task's outputs. */
+            source_pointer?: string | null;
+            /**
+             * Format: int64
+             * @description Upstream task to read from. Omit for a literal.
+             */
+            source_task_number?: number | null;
+        };
         SetChannelArchiveRequest: {
             agent_id: string;
             archived: boolean;
             channel_id: string;
+        };
+        SetContractRequest: {
+            input_schema?: unknown;
+            output_schema?: unknown;
         };
         SkillContentResponse: {
             base_dir: string;
@@ -3963,11 +5353,84 @@ export interface components {
         StatusResponse: {
             /** Format: int32 */
             pid: number;
+            /** @description Per-agent process containment. One entry per agent with a live sandbox. */
+            sandbox: components["schemas"]["SandboxContainmentStatus"][];
             status: string;
             /** Format: int64 */
             uptime_seconds: number;
             version: string;
         };
+        StepBinding: {
+            input_key: string;
+            literal_value?: unknown;
+            source: components["schemas"]["BindingSource"];
+            /** @description RFC 6901 JSON Pointer. Empty selects the whole document. */
+            source_pointer?: string | null;
+            source_step_key?: string | null;
+            step_key: string;
+            workflow_id: string;
+        };
+        StepEdgeRequest: {
+            child_step_key: string;
+            /**
+             * @description `normal` (default) or `on_exhausted`.
+             *
+             *     An `on_exhausted` edge is followed only when the loop ending at the
+             *     parent runs out of attempts. Converging and giving up are opposite
+             *     results, so they get different edges rather than one edge meaning both.
+             */
+            kind?: string | null;
+            parent_step_key: string;
+        };
+        /**
+         * @description A gate declared by a *template*, addressed by step key.
+         *
+         *     The template-level mirror of `task_gates`, exactly as [`StepBinding`] is the
+         *     template-level mirror of `task_input_bindings`, and for the same reason:
+         *     `task_gates` is keyed by task number and a template has only step keys. The
+         *     translation at launch is the same one bindings already do.
+         *
+         *     This is where a *condition* on a step lives. Whether the condition holds the
+         *     step or settles it is [`StepGate::disposition`], and that one field is the
+         *     whole of branching.
+         */
+        StepGate: {
+            /**
+             * @description The predicate, in the shape `task_gates.config` takes: an RFC 6901
+             *     pointer plus `equals` / `any_of`. No second predicate language.
+             */
+            config: unknown;
+            disposition?: null | components["schemas"]["GateDisposition"];
+            /**
+             * @description Author-named, so saving the same gate twice is an edit rather than a
+             *     second gate holding the step behind a duplicate of one condition.
+             */
+            gate_key: string;
+            kind: components["schemas"]["GateKind"];
+            /** @description What the board should call this. "needs legal review" beats a pointer. */
+            label?: string | null;
+            /** Format: int64 */
+            poll_interval_secs: number;
+            /**
+             * @description For `task_output`: whose output to read, by name. Becomes
+             *     `config.task_number` at launch — the entire translation.
+             */
+            source_step_key?: string | null;
+            /** @description The step this gate holds back. */
+            step_key: string;
+            workflow_id: string;
+        };
+        /**
+         * @description What a step *is*: something a model does, or something a process does.
+         *
+         *     Named rather than inferred from "does `command` have a value". A NULL command
+         *     on a step somebody meant to be a command step is a template bug, and
+         *     inferring the kind would silently turn it into an agent step running a model
+         *     against an empty instruction — expensive, slow, and wrong in a way nothing
+         *     reports. With an explicit kind, launch refuses and names the missing field.
+         * @enum {string}
+         */
+        StepKind: "agent" | "command" | "decision";
         StorageStatus: {
             /** Format: int64 */
             available_bytes: number;
@@ -3980,40 +5443,447 @@ export interface components {
             approved_at?: string | null;
             approved_by?: string | null;
             assigned_agent_id: string;
+            awaiting_loop_arm?: null | components["schemas"]["LoopArm"];
+            /**
+             * @description This task is downstream of the named loop and waits on its verdict.
+             *
+             *     The ready sweep skips it while this is set. That is what stops both arms
+             *     of a loop's exit from running: the body finishes whether the loop
+             *     converged or gave up, so completion alone cannot tell them apart.
+             */
+            awaiting_loop_group?: string | null;
+            block_kind?: null | components["schemas"]["BlockKind"];
+            /** @description Human-readable explanation shown on the card. */
+            block_reason?: string | null;
+            /**
+             * Format: int64
+             * @description Consecutive blocks for the same reason. See [`BLOCK_RECURRENCE_LIMIT`].
+             */
+            block_recurrences: number;
+            /** @description The command line, frozen from the step at launch. See [`TaskKind`]. */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard wall-clock ceiling for that command, in seconds.
+             */
+            command_timeout_secs?: number | null;
             completed_at?: string | null;
+            /**
+             * Format: int64
+             * @description Failures since the last success. Reset to 0 on completion and on an
+             *     operator-initiated retry.
+             */
+            consecutive_failures: number;
             created_at: string;
             created_by: string;
+            /**
+             * @description When it was settled. For a carried answer this is the *original*
+             *     timestamp, not the moment it was reused.
+             */
+            decision_answered_at?: string | null;
+            /**
+             * @description Who answered. `None` for a defaulted or timed-out decision, where the
+             *     honest answer is nobody.
+             */
+            decision_answered_by?: string | null;
+            /** @description What this decision does on a loop's second pass. */
+            decision_ask: components["schemas"]["DecisionAsk"];
+            /**
+             * @description When this decision became answerable. `None` means it has not been asked
+             *     yet, and answering it is refused until it has been.
+             */
+            decision_asked_at?: string | null;
+            /**
+             * @description Who may answer. Empty/absent means anyone. **Advisory in v1**: recorded
+             *     alongside `decision_answered_by` so an audit can compare them, but not
+             *     enforced, because this layer has no authenticated caller identity to
+             *     enforce it against.
+             */
+            decision_asked_of?: string[] | null;
+            /** @description The answer that applies on a `default` timeout. */
+            decision_default_answer?: unknown;
+            decision_outcome?: null | components["schemas"]["DecisionOutcome"];
+            /**
+             * @description The question a decision task asks, frozen from the step at launch.
+             *
+             *     Frozen rather than read back from the template so that the question a
+             *     person answered is the question on the record afterwards — a live read
+             *     could be edited between the ask and the answer.
+             */
+            decision_question?: string | null;
+            /** @description What happens if nobody answers. */
+            decision_timeout_action: components["schemas"]["DecisionTimeoutAction"];
+            /**
+             * Format: int64
+             * @description How long, in seconds, from `decision_asked_at`.
+             */
+            decision_timeout_secs?: number | null;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success. `None` means the code is *data*: a
+             *     command that ran and reported a problem is a task that succeeded.
+             */
+            expect_exit_code?: number | null;
+            /**
+             * @description Which branch of a fan-out this task is, once the fan-out has expanded.
+             *
+             *     `None` on every ordinary task, and on the placeholder that holds the
+             *     shape before expansion. This is the key a fan-in binding collects by.
+             */
+            fan_out_branch_key?: string | null;
+            /**
+             * @description Whether this task is a fan-out placeholder rather than work.
+             *
+             *     A placeholder carries exactly the edges its branches will inherit, so
+             *     the steps downstream have something to wait on between launch and
+             *     expansion. It is never promoted and never claimed — expansion replaces
+             *     it with one task per item.
+             */
+            fan_out_placeholder: boolean;
             id: string;
+            /** @description JSON Schema this task's resolved inputs must satisfy before it runs. */
+            input_schema?: unknown;
+            /**
+             * @description Inputs as resolved at claim time. Persisted so the value the worker
+             *     actually saw survives a crash and stays readable after upstream changes.
+             */
+            inputs?: unknown;
+            /**
+             * @description Whether this task is executed by a worker or by a process.
+             *
+             *     `agent` on everything that predates command steps, which is why the
+             *     column defaults to it: an unreadable or missing value must never be
+             *     guessed as `command`, because that would execute a stored shell line on
+             *     the strength of a corrupt row.
+             */
+            kind: components["schemas"]["TaskKind"];
+            last_block_kind?: null | components["schemas"]["BlockKind"];
+            /**
+             * @description Text of the most recent failure, kept on the task so the board can
+             *     show why it is parked without joining `task_runs`.
+             */
+            last_error?: string | null;
+            /** @description Which loop body this task belongs to. `None` on every ordinary task. */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description Which pass of that body this task is, 1-based.
+             *
+             *     The pass, not the attempt: a task retried under the failure budget keeps
+             *     its iteration, because retrying is not looping.
+             */
+            loop_iteration?: number | null;
+            loop_resolution?: null | components["schemas"]["LoopResolution"];
+            /**
+             * @description Whether this task is the body's exit point — the one whose outputs
+             *     `loop_until` reads, and the one the iteration boundary is decided on.
+             */
+            loop_terminal: boolean;
+            /**
+             * Format: int64
+             * @description Per-task override of [`DEFAULT_FAILURE_LIMIT`].
+             *
+             *     Despite the name (inherited from the column), this is a *failure* limit,
+             *     not a retry count: the task is parked once `consecutive_failures`
+             *     reaches it, so `max_retries = 1` allows one attempt and zero retries.
+             */
+            max_retries?: number | null;
             metadata: unknown;
+            /** @description JSON Schema this task's outputs must satisfy to complete. */
+            output_schema?: unknown;
+            /** @description Validated outputs. What downstream tasks read from. */
+            outputs?: unknown;
             owner_agent_id: string;
             priority: components["schemas"]["TaskPriority"];
+            /** @description Project this task acts on, if any. */
+            project_id?: string | null;
+            /**
+             * @description Specific repo within the project. A project holds many repos, so this is
+             *     what makes a task about `api-gateway` distinguishable from one about
+             *     `web` in the same project.
+             */
+            repo_id?: string | null;
+            /**
+             * @description What this task needs, instead of who should do it.
+             *
+             *     `None` on a pushed task — the common case, and the one a fleet of one
+             *     never leaves. `Some` makes the task *pooled*: any agent declaring all of
+             *     these labels may claim it, and claiming stamps `assigned_agent_id` so
+             *     that from that moment it is indistinguishable from a pushed task.
+             *
+             *     This stays set for the life of the task, including while it is claimed.
+             *     It answers "where did this come from", which is a different question
+             *     from "who has it now" — and the reaper needs both to put a crashed
+             *     pooled task back in the pool rather than back on the agent that died.
+             */
+            required_capabilities?: string[] | null;
+            /**
+             * @description Why this task will never run, when its status is `skipped`.
+             *
+             *     Its own field rather than a second meaning for `block_reason`: a block
+             *     is a stop that recovers, and it drags in `block_kind`, the sticky kinds,
+             *     the recurrence limiter, and the unblock path — none of which applies to
+             *     a branch that was simply not taken.
+             */
+            skip_reason?: string | null;
             source_memory_id?: string | null;
             status: components["schemas"]["TaskStatus"];
             subtasks: components["schemas"]["TaskSubtask"][];
+            /**
+             * @description Extra instructions appended to the worker prompt at pickup. Appended,
+             *     never substituted — this is task guidance, not an identity override.
+             */
+            system_prompt?: string | null;
             /** Format: int64 */
             task_number: number;
             title: string;
             updated_at: string;
             worker_id?: string | null;
+            /**
+             * @description The workflow launch this task was compiled from, if any.
+             *
+             *     Plain text rather than a foreign key: a task outlives its template, and
+             *     deleting a workflow must not take the record of work that actually
+             *     happened with it.
+             */
+            workflow_run_id?: string | null;
+            /** @description Which step of that workflow produced this task. */
+            workflow_step_key?: string | null;
+            /** @description What a provisioned worktree forks from. `None` means the repo's HEAD. */
+            worktree_base_ref?: string | null;
+            /**
+             * @description Worktree to execute in. When set, the worker's working directory is
+             *     resolved from it rather than from the repo or project root.
+             */
+            worktree_id?: string | null;
+            /**
+             * @description What checkout this task runs in, frozen from the step at launch.
+             *
+             *     A fan-out placeholder carries it to its branches, which is how expansion
+             *     knows to provision one checkout per branch — inside the same transaction
+             *     that emits them.
+             */
+            worktree_mode: components["schemas"]["WorktreeMode"];
         };
         TaskActionResponse: {
             message: string;
             success: boolean;
         };
+        TaskContractResponse: {
+            bindings: components["schemas"]["TaskInputBinding"][];
+            input_schema?: unknown;
+            /** @description Inputs as they were resolved at the last claim. */
+            inputs?: unknown;
+            output_schema?: unknown;
+            outputs?: unknown;
+            /** @description Why resolution fails, if it does. Empty when the contract is satisfied. */
+            problems: components["schemas"]["ContractProblem"][];
+            /**
+             * @description What the bindings resolve to right now, which may differ from `inputs`
+             *     if the graph changed since the last attempt.
+             */
+            resolved_inputs?: unknown;
+        };
+        TaskDependenciesResponse: {
+            /**
+             * @description The subset of `parents` that has not finished yet — what the board
+             *     should name when explaining why a task is not moving.
+             */
+            blocked_by: number[];
+            /** @description Tasks waiting on this one. */
+            children: number[];
+            /** @description Tasks this one waits on. */
+            parents: number[];
+        };
+        /** @description How many edges touch a task, and how many still gate it. */
+        TaskEdgeSummary: {
+            /**
+             * Format: int64
+             * @description The subset of `parents` that has not finished — why the task is waiting.
+             */
+            blocked_by: number;
+            /**
+             * Format: int64
+             * @description Tasks waiting on this one.
+             */
+            children: number;
+            /**
+             * Format: int64
+             * @description Tasks this one waits on.
+             */
+            parents: number;
+            /** Format: int64 */
+            task_number: number;
+        };
+        TaskGate: {
+            config: unknown;
+            /** Format: int64 */
+            consecutive_errors: number;
+            created_at: string;
+            disposition?: null | components["schemas"]["GateDisposition"];
+            id: string;
+            kind: components["schemas"]["GateKind"];
+            /**
+             * @description What a person should read on the board. "waiting for CI on main" beats
+             *     a URL.
+             */
+            label?: string | null;
+            last_checked_at?: string | null;
+            last_detail?: string | null;
+            last_result: components["schemas"]["GateResult"];
+            /** Format: int64 */
+            poll_interval_secs: number;
+            /** Format: int64 */
+            task_number: number;
+        };
+        TaskGatesResponse: {
+            gates: components["schemas"]["TaskGate"][];
+        };
+        /**
+         * @description The connected graph a task belongs to.
+         *
+         *     The unit a person actually asks about. "Show me this task" is nearly always
+         *     "show me what this task is part of" — what it waits for, what waits on it,
+         *     and what runs beside it.
+         */
+        TaskGraph: {
+            edges: components["schemas"]["TaskGraphEdge"][];
+            /**
+             * Format: int64
+             * @description The task that was asked about, so a renderer can mark it.
+             */
+            seed: number;
+            tasks: components["schemas"]["Task"][];
+            /**
+             * @description Whether the walk hit its cap. Reported rather than swallowed: a partial
+             *     graph presented as a whole one is worse than no graph.
+             */
+            truncated: boolean;
+        };
+        /** @description One dependency edge, as a pair rather than a count. */
+        TaskGraphEdge: {
+            /** Format: int64 */
+            child_task_number: number;
+            /** Format: int64 */
+            parent_task_number: number;
+        };
+        /**
+         * @description Where one of a task's inputs comes from.
+         *
+         *     Either a pointer into an upstream task's outputs, or a literal baked into
+         *     the graph. `source_task_number` being `None` means literal.
+         */
+        TaskInputBinding: {
+            /** Format: int64 */
+            child_task_number: number;
+            /**
+             * @description Collect every branch of this workflow step into one object, keyed by
+             *     branch key.
+             *
+             *     Mutually exclusive with `source_task_number`, and it has to be: that one
+             *     addresses a single upstream task by number, which cannot name a set that
+             *     does not exist until the fan-out expands.
+             */
+            fan_in_step_key?: string | null;
+            /** @description Key in the child's input object. */
+            input_key: string;
+            /** @description JSON literal, used when `source_task_number` is `None`. */
+            literal_value?: unknown;
+            /**
+             * @description RFC 6901 JSON Pointer into that task's outputs. Empty selects the whole
+             *     outputs object.
+             */
+            source_pointer?: string | null;
+            /**
+             * Format: int64
+             * @description Upstream task to read from. `None` for a literal.
+             */
+            source_task_number?: number | null;
+        };
+        /**
+         * @description What executes a task.
+         *
+         *     The task-level mirror of [`crate::workflows::StepKind`], and named rather
+         *     than inferred from "does `command` have a value" for the same reason: a task
+         *     meant to be a command and missing its command line must be *reported*, not
+         *     quietly run as an agent task against an empty instruction.
+         * @enum {string}
+         */
+        TaskKind: "agent" | "command" | "decision";
         TaskListResponse: {
+            /**
+             * Format: int64
+             * @description How many consecutive failures a task tolerates when it sets no limit of
+             *     its own.
+             *
+             *     Published because the dashboard has to show what "default" *means* — a
+             *     budget control that says "uses the default" without the number tells a
+             *     reader nothing they can act on. The alternative was hard-coding it in
+             *     TypeScript, which is the same silent-drift bug this codebase has already
+             *     paid for four times over in dead config.
+             */
+            default_failure_limit: number;
+            /**
+             * @description Edge counts for every task that has any. Tasks with no dependencies are
+             *     absent rather than listed with zeroes.
+             */
+            edges: components["schemas"]["TaskEdgeSummary"][];
             tasks: components["schemas"]["Task"][];
         };
         /** @enum {string} */
         TaskPriority: "critical" | "high" | "medium" | "low";
+        TaskProvenanceResponse: {
+            /** @description Cards this task filed. */
+            filed: components["schemas"]["Task"][];
+            /**
+             * Format: int64
+             * @description The task that filed this one, when a worker did.
+             */
+            filed_by_task_number?: number | null;
+            /**
+             * Format: int64
+             * @description How many more this task may still file before hitting the cap.
+             */
+            remaining_fan_out: number;
+        };
         TaskResponse: {
             task: components["schemas"]["Task"];
         };
+        /** @description A single execution attempt against a task. */
+        TaskRun: {
+            /** Format: int64 */
+            attempt: number;
+            ended_at?: string | null;
+            error?: string | null;
+            id: string;
+            outcome?: null | components["schemas"]["TaskRunOutcome"];
+            started_at: string;
+            summary?: string | null;
+            /** Format: int64 */
+            task_number: number;
+            worker_id?: string | null;
+        };
+        /**
+         * @description Outcome of a single task execution attempt.
+         * @enum {string}
+         */
+        TaskRunOutcome: "completed" | "failed" | "timeout" | "cancelled" | "blocked" | "rate_limited" | "abandoned";
+        TaskRunsResponse: {
+            runs: components["schemas"]["TaskRun"][];
+        };
         /** @enum {string} */
-        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
+        TaskStatus: "pending_approval" | "backlog" | "ready" | "in_progress" | "blocked" | "done" | "skipped";
         TaskSubtask: {
             completed: boolean;
             title: string;
+        };
+        TaskTransition: {
+            from: components["schemas"]["TaskStatus"];
+            to: components["schemas"]["TaskStatus"];
+        };
+        TaskTransitionsResponse: {
+            transitions: components["schemas"]["TaskTransition"][];
         };
         /** @description A unified timeline item combining messages, branch runs, and worker runs. */
         TimelineItem: {
@@ -4079,6 +5949,8 @@ export interface components {
             /** Format: int64 */
             reasoning: number;
         };
+        /** @enum {string} */
+        ToolResultStatus: "pending" | "final" | "waiting_for_input";
         ToolsResponse: {
             binaries: components["schemas"]["BinaryEntry"][];
             tools_bin: string;
@@ -4133,7 +6005,10 @@ export interface components {
             type: "system_text";
         } | {
             call_id: string;
+            /** @description Accumulated streaming output for live display. Cleared when tool completes. */
+            live_output?: string | null;
             name: string;
+            status?: components["schemas"]["ToolResultStatus"];
             text: string;
             /** @enum {string} */
             type: "tool_result";
@@ -4167,6 +6042,12 @@ export interface components {
         };
         UpdateAgentRequest: {
             agent_id: string;
+            /**
+             * @description Replace what this agent declares it can do. Absent leaves it alone; an
+             *     empty list clears it, which is how an agent is taken out of every pool
+             *     without deleting it.
+             */
+            capabilities?: string[] | null;
             display_name?: string | null;
             gradient_end?: string | null;
             gradient_start?: string | null;
@@ -4233,6 +6114,10 @@ export interface components {
             status?: string | null;
             tags?: string[] | null;
         };
+        UpdateRepoDependencyRequest: {
+            kind?: string | null;
+            note?: string | null;
+        };
         /** @description Result of an update check. */
         UpdateStatus: {
             /** @description Whether the Docker socket is accessible (enables one-click update). */
@@ -4254,14 +6139,28 @@ export interface components {
         UpdateTaskRequest: {
             approved_by?: string | null;
             assigned_agent_id?: string | null;
+            /** @description Unbind the task from its project/repo/worktree entirely. */
+            clear_binding?: boolean;
             complete_subtask?: number | null;
             description?: string | null;
+            /**
+             * Format: int64
+             * @description How many failures this task tolerates before it is parked.
+             *
+             *     Absent leaves it alone; explicit `null` returns it to the instance
+             *     default. Distinguishing those needs the doubly-nested option — a plain
+             *     `Option` cannot express "clear this".
+             */
+            max_retries?: number | null;
             metadata?: unknown;
             priority?: string | null;
+            project_id?: string | null;
+            repo_id?: string | null;
             status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][] | null;
             title?: string | null;
             worker_id?: string | null;
+            worktree_id?: string | null;
         };
         UploadSkillResponse: {
             installed: string[];
@@ -4340,6 +6239,11 @@ export interface components {
             /** Format: int64 */
             request_count: number;
         };
+        WakeAgentResponse: {
+            agent_id: string;
+            fired: boolean;
+            message: string;
+        };
         WarmupSection: {
             eager_embedding_load: boolean;
             enabled: boolean;
@@ -4386,6 +6290,23 @@ export interface components {
             refresh_secs?: number | null;
             /** Format: int64 */
             startup_delay_secs?: number | null;
+        };
+        /**
+         * @description A webhook as it is safe to describe.
+         *
+         *     There is no `secret` field, and that is structural rather than a matter of
+         *     remembering: the type the store hands back does not carry the secret either,
+         *     so there is nothing here that a future edit could accidentally serialise.
+         */
+        WebhookResponse: {
+            /**
+             * @description Where deliveries go, so an operator can paste it into a CI config
+             *     without reconstructing it from the route table.
+             */
+            delivery_path: string;
+            /** @description The header the shared secret goes in. */
+            secret_header: string;
+            webhook: components["schemas"]["WorkflowWebhook"];
         };
         WikiActionResponse: {
             message: string;
@@ -4525,6 +6446,253 @@ export interface components {
          * @enum {string}
          */
         WorkerMemoryMode: "none" | "ambient" | "tools" | "full";
+        /** @description A reusable pipeline definition. */
+        Workflow: {
+            created_at: string;
+            description?: string | null;
+            id: string;
+            /** @description JSON Schema for the input a whole run is launched with. */
+            input_schema?: unknown;
+            name: string;
+            updated_at: string;
+        };
+        WorkflowActionResponse: {
+            message: string;
+            success: boolean;
+        };
+        /**
+         * @description A template and everything that references it.
+         *
+         *     One response rather than four endpoints because the editor cannot render
+         *     anything useful without all of it — a step list with no edges is not a
+         *     pipeline — and four round trips can interleave with a save.
+         */
+        WorkflowDetailResponse: {
+            bindings: components["schemas"]["StepBinding"][];
+            edges: components["schemas"]["WorkflowEdge"][];
+            /**
+             * @description Conditions on steps. Part of the same response for the same reason the
+             *     edges are: a canvas that draws a step without its condition draws a
+             *     pipeline that is not the one that runs.
+             */
+            gates: components["schemas"]["StepGate"][];
+            steps: components["schemas"]["WorkflowStep"][];
+            workflow: components["schemas"]["Workflow"];
+        };
+        WorkflowEdge: {
+            child_step_key: string;
+            /**
+             * @description `normal` or `on_exhausted`. An editor that drew both alike would draw a
+             *     pipeline that is not the one that runs.
+             */
+            kind: string;
+            parent_step_key: string;
+        };
+        WorkflowListResponse: {
+            workflows: components["schemas"]["Workflow"][];
+        };
+        WorkflowResponse: {
+            workflow: components["schemas"]["Workflow"];
+        };
+        /** @description One launch of a workflow. */
+        WorkflowRun: {
+            created_at: string;
+            /**
+             * @description When the run stopped, in any terminal sense. `None` exactly while
+             *     `status` is `running`.
+             */
+            finished_at?: string | null;
+            id: string;
+            inputs: unknown;
+            launched_by: string;
+            status: components["schemas"]["RunStatus"];
+            /** @description Why the run reached its current status, in words. */
+            status_reason?: string | null;
+            workflow_id: string;
+        };
+        /** @description A schedule attached to a workflow, launching with a stored input. */
+        WorkflowSchedule: {
+            /** @description Which agent owns and executes the emitted tasks. */
+            agent_id: string;
+            created_at: string;
+            /** @description 5-field cron expression, read in UTC. `None` uses `interval_secs`. */
+            cron_expr?: string | null;
+            enabled: boolean;
+            id: string;
+            /** @description The launch payload. A literal, because a schedule cannot prompt. */
+            inputs: unknown;
+            /** Format: int64 */
+            interval_secs: number;
+            last_detail?: string | null;
+            last_fired_at?: string | null;
+            last_outcome?: null | components["schemas"]["ScheduleOutcome"];
+            last_run_id?: string | null;
+            name: string;
+            next_run_at?: string | null;
+            workflow_id: string;
+        };
+        /** @description One step of a pipeline. Becomes exactly one task per launch. */
+        WorkflowStep: {
+            /**
+             * @description `None` means the agent that launched the run — unless
+             *     `required_capabilities` is set, in which case nobody is named and the
+             *     emitted task goes into the pool.
+             */
+            assigned_agent_id?: string | null;
+            /**
+             * @description The command line, for a command step. `None` on every agent step, and
+             *     launch refuses an agent step that carries one.
+             */
+            command?: string | null;
+            /**
+             * Format: int64
+             * @description Hard wall-clock ceiling for a command step, in seconds.
+             *
+             *     Required rather than inherited from a default: a stored command runs
+             *     unattended and forever, and the author is the only person who knows
+             *     whether this is a two-second linter or a four-minute build.
+             */
+            command_timeout_secs?: number | null;
+            /** @description What a decision inside a loop body does on the second pass. */
+            decision_ask?: components["schemas"]["DecisionAsk"];
+            /**
+             * @description Who may answer. Empty or `None` means anyone. **Advisory in v1** — see
+             *     [`crate::tasks::Task::decision_asked_of`].
+             */
+            decision_asked_of?: string[] | null;
+            /**
+             * @description The answer that applies on a `default` timeout. Validated against this
+             *     step's own `output_schema` at launch, not when the timeout fires.
+             */
+            decision_default_answer?: unknown;
+            /**
+             * @description The question a decision step asks, as the person answering reads it.
+             *     Required on a decision step and refused on every other kind.
+             */
+            decision_question?: string | null;
+            /** @description What happens if nobody answers. */
+            decision_timeout_action?: components["schemas"]["DecisionTimeoutAction"];
+            /**
+             * Format: int64
+             * @description How long, in seconds, from the moment the decision is asked. Required by
+             *     `default` and `fail`, refused by `wait`.
+             */
+            decision_timeout_secs?: number | null;
+            description?: string | null;
+            /**
+             * Format: int64
+             * @description The exit code that means success, for the steps where non-zero really is
+             *     a failure. Absent by default — see [`StepKind::Command`].
+             */
+            expect_exit_code?: number | null;
+            /**
+             * @description Pointer *within each item* naming its branch, e.g. `/name` over
+             *     `{"name": "repo-a"}` labels the branch `repo-a`.
+             *
+             *     This is what makes a fan-in keyed rather than positional. Without it the
+             *     index is used and the keys come out `0`, `1`, `2` — honest, but far less
+             *     useful in a report.
+             */
+            for_each_key?: string | null;
+            /** @description RFC 6901 pointer into that step's outputs. Must select an array. */
+            for_each_pointer?: string | null;
+            /**
+             * @description Which upstream step produces the collection this step iterates.
+             *
+             *     Set, and the step is a fan-out: it becomes one task per item rather than
+             *     one task, and the width is not known until that step finishes.
+             */
+            for_each_step_key?: string | null;
+            input_schema?: unknown;
+            /** @description Agent step or command step. See [`StepKind`]. */
+            kind?: components["schemas"]["StepKind"];
+            /**
+             * @description Which loop body this step belongs to.
+             *
+             *     A loop is one or more steps sharing this name. A body of one step is the
+             *     degenerate case and needs no special handling.
+             */
+            loop_group?: string | null;
+            /**
+             * Format: int64
+             * @description How many passes the body may run before the loop gives up.
+             *
+             *     `None` means [`crate::tasks::DEFAULT_LOOP_MAX_ITERATIONS`]. Read from the
+             *     body's exit step only; set anywhere else it would be a number nothing
+             *     consumes, so launch refuses that rather than letting it sit in a row.
+             */
+            loop_max_iterations?: number | null;
+            /**
+             * @description The exit predicate, as the same object a `task_output` gate takes:
+             *     `{"pointer": "/tests/passed", "equals": true}`.
+             *
+             *     Deliberately not a second predicate language — conditional steps,
+             *     external gating, and loop exit are one question asked in three places.
+             *     Required on the body's exit step: a loop with no exit condition always
+             *     burns its whole budget.
+             */
+            loop_until?: unknown;
+            output_schema?: unknown;
+            /** Format: int64 */
+            position: number;
+            priority: components["schemas"]["TaskPriority"];
+            repo_id?: string | null;
+            /**
+             * @description What this step needs, instead of who should do it.
+             *
+             *     The step-level half of the same choice a task has. `None` on every step
+             *     that exists today. Set, and the emitted task is unassigned and claimed
+             *     by whichever capable agent asks first.
+             *
+             *     A requirement nothing in the fleet can satisfy is refused at **launch**,
+             *     the way an unknown step reference already is — a template is edited by
+             *     somebody who is still watching, and a pooled task nothing can claim is
+             *     otherwise only visible in the sweep report.
+             */
+            required_capabilities?: string[] | null;
+            /** @description Stable name that edges and bindings reference. */
+            step_key: string;
+            /** @description Per-step instructions appended to the worker prompt at pickup. */
+            system_prompt?: string | null;
+            title: string;
+            workflow_id: string;
+            /** @description What a provisioned worktree forks from. `None` means the repo's HEAD. */
+            worktree_base_ref?: string | null;
+            /**
+             * @description What checkout this step runs in. See
+             *     [`crate::workflows::worktrees::WorktreeMode`].
+             */
+            worktree_mode?: components["schemas"]["WorktreeMode"];
+        };
+        /**
+         * @description An inbound endpoint mapping a payload to a run input.
+         *
+         *     Note what is *not* on this struct: the secret. It goes in as plaintext once,
+         *     is hashed immediately, and is never read back out — there is no field here
+         *     that could be serialised into a response by accident.
+         */
+        WorkflowWebhook: {
+            agent_id: string;
+            created_at: string;
+            enabled: boolean;
+            /** @description `{ "<run input key>": "<JSON Pointer into the payload>" }`. */
+            input_pointers: {
+                [key: string]: unknown;
+            };
+            last_delivery_at?: string | null;
+            last_detail?: string | null;
+            last_outcome?: null | components["schemas"]["DeliveryOutcome"];
+            last_run_id?: string | null;
+            workflow_id: string;
+        };
+        /**
+         * @description Where a step gets its working directory from.
+         *
+         *     `Inherit` is the default and is exactly today's behaviour, which is what lets
+         *     every template that predates this feature keep working untouched.
+         * @enum {string}
+         */
+        WorktreeMode: "inherit" | "per_run" | "per_branch";
         WorktreeResponse: {
             worktree: components["schemas"]["ProjectWorktree"];
         };
@@ -5857,6 +8025,82 @@ export interface operations {
             };
         };
     };
+    list_repo_dependencies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyListResponse"];
+                };
+            };
+            /** @description Project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    declare_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeclareRepoDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyResponse"];
+                };
+            };
+            /** @description Project or repo not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Already declared */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Self-dependency, or a repo from another project */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     create_repo: {
         parameters: {
             query?: never;
@@ -5919,6 +8163,35 @@ export interface operations {
             };
         };
     };
+    list_worktree_orphans: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrphanWorktreesResponse"];
+                };
+            };
+            /** @description Project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     create_worktree: {
         parameters: {
             query?: never;
@@ -5952,6 +8225,76 @@ export interface operations {
             };
         };
     };
+    update_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Dependent repo ID */
+                repo_id: string;
+                /** @description Depended-upon repo ID */
+                depends_on_repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRepoDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencyResponse"];
+                };
+            };
+            /** @description Declaration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_repo_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Dependent repo ID */
+                repo_id: string;
+                /** @description Depended-upon repo ID */
+                depends_on_repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResponse"];
+                };
+            };
+            /** @description Declaration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     delete_repo: {
         parameters: {
             query?: never;
@@ -5972,6 +8315,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActionResponse"];
+                };
+            };
+            /** @description Project or repo not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    repo_dependency_suggestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                project_id: string;
+                /** @description Repository ID */
+                repo_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepoDependencySuggestions"];
                 };
             };
             /** @description Project or repo not found */
@@ -6476,6 +8850,35 @@ export interface operations {
             };
             /** @description Internal server error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    wake_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WakeAgentResponse"];
+                };
+            };
+            /** @description Wake manager not running */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8643,65 +11046,6 @@ export interface operations {
             };
         };
     };
-    start_openai_browser_oauth: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["OpenAiOAuthBrowserStartRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpenAiOAuthBrowserStartResponse"];
-                };
-            };
-            /** @description Invalid request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    openai_browser_oauth_status: {
-        parameters: {
-            query: {
-                /** @description OAuth state parameter */
-                state: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpenAiOAuthBrowserStatusResponse"];
-                };
-            };
-            /** @description Invalid request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     test_provider_model: {
         parameters: {
             query?: never;
@@ -8737,7 +11081,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Provider name to delete */
+                /** @description Provider ID to delete */
                 provider: string;
             };
             cookie?: never;
@@ -8758,35 +11102,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Provider not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    get_provider_config: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Provider ID */
-                provider: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProviderConfigResponse"];
-                };
             };
             /** @description Provider not found */
             404: {
@@ -9678,6 +11993,25 @@ export interface operations {
             };
         };
     };
+    list_task_transitions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskTransitionsResponse"];
+                };
+            };
+        };
+    };
     get_task: {
         parameters: {
             query?: never;
@@ -9877,6 +12211,384 @@ export interface operations {
             };
         };
     };
+    set_task_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Input key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBindingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description A binding must name either a source task or a literal */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_task_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Input key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Binding not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    block_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BlockTaskRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown block kind */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_contract: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_task_contract: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetContractRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskContractResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    answer_decision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerDecisionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Already answered, defaulted, or not yet asked */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a decision, or the answer does not match its schema */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_dependencies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_task_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Child task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddDependencyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Edge would create a cycle */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A task cannot depend on itself */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_task_dependency: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Child task number */
+                number: number;
+                /** @description Parent task number */
+                parent: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDependenciesResponse"];
+                };
+            };
+            /** @description Edge not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     execute_task: {
         parameters: {
             query?: never;
@@ -9909,6 +12621,286 @@ export interface operations {
                 content?: never;
             };
             /** @description Task pending approval */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_gates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_task_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Gate config is not usable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_task_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+                /** @description Gate id */
+                gate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGatesResponse"];
+                };
+            };
+            /** @description No such gate */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_graph: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number to centre on */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskGraph"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_task_provenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskProvenanceResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    retry_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRunsResponse"];
+                };
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unblock_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Task not found or not blocked */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This is a decision — answer it instead */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10093,6 +13085,46 @@ export interface operations {
             };
             /** @description Internal server error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    workflow_webhook_delivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryResponse"];
+                };
+            };
+            /** @description No usable webhook, or no valid shared secret */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated, and the payload or the template was unusable */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10372,6 +13404,800 @@ export interface operations {
             };
             /** @description Wiki store not initialized */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDetailResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowActionResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run is still going, or a worker is still in it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancel_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run id */
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CancelRunRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelRunResponse"];
+                };
+            };
+            /** @description No such run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run has already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow schedule id */
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such schedule */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_workflows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowListResponse"];
+                };
+            };
+            /** @description Workflow store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWorkflowRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description A workflow with that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWorkflowRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowActionResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepEdgeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description Self-loop, or a step that does not exist */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_edge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepEdgeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such edge */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    launch_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LaunchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LaunchResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The steps form a cycle */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad input, or a reference that does not resolve */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunListResponse"];
+                };
+            };
+        };
+    };
+    list_schedules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleListResponse"];
+                };
+            };
+        };
+    };
+    put_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveScheduleRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unusable schedule */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_step: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Stable step name */
+                step_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveStepRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown priority */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_step: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Stable step name */
+                step_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being bound */
+                step_key: string;
+                /** @description Name of the input */
+                input_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveBindingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description Unknown source, or a source that does not match its kind */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_binding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being bound */
+                step_key: string;
+                /** @description Name of the input */
+                input_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such binding */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_step_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being gated */
+                step_key: string;
+                /** @description Author-chosen name for this condition */
+                gate_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveStepGateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown kind or disposition, a step that does not exist, or an unusable config */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_step_gate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+                /** @description Step being gated */
+                step_key: string;
+                /** @description Name of the condition */
+                gate_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailResponse"];
+                };
+            };
+            /** @description No such condition */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookResponse"];
+                };
+            };
+            /** @description No webhook is configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveWebhookRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookResponse"];
+                };
+            };
+            /** @description No such workflow */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unusable webhook configuration */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No webhook is configured */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

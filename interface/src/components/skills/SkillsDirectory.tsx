@@ -188,12 +188,12 @@ export function SkillsDirectory({
 					</Button>
 				</form>
 				{githubInstallMutation.isError && (
-					<p className="mt-1.5 text-xs text-red-400">
+					<p className="mt-1.5 text-xs text-status-error">
 						Failed to install. Check the repository format.
 					</p>
 				)}
 				{githubInstallMutation.isSuccess && (
-					<p className="mt-1.5 text-xs text-green-400">
+					<p className="mt-1.5 text-xs text-status-success">
 						Installed: {githubInstallMutation.data.installed.join(", ")}
 					</p>
 				)}

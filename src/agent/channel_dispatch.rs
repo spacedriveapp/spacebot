@@ -600,14 +600,22 @@ pub async fn spawn_worker_from_state(
     interactive: bool,
     suggested_skills: &[&str],
     worker_context: &WorkerContextMode,
+    working_dir: Option<std::path::PathBuf>,
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
     let task = task.into();
     reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "worker");
 
-    let result =
-        spawn_worker_inner(state, &task, interactive, suggested_skills, worker_context).await;
+    let result = spawn_worker_inner(
+        state,
+        &task,
+        interactive,
+        suggested_skills,
+        worker_context,
+        working_dir,
+    )
+    .await;
 
     // Release the reservation regardless of success or failure.
     // On success the task is now in the status block; on failure it needs cleanup.
@@ -624,6 +632,7 @@ async fn spawn_worker_inner(
     interactive: bool,
     suggested_skills: &[&str],
     worker_context: &WorkerContextMode,
+    working_dir: Option<std::path::PathBuf>,
 ) -> std::result::Result<WorkerId, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
@@ -791,6 +800,17 @@ async fn spawn_worker_inner(
             .await
             .insert(worker.id, inject_tx);
         worker
+    };
+
+    // Root the worker in the caller's requested directory. Before this the
+    // resolved directory was computed and then dropped for builtin workers, so
+    // `spawn_worker(directory: ...)` only ever took effect for OpenCode — the
+    // argument silently did nothing everywhere else.
+    let worker = match working_dir {
+        Some(dir) => worker
+            .with_working_dir(&dir)
+            .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?,
+        None => worker,
     };
 
     let worker_id = worker.id;

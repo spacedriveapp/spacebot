@@ -1,5 +1,6 @@
 import {useState} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
+import {copyText} from "@/lib/clipboard";
 import {
 	api,
 	type SecretCategory,
@@ -215,7 +216,7 @@ export function SecretsSection() {
 	const handleCopyKey = async () => {
 		if (!masterKeyDisplay) return;
 		try {
-			await navigator.clipboard.writeText(masterKeyDisplay);
+			await copyText(masterKeyDisplay);
 			setMasterKeyCopied(true);
 		} catch {
 			// Fallback
@@ -262,10 +263,10 @@ export function SecretsSection() {
 						<div
 							className={`h-2 w-2 rounded-full ${
 								state === "unlocked"
-									? "bg-green-500"
+									? "bg-status-success"
 									: state === "locked"
-										? "bg-red-500"
-										: "bg-amber-500"
+										? "bg-status-error"
+										: "bg-status-warning"
 							}`}
 						/>
 						<span className="text-sm font-medium text-ink">
@@ -286,10 +287,10 @@ export function SecretsSection() {
 
 			{/* Encryption banner (unencrypted stores) */}
 			{state === "unencrypted" && !storeStatus?.platform_managed && (
-				<div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+				<div className="mb-4 rounded-md border border-status-warning/20 bg-status-warning/5 px-4 py-3">
 					<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 						<div className="sm:pr-4">
-							<p className="text-sm font-medium text-amber-400">
+							<p className="text-sm font-medium text-status-warning">
 								Encryption not enabled
 							</p>
 							<p className="mt-0.5 text-sm text-ink-faint">
@@ -313,8 +314,8 @@ export function SecretsSection() {
 
 			{/* Unlock prompt (locked stores) */}
 			{isLocked && (
-				<div className="mb-4 rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3">
-					<p className="text-sm font-medium text-red-400">Secrets are locked</p>
+				<div className="mb-4 rounded-md border border-status-error/20 bg-status-error/5 px-4 py-3">
+					<p className="text-sm font-medium text-status-error">Secrets are locked</p>
 					<p className="mt-0.5 text-sm text-ink-faint">
 						Enter your master key to unlock encrypted secrets. You can view
 						secret names but cannot add, edit, or read values while locked.
@@ -348,8 +349,8 @@ export function SecretsSection() {
 				<div
 					className={`mb-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-status-success/20 bg-status-success/10 text-status-success"
+							: "border-status-error/20 bg-status-error/10 text-status-error"
 					}`}
 				>
 					{message.text}
@@ -711,7 +712,7 @@ export function SecretsSection() {
 							</DialogHeader>
 							<div className="space-y-3">
 								<div className="flex items-center gap-2">
-									<code className="flex-1 rounded border border-app-line bg-app-darkerBox px-3 py-2 font-mono text-tiny text-ink break-all select-all">
+									<code className="flex-1 rounded border border-app-line bg-app-darker-box px-3 py-2 font-mono text-tiny text-ink break-all select-all">
 										{masterKeyDisplay}
 									</code>
 									<Button
@@ -722,7 +723,7 @@ export function SecretsSection() {
 										{masterKeyCopied ? "Copied" : "Copy"}
 									</Button>
 								</div>
-								<div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-sm text-amber-400">
+								<div className="rounded-md border border-status-warning/20 bg-status-warning/5 px-3 py-2 text-sm text-status-warning">
 									If you lose this key and the OS credential store is cleared
 									(e.g. after a Linux reboot), you will not be able to access
 									your encrypted secrets.

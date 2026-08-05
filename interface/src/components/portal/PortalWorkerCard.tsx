@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { InlineWorkerCard, type TranscriptStep } from "@spacedrive/ai";
 import { api, type WorkerListItem } from "@/api/client";
+import {copyText} from "@/lib/clipboard";
 
 interface PortalWorkerCardProps {
 	agentId: string;
@@ -38,7 +39,7 @@ export function PortalWorkerCard({ agentId, worker }: PortalWorkerCardProps) {
 			.filter(Boolean)
 			.join("\n\n");
 
-		await navigator.clipboard.writeText(payload);
+		await copyText(payload);
 	};
 
 	const cancelMutation = useMutation({

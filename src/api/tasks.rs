@@ -36,9 +36,17 @@ pub(super) struct TaskListQuery {
 pub(super) struct CreateTaskRequest {
     /// Agent that owns (created) this task.
     owner_agent_id: String,
-    /// Agent assigned to execute. Defaults to `owner_agent_id`.
+    /// Agent assigned to execute. Defaults to `owner_agent_id`, unless
+    /// `required_capabilities` is set — then the task is pooled and nobody is
+    /// named until an agent claims it.
     #[serde(default)]
     assigned_agent_id: Option<String>,
+    /// What this task needs, instead of who should do it.
+    ///
+    /// Any agent declaring all of these may claim it. Mutually exclusive with
+    /// `assigned_agent_id`; sending both is rejected rather than resolved.
+    #[serde(default)]
+    required_capabilities: Option<Vec<String>>,
     title: String,
     #[serde(default)]
     description: Option<String>,
@@ -52,6 +60,25 @@ pub(super) struct CreateTaskRequest {
     source_memory_id: Option<String>,
     #[serde(default)]
     created_by: Option<String>,
+    /// Project this task acts on.
+    #[serde(default)]
+    project_id: Option<String>,
+    /// Repo within the project. A project holds many repos.
+    #[serde(default)]
+    repo_id: Option<String>,
+    /// Worktree to execute in.
+    #[serde(default)]
+    worktree_id: Option<String>,
+    /// Task numbers that must finish before this one may run.
+    #[serde(default)]
+    depends_on: Vec<i64>,
+    /// Status to create the task in. Defaults to `pending_approval`.
+    ///
+    /// The dashboard has always sent `backlog` here; the field simply did not
+    /// exist, so serde dropped it and every task created from the UI came back
+    /// awaiting an approval the creator had just given by clicking "create".
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -76,6 +103,22 @@ pub(super) struct UpdateTaskRequest {
     worker_id: Option<String>,
     #[serde(default)]
     approved_by: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    repo_id: Option<String>,
+    #[serde(default)]
+    worktree_id: Option<String>,
+    /// Unbind the task from its project/repo/worktree entirely.
+    #[serde(default)]
+    clear_binding: bool,
+    /// How many failures this task tolerates before it is parked.
+    ///
+    /// Absent leaves it alone; explicit `null` returns it to the instance
+    /// default. Distinguishing those needs the doubly-nested option — a plain
+    /// `Option` cannot express "clear this".
+    #[serde(default, deserialize_with = "double_option")]
+    max_retries: Option<Option<i64>>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -92,6 +135,18 @@ pub(super) struct AssignRequest {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskListResponse {
     tasks: Vec<crate::tasks::Task>,
+    /// Edge counts for every task that has any. Tasks with no dependencies are
+    /// absent rather than listed with zeroes.
+    edges: Vec<crate::tasks::TaskEdgeSummary>,
+    /// How many consecutive failures a task tolerates when it sets no limit of
+    /// its own.
+    ///
+    /// Published because the dashboard has to show what "default" *means* — a
+    /// budget control that says "uses the default" without the number tells a
+    /// reader nothing they can act on. The alternative was hard-coding it in
+    /// TypeScript, which is the same silent-drift bug this codebase has already
+    /// paid for four times over in dead config.
+    default_failure_limit: i64,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -103,6 +158,118 @@ pub(super) struct TaskResponse {
 pub(super) struct TaskActionResponse {
     success: bool,
     message: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskRunsResponse {
+    runs: Vec<crate::tasks::TaskRun>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskTransition {
+    from: crate::tasks::TaskStatus,
+    to: crate::tasks::TaskStatus,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskTransitionsResponse {
+    transitions: Vec<TaskTransition>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskDependenciesResponse {
+    /// Tasks this one waits on.
+    parents: Vec<i64>,
+    /// Tasks waiting on this one.
+    children: Vec<i64>,
+    /// The subset of `parents` that has not finished yet — what the board
+    /// should name when explaining why a task is not moving.
+    blocked_by: Vec<i64>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct AddDependencyRequest {
+    parent_task_number: i64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskContractResponse {
+    input_schema: Option<serde_json::Value>,
+    output_schema: Option<serde_json::Value>,
+    /// Inputs as they were resolved at the last claim.
+    inputs: Option<serde_json::Value>,
+    outputs: Option<serde_json::Value>,
+    /// What the bindings resolve to right now, which may differ from `inputs`
+    /// if the graph changed since the last attempt.
+    resolved_inputs: Option<serde_json::Value>,
+    bindings: Vec<crate::tasks::TaskInputBinding>,
+    /// Why resolution fails, if it does. Empty when the contract is satisfied.
+    problems: Vec<crate::tasks::ContractProblem>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskProvenanceResponse {
+    /// The task that filed this one, when a worker did.
+    filed_by_task_number: Option<i64>,
+    /// Cards this task filed.
+    filed: Vec<crate::tasks::Task>,
+    /// How many more this task may still file before hitting the cap.
+    remaining_fan_out: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct SetContractRequest {
+    #[serde(default)]
+    input_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct SetBindingRequest {
+    /// Upstream task to read from. Omit for a literal.
+    #[serde(default)]
+    source_task_number: Option<i64>,
+    /// RFC 6901 JSON Pointer into that task's outputs.
+    #[serde(default)]
+    source_pointer: Option<String>,
+    /// Literal JSON value, used when no source task is given.
+    #[serde(default)]
+    literal_value: Option<serde_json::Value>,
+}
+
+/// An answer to a decision step.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct AnswerDecisionRequest {
+    /// The answer, in whatever shape the step's `output_schema` declares. It
+    /// becomes the task's outputs verbatim, so a binding downstream reads it
+    /// with the pointers it already uses.
+    answer: serde_json::Value,
+    /// Who is answering. Required — an answer with no answerer has no
+    /// provenance, and provenance is the only thing a decision step has that an
+    /// agent step asking in a channel does not.
+    answered_by: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct BlockTaskRequest {
+    /// dependency | needs_input | capability | transient
+    kind: String,
+    reason: String,
+}
+
+/// Distinguish "field absent" from "field explicitly null".
+///
+/// `#[serde(default)]` yields `None` when the key is missing; this wraps a
+/// present value — including `null` — in `Some`. Without it, clearing a field
+/// and not mentioning it are the same request, which is how the binding patch
+/// used to null columns nobody asked about.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +378,39 @@ pub(super) async fn list_tasks(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(TaskListResponse { tasks }))
+    // Edge counts ride along with the list rather than being fetched per card.
+    // The board draws a badge on every row; a request per row would defeat the
+    // point of a list endpoint. A failure here degrades the badges, not the
+    // board, so it is logged rather than propagated.
+    let edges = store.dependency_summaries().await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to summarize task dependencies");
+        Vec::new()
+    });
+
+    Ok(Json(TaskListResponse {
+        tasks,
+        edges,
+        default_failure_limit: crate::tasks::DEFAULT_FAILURE_LIMIT,
+    }))
+}
+
+/// `GET /tasks/transitions` — every legal status move.
+///
+/// The dashboard reads this instead of hand-maintaining a second transition
+/// table in TypeScript, so a board can never offer a move the API rejects.
+#[utoipa::path(
+    get,
+    path = "/tasks/transitions",
+    responses((status = 200, body = TaskTransitionsResponse)),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_transitions() -> Json<TaskTransitionsResponse> {
+    Json(TaskTransitionsResponse {
+        transitions: crate::tasks::legal_transitions()
+            .into_iter()
+            .map(|(from, to)| TaskTransition { from, to })
+            .collect(),
+    })
 }
 
 /// `GET /tasks/{number}` — get a task by globally unique number.
@@ -264,18 +463,40 @@ pub(super) async fn create_task(
 ) -> Result<Json<TaskResponse>, StatusCode> {
     let store = get_task_store(&state)?;
 
-    let status = crate::tasks::TaskStatus::PendingApproval;
+    let status = parse_status(request.status.as_deref())?
+        .unwrap_or(crate::tasks::TaskStatus::PendingApproval);
     let priority =
         parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
 
-    let assigned = request
+    // A pooled task names nobody. The default-to-owner fallback has to be
+    // skipped for one, or every pooled task would be created already assigned
+    // to its creator and the requirement would never be matched against
+    // anything.
+    let requires =
+        crate::tasks::normalise_capabilities(&request.required_capabilities.unwrap_or_default());
+    let named = request
         .assigned_agent_id
-        .unwrap_or_else(|| request.owner_agent_id.clone());
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Both is a caller mistake, not a server fault. The store refuses it too —
+    // this is only here so the answer is a 422 rather than a 500.
+    if !requires.is_empty() && named.is_some() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let assigned = if requires.is_empty() {
+        named
+            .map(str::to_string)
+            .unwrap_or_else(|| request.owner_agent_id.clone())
+    } else {
+        crate::tasks::UNASSIGNED_AGENT_ID.to_string()
+    };
 
     let task = store
         .create(crate::tasks::CreateTaskInput {
             owner_agent_id: request.owner_agent_id,
             assigned_agent_id: assigned,
+            required_capabilities: requires,
             title: request.title,
             description: request.description,
             status,
@@ -284,6 +505,12 @@ pub(super) async fn create_task(
             metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
             source_memory_id: request.source_memory_id,
             created_by: request.created_by.unwrap_or_else(|| "human".to_string()),
+            binding: crate::tasks::TaskProjectBinding {
+                project_id: request.project_id,
+                repo_id: request.repo_id,
+                worktree_id: request.worktree_id,
+            },
+            depends_on: request.depends_on,
         })
         .await
         .map_err(|error| {
@@ -322,6 +549,15 @@ pub(super) async fn update_task(
     let status = parse_status(request.status.as_deref())?;
     let priority = parse_priority(request.priority.as_deref())?;
 
+    // Each binding column is patched independently: naming only `repo_id` must
+    // rebind the repo and leave the project and worktree exactly as they were.
+    // Use `clear_binding` to unbind entirely.
+    let binding = crate::tasks::TaskBindingPatch {
+        project_id: request.project_id.map(Some),
+        repo_id: request.repo_id.map(Some),
+        worktree_id: request.worktree_id.map(Some),
+    };
+
     let task = store
         .update(
             number,
@@ -334,9 +570,12 @@ pub(super) async fn update_task(
                 subtasks: request.subtasks,
                 metadata: request.metadata,
                 worker_id: request.worker_id,
-                clear_worker_id: false,
                 approved_by: request.approved_by,
                 complete_subtask: request.complete_subtask,
+                binding,
+                clear_binding: request.clear_binding,
+                max_retries: request.max_retries,
+                ..Default::default()
             },
         )
         .await
@@ -456,6 +695,81 @@ pub(super) async fn approve_task(
     Ok(Json(TaskResponse { task }))
 }
 
+/// `GET /tasks/{number}/runs` — the per-attempt execution log for a task.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/runs",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskRunsResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_runs(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskRunsResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let runs = store.list_runs(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task runs");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(TaskRunsResponse { runs }))
+}
+
+/// `POST /tasks/{number}/retry` — clear the failure budget and requeue.
+///
+/// A human looked at the task, so the budget starts over rather than
+/// immediately re-parking it on the next failure.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/retry",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn retry_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    store.clear_failures(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to clear task failure budget");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let task = store
+        .update(
+            number,
+            crate::tasks::UpdateTaskInput {
+                status: Some(crate::tasks::TaskStatus::Ready),
+                clear_worker_id: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to requeue task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
 /// `POST /tasks/{number}/execute` — move a task to ready for execution.
 /// Tasks already in `ready` or `in_progress` are returned as-is.
 #[utoipa::path(
@@ -560,4 +874,1269 @@ pub(super) async fn assign_task(
 
     emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
+}
+
+/// `GET /tasks/{number}/dependencies` — the edges around a task.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/dependencies",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_dependencies(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskDependenciesResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let parents = store.list_parents(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task parents");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let children = store.list_children(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task children");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let blocked_by = store.unfinished_parents(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list unfinished parents");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(TaskDependenciesResponse {
+        parents,
+        children,
+        blocked_by,
+    }))
+}
+
+/// `POST /tasks/{number}/dependencies` — make this task wait on another.
+///
+/// Rejects self-loops, unknown tasks, and any edge that would close a cycle.
+/// The cycle response names the path so the caller can see which existing edge
+/// conflicts, rather than being told only that something is wrong.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/dependencies",
+    params(("number" = i64, Path, description = "Child task number")),
+    request_body = AddDependencyRequest,
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Edge would create a cycle"),
+        (status = 422, description = "A task cannot depend on itself"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn add_task_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<AddDependencyRequest>,
+) -> Result<Json<TaskDependenciesResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state)
+        .map_err(|status| (status, "task store not initialized".to_string()))?;
+
+    store
+        .link_tasks(request.parent_task_number, number)
+        .await
+        .map_err(|error| {
+            let status = match &error {
+                crate::tasks::DependencyError::SelfLoop { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+                crate::tasks::DependencyError::UnknownTask { .. } => StatusCode::NOT_FOUND,
+                crate::tasks::DependencyError::WouldCycle { .. } => StatusCode::CONFLICT,
+                crate::tasks::DependencyError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string())
+        })?;
+
+    // A task that just gained an unfinished parent must not stay claimable.
+    if let Ok(unfinished) = store.unfinished_parents(number).await
+        && !unfinished.is_empty()
+        && let Err(error) = store
+            .block_task(
+                number,
+                crate::tasks::BlockKind::Dependency,
+                &format!(
+                    "waiting on {}",
+                    unfinished
+                        .iter()
+                        .map(|n| format!("#{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .await
+    {
+        tracing::warn!(%error, task_number = number, "failed to park newly dependent task");
+    }
+
+    list_task_dependencies(State(state), Path(number))
+        .await
+        .map_err(|status| (status, "failed to read dependencies".to_string()))
+}
+
+/// `DELETE /tasks/{number}/dependencies/{parent}` — drop an edge.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/dependencies/{parent}",
+    params(
+        ("number" = i64, Path, description = "Child task number"),
+        ("parent" = i64, Path, description = "Parent task number"),
+    ),
+    responses(
+        (status = 200, body = TaskDependenciesResponse),
+        (status = 404, description = "Edge not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn remove_task_dependency(
+    State(state): State<Arc<ApiState>>,
+    Path((number, parent)): Path<(i64, i64)>,
+) -> Result<Json<TaskDependenciesResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let removed = store.unlink_tasks(parent, number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to unlink tasks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if !removed {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    list_task_dependencies(State(state), Path(number)).await
+}
+
+/// `POST /tasks/{number}/block` — park a task with a typed reason.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/block",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = BlockTaskRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 422, description = "Unknown block kind"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn block_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<BlockTaskRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let kind =
+        crate::tasks::BlockKind::parse(&request.kind).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    store
+        .block_task(number, kind, &request.reason)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to block task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read blocked task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `POST /tasks/{number}/unblock` — release a parked task.
+///
+/// Lands in `ready` when nothing upstream is outstanding, `backlog` otherwise.
+///
+/// Refuses an unanswered decision with 409 and a sentence naming the endpoint
+/// that does work. Unblocking says somebody acted, not what they decided —
+/// releasing a decision through it would put the task back in the queue with
+/// nothing in its outputs, which is the exact hole the decision step fills.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/unblock",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found or not blocked"),
+        (status = 409, description = "This is a decision — answer it instead"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn unblock_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state).map_err(|code| (code, String::new()))?;
+
+    let outcome = store.unblock_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to unblock task");
+        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+    })?;
+
+    let task = match outcome {
+        crate::tasks::UnblockOutcome::Released(task) => *task,
+        crate::tasks::UnblockOutcome::NotBlocked => {
+            return Err((StatusCode::NOT_FOUND, String::new()));
+        }
+        crate::tasks::UnblockOutcome::RefusedDecision { question } => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "task #{number} is a decision waiting for an answer, not a task waiting to be \
+                     released — unblocking it would put it back in the queue with nothing in its \
+                     outputs, so the steps below it would read an answer that was never given. \
+                     POST /tasks/{number}/decision with the answer to: {question}"
+                ),
+            ));
+        }
+    };
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `POST /tasks/{number}/decision` — answer a decision step.
+///
+/// The only path by which a human-chosen value ever reaches a task's outputs,
+/// and it works on exactly one kind of task. That is the constraint the whole
+/// feature rests on: a person must not be able to set an *arbitrary* task's
+/// outputs, because an agent task's outputs are the record of what that agent
+/// produced. A decision step's outputs are the answer and nothing else, which is
+/// what lets the run record distinguish "the operator approved this" from "a
+/// model believed the operator approved this".
+///
+/// The answer is validated against the step's own `output_schema` by the same
+/// validator that checks an agent's outputs — there is no second contract path.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/decision",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = AnswerDecisionRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Already answered, defaulted, or not yet asked"),
+        (status = 422, description = "Not a decision, or the answer does not match its schema"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn answer_decision(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<AnswerDecisionRequest>,
+) -> Result<Json<TaskResponse>, (StatusCode, String)> {
+    let store = get_task_store(&state).map_err(|code| (code, String::new()))?;
+
+    // Refused rather than defaulted to "someone". An answer with no answerer is
+    // an answer with no provenance, which is the one thing this endpoint exists
+    // to carry.
+    let answered_by = request.answered_by.trim();
+    if answered_by.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an answer has to say who gave it — `answered_by` is what makes this a human \
+             decision rather than an anonymous edit"
+                .to_string(),
+        ));
+    }
+
+    let outcome = store
+        .answer_decision(number, &request.answer, answered_by)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to answer a decision");
+            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+        })?;
+
+    let task = match outcome {
+        crate::tasks::DecisionAnswer::Accepted { task } => *task,
+        crate::tasks::DecisionAnswer::TaskMissing => {
+            return Err((StatusCode::NOT_FOUND, String::new()));
+        }
+        crate::tasks::DecisionAnswer::NotADecision { kind } => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "task #{number} is a {kind} step, and a person may not set its outputs — they \
+                     are the record of what that step produced. Only a decision step's outputs \
+                     are a human answer",
+                    kind = kind.as_str()
+                ),
+            ));
+        }
+        crate::tasks::DecisionAnswer::NotYetAsked => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "decision #{number} has not been asked yet — the steps it depends on have not \
+                     finished, so the work it is about does not exist to be decided on"
+                ),
+            ));
+        }
+        crate::tasks::DecisionAnswer::AlreadySettled {
+            outcome,
+            answered_by,
+        } => {
+            return Err((
+                StatusCode::CONFLICT,
+                match answered_by {
+                    Some(who) => format!("decision #{number} was already {outcome} by {who}"),
+                    None => format!(
+                        "decision #{number} was already settled ({outcome}) — nobody answered it \
+                         in time"
+                    ),
+                },
+            ));
+        }
+        crate::tasks::DecisionAnswer::Rejected { problems } => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "that answer does not match what this decision asked for: {}",
+                    problems
+                        .iter()
+                        .map(|problem| problem.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
+    };
+
+    // The notification that asked for this answer has been answered, so it goes
+    // away — the same cleanup an approved task's notification gets, and for the
+    // same reason: an inbox that keeps asking for something already given is an
+    // inbox people stop reading.
+    if let Some(notifications) = state.notification_store.load().as_ref()
+        && let Err(error) = notifications
+            .dismiss_by_entity(
+                crate::notifications::NotificationKind::DecisionRequested.as_str(),
+                "task",
+                &number.to_string(),
+            )
+            .await
+    {
+        tracing::warn!(%error, task_number = number, "failed to dismiss an answered decision's notification");
+    }
+
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
+
+/// `GET /tasks/{number}/contract` — the declared contract, its bindings, and
+/// what those bindings currently resolve to.
+///
+/// Resolution runs live rather than being read back from the last claim, so the
+/// page shows what the task *would* get if it ran now. A graph that has drifted
+/// since the last attempt is exactly the case worth seeing.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/contract",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_contract(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for contract");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let bindings = store.list_input_bindings(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list input bindings");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let (resolved_inputs, problems) = match store.resolve_inputs(number).await {
+        Ok(crate::tasks::ContractResolution::Resolved { inputs }) => (Some(inputs), Vec::new()),
+        Ok(crate::tasks::ContractResolution::Unresolved { problems }) => (None, problems),
+        Ok(crate::tasks::ContractResolution::NotRequired) => (None, Vec::new()),
+        // Waiting on branches that have not finished is not a contract problem,
+        // and listing it as one would put a red mark on a healthy pipeline.
+        Ok(crate::tasks::ContractResolution::Pending { .. }) => (None, Vec::new()),
+        // Neither is a branch that was not taken. The task's own `skip_reason`
+        // is where that is reported; listing it here would say the contract is
+        // broken when it is simply moot.
+        Ok(crate::tasks::ContractResolution::Unreachable { .. }) => (None, Vec::new()),
+        Err(error) => {
+            tracing::warn!(%error, task_number = number, "failed to resolve inputs for contract view");
+            (None, Vec::new())
+        }
+    };
+
+    Ok(Json(TaskContractResponse {
+        input_schema: task.input_schema,
+        output_schema: task.output_schema,
+        inputs: task.inputs,
+        outputs: task.outputs,
+        resolved_inputs,
+        bindings,
+        problems,
+    }))
+}
+
+/// `PUT /tasks/{number}/contract` — declare what a task needs and produces.
+#[utoipa::path(
+    put,
+    path = "/tasks/{number}/contract",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = SetContractRequest,
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn set_task_contract(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<SetContractRequest>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    store
+        .set_contract(
+            number,
+            request.input_schema.as_ref(),
+            request.output_schema.as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to set task contract");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    get_task_contract(State(state), Path(number)).await
+}
+
+/// `PUT /tasks/{number}/bindings/{key}` — point one input at its source.
+#[utoipa::path(
+    put,
+    path = "/tasks/{number}/bindings/{key}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("key" = String, Path, description = "Input key"),
+    ),
+    request_body = SetBindingRequest,
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 422, description = "A binding must name either a source task or a literal"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn set_task_binding(
+    State(state): State<Arc<ApiState>>,
+    Path((number, key)): Path<(i64, String)>,
+    Json(request): Json<SetBindingRequest>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    // A binding that names neither a source nor a literal resolves to nothing
+    // and would fail silently at claim time — reject it while somebody is
+    // looking at it.
+    if request.source_task_number.is_none() && request.literal_value.is_none() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    store
+        .set_input_binding(&crate::tasks::TaskInputBinding {
+            child_task_number: number,
+            input_key: key,
+            source_task_number: request.source_task_number,
+            source_pointer: request.source_pointer,
+            literal_value: request.literal_value,
+            // Fan-in bindings are written by a workflow launch, which knows the
+            // step key. Hand-editing one task's binding cannot name a set.
+            fan_in_step_key: None,
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to set input binding");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    get_task_contract(State(state), Path(number)).await
+}
+
+/// `DELETE /tasks/{number}/bindings/{key}` — unbind one input.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/bindings/{key}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("key" = String, Path, description = "Input key"),
+    ),
+    responses(
+        (status = 200, body = TaskContractResponse),
+        (status = 404, description = "Binding not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn remove_task_binding(
+    State(state): State<Arc<ApiState>>,
+    Path((number, key)): Path<(i64, String)>,
+) -> Result<Json<TaskContractResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let removed = store
+        .remove_input_binding(number, &key)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to remove input binding");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !removed {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    get_task_contract(State(state), Path(number)).await
+}
+
+/// `GET /tasks/{number}/provenance` — where this card came from and what it
+/// spawned.
+///
+/// A worker-filed card is otherwise indistinguishable from one a human wrote,
+/// which makes a surprising board impossible to explain.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/provenance",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskProvenanceResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_provenance(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskProvenanceResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for provenance");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let filer = crate::tasks::filer_id(number);
+    let filed = store.list_tasks_filed_by(&filer).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list filed tasks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let remaining_fan_out = (crate::tasks::MAX_TASKS_FILED_PER_TASK - filed.len() as i64).max(0);
+
+    Ok(Json(TaskProvenanceResponse {
+        filed_by_task_number: crate::tasks::parse_filer_task_number(&task.created_by),
+        filed,
+        remaining_fan_out,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// External gates
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct CreateGateRequest {
+    /// `http` | `task_output`
+    kind: String,
+    /// Shape depends on `kind`. See `crate::tasks::gates`.
+    config: serde_json::Value,
+    /// What the board should call this gate. "waiting for CI on main" beats a
+    /// URL.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    poll_interval_secs: Option<i64>,
+    /// `wait` | `route`, or omit to derive it.
+    ///
+    /// What a *false* answer means. `wait` is a gate in the original sense —
+    /// poll again. `route` says the step does not apply and settles it as
+    /// `skipped`. Omitted is the right answer nearly always: a `task_output`
+    /// gate whose source has finished routes, everything else waits, and that
+    /// is a fact about whether the input can still change rather than a guess.
+    #[serde(default)]
+    disposition: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct TaskGatesResponse {
+    gates: Vec<crate::tasks::TaskGate>,
+}
+
+fn gate_store(state: &ApiState) -> Result<crate::tasks::GateStore, StatusCode> {
+    Ok(crate::tasks::GateStore::new(
+        get_task_store(state)?.pool().clone(),
+    ))
+}
+
+/// Header names whose values are credentials, matched case-insensitively.
+/// Anything else in a gate's `headers` map rides through the API untouched.
+const CREDENTIAL_HEADER_NAMES: [&str; 5] = [
+    "authorization",
+    "private-token",
+    "x-api-key",
+    "token",
+    "api-key",
+];
+
+/// What a redacted credential value reads as in an API response.
+const REDACTED_CREDENTIAL_VALUE: &str = "********";
+
+/// A gate as the API may show it: the stored row with credential-bearing
+/// header values blanked out.
+///
+/// The stored config keeps the real values — the evaluator sends them — but
+/// this response is read by anyone who can see the task, and a token written
+/// into a gate config must not come back out of the API in plaintext.
+fn redacted_gate(gate: crate::tasks::TaskGate) -> crate::tasks::TaskGate {
+    let mut config = gate.config.clone();
+    if let Some(headers) = config
+        .get_mut("headers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (name, value) in headers.iter_mut() {
+            if CREDENTIAL_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+                *value = serde_json::Value::String(REDACTED_CREDENTIAL_VALUE.to_string());
+            }
+        }
+    }
+    crate::tasks::TaskGate { config, ..gate }
+}
+
+/// `GET /tasks/{number}/gates` — what this task is waiting on outside the graph.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/gates",
+    params(("number" = i64, Path, description = "Task number")),
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_gates(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<TaskGatesResponse>, StatusCode> {
+    let gates = gate_store(&state)?
+        .list_for_task(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to list task gates");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
+}
+
+/// `POST /tasks/{number}/gates` — hold this task until something outside says go.
+///
+/// The config is validated here rather than at first poll. A malformed gate
+/// accepted now would error once a minute forever with nobody reading the log,
+/// so the rejection has to land while a person is still looking at the form.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/gates",
+    params(("number" = i64, Path, description = "Task number")),
+    request_body = CreateGateRequest,
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 404, description = "Task not found"),
+        (status = 422, description = "Gate config is not usable"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn create_task_gate(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<CreateGateRequest>,
+) -> Result<Json<TaskGatesResponse>, (StatusCode, String)> {
+    let store =
+        get_task_store(&state).map_err(|code| (code, "task store unavailable".to_string()))?;
+    let gates = gate_store(&state).map_err(|code| (code, "task store unavailable".to_string()))?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for gate");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read task".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, format!("no task #{number}")))?;
+
+    let kind = crate::tasks::GateKind::parse(&request.kind).ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        crate::tasks::GateConfigError::UnknownKind {
+            value: request.kind.clone(),
+        }
+        .to_string(),
+    ))?;
+
+    let interval = request
+        .poll_interval_secs
+        .unwrap_or(crate::tasks::MIN_POLL_INTERVAL_SECS.max(60));
+
+    crate::tasks::validate_config(kind, &request.config, interval)
+        .map_err(|error| (StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+
+    let disposition = match request.disposition.as_deref() {
+        None => None,
+        Some(value) => Some(crate::tasks::GateDisposition::parse(value).ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "`{value}` is not a gate disposition — use wait or route, or omit it to derive"
+            ),
+        ))?),
+    };
+
+    gates
+        .create(
+            number,
+            kind,
+            &request.config,
+            request.label.as_deref(),
+            interval,
+            disposition,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to create task gate");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to create gate".to_string(),
+            )
+        })?;
+
+    // A gate governs *promotion*, so one added to a task already sitting in
+    // `ready` would hold nothing — the sweep has finished with it and the next
+    // claim would run it regardless. Park it so the same sweep that honours
+    // every other gate honours this one too.
+    //
+    // `Dependency` is the right kind: it rests in the backlog rather than the
+    // blocked column a human triages, and it is one of the signals that marks a
+    // task as parked *by the scheduler*, so the scheduler may release it once
+    // the gate opens. Anything sticky would need a person to undo.
+    if task.status == crate::tasks::TaskStatus::Ready {
+        let reason = format!(
+            "waiting on {}",
+            request.label.as_deref().unwrap_or("an external gate")
+        );
+        if let Err(error) = store
+            .block_task(number, crate::tasks::BlockKind::Dependency, &reason)
+            .await
+        {
+            tracing::warn!(%error, task_number = number, "failed to park a task behind its new gate");
+        }
+    }
+
+    let gates = gates.list_for_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task gates");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to list gates".to_string(),
+        )
+    })?;
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
+}
+
+/// `DELETE /tasks/{number}/gates/{gate_id}` — stop waiting on it.
+///
+/// Removing a gate is the escape hatch for one that has failed or cannot be
+/// reached: the task becomes promotable again on the next sweep. It is a
+/// deliberate act by a person, which is exactly what a `failed` gate is asking
+/// for.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}/gates/{gate_id}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        ("gate_id" = String, Path, description = "Gate id"),
+    ),
+    responses(
+        (status = 200, body = TaskGatesResponse),
+        (status = 404, description = "No such gate"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn delete_task_gate(
+    State(state): State<Arc<ApiState>>,
+    Path((number, gate_id)): Path<(i64, String)>,
+) -> Result<Json<TaskGatesResponse>, StatusCode> {
+    let gates = gate_store(&state)?;
+    if !gates.delete(&gate_id).await.map_err(|error| {
+        tracing::warn!(%error, %gate_id, "failed to delete task gate");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })? {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let gates = gates.list_for_task(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to list task gates");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(TaskGatesResponse {
+        gates: gates.into_iter().map(redacted_gate).collect(),
+    }))
+}
+
+/// `GET /tasks/{number}/graph` — every task connected to this one, and the
+/// edges between them.
+///
+/// Drawn from real dependency edges rather than from a workflow template,
+/// which is what makes it answer the question in the three cases that matter:
+/// the template has since been deleted, the step fanned out so one step is now
+/// many tasks, or there was never a template at all because the graph was built
+/// by hand or by a worker filing cards.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/graph",
+    params(("number" = i64, Path, description = "Task number to centre on")),
+    responses(
+        (status = 200, body = crate::tasks::TaskGraph),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn get_task_graph(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+) -> Result<Json<crate::tasks::TaskGraph>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    // Checked before the walk so a missing task is a 404 rather than a graph of
+    // one task that does not exist.
+    if store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to read task for graph");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let graph = store
+        .graph_component(number, crate::tasks::MAX_GRAPH_TASKS)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to walk task graph");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(graph))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        ))
+    }
+
+    async fn state_with_task_store() -> Arc<ApiState> {
+        let state = test_api_state();
+        state.set_task_store(Arc::new(crate::tasks::store::setup_test_store().await));
+        state
+    }
+
+    fn create_request(title: &str) -> CreateTaskRequest {
+        CreateTaskRequest {
+            owner_agent_id: "agent-test".to_string(),
+            assigned_agent_id: None,
+            required_capabilities: None,
+            title: title.to_string(),
+            description: None,
+            priority: None,
+            subtasks: Vec::new(),
+            metadata: None,
+            source_memory_id: None,
+            created_by: None,
+            project_id: None,
+            repo_id: None,
+            worktree_id: None,
+            depends_on: Vec::new(),
+            status: None,
+        }
+    }
+
+    async fn create_one(state: &Arc<ApiState>, title: &str) -> crate::tasks::Task {
+        create_task(State(state.clone()), Json(create_request(title)))
+            .await
+            .expect("task should be created")
+            .0
+            .task
+    }
+
+    fn list_query() -> TaskListQuery {
+        TaskListQuery {
+            agent_id: None,
+            owner_agent_id: None,
+            assigned_agent_id: None,
+            status: None,
+            priority: None,
+            created_by: None,
+            limit: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_without_store_is_service_unavailable() {
+        let state = test_api_state();
+        let result = list_tasks(State(state), Query(list_query())).await;
+        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+    }
+
+    #[tokio::test]
+    async fn create_get_and_list_round_trip() {
+        let state = state_with_task_store().await;
+
+        let created = create_task(State(state.clone()), Json(create_request("write the spec")))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        assert_eq!(created.status, crate::tasks::TaskStatus::PendingApproval);
+        assert_eq!(created.title, "write the spec");
+        // No assignee named and no capability pool: the owner takes it.
+        assert_eq!(created.assigned_agent_id, "agent-test");
+
+        let fetched = get_task(State(state.clone()), Path(created.task_number))
+            .await
+            .expect("task should be found")
+            .0
+            .task;
+        assert_eq!(fetched.task_number, created.task_number);
+
+        let listed = list_tasks(State(state), Query(list_query()))
+            .await
+            .expect("tasks should list")
+            .0;
+        assert!(
+            listed
+                .tasks
+                .iter()
+                .any(|task| task.task_number == created.task_number)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_task_rejects_unknown_status() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("bad status");
+        request.status = Some("doing-it".to_string());
+
+        let result = create_task(State(state), Json(request)).await;
+        assert!(matches!(result, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[tokio::test]
+    async fn create_task_rejects_assignee_and_capabilities_together() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("who does this");
+        request.assigned_agent_id = Some("agent-test".to_string());
+        request.required_capabilities = Some(vec!["rust".to_string()]);
+
+        let result = create_task(State(state), Json(request)).await;
+        assert!(matches!(result, Err(StatusCode::UNPROCESSABLE_ENTITY)));
+    }
+
+    #[tokio::test]
+    async fn get_task_unknown_number_is_not_found() {
+        let state = state_with_task_store().await;
+        let result = get_task(State(state), Path(999)).await;
+        assert!(matches!(result, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn block_task_parks_with_typed_reason() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "wait on a person").await;
+
+        let blocked = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "which environment?".to_string(),
+            }),
+        )
+        .await
+        .expect("block should succeed")
+        .0
+        .task;
+
+        assert_eq!(blocked.status, crate::tasks::TaskStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn block_task_rejects_unknown_kind_and_unknown_task() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "kind check").await;
+
+        let bad_kind = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "vibes".to_string(),
+                reason: "no reason".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(bad_kind, Err(StatusCode::UNPROCESSABLE_ENTITY)));
+
+        let missing = block_task(
+            State(state),
+            Path(999),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "no task".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(missing, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn unblock_releases_blocked_task_to_ready() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "park then release").await;
+        let _blocked = block_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(BlockTaskRequest {
+                kind: "needs_input".to_string(),
+                reason: "holding".to_string(),
+            }),
+        )
+        .await
+        .expect("block should succeed");
+
+        // Nothing upstream is outstanding, so the release lands in ready.
+        let released = unblock_task(State(state), Path(task.task_number))
+            .await
+            .expect("unblock should succeed")
+            .0
+            .task;
+        assert_eq!(released.status, crate::tasks::TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn unblock_task_outside_parked_states_is_not_found() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("already running");
+        request.status = Some("ready".to_string());
+        let task = create_task(State(state.clone()), Json(request))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        let result = unblock_task(State(state), Path(task.task_number)).await;
+        assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn execute_task_refuses_pending_approval() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "not yet approved").await;
+
+        let result = execute_task(
+            State(state),
+            Path(task.task_number),
+            Json(ApproveRequest { approved_by: None }),
+        )
+        .await;
+        assert!(matches!(result, Err(StatusCode::CONFLICT)));
+    }
+
+    #[tokio::test]
+    async fn execute_task_moves_backlog_to_ready() {
+        let state = state_with_task_store().await;
+        let mut request = create_request("run me");
+        request.status = Some("backlog".to_string());
+        let task = create_task(State(state.clone()), Json(request))
+            .await
+            .expect("task should be created")
+            .0
+            .task;
+
+        let executed = execute_task(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(ApproveRequest {
+                approved_by: Some("operator".to_string()),
+            }),
+        )
+        .await
+        .expect("execute should succeed")
+        .0
+        .task;
+        assert_eq!(executed.status, crate::tasks::TaskStatus::Ready);
+
+        let missing = execute_task(
+            State(state),
+            Path(999),
+            Json(ApproveRequest { approved_by: None }),
+        )
+        .await;
+        assert!(matches!(missing, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn gate_listing_redacts_credential_headers_but_keeps_config() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "gated on ci").await;
+
+        let _created = create_task_gate(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "http".to_string(),
+                config: serde_json::json!({
+                    "url": "https://ci.example.com/status",
+                    "expect_status": 200,
+                    "headers": {
+                        "Authorization": "Bearer super-secret",
+                        "PRIVATE-token": "glpat-secret",
+                        "X-Api-Key": "apikey-secret",
+                        "X-Build-Id": "42"
+                    }
+                }),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await
+        .expect("gate should be created");
+
+        let gates = list_task_gates(State(state.clone()), Path(task.task_number))
+            .await
+            .expect("gates should list")
+            .0
+            .gates;
+        assert_eq!(gates.len(), 1);
+        let listed = &gates[0].config;
+
+        assert_eq!(listed["headers"]["Authorization"], "********");
+        assert_eq!(listed["headers"]["PRIVATE-token"], "********");
+        assert_eq!(listed["headers"]["X-Api-Key"], "********");
+        assert_eq!(listed["headers"]["X-Build-Id"], "42");
+        assert_eq!(listed["url"], "https://ci.example.com/status");
+        assert_eq!(listed["expect_status"], 200);
+
+        // The stored row keeps the real values — the evaluator sends them.
+        let stored = gate_store(&state)
+            .expect("gate store")
+            .list_for_task(task.task_number)
+            .await
+            .expect("stored gates");
+        assert_eq!(
+            stored[0].config["headers"]["Authorization"],
+            "Bearer super-secret"
+        );
+        assert_eq!(stored[0].config["headers"]["X-Api-Key"], "apikey-secret");
+    }
+
+    #[tokio::test]
+    async fn create_gate_rejects_unusable_config() {
+        let state = state_with_task_store().await;
+        let task = create_one(&state, "gate validation").await;
+
+        // Unknown kind.
+        let unknown_kind = create_task_gate(
+            State(state.clone()),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "smoke_signal".to_string(),
+                config: serde_json::json!({}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            unknown_kind,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+
+        // An http gate with no assertion is satisfied by any response, which
+        // means it is not a gate.
+        let no_assertion = create_task_gate(
+            State(state),
+            Path(task.task_number),
+            Json(CreateGateRequest {
+                kind: "http".to_string(),
+                config: serde_json::json!({"url": "https://ci.example.com/status"}),
+                label: None,
+                poll_interval_secs: None,
+                disposition: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            no_assertion,
+            Err((StatusCode::UNPROCESSABLE_ENTITY, _))
+        ));
+    }
 }

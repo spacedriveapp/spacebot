@@ -6,6 +6,7 @@ import {api, type AttachmentMeta, type TimelineBranchRun, type TimelineItem, typ
 import {ToolCall, type ToolCallPair, tryParseJson, isErrorResult} from "@/components/ToolCall";
 import {PortalWorkerCard} from "./PortalWorkerCard";
 import clsx from "clsx";
+import {copyText} from "@/lib/clipboard";
 
 function formatFileSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
@@ -245,7 +246,7 @@ export function PortalTimeline({
 	}, [sendCount]);
 
 	const copyMessage = async (content: string) => {
-		await navigator.clipboard.writeText(content);
+		await copyText(content);
 	};
 
 	return (

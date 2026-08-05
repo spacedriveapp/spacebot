@@ -10,13 +10,12 @@ export {UpdatesSection} from "./UpdatesSection";
 export {ChangelogSection} from "./ChangelogSection";
 export {ConfigFileSection} from "./ConfigFileSection";
 export {ProviderCard} from "./ProviderCard";
-export {ChatGptOAuthDialog} from "./ChatGptOAuthDialog";
-export {SECTIONS, PROVIDERS, CHATGPT_OAUTH_DEFAULT_MODEL, PERMISSION_OPTIONS} from "./constants";
+export {SECTIONS, API_TYPES, DEFAULT_NEW_PROVIDER, PERMISSION_OPTIONS} from "./constants";
+export type {ApiTypeId} from "./constants";
 export type {
 	SectionId,
 	Platform,
 	GlobalSettingsSectionProps,
 	ChangelogRelease,
 	ProviderCardProps,
-	ChatGptOAuthDialogProps,
 } from "./types";

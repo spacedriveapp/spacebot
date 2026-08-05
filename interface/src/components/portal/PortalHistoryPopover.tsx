@@ -153,7 +153,7 @@ function HistoryRow({
 						e.stopPropagation();
 						onDelete();
 					}}
-					className="rounded p-0.5 text-ink-faint hover:bg-red-500/20 hover:text-red-400"
+					className="rounded p-0.5 text-ink-faint hover:bg-status-error/20 hover:text-status-error"
 					title="Delete"
 				>
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

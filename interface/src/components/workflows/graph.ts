@@ -1,0 +1,359 @@
+import type {TaskItem, WorkflowEdge, WorkflowStep} from "@/api/client";
+import {sortPasses} from "./loops";
+
+/**
+ * Put the steps in the order they will actually run.
+ *
+ * `position` is display order only — the server says so in the schema, and it
+ * is not maintained when an edge is added. So a template whose steps were
+ * created in one order and wired in another reads as nonsense if you trust
+ * `position` alone: "publish" can sit above the step it waits for. A
+ * topological sort is what makes the list match execution.
+ *
+ * Kahn's algorithm, with `position` (then `step_key`) breaking ties so two
+ * independent steps keep a stable, author-chosen order rather than whichever
+ * one the map happened to yield first.
+ *
+ * A cycle cannot be ordered at all. The server refuses to create one — both
+ * `POST /edges` and `POST /run` answer 409 — but a template can still be read
+ * while the refusal is on screen, and returning nothing would blank the editor
+ * at the moment it is most needed. So the steps that *can* be ordered come
+ * back first, the rest are appended in position order, and `cycle` names the
+ * ones that could not be placed.
+ */
+export function orderSteps(
+	steps: WorkflowStep[],
+	edges: WorkflowEdge[],
+): {ordered: WorkflowStep[]; cycle: string[]} {
+	const byKey = new Map(steps.map((step) => [step.step_key, step]));
+	const indegree = new Map<string, number>(
+		steps.map((step) => [step.step_key, 0]),
+	);
+	const children = new Map<string, string[]>();
+
+	for (const edge of edges) {
+		// An edge can name a step that no longer exists only if the server let it
+		// linger; ignore it rather than counting a dependency nothing satisfies.
+		if (!byKey.has(edge.parent_step_key) || !byKey.has(edge.child_step_key)) {
+			continue;
+		}
+		indegree.set(edge.child_step_key, (indegree.get(edge.child_step_key) ?? 0) + 1);
+		const list = children.get(edge.parent_step_key);
+		if (list) list.push(edge.child_step_key);
+		else children.set(edge.parent_step_key, [edge.child_step_key]);
+	}
+
+	const rank = (key: string) => {
+		const step = byKey.get(key);
+		return step ? step.position : 0;
+	};
+	const compare = (a: string, b: string) =>
+		rank(a) - rank(b) || a.localeCompare(b);
+
+	const ready = [...indegree.entries()]
+		.filter(([, degree]) => degree === 0)
+		.map(([key]) => key)
+		.sort(compare);
+
+	const ordered: WorkflowStep[] = [];
+	while (ready.length > 0) {
+		const key = ready.shift() as string;
+		const step = byKey.get(key);
+		if (step) ordered.push(step);
+		for (const child of children.get(key) ?? []) {
+			const next = (indegree.get(child) ?? 0) - 1;
+			indegree.set(child, next);
+			if (next === 0) {
+				ready.push(child);
+				ready.sort(compare);
+			}
+		}
+	}
+
+	const placed = new Set(ordered.map((step) => step.step_key));
+	const cycle = steps
+		.filter((step) => !placed.has(step.step_key))
+		.sort((a, b) => a.position - b.position || a.step_key.localeCompare(b.step_key));
+
+	return {ordered: [...ordered, ...cycle], cycle: cycle.map((s) => s.step_key)};
+}
+
+/**
+ * A run's nodes, which are tasks and not steps.
+ *
+ * One step used to mean one task, and the canvas was built on that. A step
+ * declaring `for_each_step_key` breaks it: at run time it expands into one task
+ * per item in an upstream step's output array, so `audit` can be three tasks in
+ * one run and the step key no longer identifies anything on screen. Keying
+ * nodes by task is what lets three branches be three boxes, each with its own
+ * status, inputs and outputs.
+ *
+ * A step with no task yet still gets a node, named after the step. That is not
+ * a nicety: between launching a run and the tasks arriving, and again in the
+ * moment a fan-out swaps its placeholder for branches, the honest answer is
+ * "this step is in the template and has nothing to show", and drawing nothing
+ * would blank the graph exactly when someone is watching it happen.
+ */
+export interface RunNode {
+	id: string;
+	stepKey: string;
+	/**
+	 * The task this box stands for. `null` only when the run has produced none.
+	 *
+	 * For a collapsed loop it is the *latest* pass — the one whose status and
+	 * resolution describe where the loop currently stands.
+	 */
+	task: TaskItem | null;
+	/**
+	 * Every pass behind this box, oldest first.
+	 *
+	 * One entry for an ordinary step or one fan-out branch. Several only for a
+	 * loop body step, where they are the same step run again, not siblings.
+	 */
+	passes: TaskItem[];
+	/** Whether this box is a loop body step drawn collapsed. */
+	collapsedLoop: boolean;
+}
+
+/** Node id for one task of a step. Unique per run; the step key is not. */
+export function runNodeId(stepKey: string, taskNumber: number): string {
+	return `${stepKey}#${taskNumber}`;
+}
+
+export interface RunNodeOptions {
+	/**
+	 * Draw a loop's passes as separate boxes instead of one.
+	 *
+	 * Off by default, and that default is the point — see `runNodes`.
+	 */
+	expandLoops?: boolean;
+}
+
+/**
+ * Expand the template's steps into the nodes a run actually has.
+ *
+ * With no tasks — the editor — every step yields exactly one node whose id is
+ * its step key, so nothing about the template canvas changes.
+ *
+ * Two things grow a run's graph after launch and they are drawn differently on
+ * purpose, because they mean opposite things:
+ *
+ *   - `fan_out_branch_key` is a *parallel* branch. Three audits ran at once and
+ *     all three are part of the answer, so they are three boxes.
+ *   - `loop_iteration` is a *sequential* pass. Pass 2 exists only because pass 1
+ *     did not converge, and only the last one feeds anything downstream. Drawn
+ *     as three boxes side by side it is indistinguishable from a fan-out — a
+ *     picture of three things happening together, when what happened was one
+ *     thing three times. So the passes collapse into one box that says which
+ *     pass it is on, and the panel carries the history.
+ *
+ * Confusing the two is the whole bug this exists to avoid, hence the split on
+ * `loop_iteration` and nothing else.
+ */
+export function runNodes(
+	steps: WorkflowStep[],
+	tasksByStep?: Map<string, TaskItem[]>,
+	options?: RunNodeOptions,
+): RunNode[] {
+	const nodes: RunNode[] = [];
+	for (const step of steps) {
+		const tasks = tasksByStep?.get(step.step_key) ?? [];
+		if (tasks.length === 0) {
+			nodes.push({
+				id: step.step_key,
+				stepKey: step.step_key,
+				task: null,
+				passes: [],
+				collapsedLoop: false,
+			});
+			continue;
+		}
+
+		const looping =
+			!options?.expandLoops &&
+			tasks.some((task) => task.loop_iteration != null);
+
+		if (looping) {
+			// A step cannot be both a loop body and a fan-out — the server refuses
+			// it — so in practice this is one bucket. Keying by branch anyway keeps
+			// the collapse from ever merging two genuinely parallel things.
+			const byBranch = new Map<string, TaskItem[]>();
+			for (const task of tasks) {
+				const branch = task.fan_out_branch_key ?? "";
+				const list = byBranch.get(branch);
+				if (list) list.push(task);
+				else byBranch.set(branch, [task]);
+			}
+			for (const [branch, group] of byBranch) {
+				const passes = sortPasses(group);
+				nodes.push({
+					id: branch ? `${step.step_key}@${branch}` : step.step_key,
+					stepKey: step.step_key,
+					task: passes[passes.length - 1],
+					passes,
+					collapsedLoop: true,
+				});
+			}
+			continue;
+		}
+
+		// Task number is creation order, which for a fan-out is item order — the
+		// branches read top to bottom in the order the upstream array listed them.
+		for (const task of [...tasks].sort((a, b) => a.task_number - b.task_number)) {
+			nodes.push({
+				id: runNodeId(step.step_key, task.task_number),
+				stepKey: step.step_key,
+				task,
+				passes: [task],
+				collapsedLoop: false,
+			});
+		}
+	}
+	return nodes;
+}
+
+/** parent keys for each step, so a card can say what it waits for. */
+export function parentsByStep(edges: WorkflowEdge[]): Map<string, string[]> {
+	const map = new Map<string, string[]>();
+	for (const edge of edges) {
+		const list = map.get(edge.child_step_key);
+		if (list) list.push(edge.parent_step_key);
+		else map.set(edge.child_step_key, [edge.parent_step_key]);
+	}
+	for (const list of map.values()) list.sort();
+	return map;
+}
+
+/** child keys for each step — the other half of "what does removing this break". */
+export function childrenByStep(edges: WorkflowEdge[]): Map<string, string[]> {
+	const map = new Map<string, string[]>();
+	for (const edge of edges) {
+		const list = map.get(edge.parent_step_key);
+		if (list) list.push(edge.child_step_key);
+		else map.set(edge.parent_step_key, [edge.child_step_key]);
+	}
+	for (const list of map.values()) list.sort();
+	return map;
+}
+
+/**
+ * Every step that is guaranteed to have finished before this one starts.
+ *
+ * Not the same as its direct prerequisites, and the difference matters: in
+ * `draft → review → publish`, `publish` waits only for `review`, but binding
+ * `publish` to `draft`'s output is perfectly safe because `draft` is finished
+ * by then. Checking direct parents alone flags that as a mistake, and a warning
+ * that fires on correct pipelines is one people learn to ignore.
+ */
+export function ancestorsOf(edges: WorkflowEdge[], stepKey: string): Set<string> {
+	const parents = parentsByStep(edges);
+	const seen = new Set<string>();
+	const stack = [stepKey];
+	while (stack.length > 0) {
+		const key = stack.pop() as string;
+		for (const parent of parents.get(key) ?? []) {
+			if (seen.has(parent)) continue;
+			seen.add(parent);
+			stack.push(parent);
+		}
+	}
+	return seen;
+}
+
+/**
+ * Would adding parent → child close a loop?
+ *
+ * The server refuses cycles with a 409 that names the path, and that refusal is
+ * the authority. This only exists so the picker can grey out the choices that
+ * are certain to be refused: offering a step its own descendant as a
+ * prerequisite is offering a mistake.
+ */
+export function wouldCycle(
+	edges: WorkflowEdge[],
+	parentKey: string,
+	childKey: string,
+): boolean {
+	if (parentKey === childKey) return true;
+	// Walk down from the prospective child. Reaching the prospective parent means
+	// the parent already depends on it, so the new edge would close the loop.
+	const children = childrenByStep(edges);
+	const seen = new Set<string>([childKey]);
+	const stack = [childKey];
+	while (stack.length > 0) {
+		const key = stack.pop() as string;
+		for (const next of children.get(key) ?? []) {
+			if (next === parentKey) return true;
+			if (seen.has(next)) continue;
+			seen.add(next);
+			stack.push(next);
+		}
+	}
+	return false;
+}
+
+/**
+ * The chain of steps leading from one to another, or null if there is none.
+ *
+ * `wouldCycle` answers whether a connection is refusable; this answers *why*,
+ * which is the only part the author can act on. The server's 409 names the full
+ * path for the same reason — "the steps form a cycle: draft → review → publish"
+ * says which edge to not draw, where "that would create a cycle" leaves them
+ * guessing at a graph they cannot see the far side of.
+ *
+ * Breadth-first, so the path returned is the shortest one and does not wander
+ * through branches that are beside the point.
+ */
+export function pathBetween(
+	edges: WorkflowEdge[],
+	fromKey: string,
+	toKey: string,
+): string[] | null {
+	if (fromKey === toKey) return [fromKey];
+	const children = childrenByStep(edges);
+	const cameFrom = new Map<string, string>();
+	const seen = new Set<string>([fromKey]);
+	const queue = [fromKey];
+	while (queue.length > 0) {
+		const key = queue.shift() as string;
+		for (const next of children.get(key) ?? []) {
+			if (seen.has(next)) continue;
+			seen.add(next);
+			cameFrom.set(next, key);
+			if (next === toKey) {
+				const path = [next];
+				let cursor = key;
+				while (cursor !== fromKey) {
+					path.unshift(cursor);
+					cursor = cameFrom.get(cursor) as string;
+				}
+				path.unshift(fromKey);
+				return path;
+			}
+			queue.push(next);
+		}
+	}
+	return null;
+}
+
+/**
+ * A step key the server will accept, derived from a title.
+ *
+ * Keys are what edges and bindings reference, so they are typed into pointers
+ * and read in refusals — `draft-the-release-headline` is worth more there than
+ * a uuid, and far more than making the author invent one before they have
+ * written the title.
+ */
+export function suggestStepKey(title: string, taken: string[]): string {
+	const base =
+		title
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "_")
+			.replace(/^_+|_+$/g, "")
+			.slice(0, 40) || "step";
+	if (!taken.includes(base)) return base;
+	for (let n = 2; n < 100; n++) {
+		const candidate = `${base}_${n}`;
+		if (!taken.includes(candidate)) return candidate;
+	}
+	return `${base}_${Date.now()}`;
+}

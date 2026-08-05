@@ -171,6 +171,8 @@ if $is_ci; then
 fi
 
 check_migration_safety
+# Cheap and catches a whole class of frontend/server drift — run it first.
+run_step "scripts/check-api-types.sh" ./scripts/check-api-types.sh
 run_step "cargo fmt --all -- --check" cargo fmt --all -- --check
 run_step "cargo check --all-targets" cargo check --all-targets
 

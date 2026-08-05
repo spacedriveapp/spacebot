@@ -10,6 +10,7 @@ import {
 	Switch,
 } from "@spacedrive/primitives";
 import {ModelSelect} from "@/components/ModelSelect";
+import {ContainmentStatusList} from "@/components/SandboxContainment";
 import {TagInput} from "@/components/TagInput";
 import {supportsAdaptiveThinking} from "./utils";
 import {SANDBOX_DEFAULTS} from "./constants";
@@ -554,6 +555,23 @@ export function ConfigSectionEditor({
 								</SelectContent>
 							</SelectRoot>
 						</div>
+						{/* What the host is *actually* doing, next to what was asked for.
+						    `mode` and `containment_active` are two questions that read
+						    alike from this form, and showing only the first is how an
+						    instance ends up running unconfined while this control says
+						    "Enabled". It is also the explanation for a command step
+						    parked as `capability` with nothing else visibly wrong. */}
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">
+								What this host enforces
+							</label>
+							<p className="text-tiny text-ink-faint">
+								The mode above is the request. This is the answer — and the two
+								can differ, because containment needs a backend the host may
+								not have.
+							</p>
+							<ContainmentStatusList />
+						</div>
 						<div className="flex flex-col gap-1.5">
 							<label className="text-sm font-medium text-ink">
 								Extra Allowed Paths
@@ -599,12 +617,6 @@ export function ConfigSectionEditor({
 							/>
 						</div>
 						<ConfigToggleField
-							label="Auto-Create Worktrees"
-							description="Automatically create a worktree when spawning a worker on a new branch."
-							value={localValues.auto_create_worktrees as boolean}
-							onChange={(v) => handleChange("auto_create_worktrees", v)}
-						/>
-						<ConfigToggleField
 							label="Auto-Discover Repos"
 							description="Scan the project root for git repositories when a project is created."
 							value={localValues.auto_discover_repos as boolean}
@@ -639,7 +651,7 @@ export function ConfigSectionEditor({
 					<span className="text-tiny text-ink-faint">{description}</span>
 				</div>
 				{localDirty ? (
-					<span className="text-tiny text-amber-400">Unsaved changes</span>
+					<span className="text-tiny text-status-warning">Unsaved changes</span>
 				) : (
 					<span className="text-tiny text-ink-faint/50">
 						Changes saved to config.toml

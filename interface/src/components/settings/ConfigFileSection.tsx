@@ -196,10 +196,10 @@ export function ConfigFileSection() {
 				<div
 					className={`border-b px-6 py-2 text-sm ${
 						validationError
-							? "border-red-500/20 bg-red-500/5 text-red-400"
+							? "border-status-error/20 bg-status-error/5 text-status-error"
 							: message?.type === "success"
-								? "border-green-500/20 bg-green-500/5 text-green-400"
-								: "border-red-500/20 bg-red-500/5 text-red-400"
+								? "border-status-success/20 bg-status-success/5 text-status-success"
+								: "border-status-error/20 bg-status-error/5 text-status-error"
 					}`}
 				>
 					{validationError ? `Syntax error: ${validationError}` : message?.text}

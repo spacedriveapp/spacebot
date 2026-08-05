@@ -66,7 +66,7 @@ export function DeleteAgentDialog({open, onOpenChange, agentId}: DeleteAgentDial
 						/>
 					</div>
 					{error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-md border border-status-error/20 bg-status-error/10 px-3 py-2 text-sm text-status-error">
 							{error}
 						</div>
 					)}

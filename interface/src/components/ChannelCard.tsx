@@ -117,7 +117,7 @@ export function ChannelCard({
 							</span>
 						)}
 						{channel.response_mode === "mention_only" && (
-							<span className="inline-flex items-center rounded-md bg-red-500/10 px-1.5 py-0.5 text-tiny font-medium text-red-400">
+							<span className="inline-flex items-center rounded-md bg-status-info/10 px-1.5 py-0.5 text-tiny font-medium text-status-info">
 								Mention Only
 							</span>
 						)}

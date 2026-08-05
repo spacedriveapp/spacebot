@@ -20,6 +20,20 @@ pub enum SandboxBackend {
     None,
 }
 
+impl SandboxBackend {
+    /// Stable wire name, for status APIs and logs.
+    ///
+    /// Named rather than boolean so an operator can tell which mechanism is
+    /// confining their processes, not merely that something claims to be.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxBackend::Bubblewrap => "bubblewrap",
+            SandboxBackend::SandboxExec => "sandbox-exec",
+            SandboxBackend::None => "none",
+        }
+    }
+}
+
 /// Detect available sandbox backend by probing system binaries.
 /// Runs preflight checks to ensure the backend actually works.
 pub async fn detect_backend() -> SandboxBackend {

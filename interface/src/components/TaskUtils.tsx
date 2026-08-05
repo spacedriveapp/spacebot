@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faCodeBranch, faExternalLinkAlt } from "@fortawesome/free-solid-svg-icons";
 import { Badge, Popover, SelectPill, OptionList, OptionListItem } from "@spacedrive/primitives";
+import { isRecord } from "@/lib/json";
 
 // ---------------------------------------------------------------------------
 // GitHub metadata helpers
@@ -11,10 +12,6 @@ interface GithubReference {
   kind: "issue" | "pr";
   label: string;
   url: string | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function toSafeExternalUrl(value: unknown): string | null {
@@ -52,7 +49,16 @@ function readGithubReference(
   return { kind, label, url };
 }
 
-export function getGithubReferences(metadata: Record<string, unknown>): GithubReference[] {
+/**
+ * Task metadata is a free-form JSON value on the server, so it arrives typed as
+ * `unknown` rather than as an object — it is not guaranteed to be one. Narrow
+ * here instead of asserting at each call site.
+ */
+export function getGithubReferences(metadata: unknown): GithubReference[] {
+  if (!isRecord(metadata)) {
+    return [];
+  }
+
   return [
     readGithubReference(metadata.github_issue, "issue"),
     readGithubReference(metadata.github_pr, "pr"),
@@ -87,8 +93,8 @@ export function GithubMetadataBadges({
         );
 
         const className = compact
-          ? "cursor-pointer hover:border-blue-400/50 hover:text-blue-300"
-          : "cursor-pointer hover:border-blue-400/50 hover:bg-blue-500/20 hover:text-blue-300";
+          ? "cursor-pointer hover:border-status-info/50 hover:text-status-info"
+          : "cursor-pointer hover:border-status-info/50 hover:bg-status-info/20 hover:text-status-info";
 
         if (reference.url) {
           return (

@@ -63,12 +63,19 @@ export default defineConfig({
 
 	server: {
 		port: 19840,
+		// Reachable off-box when set, so the dev server can be opened from
+		// another device on the tailnet rather than only from localhost.
+		host: process.env.SPACEBOT_DEV_HOST ?? "localhost",
 		fs: {
 			allow: [path.resolve(__dirname, "..")],
 		},
 		proxy: {
 			"/api": {
-				target: "http://127.0.0.1:19898",
+				// Point at whichever instance you are working against. Doing UI
+				// work through this proxy means an edit is a hot reload rather
+				// than a frontend build plus a 10-minute release build to
+				// re-embed it.
+				target: process.env.SPACEBOT_API ?? "http://127.0.0.1:19898",
 				changeOrigin: true,
 				timeout: 0,
 				configure: (proxy) => {

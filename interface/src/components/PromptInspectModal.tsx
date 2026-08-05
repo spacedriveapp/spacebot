@@ -169,13 +169,13 @@ export function PromptInspectModal({
 							</div>
 						)}
 						{error && (
-							<div className="m-6 rounded-md border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+							<div className="m-6 rounded-md border border-status-error/20 bg-status-error/10 px-4 py-3 text-sm text-status-error">
 								Failed to load prompt:{" "}
 								{error instanceof Error ? error.message : "Unknown error"}
 							</div>
 						)}
 						{data?.error && (
-							<div className="m-6 rounded-md border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+							<div className="m-6 rounded-md border border-status-warning/20 bg-status-warning/10 px-4 py-3 text-sm text-status-warning">
 								{data.message}
 							</div>
 						)}

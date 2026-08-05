@@ -21,6 +21,7 @@ import {
 import {CSS} from "@dnd-kit/utilities";
 import {
 	api,
+	type OrphanWorktree,
 	type Project,
 	type ProjectWorktreeWithRepo,
 	type ProjectRepo,
@@ -618,7 +619,7 @@ function RepoCard({
 	const isSingleRepo = repo.path === ".";
 
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-active">
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
@@ -686,7 +687,7 @@ function WorktreeCard({
 	isDeleting: boolean;
 }) {
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-active">
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
@@ -721,6 +722,86 @@ function WorktreeCard({
 					disabled={isDeleting}
 				/>
 			</div>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned Worktrees
+// ---------------------------------------------------------------------------
+
+/**
+ * Checkouts under `.worktrees/` that nothing alive accounts for.
+ *
+ * A crash between "worktree created" and "run recorded it" leaves a directory
+ * nobody owns, and the deterministic naming scheme — `<run>-<step>[-<branch>]`
+ * — is what makes it findable at all. So this is a **report**: it names them,
+ * says which run they look like they belonged to, and stops there.
+ *
+ * There is deliberately no delete button, and there is deliberately no endpoint
+ * behind one. The one thing worse than a stale worktree is a background process
+ * that removes directories, and a stale worktree from a failed run is very
+ * often the only surviving record of what that run actually did. Removing one
+ * is a decision a person makes at a terminal, with the diff in front of them.
+ */
+function OrphanWorktreesSection({projectId}: {projectId: string}) {
+	const {data, isLoading, error} = useQuery({
+		queryKey: ["project-worktree-orphans", projectId],
+		queryFn: () => api.projectWorktreeOrphans(projectId),
+		staleTime: 30_000,
+	});
+
+	const orphans = data?.orphans ?? [];
+
+	// Nothing to report is the normal case, and a permanently empty heading is
+	// clutter on every project that has never run a workflow.
+	if (isLoading || error || orphans.length === 0) return null;
+
+	return (
+		<section>
+			<div className="mb-3 flex items-center justify-between">
+				{/* Deliberately not `font-plex` like its siblings above: that class
+				    generates no CSS in this build, so it is dead weight rather than a
+				    typeface. The heading renders identically without it. */}
+				<h3 className="text-sm font-semibold text-ink">
+					Unaccounted checkouts
+					<span className="ml-2 text-ink-faint">({orphans.length})</span>
+				</h3>
+			</div>
+			<p className="mb-2 text-xs text-ink-faint">
+				Directories under{" "}
+				<span className="font-mono text-ink-dull">.worktrees/</span> that no live
+				run owns — usually a crash between creating a checkout and recording it.
+				Listed, never removed: uncommitted work from a failed run is evidence,
+				and nothing here deletes a directory. Remove one yourself with{" "}
+				<span className="font-mono text-ink-dull">git worktree remove</span> once
+				you have looked at it.
+			</p>
+			<div className="space-y-2">
+				{orphans.map((orphan) => (
+					<OrphanCard key={orphan.path} orphan={orphan} />
+				))}
+			</div>
+		</section>
+	);
+}
+
+function OrphanCard({orphan}: {orphan: OrphanWorktree}) {
+	return (
+		<div className="rounded-lg border border-status-warning/30 bg-status-warning/5 p-4">
+			<div className="flex items-center gap-2">
+				<h4 className="truncate font-mono text-xs text-ink">{orphan.path}</h4>
+				<Badge variant="outline" size="sm">
+					{orphan.branch}
+				</Badge>
+			</div>
+			<p className="mt-1 text-xs text-status-warning">{orphan.reason}</p>
+			{orphan.run_id && (
+				<p className="mt-0.5 text-xs text-ink-faint">
+					Looks like it belonged to run{" "}
+					<span className="font-mono text-ink-dull">{orphan.run_id}</span>
+				</p>
+			)}
 		</div>
 	);
 }
@@ -929,6 +1010,8 @@ function ProjectDetail({
 						</div>
 					)}
 				</section>
+
+				<OrphanWorktreesSection projectId={projectId} />
 
 				{/* Meta */}
 				<div className="flex items-center gap-4 text-xs text-ink-faint">

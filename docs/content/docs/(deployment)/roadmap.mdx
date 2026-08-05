@@ -9,7 +9,7 @@ description: What's shipped, what's next, and what we decided against.
 
 Spacebot is a working multi-agent system. Five process types (channel, branch, worker, compactor, cortex) run concurrently with delegation as the core pattern. Six messaging platforms are supported (Discord, Slack, Telegram, Twitch, Email, webhooks). The hosted platform is live at spacebot.sh.
 
-The core systems are stable: memory graph with hybrid search, model routing with fallback chains across 14 providers (including Azure OpenAI), OS-level sandboxing, secret store with encryption at rest, per-channel settings with hot-reload, conversation persistence, token-by-token streaming, and a full React dashboard embedded in the binary.
+The core systems are stable: memory graph with hybrid search, model routing with fallback chains over user-defined providers (a native Anthropic API type plus an OpenAI-compatible type that covers everything else, with LiteLLM as the recommended gateway), OS-level sandboxing, secret store with encryption at rest, per-channel settings with hot-reload, conversation persistence, token-by-token streaming, and a full React dashboard embedded in the binary.
 
 Recent work has focused on expanding what agents can do and how they share knowledge:
 
@@ -68,7 +68,6 @@ Token usage tracking is shipped. Remaining: warning thresholds, hard blocks when
 - **Hot reload agent topology** — adding/removing agents without restart
 - **Agent templates** — pre-built configurations for common use cases
 - **JsonSchema-derived tool definitions** — replace hand-written JSON schemas with the `JsonSchema` derive already on every Args struct
-- **Spacedrive integration** — connect agents to terabytes of indexed, content-addressed file data across devices
 
 ## Decided Against
 

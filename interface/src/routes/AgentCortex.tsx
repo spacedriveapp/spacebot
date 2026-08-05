@@ -2,25 +2,26 @@ import {useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {AnimatePresence, motion} from "framer-motion";
 import {api, type CortexEvent, type CortexEventType} from "@/api/client";
+import {asRecord, hasContent} from "@/lib/json";
 import {formatTimeAgo} from "@/lib/format";
 import {FilterButton} from "@spacedrive/primitives";
 
 const PAGE_SIZE = 50;
 
 const EVENT_CATEGORY_COLORS: Record<string, string> = {
-	bulletin_generated: "bg-blue-500/15 text-blue-400",
-	bulletin_failed: "bg-red-500/15 text-red-400",
-	maintenance_run: "bg-green-500/15 text-green-400",
-	memory_merged: "bg-green-500/15 text-green-400",
-	memory_decayed: "bg-green-500/15 text-green-400",
-	memory_pruned: "bg-green-500/15 text-green-400",
-	association_created: "bg-violet-500/15 text-violet-400",
-	contradiction_flagged: "bg-violet-500/15 text-violet-400",
-	worker_killed: "bg-amber-500/15 text-amber-400",
-	branch_killed: "bg-amber-500/15 text-amber-400",
-	circuit_breaker_tripped: "bg-amber-500/15 text-amber-400",
-	observation_created: "bg-cyan-500/15 text-cyan-400",
-	health_check: "bg-blue-500/15 text-blue-400",
+	bulletin_generated: "bg-status-success/15 text-status-success",
+	bulletin_failed: "bg-status-error/15 text-status-error",
+	maintenance_run: "bg-status-info/15 text-status-info",
+	memory_merged: "bg-status-info/15 text-status-info",
+	memory_decayed: "bg-status-info/15 text-status-info",
+	memory_pruned: "bg-status-info/15 text-status-info",
+	association_created: "bg-status-info/15 text-status-info",
+	contradiction_flagged: "bg-status-warning/15 text-status-warning",
+	worker_killed: "bg-status-warning/15 text-status-warning",
+	branch_killed: "bg-status-warning/15 text-status-warning",
+	circuit_breaker_tripped: "bg-status-warning/15 text-status-warning",
+	observation_created: "bg-status-info/15 text-status-info",
+	health_check: "bg-app-box text-ink-dull",
 };
 
 /** Groups for the filter pills — reduces clutter vs showing all 13 types. */
@@ -67,10 +68,10 @@ function EventTypeBadge({eventType}: {eventType: string}) {
 	);
 }
 
-function DetailsPanel({details}: {details: Record<string, unknown>}) {
+function DetailsPanel({details}: {details: unknown}) {
 	return (
 		<div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-tiny">
-			{Object.entries(details).map(([key, value]) => (
+			{Object.entries(asRecord(details)).map(([key, value]) => (
 				<div key={key} className="contents">
 					<span className="text-ink-faint">{key}</span>
 					<span className="font-mono text-ink-dull">
@@ -116,7 +117,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 
 	if (isGroupFiltering) {
 		events = events.filter((event) =>
-			activeGroupTypes.includes(event.event_type),
+			(activeGroupTypes as string[]).includes(event.event_type),
 		);
 		total = events.length;
 		events = events.slice(offset, offset + PAGE_SIZE);
@@ -202,7 +203,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 				</div>
 			) : isError ? (
 				<div className="flex flex-1 items-center justify-center">
-					<p className="text-sm text-red-400">Failed to load cortex events</p>
+					<p className="text-sm text-status-error">Failed to load cortex events</p>
 				</div>
 			) : events.length === 0 ? (
 				<div className="flex flex-1 items-center justify-center">
@@ -230,7 +231,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 										<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">
 											{event.summary}
 										</span>
-										{event.details && (
+										{hasContent(event.details) && (
 											<span className="flex-shrink-0 text-tiny text-ink-faint">
 												{isExpanded ? "v" : ">"}
 											</span>
@@ -238,7 +239,7 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 									</button>
 
 									<AnimatePresence>
-										{isExpanded && event.details && (
+										{isExpanded && hasContent(event.details) && (
 											<motion.div
 												initial={{height: 0, opacity: 0}}
 												animate={{height: "auto", opacity: 1}}

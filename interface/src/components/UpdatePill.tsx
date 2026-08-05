@@ -18,9 +18,9 @@ export function UpdatePill() {
 		<Link
 			to="/settings"
 			search={{tab: "updates"}}
-			className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-300 transition-colors hover:border-cyan-400/60 hover:bg-cyan-500/20"
+			className="inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium text-accent transition-colors hover:border-accent/60 hover:bg-accent/20"
 		>
-			<span className="h-1.5 w-1.5 rounded-full bg-cyan-300" />
+			<span className="h-1.5 w-1.5 rounded-full bg-accent" />
 			Update {data.latest_version ?? "available"}
 		</Link>
 	);

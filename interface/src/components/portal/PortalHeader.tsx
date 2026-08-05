@@ -78,12 +78,12 @@ export function PortalHeader({
 					<span className="text-xs text-ink-faint">{modelLabel}</span>
 				)}
 				{responseMode === "observe" && (
-					<span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+					<span className="rounded-md bg-status-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-status-warning">
 						Observe
 					</span>
 				)}
 				{responseMode === "mention_only" && (
-					<span className="rounded-md bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">
+					<span className="rounded-md bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium text-status-info">
 						Mention Only
 					</span>
 				)}
@@ -160,7 +160,7 @@ export function PortalHeader({
 								saving={saving}
 							/>
 						) : (
-							<div className="py-4 text-center text-xs text-red-400">
+							<div className="py-4 text-center text-xs text-status-error">
 								{defaultsError?.message ?? "Failed to load settings"}
 							</div>
 						)}

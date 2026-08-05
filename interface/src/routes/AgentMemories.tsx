@@ -32,14 +32,14 @@ const SORT_OPTIONS: {value: MemorySort; label: string}[] = [
 ];
 
 const TYPE_COLORS: Record<MemoryType, string> = {
-	fact: "bg-blue-500/15 text-blue-400",
-	preference: "bg-pink-500/15 text-pink-400",
-	decision: "bg-amber-500/15 text-amber-400",
-	identity: "bg-purple-500/15 text-purple-400",
-	event: "bg-green-500/15 text-green-400",
-	observation: "bg-cyan-500/15 text-cyan-400",
-	goal: "bg-orange-500/15 text-orange-400",
-	todo: "bg-red-500/15 text-red-400",
+	fact: "bg-status-info/15 text-status-info",
+	preference: "bg-app-box text-ink-dull",
+	decision: "bg-status-warning/15 text-status-warning",
+	identity: "bg-app-box text-ink-dull",
+	event: "bg-status-success/15 text-status-success",
+	observation: "bg-status-info/15 text-status-info",
+	goal: "bg-status-warning/15 text-status-warning",
+	todo: "bg-status-error/15 text-status-error",
 };
 
 function TypeBadge({type: memoryType}: {type: MemoryType}) {
@@ -256,7 +256,7 @@ export function AgentMemories({agentId}: AgentMemoriesProps) {
 						</div>
 					) : isError ? (
 						<div className="flex flex-1 items-center justify-center">
-							<p className="text-sm text-red-400">Failed to load memories</p>
+							<p className="text-sm text-status-error">Failed to load memories</p>
 						</div>
 					) : memories.length === 0 ? (
 						<div className="flex flex-1 items-center justify-center">

@@ -247,6 +247,7 @@ impl Tool for SendAgentMessageTool {
                 metadata,
                 source_memory_id: None,
                 created_by: format!("agent:{}", sending_agent_id),
+                ..Default::default()
             })
             .await
             .map_err(|error| {

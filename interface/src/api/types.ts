@@ -231,6 +231,12 @@ export type MemoryPersistenceSection =
 export type BrowserSection = components["schemas"]["BrowserSection"];
 export type ChannelSection = components["schemas"]["ChannelSection"];
 export type SandboxSection = components["schemas"]["SandboxSection"];
+// What the host is *actually* doing, as opposed to what `sandbox.mode` asked
+// for. The two read alike from the config surface and are not the same
+// question — reporting only the first is how an instance ends up running
+// unconfined while its config says `enabled`.
+export type SandboxContainmentStatus =
+  components["schemas"]["SandboxContainmentStatus"];
 export type ProjectsSection = components["schemas"]["ProjectsSection"];
 export type DiscordSection = components["schemas"]["DiscordSection"];
 
@@ -297,7 +303,7 @@ export type TriggerCronRequest = components["schemas"]["TriggerCronRequest"];
 // Provider/Model Types
 // =============================================================================
 
-export type ProviderStatus = components["schemas"]["ProviderStatus"];
+export type ProviderEntry = components["schemas"]["ProviderEntry"];
 export type ProvidersResponse = components["schemas"]["ProvidersResponse"];
 export type ProviderUpdateRequest =
   components["schemas"]["ProviderUpdateRequest"];
@@ -309,14 +315,6 @@ export type ProviderModelTestRequest =
   components["schemas"]["ProviderModelTestRequest"];
 export type ProviderModelTestResponse =
   components["schemas"]["ProviderModelTestResponse"];
-
-// OAuth
-export type OpenAiOAuthBrowserStartRequest =
-  components["schemas"]["OpenAiOAuthBrowserStartRequest"];
-export type OpenAiOAuthBrowserStartResponse =
-  components["schemas"]["OpenAiOAuthBrowserStartResponse"];
-export type OpenAiOAuthBrowserStatusResponse =
-  components["schemas"]["OpenAiOAuthBrowserStatusResponse"];
 
 // Models
 export type ModelInfo = components["schemas"]["ModelInfo"];
@@ -370,12 +368,83 @@ export type TaskSubtask = components["schemas"]["TaskSubtask"];
 export type TaskListResponse = components["schemas"]["TaskListResponse"];
 export type TaskResponse = components["schemas"]["TaskResponse"];
 export type TaskActionResponse = components["schemas"]["TaskActionResponse"];
+export type TaskRun = components["schemas"]["TaskRun"];
+export type TaskRunOutcome = components["schemas"]["TaskRunOutcome"];
+export type TaskRunsResponse = components["schemas"]["TaskRunsResponse"];
+export type BlockKind = components["schemas"]["BlockKind"];
+export type TaskEdgeSummary = components["schemas"]["TaskEdgeSummary"];
+export type TaskDependenciesResponse =
+	components["schemas"]["TaskDependenciesResponse"];
+export type TaskTransition = components["schemas"]["TaskTransition"];
+export type ContractProblem = components["schemas"]["ContractProblem"];
+export type ContractSide = components["schemas"]["ContractSide"];
+export type TaskInputBinding = components["schemas"]["TaskInputBinding"];
+export type TaskContractResponse =
+	components["schemas"]["TaskContractResponse"];
+export type TaskProvenanceResponse =
+	components["schemas"]["TaskProvenanceResponse"];
+export type TaskTransitionsResponse =
+	components["schemas"]["TaskTransitionsResponse"];
+export type TaskGraph = components["schemas"]["TaskGraph"];
+export type TaskGraphEdge = components["schemas"]["TaskGraphEdge"];
+
+// A condition on a live task: the predicate, its last verdict, and — via
+// `disposition` — whether a false answer holds the task or rules it out.
+export type TaskGate = components["schemas"]["TaskGate"];
+export type TaskGatesResponse = components["schemas"]["TaskGatesResponse"];
+export type GateKind = components["schemas"]["GateKind"];
+export type GateResult = components["schemas"]["GateResult"];
+export type GateDisposition = components["schemas"]["GateDisposition"];
 
 // Requests
 export type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];
 export type UpdateTaskRequest = components["schemas"]["UpdateTaskRequest"];
 export type ApproveRequest = components["schemas"]["ApproveRequest"];
 export type AssignRequest = components["schemas"]["AssignRequest"];
+
+// =============================================================================
+// Workflow Types
+// =============================================================================
+
+export type Workflow = components["schemas"]["Workflow"];
+export type WorkflowStep = components["schemas"]["WorkflowStep"];
+export type WorkflowEdge = components["schemas"]["WorkflowEdge"];
+export type StepBinding = components["schemas"]["StepBinding"];
+// The template half of a condition. Addressed by `step_key` like a binding,
+// compiled into a real `TaskGate` at launch.
+export type StepGate = components["schemas"]["StepGate"];
+export type BindingSource = components["schemas"]["BindingSource"];
+// Whether a step runs a model or a process. `agent` is the default and is every
+// step that predates command steps.
+export type StepKind = components["schemas"]["StepKind"];
+// Where a step gets its working directory from: the task binding it already
+// has, a checkout of its own, or one per fan-out branch.
+export type WorktreeMode = components["schemas"]["WorktreeMode"];
+export type LoopArm = components["schemas"]["LoopArm"];
+export type LoopResolution = components["schemas"]["LoopResolution"];
+export type WorkflowListResponse = components["schemas"]["WorkflowListResponse"];
+export type WorkflowResponse = components["schemas"]["WorkflowResponse"];
+export type WorkflowDetailResponse =
+	components["schemas"]["WorkflowDetailResponse"];
+export type WorkflowActionResponse =
+	components["schemas"]["WorkflowActionResponse"];
+export type WorkflowRun = components["schemas"]["WorkflowRun"];
+// How a run is going, as a property of the run rather than a reduction over its
+// tasks. `stuck` is the value the enum exists for: no single task can report it.
+export type RunStatus = components["schemas"]["RunStatus"];
+export type RunDetailResponse = components["schemas"]["RunDetailResponse"];
+export type RunListResponse = components["schemas"]["RunListResponse"];
+export type CancelRunResponse = components["schemas"]["CancelRunResponse"];
+
+// Requests
+export type CancelRunRequest = components["schemas"]["CancelRunRequest"];
+export type SaveWorkflowRequest = components["schemas"]["SaveWorkflowRequest"];
+export type SaveStepRequest = components["schemas"]["SaveStepRequest"];
+export type SaveBindingRequest = components["schemas"]["SaveBindingRequest"];
+export type SaveStepGateRequest = components["schemas"]["SaveStepGateRequest"];
+export type StepEdgeRequest = components["schemas"]["StepEdgeRequest"];
+export type LaunchRequest = components["schemas"]["LaunchRequest"];
+export type LaunchResponse = components["schemas"]["LaunchResponse"];
 
 // =============================================================================
 // Messaging Types
@@ -457,6 +526,12 @@ export type ProjectWithRelations =
 export type ProjectListResponse = components["schemas"]["ProjectListResponse"];
 export type ProjectResponse = components["schemas"]["ProjectResponse"];
 
+// A checkout under `.worktrees/` that no live run accounts for. Listed for a
+// person to look at — there is deliberately no endpoint that removes one.
+export type OrphanWorktree = components["schemas"]["OrphanWorktree"];
+export type OrphanWorktreesResponse =
+  components["schemas"]["OrphanWorktreesResponse"];
+
 // Disk usage
 export type DiskUsageEntry = components["schemas"]["DiskUsageEntry"];
 export type DiskUsageResponse = components["schemas"]["DiskUsageResponse"];
@@ -509,3 +584,32 @@ export type StorageStatus = components["schemas"]["StorageStatus"];
 // NOTE: Backup operations use raw binary data (zip/octet-stream), not JSON schema types:
 // - Backup export returns application/zip
 // - Backup restore accepts application/octet-stream
+
+// =============================================================================
+// Aliases consumed by client.ts
+// =============================================================================
+
+export type ActivityDay = components["schemas"]["ActivityDay"];
+export type ActivityResponse = components["schemas"]["ActivityResponse"];
+export type ActivityTotals = components["schemas"]["ActivityTotals"];
+export type Deployment = components["schemas"]["Deployment"];
+export type NotificationsResponse = components["schemas"]["NotificationsResponse"];
+export type PresetDefaults = components["schemas"]["PresetDefaults"];
+export type PresetMeta = components["schemas"]["PresetMeta"];
+export type ProcessTokens = components["schemas"]["ProcessTokens"];
+export type TokenSummary = components["schemas"]["TokenSummary"];
+export type UnreadCountResponse = components["schemas"]["UnreadCountResponse"];
+export type UpdateStatus = components["schemas"]["UpdateStatus"];
+export type UsageByModel = components["schemas"]["UsageByModel"];
+export type UsageResponse = components["schemas"]["UsageResponse"];
+export type UsageTotals = components["schemas"]["UsageTotals"];
+export type WikiHistoryResponse = components["schemas"]["WikiHistoryResponse"];
+export type WikiListResponse = components["schemas"]["WikiListResponse"];
+export type WikiPage = components["schemas"]["WikiPage"];
+export type WikiPageResponse = components["schemas"]["WikiPageResponse"];
+export type WikiPageSummary = components["schemas"]["WikiPageSummary"];
+export type WikiPageVersion = components["schemas"]["WikiPageVersion"];
+export type CreatePageRequest = components["schemas"]["CreatePageRequest"];
+export type EditPageRequest = components["schemas"]["EditPageRequest"];
+export type Notification = components["schemas"]["Notification"];
+export type SavedAttachmentMeta = components["schemas"]["SavedAttachmentMeta"];

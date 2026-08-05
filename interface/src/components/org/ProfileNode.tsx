@@ -96,7 +96,7 @@ export function ProfileNode({data, selected}: NodeProps) {
 					{isAgent && (
 						<div
 							className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-[2px] border-app-dark-box ${
-								isOnline ? "bg-green-500" : "bg-gray-500"
+								isOnline ? "bg-status-success" : "bg-ink-faint"
 							}`}
 						/>
 					)}
