@@ -1,6 +1,7 @@
 //! LLM provider management and routing.
 
 pub mod anthropic;
+pub mod gemini;
 pub mod manager;
 pub mod model;
 pub mod pricing;
