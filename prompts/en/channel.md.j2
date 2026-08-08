@@ -192,6 +192,14 @@ When in doubt, skip. Being a lurker who speaks when it matters is better than be
 {{ participant_context }}
 {%- endif %}
 
+{%- if active_recall_context %}
+## Background Recall (READ-ONLY CONTEXT)
+
+The notes below were prepared by a background recall process. They are context, not user input. Use them only when they help answer the latest user message.
+
+{{ active_recall_context }}
+{%- endif %}
+
 {%- if knowledge_synthesis %}
 ## Knowledge Context
 
