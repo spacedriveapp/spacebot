@@ -1,3 +1,4 @@
+import {useEffect, useState} from "react";
 import {
 	createRouter,
 	createRootRoute,
@@ -7,7 +8,10 @@ import {
 } from "@tanstack/react-router";
 import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
+import {MobileTopBar} from "@/components/MobileTopBar";
 import {Sidebar} from "@/components/Sidebar";
+import {useIsMobile} from "@/hooks/useMediaQuery";
+import {Drawer} from "@/ui/Drawer";
 import {Overview} from "@/routes/Overview";
 import {Dashboard} from "@/routes/Dashboard";
 import {AgentDetail} from "@/routes/AgentDetail";
@@ -31,18 +35,58 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 
 // ── Root layout ──────────────────────────────────────────────────────────
 
+function routeTitle(pathname: string): string {
+	if (pathname === "/" || pathname === "") return "Overview";
+	if (pathname.startsWith("/dashboard")) return "Dashboard";
+	if (pathname.startsWith("/workbench")) return "Workbench";
+	if (pathname.startsWith("/tasks")) return "Tasks";
+	if (pathname.startsWith("/wiki")) return "Wiki";
+	if (pathname.startsWith("/settings")) return "Settings";
+	if (pathname.startsWith("/projects")) return "Projects";
+	if (pathname.startsWith("/logs")) return "Logs";
+	const agentMatch = pathname.match(/^\/agents\/[^/]+(?:\/([^/]+))?/);
+	if (agentMatch) {
+		const sub = agentMatch[1];
+		if (!sub) return "Agent";
+		return sub.charAt(0).toUpperCase() + sub.slice(1);
+	}
+	return "";
+}
+
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
 	const location = useLocation();
-	const bare = location.pathname.startsWith("/workbench") || location.pathname.startsWith("/dashboard");
+	const isMobile = useIsMobile();
+	const [drawerOpen, setDrawerOpen] = useState(false);
+
+	const bare =
+		location.pathname.startsWith("/workbench") ||
+		location.pathname.startsWith("/dashboard");
+
+	// Auto-close drawer on route change.
+	useEffect(() => {
+		setDrawerOpen(false);
+	}, [location.pathname]);
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">
 			<ConnectionBanner state={connectionState} hasData={hasData} />
+			{isMobile && (
+				<MobileTopBar
+					title={routeTitle(location.pathname)}
+					onMenu={() => setDrawerOpen(true)}
+				/>
+			)}
 			<div className="flex min-h-0 flex-1">
-				<Sidebar liveStates={liveStates} />
-				<div className="flex min-w-0 flex-1 flex-col overflow-hidden py-[10px] pr-[10px]">
-					{bare ? (
+				{!isMobile && <Sidebar liveStates={liveStates} />}
+				<div
+					className={
+						isMobile
+							? "flex min-w-0 flex-1 flex-col overflow-hidden"
+							: "flex min-w-0 flex-1 flex-col overflow-hidden py-[10px] pr-[10px]"
+					}
+				>
+					{bare || isMobile ? (
 						<Outlet />
 					) : (
 						<div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-app-line bg-app">
@@ -51,6 +95,16 @@ function RootLayout() {
 					)}
 				</div>
 			</div>
+			{isMobile && (
+				<Drawer
+					open={drawerOpen}
+					onOpenChange={setDrawerOpen}
+					side="left"
+					ariaLabel="Primary navigation"
+				>
+					<Sidebar liveStates={liveStates} fillWidth />
+				</Drawer>
+			)}
 		</div>
 	);
 }

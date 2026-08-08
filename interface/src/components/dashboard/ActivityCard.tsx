@@ -195,7 +195,7 @@ export function ActivityCard() {
 						</div>
 
 						{/* Summary row */}
-						<div className="mt-3 flex items-center gap-4 text-tiny">
+						<div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-tiny">
 							{SERIES.map((s) => {
 								const val = totals[s.key as keyof typeof totals] as number;
 								if (val === 0) return null;

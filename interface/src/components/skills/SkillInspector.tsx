@@ -92,7 +92,7 @@ export function SkillInspector({
 		selected.type === "installed" ? installedContentQuery.data?.base_dir : null;
 
 	return (
-		<div className="flex w-80 flex-shrink-0 flex-col border-l border-app-line/50 bg-app-dark-box/10">
+		<div className="flex h-full w-full shrink-0 flex-col md:w-80 md:border-l md:border-app-line/50 md:bg-app-dark-box/10">
 			{/* Header */}
 			<div className="flex items-start justify-between gap-2 border-b border-app-line/50 px-4 py-3">
 				<div className="min-w-0 flex-1">

@@ -14,14 +14,14 @@ export function WorkerColumn({worker}: {worker: OrchestrationWorker}) {
 	const taskText = worker.task.replace(/^\[opencode\]\s*/i, "");
 
 	return (
-		<div className="flex h-full w-[560px] flex-shrink-0 flex-col overflow-hidden rounded-2xl border border-app-line bg-app-box">
+		<div className="flex h-full w-full shrink-0 snap-center flex-col overflow-hidden rounded-2xl border border-app-line bg-app-box md:w-[560px] md:snap-none">
 			{/* Column header */}
 			<div className="flex flex-col gap-1 h-[60px] border-b border-app-line px-3 py-2">
 				<div className="flex items-center gap-2">
 					{/* Status dot */}
 					<span
 						className={cx(
-							"h-2 w-2 bg-ink-faint flex-shrink-0 rounded-full",
+							"h-2 w-2 bg-ink-faint shrink-0 rounded-full",
 							isRunning && "animate-pulse bg-green-500",
 							isIdle && "bg-yellow-500",
 							!isRunning && !isIdle && "bg-ink-faint",
@@ -90,7 +90,7 @@ function CancelButton({
 					.catch(console.warn)
 					.finally(() => setCancelling(false));
 			}}
-			className="flex-shrink-0 rounded-md border border-app-line px-1.5 py-0.5 text-tiny font-medium text-ink-dull transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
+			className="shrink-0 rounded-md border border-app-line px-1.5 py-0.5 text-tiny font-medium text-ink-dull transition-colors hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
 			title="Cancel worker"
 		>
 			{cancelling ? "..." : "Cancel"}
