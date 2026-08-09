@@ -212,9 +212,14 @@ pub async fn spawn_branch_from_state(
 /// Uses the same branching infrastructure as regular branches but with a
 /// dedicated prompt focused on memory recall + save. The result is not injected
 /// into channel history — the channel handles these branch IDs specially.
+///
+/// When `skill_reflection` is set, the same pass also reflects on skills:
+/// the prompt gains the reflection section and the branch gets skill tools
+/// under agent-origin rails.
 pub(crate) async fn spawn_memory_persistence_branch(
     state: &ChannelState,
     deps: &AgentDeps,
+    skill_reflection: bool,
 ) -> std::result::Result<BranchId, AgentError> {
     let contract_state = Arc::new(MemoryPersistenceContractState::default());
 
@@ -223,7 +228,7 @@ pub(crate) async fn spawn_memory_persistence_branch(
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
     let tool_use_enforcement = deps.runtime_config.tool_use_enforcement.load();
     let system_prompt = prompt_engine
-        .render_static("memory_persistence")
+        .render_memory_persistence_prompt(skill_reflection)
         .and_then(|prompt| {
             prompt_engine.maybe_append_tool_use_enforcement(
                 prompt,
@@ -241,13 +246,18 @@ pub(crate) async fn spawn_memory_persistence_branch(
         "memory persistence",
         &prompt,
         &system_prompt,
-        "persisting memories...",
+        if skill_reflection {
+            "persisting memories and reflecting on skills..."
+        } else {
+            "persisting memories..."
+        },
         "memory_persistence_branch",
         BranchSpawnOptions {
             profile: BranchToolProfile::MemoryPersistence {
                 contract_state,
                 working_memory: Some(state.deps.working_memory.clone()),
                 channel_id: Some(state.channel_id.to_string()),
+                skill_reflection,
             },
         },
     )

@@ -505,6 +505,7 @@ async fn process_chunk(
             contract_state: contract_state.clone(),
             working_memory: Some(deps.working_memory.clone()),
             channel_id: None,
+            skill_reflection: false,
         },
         deps.api_state.clone(),
         deps.wiki_store.clone(),

@@ -715,6 +715,12 @@ pub struct Channel {
     message_count: usize,
     /// When the last memory persistence branch was triggered.
     last_persistence_at: std::time::Instant,
+    /// Set when a turn or worker crossed the reflection work threshold.
+    /// Consumed by the next persistence branch, which then also reflects
+    /// on skills. Atomic because turn processing marks it through `&self`.
+    reflection_signal: std::sync::atomic::AtomicBool,
+    /// When the last skill-reflection pass was spawned, for cooldown.
+    last_reflection_at: Option<std::time::Instant>,
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
     /// Optional Discord reply target captured when each branch was started.
@@ -907,6 +913,8 @@ impl Channel {
             message_count: 0,
             last_persistence_at: std::time::Instant::now(),
             memory_persistence_branches: HashSet::new(),
+            reflection_signal: std::sync::atomic::AtomicBool::new(false),
+            last_reflection_at: None,
             branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
             coalesce_deadline: None,
@@ -2923,17 +2931,28 @@ impl Channel {
                 .await;
         }
 
-        let applied_history = {
+        let (applied_history, turn_tool_calls) = {
             let mut guard = self.state.history.write().await;
-            apply_history_after_turn(
+            let applied = apply_history_after_turn(
                 &result,
                 &mut guard,
                 history,
                 history_len_before,
                 &self.id,
                 is_retrigger,
-            )
+            );
+            let appended_from = history_len_before.min(guard.len());
+            let tool_calls =
+                crate::agent::channel_history::count_tool_call_messages(&guard[appended_from..]);
+            (applied, tool_calls)
         };
+
+        {
+            let reflection = self.deps.runtime_config.skills_config.load().reflection;
+            if reflection.enabled && turn_tool_calls >= reflection.min_tool_iterations {
+                self.mark_reflection_signal("turn_tool_calls");
+            }
+        }
 
         let remove_result = match self.resolved_settings.delegation {
             DelegationMode::Direct => {
@@ -3400,6 +3419,15 @@ impl Channel {
 
                 run_logger.log_worker_completed(*worker_id, result, *success);
 
+                // A worker finishing real work successfully is a reflection
+                // signal: the session likely produced a reusable lesson.
+                if *success {
+                    let reflection = self.deps.runtime_config.skills_config.load().reflection;
+                    if reflection.enabled {
+                        self.mark_reflection_signal("worker_completed");
+                    }
+                }
+
                 self.state.active_workers.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
                 self.state.worker_injections.write().await.remove(worker_id);
@@ -3700,18 +3728,55 @@ impl Channel {
         status.render_full(&current_time_line, &system_info)
     }
 
+    /// Note that this conversation just did substantial work. The next
+    /// persistence pass will also reflect on skills, cooldown permitting.
+    ///
+    /// Cron conversations never reflect: scheduled runs repeat the same
+    /// procedure on a timer and would grind out noise skills.
+    fn mark_reflection_signal(&self, source: &'static str) {
+        if self.id.starts_with("cron") {
+            return;
+        }
+        let was_set = self
+            .reflection_signal
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        if !was_set {
+            tracing::debug!(channel_id = %self.id, source, "skill reflection signal set");
+        }
+    }
+
+    /// Whether the next persistence pass should reflect on skills.
+    fn reflection_due(&self) -> bool {
+        if !self
+            .reflection_signal
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        let config = self.deps.runtime_config.skills_config.load().reflection;
+        if !config.enabled {
+            return false;
+        }
+        match self.last_reflection_at {
+            Some(at) => at.elapsed().as_secs() >= config.cooldown_secs,
+            None => true,
+        }
+    }
+
     /// Check if a memory persistence branch should be spawned.
     ///
-    /// Three triggers (any one fires):
-    /// 1. **Message count** — threshold reached (default 20, configurable)
-    /// 2. **Time-based** — elapsed since last persistence, if conversation is active
-    /// 3. **Event density** — working memory events from this channel since last persistence
+    /// Three memory triggers (any one fires): message count, time since last
+    /// persistence, and working-memory event density. A pending skill
+    /// reflection signal is a fourth trigger and can spawn the pass on its
+    /// own; the branch it spawns also reflects on skills.
     async fn check_memory_persistence(&mut self) {
         let config = **self.deps.runtime_config.memory_persistence.load();
-        if !config.enabled
-            || config.message_interval == 0
-            || !self.resolved_settings.memory.persistence_enabled()
-        {
+        let persistence_enabled = config.enabled
+            && config.message_interval != 0
+            && self.resolved_settings.memory.persistence_enabled();
+        let reflection_due = self.reflection_due();
+
+        if !persistence_enabled && !reflection_due {
             return;
         }
 
@@ -3719,14 +3784,16 @@ impl Channel {
         let elapsed = self.last_persistence_at.elapsed();
 
         // Trigger 1: Message count threshold.
-        let message_trigger = self.message_count >= wm_config.persistence_message_threshold;
+        let message_trigger =
+            persistence_enabled && self.message_count >= wm_config.persistence_message_threshold;
 
         // Trigger 2: Time-based — only if conversation is active (message_count > 0).
-        let time_trigger = self.message_count > 0
+        let time_trigger = persistence_enabled
+            && self.message_count > 0
             && elapsed.as_secs() >= wm_config.persistence_time_threshold_secs;
 
         // Trigger 3: Event density — working memory events from this channel.
-        let density_trigger = if !message_trigger && !time_trigger {
+        let density_trigger = if persistence_enabled && !message_trigger && !time_trigger {
             // Only check DB if the cheap triggers didn't fire.
             let since = chrono::Utc::now() - chrono::Duration::seconds(elapsed.as_secs() as i64);
             match self
@@ -3745,7 +3812,7 @@ impl Channel {
             false
         };
 
-        if !message_trigger && !time_trigger && !density_trigger {
+        if !message_trigger && !time_trigger && !density_trigger && !reflection_due {
             return;
         }
 
@@ -3753,21 +3820,29 @@ impl Channel {
             "message_count"
         } else if time_trigger {
             "time"
-        } else {
+        } else if density_trigger {
             "event_density"
+        } else {
+            "reflection"
         };
 
         // Reset counters before spawning so subsequent messages don't pile up.
         self.message_count = 0;
         self.last_persistence_at = std::time::Instant::now();
+        if reflection_due {
+            self.last_reflection_at = Some(std::time::Instant::now());
+            self.reflection_signal
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+        match spawn_memory_persistence_branch(&self.state, &self.deps, reflection_due).await {
             Ok(branch_id) => {
                 self.memory_persistence_branches.insert(branch_id);
                 tracing::info!(
                     channel_id = %self.id,
                     branch_id = %branch_id,
                     trigger,
+                    skill_reflection = reflection_due,
                     "memory persistence branch spawned"
                 );
             }

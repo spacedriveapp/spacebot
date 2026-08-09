@@ -181,6 +181,25 @@ pub(crate) struct AppliedHistory {
     pub reply_text: Option<String>,
 }
 
+/// Count assistant messages carrying tool calls in a history slice.
+///
+/// Used as the per-turn work measure for skill reflection: each counted
+/// message is one tool iteration of the agentic loop.
+pub(crate) fn count_tool_call_messages(messages: &[rig::message::Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            if let rig::message::Message::Assistant { content, .. } = message {
+                content
+                    .iter()
+                    .any(|c| matches!(c, rig::message::AssistantContent::ToolCall(_)))
+            } else {
+                false
+            }
+        })
+        .count()
+}
+
 pub(crate) fn pop_retrigger_bridge_message(history: &mut Vec<rig::message::Message>) -> bool {
     if history.last().is_some_and(is_retrigger_bridge_message) {
         history.pop();
@@ -496,7 +515,7 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_history_after_turn, event_is_for_channel};
+    use super::{apply_history_after_turn, count_tool_call_messages, event_is_for_channel};
     use crate::{ChannelId, ProcessEvent, ProcessId};
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
@@ -798,6 +817,30 @@ mod tests {
             guard, initial,
             "history should be rolled back after tool error"
         );
+    }
+
+    #[test]
+    fn count_tool_call_messages_counts_only_tool_call_assistants() {
+        let tool_call_msg = Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "shell",
+                serde_json::json!({"command": "ls"}),
+            )),
+        };
+
+        let messages = vec![
+            user_msg("do the thing"),
+            tool_call_msg.clone(),
+            user_msg("(tool result)"),
+            tool_call_msg,
+            assistant_msg("done"),
+        ];
+
+        assert_eq!(count_tool_call_messages(&messages), 2);
+        assert_eq!(count_tool_call_messages(&[]), 0);
+        assert_eq!(count_tool_call_messages(&make_history(&["hi", "hey"])), 0);
     }
 
     /// Rollback on empty history is a no-op and must not panic.

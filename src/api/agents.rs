@@ -759,6 +759,7 @@ pub async fn create_agent_internal(
     };
 
     let raw_config = crate::config::AgentConfig {
+        skills: None,
         id: agent_id.clone(),
         default: false,
         display_name: request.display_name.clone().filter(|s| !s.is_empty()),

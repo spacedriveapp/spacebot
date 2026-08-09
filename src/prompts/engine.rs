@@ -300,6 +300,20 @@ impl PromptEngine {
         )
     }
 
+    /// Render the memory persistence branch system prompt.
+    ///
+    /// `skill_reflection` adds the reflection section: the pass also decides
+    /// whether the session produced a reusable procedure worth persisting as
+    /// a skill.
+    pub fn render_memory_persistence_prompt(&self, skill_reflection: bool) -> Result<String> {
+        self.render(
+            "memory_persistence",
+            context! {
+                skill_reflection => skill_reflection,
+            },
+        )
+    }
+
     /// Render the skills listing for a branch system prompt.
     ///
     /// Branches read skills directly via `read_skill` or pass names to
@@ -868,6 +882,24 @@ mod tests {
         assert!(prompt.contains("## Memory Context"));
         assert!(prompt.contains("Bulletin fallback"));
         assert!(!prompt.contains("## Knowledge Context"));
+    }
+
+    #[test]
+    fn memory_persistence_prompt_gates_reflection_section() {
+        let engine = PromptEngine::new("en").expect("prompt engine should build");
+
+        let plain = engine
+            .render_memory_persistence_prompt(false)
+            .expect("persistence prompt should render");
+        assert!(plain.contains("memory persistence process"));
+        assert!(!plain.contains("## Skill Reflection"));
+
+        let reflecting = engine
+            .render_memory_persistence_prompt(true)
+            .expect("reflection prompt should render");
+        assert!(reflecting.contains("## Skill Reflection"));
+        assert!(reflecting.contains("never the incident"));
+        assert!(reflecting.contains("Never persist"));
     }
 
     #[test]

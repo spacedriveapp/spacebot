@@ -643,6 +643,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub skills: SkillsConfig,
     pub participant_context: ParticipantContextConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
@@ -780,6 +781,40 @@ impl Default for MemoryPersistenceConfig {
         Self {
             enabled: true,
             message_interval: 50,
+        }
+    }
+}
+
+/// Skill lifecycle configuration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkillsConfig {
+    /// Reflection: the outcome-to-skill pump riding the memory persistence
+    /// branch.
+    pub reflection: ReflectionConfig,
+}
+
+/// When the persistence branch also reflects on skills.
+///
+/// Reflection is counter-based, not idle-based: the signal that something
+/// was learned is that real work happened. When a turn crosses
+/// `min_tool_iterations` (or a worker attached to the conversation succeeds),
+/// the next persistence branch runs with skill tools under agent-origin
+/// rails. Cron-originated conversations never reflect.
+#[derive(Debug, Clone, Copy)]
+pub struct ReflectionConfig {
+    pub enabled: bool,
+    /// Tool iterations in a single turn that mark it worth reflecting on.
+    pub min_tool_iterations: usize,
+    /// Minimum seconds between reflection passes per conversation.
+    pub cooldown_secs: u64,
+}
+
+impl Default for ReflectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_tool_iterations: 10,
+            cooldown_secs: 3600,
         }
     }
 }
@@ -1400,6 +1435,7 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub warmup: Option<WarmupConfig>,
+    pub skills: Option<SkillsConfig>,
     pub browser: Option<BrowserConfig>,
     pub channel: Option<ChannelConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
@@ -1463,6 +1499,7 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub skills: SkillsConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
@@ -1495,6 +1532,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
+            skills: SkillsConfig::default(),
             participant_context: ParticipantContextConfig::default(),
             browser: BrowserConfig::default(),
             channel: ChannelConfig::default(),
@@ -1562,6 +1600,7 @@ impl AgentConfig {
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
             warmup: self.warmup.unwrap_or(defaults.warmup),
+            skills: self.skills.unwrap_or(defaults.skills),
             browser: self
                 .browser
                 .clone()

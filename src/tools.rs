@@ -284,6 +284,9 @@ pub enum BranchToolProfile {
         contract_state: Arc<MemoryPersistenceContractState>,
         working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
         channel_id: Option<String>,
+        /// When set, this persistence pass also reflects on skills: the
+        /// branch gets skill tools under agent-origin rails.
+        skill_reflection: bool,
     },
 }
 
@@ -906,22 +909,33 @@ pub fn create_branch_tool_server(
             sandbox,
         ));
 
-    // Skill tools go to conversation branches only. They carry User origin
-    // because the user is present and directing; memory-persistence and
-    // ingestion branches are focused pipelines and get no mutation surface.
-    // The reflection branch (autonomous) constructs its own server with
-    // WriteOrigin::Agent and the read-before-write rail active.
-    if matches!(profile, BranchToolProfile::Default) {
+    // Skill tools by profile. Conversation branches carry User origin — the
+    // user is present and directing. A persistence pass with reflection on
+    // carries Agent origin: workspace-only writes, no installed or pinned
+    // targets, read-before-write, delete archives. Persistence passes
+    // without reflection (and ingestion) get no skill surface at all.
+    let skill_origin = match &profile {
+        BranchToolProfile::Default => Some(crate::skills::WriteOrigin::User),
+        BranchToolProfile::MemoryPersistence {
+            skill_reflection: true,
+            ..
+        } => Some(crate::skills::WriteOrigin::Agent),
+        BranchToolProfile::MemoryPersistence { .. } => None,
+    };
+    if let Some(origin) = skill_origin {
         let skill_read_tracker = new_skill_read_tracker();
+        let mut skill_manage = SkillManageTool::new(runtime_config.clone(), origin)
+            .with_read_tracker(skill_read_tracker.clone());
+        if let BranchToolProfile::MemoryPersistence {
+            channel_id: Some(channel_id),
+            ..
+        } = &profile
+        {
+            skill_manage = skill_manage.with_conversation_id(channel_id.clone());
+        }
         server = server
-            .tool(
-                ReadSkillTool::new(runtime_config.clone())
-                    .with_read_tracker(skill_read_tracker.clone()),
-            )
-            .tool(
-                SkillManageTool::new(runtime_config.clone(), crate::skills::WriteOrigin::User)
-                    .with_read_tracker(skill_read_tracker),
-            )
+            .tool(ReadSkillTool::new(runtime_config.clone()).with_read_tracker(skill_read_tracker))
+            .tool(skill_manage)
             .tool(SkillsListTool::new(runtime_config.clone()));
     }
 
@@ -944,6 +958,7 @@ pub fn create_branch_tool_server(
         contract_state,
         working_memory,
         channel_id,
+        ..
     } = profile
     {
         let mut tool = MemoryPersistenceCompleteTool::new(contract_state);

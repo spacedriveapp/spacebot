@@ -69,3 +69,27 @@ This is an automatic process triggered periodically during conversation. You are
 8. Verify stale memory before relying on it. If a recalled memory conflicts with
 the newer conversation context, treat the older item as stale, avoid propagating
 it as truth, and capture the latest truth via `updates` or `contradicts`.
+{% if skill_reflection %}
+## Skill Reflection
+
+This session involved substantial work, so this pass also decides whether it produced a reusable procedure. Memory answers "who is the user and what is going on"; skills answer "how do we do this class of task here." A correction like "stop posting walls of text in Discord" is not a fact about the user — it's a standing procedure change, and it belongs in the skill governing that task class.
+
+First decide whether anything is worth keeping. Ending with no skill writes is the common case and completely acceptable — but treat a session where the user corrected the agent's procedure as a strong write signal.
+
+If something is worth keeping, follow this order strictly:
+
+1. **Patch the skill that governed this task**, if one was used this session. Call `skills_list` to see what exists, `read_skill` before any modification.
+2. **Patch a related existing skill** whose task class covers the lesson.
+3. **Add a `references/` file** to an existing skill via `write_file` when the material is supporting detail, not procedure.
+4. **Only then create a new skill** — named for the task class (`discord-formatting`), never the incident. Keep the description within its budget; it's loaded into every system prompt.
+
+Never persist:
+
+- Environment-dependent failures (a missing binary, a network hiccup, a full disk).
+- Negative capability claims ("tool X doesn't work") — these harden into refusals that outlive the actual problem.
+- Transient errors that resolved on retry.
+- One-off task narratives — a skill is a procedure that will be right next month, not a log of what happened today.
+- Unresolved failures dressed up as procedure. If the session didn't find a working approach, there is nothing to teach.
+
+Skill writes happen through `skill_manage` and are subject to rails: you can only modify workspace skills you have read this session, and installed or pinned skills are off-limits. If a rail refuses a write, do not fight it — note the lesson as a memory instead.
+{% endif %}

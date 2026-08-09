@@ -16,12 +16,28 @@ use super::{
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
     MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
-    ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
-    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
-    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
-    normalize_adapter, validate_named_messaging_adapters,
+    ParticipantContextConfig, ProjectsConfig, ProviderConfig, ReflectionConfig, SignalConfig,
+    SignalInstanceConfig, SkillsConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig,
+    TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig,
+    WarmupConfig, WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
+
+/// Merge a `[skills]` TOML section over a base config.
+fn resolve_skills_config(toml: TomlSkillsConfig, base: SkillsConfig) -> SkillsConfig {
+    SkillsConfig {
+        reflection: toml
+            .reflection
+            .map(|r| ReflectionConfig {
+                enabled: r.enabled.unwrap_or(base.reflection.enabled),
+                min_tool_iterations: r
+                    .min_tool_iterations
+                    .unwrap_or(base.reflection.min_tool_iterations),
+                cooldown_secs: r.cooldown_secs.unwrap_or(base.reflection.cooldown_secs),
+            })
+            .unwrap_or(base.reflection),
+    }
+}
 
 use anyhow::Context as _;
 
@@ -942,6 +958,7 @@ impl Config {
             ingestion: None,
             cortex: None,
             warmup: None,
+            skills: None,
             browser: None,
             channel: None,
             mcp: None,
@@ -1584,6 +1601,11 @@ impl Config {
                         .unwrap_or(base_defaults.memory_persistence.message_interval),
                 })
                 .unwrap_or(base_defaults.memory_persistence),
+            skills: toml
+                .defaults
+                .skills
+                .map(|s| resolve_skills_config(s, base_defaults.skills))
+                .unwrap_or(base_defaults.skills),
             coalesce: toml
                 .defaults
                 .coalesce
@@ -1853,6 +1875,7 @@ impl Config {
                             .message_interval
                             .unwrap_or(defaults.memory_persistence.message_interval),
                     }),
+                    skills: a.skills.map(|s| resolve_skills_config(s, defaults.skills)),
                     coalesce: a.coalesce.map(|c| CoalesceConfig {
                         enabled: c.enabled.unwrap_or(defaults.coalesce.enabled),
                         debounce_ms: c.debounce_ms.unwrap_or(defaults.coalesce.debounce_ms),
@@ -1984,6 +2007,7 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 warmup: None,
+                skills: None,
                 browser: None,
                 channel: None,
                 mcp: None,
@@ -2681,5 +2705,35 @@ fn load_human_md(human_dir: &std::path::Path) -> Option<String> {
     match std::fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => Some(content),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod skills_config_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_skills_config_merges_partial_toml_over_base() {
+        let base = SkillsConfig::default();
+
+        let toml: TomlSkillsConfig =
+            toml::from_str("[reflection]\nmin_tool_iterations = 4").unwrap();
+        let merged = resolve_skills_config(toml, base);
+        assert_eq!(merged.reflection.min_tool_iterations, 4);
+        assert_eq!(merged.reflection.enabled, base.reflection.enabled);
+        assert_eq!(
+            merged.reflection.cooldown_secs,
+            base.reflection.cooldown_secs
+        );
+
+        let toml: TomlSkillsConfig = toml::from_str("").unwrap();
+        let merged = resolve_skills_config(toml, base);
+        assert_eq!(merged.reflection.enabled, base.reflection.enabled);
+
+        let toml: TomlSkillsConfig =
+            toml::from_str("[reflection]\nenabled = false\ncooldown_secs = 60").unwrap();
+        let merged = resolve_skills_config(toml, base);
+        assert!(!merged.reflection.enabled);
+        assert_eq!(merged.reflection.cooldown_secs, 60);
     }
 }

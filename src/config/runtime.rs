@@ -78,6 +78,8 @@ pub struct RuntimeConfig {
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
     /// Skill provenance and usage tracking, set after agent initialization.
     pub skill_usage: ArcSwap<Option<Arc<crate::skills::SkillUsageStore>>>,
+    /// Skill lifecycle configuration (reflection triggers, cooldowns).
+    pub skills_config: ArcSwap<crate::config::SkillsConfig>,
     /// Prompt snapshot store for debugging prompt construction.
     pub prompt_snapshots: ArcSwap<Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>>,
     /// Secrets store for encrypted credential storage.
@@ -158,6 +160,7 @@ impl RuntimeConfig {
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
             skill_usage: ArcSwap::from_pointee(None),
+            skills_config: ArcSwap::from_pointee(agent_config.skills),
             prompt_snapshots: ArcSwap::from_pointee(None),
             secrets: ArcSwap::from_pointee(None),
             sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),
@@ -288,6 +291,7 @@ impl RuntimeConfig {
         self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
+        self.skills_config.store(Arc::new(resolved.skills));
         self.participant_context
             .store(Arc::new(config.defaults.participant_context));
         // Preserve project_paths from the current sandbox config when

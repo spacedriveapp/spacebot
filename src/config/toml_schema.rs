@@ -299,6 +299,7 @@ pub(super) struct TomlDefaultsConfig {
     pub(super) ingestion: Option<TomlIngestionConfig>,
     pub(super) cortex: Option<TomlCortexConfig>,
     pub(super) warmup: Option<TomlWarmupConfig>,
+    pub(super) skills: Option<TomlSkillsConfig>,
     pub(super) participant_context: Option<TomlParticipantContextConfig>,
     pub(super) browser: Option<TomlBrowserConfig>,
     pub(super) channel: Option<TomlChannelConfig>,
@@ -343,6 +344,18 @@ pub(super) struct TomlRoutingConfig {
 pub(super) struct TomlMemoryPersistenceConfig {
     pub(super) enabled: Option<bool>,
     pub(super) message_interval: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlSkillsConfig {
+    pub(super) reflection: Option<TomlReflectionConfig>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlReflectionConfig {
+    pub(super) enabled: Option<bool>,
+    pub(super) min_tool_iterations: Option<usize>,
+    pub(super) cooldown_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -491,6 +504,7 @@ pub(super) struct TomlAgentConfig {
     pub(super) ingestion: Option<TomlIngestionConfig>,
     pub(super) cortex: Option<TomlCortexConfig>,
     pub(super) warmup: Option<TomlWarmupConfig>,
+    pub(super) skills: Option<TomlSkillsConfig>,
     pub(super) browser: Option<TomlBrowserConfig>,
     pub(super) channel: Option<TomlChannelConfig>,
     pub(super) mcp: Option<Vec<TomlMcpServerConfig>>,
