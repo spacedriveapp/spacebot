@@ -107,6 +107,11 @@ Two contracts on Control output:
 
 ### `CommandAccess` — declarative access control
 
+> **Superseded:** `human-scoped-turn-authority.md` replaces the binary
+> platform-ID `Everyone`/`Authority` model below with Human-scoped capabilities.
+> The typed command registry remains; commands declare required capabilities and
+> use the same `TurnAuthority` as model tools.
+
 ```rust
 pub enum CommandAccess {
     Everyone,
