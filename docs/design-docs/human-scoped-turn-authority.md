@@ -112,6 +112,7 @@ Relevant production paths:
 - Asking the LLM to decide whether a Human is trusted.
 - Treating prompt instructions as an authorization mechanism.
 - Solving all memory ownership semantics in the first patch. This design defines the boundary memory must consume.
+- Rate limiting, quotas, or cost controls. A guest with `chat.respond` still consumes model budget; usage limits are a separate concern from authority.
 
 ---
 
@@ -143,6 +144,7 @@ Examples:
 ```text
 chat.respond
 web.read
+media.generate
 memory.read.shared
 memory.read.own
 memory.write.own
@@ -359,6 +361,8 @@ Initial policy behavior:
 The full system prompt must be assembled after `TurnAuthority` is resolved. Memory bulletin, high-importance memory, project context, participant profiles, skills, and history must each accept `ContextPolicy` rather than being injected globally and filtered afterward.
 
 This is required for the claim that a guest turn is incapable of dangerous disclosure.
+
+Context filtering is only half of the boundary. Long-term memory is also reachable actively through recall tools, so the capability checks on those tools (Phase 3) close the active path while `ContextPolicy` closes the passive one. Until graduated visibility lands in Phase 6, prompt construction applies a blunt interim rule: non-owner principals receive no memory bulletin, no high-importance memories, and no participant profiles.
 
 ---
 
@@ -633,7 +637,7 @@ pub enum SystemPrincipalKind {
 
 Each system principal has a configured capability ceiling. `System` does not mean unrestricted.
 
-Cron and webhook definitions must declare their capabilities when created. A cron created by a Human cannot exceed the creator's authority unless an authorized approver grants a separate durable automation policy.
+Cron and webhook definitions must declare their capabilities when created. A cron created by a Human cannot exceed the creator's authority unless an authorized approver grants a separate durable automation policy. Each firing re-resolves the creator's current policy and intersects it with the declared capabilities — creation-time authority is a ceiling, not a durable grant. Downgrading or blocking a Human narrows or stops their automations at the next firing; a creator who can no longer be resolved fails closed.
 
 ---
 
@@ -734,6 +738,7 @@ No authorization failure should silently fall back to current unrestricted behav
 3. Add the central execution-time authority guard.
 4. Add argument-level scope validation for file, memory, task, messaging, project, and worker tools.
 5. Fail closed for MCP/plugin tools without mappings.
+6. Stop injecting memory bulletin, high-importance memories, and participant profiles for non-owner principals. This blunt rule makes the guest-privacy guarantee hold from this phase onward; Phase 6 replaces it with graduated visibility.
 
 ### Phase 4 — Commands
 
@@ -753,8 +758,10 @@ No authorization failure should silently fall back to current unrestricted behav
 
 ### Phase 6 — Context isolation
 
-1. Make prompt construction authority-aware.
-2. Filter memory bulletin, high-importance memories, history, participant profiles, project context, and skills.
+This phase refines the Phase 3 owner/non-owner injection rule into graduated visibility. It widens what restricted principals can see; it is not the phase where the privacy guarantee first becomes true.
+
+1. Make prompt construction authority-aware via `ContextPolicy`.
+2. Filter memory bulletin, high-importance memories, history, participant profiles, project context, and skills per policy instead of the blunt owner/non-owner split.
 3. Integrate the user-scoped memory design with Human IDs and capability-derived scope.
 4. Prevent cross-Human compaction and recall leakage.
 
