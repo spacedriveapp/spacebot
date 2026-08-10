@@ -132,7 +132,7 @@ Per-agent, monotonically increasing. The next number is derived from `SELECT COA
 A new cortex loop that runs on a configurable interval (default: 15 minutes). It:
 
 1. Queries recent `Todo` memories that haven't been promoted yet (no corresponding task with `source_memory_id` pointing to them)
-2. For each unprocessed todo, evaluates whether it's actionable using an LLM call with the current bulletin as context
+2. For each unprocessed todo, evaluates whether it's actionable using an LLM call with the current knowledge context
 3. If actionable, creates a `Task` with:
    - `status: pending_approval`
    - `created_by: cortex`
@@ -143,7 +143,7 @@ A new cortex loop that runs on a configurable interval (default: 15 minutes). It
    - Metadata pre-filled where possible (e.g., `worker_type`, `directory`, `skill` inferred from context)
 4. If not actionable, skips it (the todo remains as-is in the memory system)
 
-The LLM call is cheap — it's a single evaluation per todo, not a multi-turn agent loop. The prompt receives the todo content, the current bulletin, and recent task titles (to avoid duplicates).
+The LLM call is cheap — it's a single evaluation per todo, not a multi-turn agent loop. The prompt receives the todo content, the current knowledge context, and recent task titles (to avoid duplicates).
 
 ### Task Execution Paths
 
@@ -166,19 +166,19 @@ There are two distinct execution paths for `ready` tasks. Both use the same bran
 3. As the worker executes, it can only update progress for its assigned task via `task_update`
 4. When the worker completes, the task moves to `done` with `completed_at` set
 
-### Bulletin Integration
+### Knowledge Context Integration
 
-The bulletin generation loop should include a new section querying active tasks:
+The knowledge synthesis loop should include a compact section querying active tasks:
 
 ```rust
-BulletinSection {
+KnowledgeSynthesisSection {
     name: "Active Tasks",
     search_mode: SearchMode::Typed,
     // This would actually query the tasks table, not memories
 }
 ```
 
-This requires a small extension to the bulletin gathering — a direct SQLite query on the `tasks` table for non-done tasks, formatted into the bulletin sections alongside memory data.
+This requires a small extension to knowledge-synthesis gathering — a direct SQLite query on the `tasks` table for non-done tasks, formatted into the knowledge-context sections alongside memory data.
 
 ## Agent Interaction
 

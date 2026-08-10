@@ -134,4 +134,4 @@ The cortex chat panel from `cortex-chat.md` is accessible here via a toggle butt
 
 The cortex tab becomes the cortex's home page — history (what it did) plus chat (talk to it). The cortex chat panel is the same component used on channel pages, just without channel context. The event timeline is unique to this tab.
 
-These two features are independent on the backend but share UI space. Cortex history is simpler (no streaming, no new process type) and delivers value immediately since bulletin generation already runs.
+These two features are independent on the backend but share UI space. Cortex history is simpler (no streaming, no new process type) and delivers value immediately because cortex synthesis and maintenance loops already run.

@@ -62,7 +62,7 @@ CREATE TABLE channels (
 | `platform` | TEXT | Extracted from the ID prefix: `discord`, `slack`, `cron`, `webhook` |
 | `display_name` | TEXT | Human-readable name from platform metadata (e.g. `#general`) |
 | `platform_meta` | TEXT (JSON) | Platform-specific metadata blob |
-| `bulletin` | TEXT | Reserved for per-channel memory bulletins |
+| `bulletin` | TEXT | Reserved for legacy per-channel memory context |
 | `permissions` | TEXT (JSON) | Reserved for per-channel permission overrides |
 | `is_active` | INTEGER | 1 = active, 0 = archived |
 | `created_at` | TIMESTAMP | When the channel was first seen |
@@ -200,9 +200,9 @@ Implementation: `src/conversation/settings.rs` — `ResolvedConversationSettings
 
 Two columns exist in the schema but aren't populated yet:
 
-**`bulletin`** — Per-channel memory bulletins. Currently the cortex generates a single agent-wide bulletin stored in `RuntimeConfig::memory_bulletin` via `ArcSwap`. The `bulletin` column is the hook for generating channel-specific bulletins that incorporate conversation-local context alongside the global memory graph.
+**`bulletin`** -- Reserved for legacy per-channel memory context. Channel prompts now prefer layered working memory, channel activity, participant context, and `## Knowledge Context` from `RuntimeConfig::knowledge_synthesis`.
 
-**`permissions`** — Per-channel permission overrides as JSON. Intended for the UI layer — controlling which users can interact with the agent in specific channels, rate limits, tool restrictions, etc.
+**`permissions`** -- Per-channel permission overrides as JSON. Intended for the UI layer: controlling which users can interact with the agent in specific channels, rate limits, tool restrictions, etc.
 
 ## Implementation
 

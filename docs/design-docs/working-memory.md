@@ -449,7 +449,7 @@ Topics are NOT injected into the channel system prompt by default. They are pull
 
 The compactor's job is context management -- summarizing old context to free up space. Memory extraction is a secondary concern that was bolted on because there was no better place for it.
 
-**Change:** The compactor no longer calls `memory_save`. Its sole output is a compaction summary that replaces the compacted messages in the conversation history. Memories are extracted through other paths.
+**Change:** The compactor no longer writes durable memories. Its sole output is a compaction summary that replaces the compacted messages in the conversation history. Memories are extracted through other paths.
 
 **Why this is safe:** The memory persistence branch already exists and runs periodically. It has better context (full conversation history, not just the messages being compacted) and better attribution (it can set `user_id` and `channel_id`). The compactor was a safety net for conversations that ran long enough to hit compaction but not long enough to trigger persistence. That safety net is replaced by event-driven memory capture (see below).
 
@@ -609,7 +609,7 @@ async fn maybe_synthesize_daily_summary(&self) -> Result<()> {
 
 On each tick, check if `knowledge_synthesis_version` has changed. If so, debounce (wait 60s after last change), then regenerate the knowledge synthesis (Layer 5). Store in `RuntimeConfig::knowledge_synthesis` via `ArcSwap`.
 
-This replaces the bulletin generation loop entirely. The warmup loop still runs at startup to generate the initial synthesis, but the recurring generation is change-driven, not timer-driven.
+This replaces the old bulletin loop entirely. The warmup loop still runs at startup to generate the initial synthesis, but recurring synthesis is change-driven, not timer-driven.
 
 ### 4. Participant Summary Generation
 
@@ -950,7 +950,7 @@ Maximum {{ max_words }} words.
 
 ### `compactor.md.j2`
 
-Remove `memory_save` from the compactor's tool set. The compactor's only output is a compaction summary.
+Remove durable memory-write access from the compaction worker. The compactor's only output is a compaction summary.
 
 ---
 
@@ -965,7 +965,7 @@ Remove `memory_save` from the compactor's tool set. The compactor's only output 
 | `src/agent/branch.rs`                               | Emit `BranchCompleted` event on return                                                                                 |
 | `src/agent/worker.rs`                               | Emit `WorkerSpawned` and `WorkerCompleted` events                                                                      |
 | `src/agent/cortex.rs`                               | Replace bulletin loop with daily summary + knowledge synthesis (dirty flag). Remove warmup bulletin regeneration loop. |
-| `src/agent/compactor.rs`                            | Remove `memory_save` from compactor tool server                                                                        |
+| `src/agent/compactor.rs`                            | Keep compaction summary-only                                                                                           |
 | `src/agent/channel_dispatch.rs`                     | Smarter persistence branch triggers (message count, time, event density)                                               |
 | `src/config/types.rs`                               | `WorkingMemoryConfig`, deprecate `bulletin_interval_secs` / `bulletin_max_words`                                       |
 | `src/config/runtime.rs`                             | `knowledge_synthesis` replaces `memory_bulletin` in `RuntimeConfig`. Add `knowledge_synthesis_version` atomic counter. |
@@ -981,7 +981,7 @@ Remove `memory_save` from the compactor's tool set. The compactor's only output 
 | `prompts/en/cortex_knowledge_synthesis.md.j2` (new) | Narrowed synthesis prompt                                                                                              |
 | `prompts/en/cortex_daily_summary.md.j2` (new)       | Daily summary synthesis prompt                                                                                         |
 | `prompts/en/memory_persistence.md.j2`               | Add working memory event emission instructions                                                                         |
-| `prompts/en/compactor.md.j2`                        | Remove memory_save instructions                                                                                        |
+| `prompts/en/compactor.md.j2`                        | Keep summary-only instructions                                                                                         |
 
 ---
 
@@ -1032,7 +1032,7 @@ Remove `memory_save` from the compactor's tool set. The compactor's only output 
 - `maybe_synthesize_daily_summary()` in cortex tick loop
 - Context injection renders yesterday's summary instead of raw events
 - Event pruning (>30 days) added to maintenance loop
-- Remove bulletin generation loop entirely
+- Remove old bulletin loop entirely
 
 **Verification:** At day rollover, a daily summary is generated. Yesterday's section in the working memory shows the narrative summary, not raw events. Raw events older than 30 days are pruned.
 
@@ -1043,7 +1043,7 @@ Remove `memory_save` from the compactor's tool set. The compactor's only output 
 - Smarter persistence branch triggers (message count reduced to 20, time-based 15min, event-density 5+)
 - Persistence branch dual output (graph memories + working memory events)
 - Update `memory_persistence.md.j2` and `memory_persistence_complete` tool
-- Remove `memory_save` from compactor tool server
+- Keep compaction summary-only
 - Update `compactor.md.j2`
 
 **Verification:** Memory persistence fires more frequently and at the right times. The compactor produces summaries only, no memories. The working memory log contains `Decision` events emitted by the persistence branch.

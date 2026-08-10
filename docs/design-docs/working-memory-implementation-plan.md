@@ -59,7 +59,7 @@ The channel system prompt is assembled from these sources:
 | `CortexConfig` | `src/config/types.rs` | ~40 fields | Cortex tuning parameters |
 | `AgentDeps` | `src/lib.rs` | ~20 fields | Dependency bundle for all processes |
 | Channel template | `prompts/en/channel.md.j2` | 200 | System prompt template |
-| Bulletin template | `prompts/en/cortex_bulletin.md.j2` | 23 | Synthesis prompt |
+| Knowledge synthesis template | `prompts/en/cortex_knowledge_synthesis.md.j2` | 23 | Long-term context synthesis prompt |
 | Persistence template | `prompts/en/memory_persistence.md.j2` | 41 | Memory extraction prompt |
 | Compactor template | `prompts/en/compactor.md.j2` | 48 | Compaction prompt |
 
@@ -77,9 +77,11 @@ These events drive `StatusBlock` updates but are **not persisted**. They exist o
 
 ### Current Memory Persistence Flow
 
-1. **Compaction-based** — When the compactor runs (`>80%` context), the compaction worker calls `memory_save` on extracted facts/decisions. This is the safety net.
-2. **Periodic persistence branch** — Triggered every 50 user messages. Branches off channel context, recalls existing memories, saves new ones, calls `memory_persistence_complete`.
-3. **Manual** — Branches can call `memory_save` directly during thinking.
+1. **Persistence branches** -- Branch off channel context, recall existing memories, save new durable memories, and call `memory_persistence_complete`.
+2. **Manual** -- Branches can call `memory_save` directly during thinking.
+3. **Cortex workflows** -- System-level maintenance and synthesis can create observations or update derived context.
+
+The compactor is summary-only. It does not receive the durable memory write tool; memory creation should not depend on context pressure.
 
 ---
 
@@ -93,13 +95,13 @@ These events drive `StatusBlock` updates but are **not persisted**. They exist o
 | **Layer 2: Working Memory Log** | No event persistence, no temporal narrative | Full implementation needed |
 | **Layer 3: Channel Activity Map** | `channels` table exists, `ChannelStore` tracks active channels | Rendering function needed, `topic_hint` needs working memory events |
 | **Layer 4: Participant Context** | `HumanDef` in config, basic `humans` field on `AgentDeps` | Needs cortex-generated summaries, recent activity augmentation. Depends on participant-awareness.md |
-| **Layer 5: Knowledge Synthesis** | Bulletin exists but is monolithic, timer-driven | Needs scope reduction, dirty-flag trigger, renamed prompt |
+| **Layer 5: Knowledge Synthesis** | Knowledge synthesis exists as the narrow long-term context layer | Continue hardening dirty-flag refresh, prompt cache boundaries, and compatibility aliases |
 | **Event emission points** | `ProcessEvent` broadcast exists but not persisted | Need `WorkingMemoryStore::record()` calls at ~12 emission points |
 | **Daily summaries** | Nothing | New cortex responsibility, new table, new prompt |
 | **Progressive compression** | Nothing | Rendering logic with token budgeting |
 | **Decision extraction** | Nothing | Persistence branch dual output, programmatic heuristics |
 | **Persistence triggers** | 50-message threshold only | Message count (20), time (15min), event density (5+) |
-| **Compactor memory removal** | Compactor calls `memory_save` | Remove `memory_save` from compactor tool set |
+| **Compactor memory removal** | Compactor is summary-only | Keep durable memory extraction in persistence branches and cortex workflows |
 | **Config changes** | `bulletin_interval_secs`, `bulletin_max_words` | New `WorkingMemoryConfig`, deprecation aliases |
 
 ### Dependencies Between Gaps
@@ -616,7 +618,7 @@ Increment `knowledge_synthesis_version` in:
 
 #### 3.2 Cortex Changes
 
-In `src/agent/cortex.rs`, modify the bulletin generation loop:
+In `src/agent/cortex.rs`, modify the knowledge synthesis loop:
 
 **Current flow:**
 ```
@@ -818,7 +820,7 @@ At this point, the bulletin loop can be fully removed from the cortex. The corte
 5. **Maintenance** — memory decay, pruning, association building (existing, unchanged)
 6. **Event pruning** — prune old working memory events and intra-day syntheses (new, cheap SQL)
 
-Remove: bulletin interval timer, bulletin generation function, warmup bulletin regeneration.
+Remove: compatibility bulletin interval timer, old synthesis function, warmup bulletin regeneration.
 
 #### 4.8 Verification
 
@@ -902,26 +904,26 @@ When `events` is present, write each to the working memory store with the curren
 
 ---
 
-### Phase 5b: Sunset Compactor Memory Extraction
+### Phase 5b: Completed — Compactor Memory Extraction Remains Sunset
 
 **Dependencies:** Phase 5a deployed and validated (new persistence triggers confirmed adequate)
-**Risk:** Medium — removes a memory creation path. Only deploy after Phase 5a monitoring confirms coverage.
+**Risk:** Medium — validate that persistence coverage remains adequate now that the compactor is summary-only.
 
-#### 5b.1 Remove Memory Save from Compactor
+#### 5b.1 Keep Memory Save Out of Compactor
 
 Update `src/agent/compactor.rs`:
-- Remove `memory_save` from the compactor's tool server
+- Verify the compaction worker has no durable memory-write access
 - The compactor's only output is the compaction summary injected into history
 
 Update `prompts/en/compactor.md.j2`:
-- Remove all `memory_save` instructions
+- Keep all `memory_save` instructions removed
 - The compactor's sole responsibility is producing a compaction summary
 
 #### 5b.2 Verification
 
-- Integration test: run compactor, verify no `memory_save` calls in tool output
-- Regression test: verify memory quality doesn't degrade — compare memories saved before/after
-- Monitor: memory count growth rate should remain stable compared to Phase 5a baseline
+- Verified by inspection: `src/agent/compactor.rs` no longer exposes durable memory-write access
+- Verified by inspection: `prompts/en/compactor.md.j2` contains no `memory_save` instructions
+- Regression coverage continues through compaction and persistence branch verification rather than a compactor durable-write path
 
 ---
 
@@ -986,7 +988,7 @@ pub struct RuntimeConfig {
 
 **Migration of `memory_bulletin` consumers:** The following code paths currently read `runtime_config.memory_bulletin.load()` and must be updated to read `knowledge_synthesis` instead:
 
-- `src/agent/cortex.rs` — bulletin generation loop (writes the value; replaced in Phase 3)
+- `src/agent/cortex.rs` -- old synthesis loop (writes the value; replaced in Phase 3)
 - `src/agent/cortex.rs` — warmup loop (generates initial bulletin; updated to generate initial knowledge synthesis)
 - `src/agent/channel.rs` — `build_system_prompt()` (reads for template injection; updated in Phase 2)
 - `src/agent/cortex.rs` — `should_generate_bulletin_from_bulletin_loop()` freshness check (removed in Phase 4)
@@ -1096,7 +1098,7 @@ These existing tests must continue to pass:
 - [ ] Save a memory, verify knowledge synthesis regenerates
 - [ ] Wait for day rollover, verify daily summary appears
 - [ ] Send 20 messages, verify persistence branch fires
-- [ ] Run compactor, verify no memory_save tool calls in output
+- [ ] Run compaction, verify no durable memory-write calls in output
 - [ ] Check token count of system prompt stays within expected range
 
 ---
@@ -1143,7 +1145,7 @@ Each phase has a clean rollback:
 - **Phase 2:** Revert template to use `memory_bulletin`. Remove rendering functions. The bulletin is still being generated.
 - **Phase 3:** Restore bulletin timer loop. Revert dirty flag changes. The old bulletin resumes.
 - **Phase 4:** Restore bulletin loop (if Phase 3 rollback hasn't already). Daily summaries become orphaned (harmless).
-- **Phase 5:** Restore 50-message persistence trigger, restore `memory_save` in compactor.
+- **Phase 5:** Restore the prior persistence trigger only if signal-based persistence regresses. Do not restore compactor memory writes unless accepting the old context-pressure coupling as an explicit emergency rollback.
 - **Phase 6:** Remove participant rendering from context assembly.
 
 ---
