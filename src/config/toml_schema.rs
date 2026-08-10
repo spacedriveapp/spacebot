@@ -403,6 +403,8 @@ pub(super) struct TomlChronicleConfig {
     pub(super) context_token_budget: Option<usize>,
     pub(super) expand_message_limit: Option<i64>,
     pub(super) max_messages_per_checkpoint: Option<i64>,
+    pub(super) rollup_threshold: Option<usize>,
+    pub(super) rollup_batch: Option<usize>,
 }
 
 #[derive(Deserialize)]

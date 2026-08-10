@@ -44,7 +44,7 @@ active context = system prompt { header + rollups + recent checkpoints }
 
 1. **Coverage is total, contiguous, and non-overlapping.** Checkpoint N's start boundary *is* checkpoint N-1's end boundary, read in the same transaction that writes N. There is no span of the durable log that is covered twice, and none that is covered zero times once chronicling has started.
 2. **A checkpoint summarizes raw messages only.** Prior summaries may be supplied to the summarizer as narrative context, but the output describes only the new interval. No checkpoint is ever regenerated from another checkpoint's text.
-3. **Checkpoints are append-only and immutable.** Rollups add rows; they never delete or rewrite the rows they cover. A level-0 checkpoint's summary text, boundaries, and sequence are fixed at commit.
+3. **Checkpoints are append-only and immutable.** Rollups add rows and stamp `rolled_up_into` on what they cover; they never delete or rewrite it. A checkpoint's summary text, boundaries, and sequence are fixed at commit, so a rollup can always be expanded back into the checkpoints it summarizes, and each of those back into raw transcript.
 4. **Commit is idempotent under retry and restart.** Boundaries are derived inside the transaction and constrained by unique indexes, so a duplicate or late commit is rejected rather than written. A checkpoint that fails to commit leaves the span unsummarized — the next cut picks it up.
 5. **The chronicle never blocks a turn.** Cut selection takes a read lock, the LLM call holds none, and the in-memory trim is a bounded write-lock section guarded by the shared fence.
 6. **One fence guards every head mutation.** Both compaction modes share it, so a mode switch cannot leave two summarizers mutating the same head, and emergency truncation cannot interleave with a cut mid-commit.
@@ -411,12 +411,12 @@ Phases 1-5 are the end-to-end vertical slice: durable schema, lifecycle, assembl
 
 ### Status
 
-Phases 1-5 are implemented and reachable by config (`compaction.mode = "chronicle"`); the default stays `rolling`. Phase 6 (rollups) is not built. Two consequences worth stating rather than discovering:
+Phases 1-6 are implemented and reachable by config (`compaction.mode = "chronicle"`); the default stays `rolling`.
 
-- **No rollups exist yet**, so `level` is always 0 and `rolled_up_into` always null. The schema, the `list_before_seq` selection, the `Rollup` label in both renderers, and the badge are in place and inert.
-- **`max_older` bounds the older list.** Checkpoints beyond it are absent from the prompt view — reachable through the `chronicle` tool, which reads the table directly, but not rendered. That is the gap rollups close.
+Rollups fold the oldest run of un-rolled checkpoints into a higher-level entry once `rollup_threshold` (default 12) have accumulated, `rollup_batch` (default 8) at a time, and they nest: level-1 rollups roll into level-2 by the same path, so a session of any length keeps a bounded number of entries at the top of the view. The insert and the `rolled_up_into` stamping are one transaction — a rollup whose children were unmarked would be rolled forever, and children marked without a surviving parent would drop out of the view with nothing covering them. Children are stamped, never deleted or rewritten, so `open` on a rollup lists exactly what it stands for and each child is still individually openable and expandable.
 
 Known limits, stated plainly rather than implied away:
 
-- The request estimate is a lower bound; tool schemas are not measurable at this layer (see above).
-- Lifecycle coverage drives the trim path and the fence directly. It does not spin up a real `Channel` with a full `AgentDeps`, so end-to-end `check_and_chronicle` → `CutContext::run` → commit, process death mid-cut, and a genuinely concurrent two-commit race are covered by their component paths rather than by an integration test.
+- The request estimate is a lower bound; serialized tool schemas are assembled inside Rig's `ToolServer` at call time and are not measurable at this layer.
+- Lifecycle coverage drives the trim path, the fence, and the rollup store invariants directly. It does not spin up a real `Channel` with a full `AgentDeps`, so end-to-end `check_and_chronicle` → `CutContext::run` → commit, process death mid-cut, and a genuinely concurrent two-commit race are covered by their component paths rather than by an integration test.
+- `roll_up_if_due` runs after a successful cut rather than on its own schedule, so a channel that stops cutting stops rolling up. That is the intended coupling — there is nothing new to roll — but it does mean a channel parked just under the interval keeps its un-rolled tail.

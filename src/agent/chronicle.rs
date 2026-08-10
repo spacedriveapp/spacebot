@@ -665,7 +665,201 @@ impl CutContext {
             "chronicle checkpoint committed"
         );
 
+        // The mutation lock is only needed for head mutations; rollups touch
+        // nothing but the checkpoint table, so it is released first.
+        drop(_guard);
+        self.roll_up_if_due().await;
+
         Ok(())
+    }
+
+    /// Fold the oldest run of un-rolled checkpoints into a higher-level
+    /// summary once enough have accumulated.
+    ///
+    /// Runs level by level: level-0 checkpoints roll into level-1, and once
+    /// enough level-1 rollups exist they roll into level-2, so a session of any
+    /// length keeps a bounded number of entries at the top.
+    async fn roll_up_if_due(&self) {
+        const MAX_ROLLUP_LEVELS: i64 = 8;
+
+        let mut level = 0i64;
+        while level < MAX_ROLLUP_LEVELS {
+            match self.roll_up_level(level).await {
+                Ok(true) => level += 1,
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        channel_id = %self.channel_id,
+                        level,
+                        %error,
+                        "chronicle rollup failed"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Roll the oldest `rollup_batch` un-rolled checkpoints at one level.
+    /// Returns whether a rollup was committed.
+    async fn roll_up_level(&self, level: i64) -> Result<bool> {
+        let config = self.config;
+        let pending = self.store.unrolled_count(&self.channel_id, level).await?;
+        if pending <= config.rollup_threshold as i64 {
+            return Ok(false);
+        }
+
+        let children = self
+            .store
+            .unrolled_at_level(&self.channel_id, level, config.rollup_batch as i64)
+            .await?;
+        if children.len() < 2 {
+            return Ok(false);
+        }
+
+        // Coverage must be contiguous, or the rollup would claim a span it does
+        // not summarize. The oldest un-rolled run always is, but a gap would
+        // mean something rolled out of order.
+        for pair in children.windows(2) {
+            if pair[0].covers_to_seq != pair[1].covers_from_seq {
+                tracing::warn!(
+                    channel_id = %self.channel_id,
+                    level,
+                    "skipping rollup: checkpoint coverage is not contiguous"
+                );
+                return Ok(false);
+            }
+        }
+
+        let first = children.first().expect("checked non-empty");
+        let last = children.last().expect("checked non-empty");
+        let (title, summary, model) = self.summarize_rollup(&children).await;
+
+        let outcome = self
+            .store
+            .commit_rollup(
+                NewCheckpoint {
+                    channel_id: self.channel_id.to_string(),
+                    level: level + 1,
+                    kind: CheckpointKind::Rollup,
+                    title,
+                    summary: summary.clone(),
+                    covers_from: first.start_boundary(),
+                    covers_to: last.end_boundary(),
+                    covers_from_at: first.covers_from_at,
+                    covers_to_at: last.covers_to_at,
+                    covers_from_message_id: first.covers_from_message_id.clone(),
+                    covers_to_message_id: last.covers_to_message_id.clone(),
+                    message_count: children.iter().map(|child| child.message_count).sum(),
+                    token_estimate: estimate_text_tokens(&summary) as i64,
+                    rolls_up_from_seq: Some(first.seq),
+                    rolls_up_to_seq: Some(last.seq),
+                    model,
+                },
+                &children
+                    .iter()
+                    .map(|child| child.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+
+        match outcome {
+            CommitOutcome::Committed(rollup) => {
+                tracing::info!(
+                    channel_id = %self.channel_id,
+                    seq = rollup.seq,
+                    level = rollup.level,
+                    covers = format!("#{}..#{}", first.seq, last.seq),
+                    "chronicle rollup committed"
+                );
+                emit_checkpoint_event(&self.deps, &self.channel_id, &rollup);
+                Ok(true)
+            }
+            CommitOutcome::Superseded { .. } => {
+                tracing::debug!(
+                    channel_id = %self.channel_id,
+                    level,
+                    "chronicle rollup superseded; another pass claimed these checkpoints"
+                );
+                Ok(false)
+            }
+            CommitOutcome::Busy => Ok(false),
+        }
+    }
+
+    /// Summarize a run of checkpoints into one higher-level entry.
+    ///
+    /// This is the one legitimate summary-of-summaries in the design: bounded
+    /// to a single level of recursion per generation, and reversible because
+    /// the covered checkpoints keep their own rows.
+    async fn summarize_rollup(
+        &self,
+        children: &[ChronicleCheckpoint],
+    ) -> (String, String, Option<String>) {
+        let fallback_title = match (children.first(), children.last()) {
+            (Some(first), Some(last)) => format!(
+                "{} – {}",
+                first.covers_from_at.format("%Y-%m-%d"),
+                last.covers_to_at.format("%Y-%m-%d")
+            ),
+            _ => "Earlier history".to_string(),
+        };
+
+        let prompt_engine = self.deps.runtime_config.prompts.load();
+        let preamble = match prompt_engine.render_static("chronicle_rollup") {
+            Ok(preamble) => preamble,
+            Err(error) => {
+                tracing::error!(%error, "failed to render chronicle rollup prompt");
+                return (fallback_title, rollup_fallback_summary(children), None);
+            }
+        };
+
+        let routing = self.deps.runtime_config.routing.load();
+        let model_name = match &self.model_override {
+            Some(model) => model.clone(),
+            None => routing.resolve(ProcessType::Compactor, None).to_string(),
+        };
+        let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
+            .with_context(&*self.deps.agent_id, "chronicle-rollup")
+            .with_routing((**routing).clone());
+
+        let agent = AgentBuilder::new(model)
+            .preamble(&preamble)
+            .default_max_turns(1)
+            .build();
+
+        let hook = SpacebotHook::new(
+            self.deps.agent_id.clone(),
+            ProcessId::Worker(Uuid::new_v4()),
+            ProcessType::Compactor,
+            Some(self.channel_id.clone()),
+            self.deps.event_tx.clone(),
+        );
+
+        let mut prompt = String::from("## Checkpoints to condense\n\n");
+        for child in children {
+            prompt.push_str(&format!(
+                "### #{} {} ({} → {}, {} messages)\n\n{}\n\n",
+                child.seq,
+                child.title,
+                child.covers_from_at.format("%Y-%m-%d %H:%M"),
+                child.covers_to_at.format("%Y-%m-%d %H:%M"),
+                child.message_count,
+                child.summary
+            ));
+        }
+
+        let mut rollup_history = Vec::new();
+        match hook.prompt_once(&agent, &mut rollup_history, &prompt).await {
+            Ok(text) => {
+                let (title, summary) = parse_checkpoint_response(&text);
+                (title.unwrap_or(fallback_title), summary, Some(model_name))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "chronicle rollup summarization failed");
+                (fallback_title, rollup_fallback_summary(children), None)
+            }
+        }
     }
 
     /// Produce the checkpoint's title and summary.
@@ -825,6 +1019,20 @@ fn emit_checkpoint_event(
     }
 }
 
+/// Used when a rollup's summarization fails: the covered checkpoints are still
+/// individually readable, so the entry says where to look rather than
+/// pretending to summarize.
+fn rollup_fallback_summary(children: &[ChronicleCheckpoint]) -> String {
+    match (children.first(), children.last()) {
+        (Some(first), Some(last)) => format!(
+            "Covers checkpoints #{}–#{}. Summarization failed, so this entry has no narrative; \
+             open the individual checkpoints for their detail.",
+            first.seq, last.seq
+        ),
+        _ => "Covers earlier checkpoints; summarization failed.".to_string(),
+    }
+}
+
 fn unsummarized_notice(message_count: usize) -> String {
     format!(
         "This span of {message_count} messages was not summarized — summarization failed. \
@@ -976,19 +1184,14 @@ pub async fn render_chronicle_view(
         .list_since(channel_id, 0, since, config.max_recent as i64)
         .await?;
 
-    let older = match recent.first() {
-        Some(first) => {
-            store
-                .list_before_seq(channel_id, 0, first.seq, config.max_older as i64)
-                .await?
-        }
-        None => store
-            .list(channel_id, 0, config.max_older as i64)
-            .await?
-            .into_iter()
-            .rev()
-            .collect(),
-    };
+    // Older history renders from whatever covers it most compactly: a level-0
+    // checkpoint a rollup has absorbed is represented by that rollup instead,
+    // so a long session shows a few high-level entries rather than dropping its
+    // oldest ones off the end of the view.
+    let before_seq = recent.first().map(|first| first.seq).unwrap_or(i64::MAX);
+    let older = store
+        .uncovered_before_seq(channel_id, before_seq, config.max_older as i64)
+        .await?;
 
     Ok(Some(compose_view(
         &stats,

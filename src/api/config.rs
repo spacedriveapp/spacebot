@@ -49,6 +49,8 @@ pub struct ChronicleSection {
     pub context_token_budget: usize,
     pub expand_message_limit: i64,
     pub max_messages_per_checkpoint: i64,
+    pub rollup_threshold: usize,
+    pub rollup_batch: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, utoipa::ToSchema)]
@@ -236,6 +238,8 @@ pub(super) struct ChronicleUpdate {
     context_token_budget: Option<usize>,
     expand_message_limit: Option<i64>,
     max_messages_per_checkpoint: Option<i64>,
+    rollup_threshold: Option<usize>,
+    rollup_batch: Option<usize>,
 }
 
 #[derive(Deserialize, Debug, utoipa::ToSchema)]
@@ -398,6 +402,8 @@ pub(super) async fn get_agent_config(
                 context_token_budget: compaction.chronicle.context_token_budget,
                 expand_message_limit: compaction.chronicle.expand_message_limit,
                 max_messages_per_checkpoint: compaction.chronicle.max_messages_per_checkpoint,
+                rollup_threshold: compaction.chronicle.rollup_threshold,
+                rollup_batch: compaction.chronicle.rollup_batch,
             },
         },
         cortex: CortexSection {
@@ -800,6 +806,12 @@ fn update_compaction_table(
         }
         if let Some(v) = chronicle.max_messages_per_checkpoint {
             chronicle_table["max_messages_per_checkpoint"] = toml_edit::value(v);
+        }
+        if let Some(v) = chronicle.rollup_threshold {
+            chronicle_table["rollup_threshold"] = toml_edit::value(v as i64);
+        }
+        if let Some(v) = chronicle.rollup_batch {
+            chronicle_table["rollup_batch"] = toml_edit::value(v as i64);
         }
     }
     Ok(())

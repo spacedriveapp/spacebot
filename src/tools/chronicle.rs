@@ -176,9 +176,12 @@ impl ChronicleTool {
                 ChronicleError(format!("Failed to read chronicle stats: {error}"))
             })?;
 
+        // Every level, not just level 0: after a rollup absorbs a run of
+        // checkpoints the rollup is the entry the agent should see first, and
+        // the children remain reachable by opening it.
         let checkpoints = self
             .store
-            .list(&self.channel_id, 0, limit)
+            .list_all_levels(&self.channel_id, limit)
             .await
             .map_err(|error| ChronicleError(format!("Failed to list checkpoints: {error}")))?;
 
@@ -203,8 +206,13 @@ impl ChronicleTool {
 
         for checkpoint in &checkpoints {
             summary.push_str(&format!(
-                "- **#{}** {} — {} → {} · {} messages · {}{}\n",
+                "- **#{}** {}{} — {} → {} · {} messages · {}{}\n",
                 checkpoint.seq,
+                if checkpoint.level > 0 {
+                    "[rollup] "
+                } else {
+                    ""
+                },
                 checkpoint.title,
                 checkpoint.covers_from_at.format("%Y-%m-%d %H:%M"),
                 checkpoint.covers_to_at.format("%Y-%m-%d %H:%M"),
@@ -223,7 +231,44 @@ impl ChronicleTool {
 
     async fn open(&self, seq: Option<i64>) -> Result<ChronicleOutput, ChronicleError> {
         let checkpoint = self.require_checkpoint(seq, "open").await?;
-        Ok(self.output("open", render_checkpoint(&checkpoint)))
+        let mut summary = render_checkpoint(&checkpoint);
+
+        // A rollup is only trustworthy if you can see what it stands for, so
+        // opening one lists the checkpoints it covers. Those rows are never
+        // deleted; each can still be opened or expanded on its own.
+        if checkpoint.level > 0 {
+            let children = self
+                .store
+                .children_of(&checkpoint.id)
+                .await
+                .map_err(|error| {
+                    ChronicleError(format!("Failed to read rollup children: {error}"))
+                })?;
+
+            if children.is_empty() {
+                summary.push_str("\n_This rollup has no recorded children._\n");
+            } else {
+                summary.push_str(&format!(
+                    "\n### Covers {} checkpoint(s)\n\n",
+                    children.len()
+                ));
+                for child in &children {
+                    summary.push_str(&format!(
+                        "- **#{}** {} — {} → {} · {} messages\n",
+                        child.seq,
+                        child.title,
+                        child.covers_from_at.format("%Y-%m-%d %H:%M"),
+                        child.covers_to_at.format("%Y-%m-%d %H:%M"),
+                        child.message_count,
+                    ));
+                }
+                summary.push_str(
+                    "\nOpen any of them for its own summary, or expand it for raw messages.\n",
+                );
+            }
+        }
+
+        Ok(self.output("open", summary))
     }
 
     async fn expand(

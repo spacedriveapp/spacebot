@@ -435,6 +435,14 @@ fn config_rows(config: AgentConfigResponse) -> Vec<Vec<String>> {
         "compaction.chronicle.max_messages_per_checkpoint",
         chronicle.max_messages_per_checkpoint.to_string(),
     );
+    push(
+        "compaction.chronicle.rollup_threshold",
+        chronicle.rollup_threshold.to_string(),
+    );
+    push(
+        "compaction.chronicle.rollup_batch",
+        chronicle.rollup_batch.to_string(),
+    );
 
     push(
         "cortex.tick_interval_secs",

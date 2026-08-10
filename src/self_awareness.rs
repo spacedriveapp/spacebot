@@ -201,6 +201,8 @@ pub fn runtime_snapshot_value(agent_id: &str, runtime_config: &RuntimeConfig) ->
                 "context_token_budget": compaction.chronicle.context_token_budget,
                 "expand_message_limit": compaction.chronicle.expand_message_limit,
                 "max_messages_per_checkpoint": compaction.chronicle.max_messages_per_checkpoint,
+                "rollup_threshold": compaction.chronicle.rollup_threshold,
+                "rollup_batch": compaction.chronicle.rollup_batch,
             },
         },
         "memory_persistence": {

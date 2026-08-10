@@ -3127,6 +3127,8 @@ export interface components {
             max_recent: number;
             /** Format: int64 */
             recent_window_hours: number;
+            rollup_batch: number;
+            rollup_threshold: number;
         };
         ChronicleUpdate: {
             context_token_budget?: number | null;
@@ -3141,6 +3143,8 @@ export interface components {
             max_recent?: number | null;
             /** Format: int64 */
             recent_window_hours?: number | null;
+            rollup_batch?: number | null;
+            rollup_threshold?: number | null;
         };
         /**
          * @description What happens when a worker explicitly calls "close" on the browser.
