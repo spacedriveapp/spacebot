@@ -868,19 +868,28 @@ fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Optio
 
 #[cfg(test)]
 pub(crate) async fn setup_test_store() -> TaskStore {
-    // A uniquely named shared-cache in-memory database: isolated per test, but
-    // reachable from several pool connections so concurrency tests are real.
-    let url = format!(
-        "sqlite:file:tasks-test-{}?mode=memory&cache=shared",
-        uuid::Uuid::new_v4()
-    );
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+
+    // A file-backed database in a temp directory, matching how the instance
+    // store actually runs. An in-memory database would need `cache=shared` to
+    // be reachable from more than one connection, and shared-cache SQLite
+    // raises SQLITE_LOCKED on contention — which `busy_timeout` does not
+    // retry — so the concurrency tests would flake on an artifact that no
+    // deployment can hit.
+    let directory = tempfile::tempdir().expect("temp dir should be created");
+    let options = SqliteConnectOptions::new()
+        .filename(directory.path().join("tasks.db"))
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Off)
+        .busy_timeout(std::time::Duration::from_secs(10));
+
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .min_connections(1)
         .max_connections(4)
-        .idle_timeout(None)
-        .connect(&url)
+        .connect_with(options)
         .await
-        .expect("in-memory sqlite should connect");
+        .expect("test sqlite should connect");
 
     // Run the real instance migrations so the test schema can never drift from
     // what ships — including task_comments and last_enriched_at.
@@ -888,6 +897,11 @@ pub(crate) async fn setup_test_store() -> TaskStore {
         .run(&pool)
         .await
         .expect("global migrations should run");
+
+    // The directory has to outlive the pool, and the store owns no place to
+    // put it. Tests are short-lived processes and each database is a few
+    // hundred kilobytes, so the handle is released to the OS temp sweeper.
+    std::mem::forget(directory);
 
     TaskStore::new(pool)
 }

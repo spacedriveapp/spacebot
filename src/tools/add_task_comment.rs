@@ -395,11 +395,20 @@ mod tests {
         let results = [first.expect("join"), second.expect("join")];
         let winners = results.iter().filter(|result| result.is_ok()).count();
         assert_eq!(winners, 1, "exactly one agent may take the task");
+
+        // The loser can lose at either gate depending on interleaving: it reads
+        // the assignment the winner already committed, or it reads an unowned
+        // task and loses the guarded UPDATE. Both end the same way — told to
+        // skip, having written nothing.
         let skip = results
             .iter()
             .find_map(|result| result.as_ref().err())
-            .expect("the loser reports a skip");
-        assert!(skip.to_string().contains("claimed by"));
+            .expect("the loser reports a skip")
+            .to_string();
+        assert!(
+            skip.contains("skip it"),
+            "the loser must be told to skip, got: {skip}"
+        );
         assert_eq!(store.count_comments(number).await.expect("count"), 1);
     }
 

@@ -400,6 +400,12 @@ impl TaskStore {
     /// then never enriched, then stale. Tasks worked during the previous run
     /// are excluded unless a user has commented since — that is what stops a
     /// run from repeating the one before it.
+    ///
+    /// The user-comment comparison is inclusive of the enrichment timestamp.
+    /// Both are millisecond-precision, so a comment landing in the same
+    /// millisecond as the enrichment that preceded it would otherwise be
+    /// swallowed. Erring toward one extra look at the task is the safe
+    /// direction; erring toward dropping a user's input is not.
     pub async fn select_for_enrichment(
         &self,
         selection: EnrichmentSelection<'_>,
@@ -416,7 +422,7 @@ impl TaskStore {
                      SELECT 1 FROM task_comments c \
                      WHERE c.task_id = tasks.id AND c.author_type = 'user' \
                        AND (tasks.last_enriched_at IS NULL \
-                            OR c.created_at > tasks.last_enriched_at) \
+                            OR c.created_at >= tasks.last_enriched_at) \
                  ) AS user_engaged \
                  FROM tasks \
                  WHERE status IN ({status_placeholders}) \
