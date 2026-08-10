@@ -679,22 +679,29 @@ impl CutContext {
     /// Runs level by level: level-0 checkpoints roll into level-1, and once
     /// enough level-1 rollups exist they roll into level-2, so a session of any
     /// length keeps a bounded number of entries at the top.
+    ///
+    /// Every level is evaluated regardless of whether the previous one
+    /// committed a rollup, because accumulated entries at a higher level should
+    /// roll up even when the level below is currently quiet. The loop stops
+    /// only after a full pass makes no progress at any level.
     async fn roll_up_if_due(&self) {
         const MAX_ROLLUP_LEVELS: i64 = 8;
 
-        let mut level = 0i64;
-        while level < MAX_ROLLUP_LEVELS {
-            match self.roll_up_level(level).await {
-                Ok(true) => level += 1,
-                Ok(false) => return,
-                Err(error) => {
-                    tracing::warn!(
-                        channel_id = %self.channel_id,
-                        level,
-                        %error,
-                        "chronicle rollup failed"
-                    );
-                    return;
+        let mut any_committed = true;
+        while any_committed {
+            any_committed = false;
+            for level in 0..MAX_ROLLUP_LEVELS {
+                match self.roll_up_level(level).await {
+                    Ok(true) => any_committed = true,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            channel_id = %self.channel_id,
+                            level,
+                            %error,
+                            "chronicle rollup failed"
+                        );
+                    }
                 }
             }
         }
@@ -733,7 +740,14 @@ impl CutContext {
 
         let first = children.first().expect("checked non-empty");
         let last = children.last().expect("checked non-empty");
-        let (title, summary, model) = self.summarize_rollup(&children).await;
+        let Some((title, summary, model)) = self.summarize_rollup(&children).await else {
+            tracing::warn!(
+                channel_id = %self.channel_id,
+                level,
+                "skipping rollup: summarization failed, span stays un-rolled for the next cut"
+            );
+            return Ok(false);
+        };
 
         let outcome = self
             .store
@@ -795,7 +809,7 @@ impl CutContext {
     async fn summarize_rollup(
         &self,
         children: &[ChronicleCheckpoint],
-    ) -> (String, String, Option<String>) {
+    ) -> Option<(String, String, Option<String>)> {
         let fallback_title = match (children.first(), children.last()) {
             (Some(first), Some(last)) => format!(
                 "{} – {}",
@@ -810,7 +824,7 @@ impl CutContext {
             Ok(preamble) => preamble,
             Err(error) => {
                 tracing::error!(%error, "failed to render chronicle rollup prompt");
-                return (fallback_title, rollup_fallback_summary(children), None);
+                return None;
             }
         };
 
@@ -853,11 +867,11 @@ impl CutContext {
         match hook.prompt_once(&agent, &mut rollup_history, &prompt).await {
             Ok(text) => {
                 let (title, summary) = parse_checkpoint_response(&text);
-                (title.unwrap_or(fallback_title), summary, Some(model_name))
+                Some((title.unwrap_or(fallback_title), summary, Some(model_name)))
             }
             Err(error) => {
                 tracing::warn!(%error, "chronicle rollup summarization failed");
-                (fallback_title, rollup_fallback_summary(children), None)
+                None
             }
         }
     }
@@ -1019,20 +1033,6 @@ fn emit_checkpoint_event(
     }
 }
 
-/// Used when a rollup's summarization fails: the covered checkpoints are still
-/// individually readable, so the entry says where to look rather than
-/// pretending to summarize.
-fn rollup_fallback_summary(children: &[ChronicleCheckpoint]) -> String {
-    match (children.first(), children.last()) {
-        (Some(first), Some(last)) => format!(
-            "Covers checkpoints #{}–#{}. Summarization failed, so this entry has no narrative; \
-             open the individual checkpoints for their detail.",
-            first.seq, last.seq
-        ),
-        _ => "Covers earlier checkpoints; summarization failed.".to_string(),
-    }
-}
-
 fn unsummarized_notice(message_count: usize) -> String {
     format!(
         "This span of {message_count} messages was not summarized — summarization failed. \
@@ -1188,9 +1188,16 @@ pub async fn render_chronicle_view(
     // checkpoint a rollup has absorbed is represented by that rollup instead,
     // so a long session shows a few high-level entries rather than dropping its
     // oldest ones off the end of the view.
-    let before_seq = recent.first().map(|first| first.seq).unwrap_or(i64::MAX);
+    //
+    // The cutoff is the coverage start, not the checkpoint sequence, so a
+    // rollup whose commit seq is higher than a recent checkpoint's seq is
+    // still included in the older view when its coverage predates it.
+    let cutoff_seq = recent
+        .first()
+        .map(|first| first.covers_from_seq)
+        .unwrap_or(i64::MAX);
     let older = store
-        .uncovered_before_seq(channel_id, before_seq, config.max_older as i64)
+        .uncovered_before_seq(channel_id, cutoff_seq, config.max_older as i64)
         .await?;
 
     Ok(Some(compose_view(

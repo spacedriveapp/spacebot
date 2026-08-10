@@ -285,7 +285,11 @@ impl ChronicleStore {
                 sqlx::query("COMMIT").execute(&mut *connection).await?;
             }
             _ => {
-                sqlx::query("ROLLBACK").execute(&mut *connection).await.ok();
+                if let Err(error) =
+                    sqlx::query("ROLLBACK").execute(&mut *connection).await
+                {
+                    tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
+                }
             }
         }
 
@@ -480,28 +484,33 @@ impl ChronicleStore {
         Ok(checkpoints_from_rows(rows))
     }
 
-    /// The most compact set of entries covering everything before `before_seq`:
+    /// The most compact set of entries covering everything before `cutoff_seq`:
     /// any checkpoint no rollup has absorbed, at whatever level it sits.
     ///
     /// A level-0 checkpoint a rollup covers is skipped, because the rollup
     /// represents it. Ordered oldest first, capped at `limit` — that cap is
     /// what rollups exist to keep meaningful, since without them the oldest
     /// entries simply fall off the end.
+    ///
+    /// `cutoff_seq` is a coverage boundary (`covers_from_seq`), not a
+    /// checkpoint sequence. Entries whose coverage ends at or before this
+    /// boundary are eligible, so a rollup committed after the recent window's
+    /// first checkpoint but covering earlier history is still included.
     pub async fn uncovered_before_seq(
         &self,
         channel_id: &str,
-        before_seq: i64,
+        cutoff_seq: i64,
         limit: i64,
     ) -> Result<Vec<ChronicleCheckpoint>> {
         let rows = sqlx::query(
             "SELECT * FROM ( \
                 SELECT * FROM channel_chronicle_checkpoints \
-                WHERE channel_id = ? AND seq < ? AND rolled_up_into IS NULL \
-                ORDER BY seq DESC LIMIT ? \
+                WHERE channel_id = ? AND covers_to_seq <= ? AND rolled_up_into IS NULL \
+                ORDER BY covers_from_seq DESC LIMIT ? \
              ) ORDER BY covers_from_seq ASC, seq ASC",
         )
         .bind(channel_id)
-        .bind(before_seq)
+        .bind(cutoff_seq)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -629,7 +638,11 @@ impl ChronicleStore {
                     .map_err(|error| anyhow::anyhow!(error))?;
             }
             _ => {
-                sqlx::query("ROLLBACK").execute(&mut *connection).await.ok();
+                if let Err(error) =
+                    sqlx::query("ROLLBACK").execute(&mut *connection).await
+                {
+                    tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
+                }
             }
         }
 
@@ -1346,11 +1359,11 @@ mod tests {
     }
 
     async fn commit_chain(store: &ChronicleStore, count: i64) -> Vec<ChronicleCheckpoint> {
-        let mut out = Vec::new();
+        let mut checkpoints = Vec::new();
         let mut from = 0i64;
         for index in 0..count {
             let to = from + 10;
-            let CommitOutcome::Committed(cp) = store
+            let CommitOutcome::Committed(checkpoint) = store
                 .commit(new_checkpoint("ch", from, to, 10))
                 .await
                 .expect("commit")
@@ -1358,9 +1371,9 @@ mod tests {
                 panic!("commit {index} should succeed")
             };
             from = to;
-            out.push(*cp);
+            checkpoints.push(*checkpoint);
         }
-        out
+        checkpoints
     }
 
     fn rollup_over(children: &[ChronicleCheckpoint]) -> NewCheckpoint {

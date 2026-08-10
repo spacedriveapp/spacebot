@@ -194,19 +194,28 @@ impl ChronicleTool {
             ));
         }
 
+        // A rolled-up checkpoint is already represented by its rollup, so it is
+        // hidden from the index. The rollup is the entry, and the children are
+        // reachable through `open`.
+        let visible: Vec<&ChronicleCheckpoint> = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.rolled_up_into.is_none())
+            .collect();
+
         let mut summary = format!(
             "## Session Chronicle — {} checkpoints, {} messages logged\n\n\
-             Showing the {} most recent. {} messages since the last checkpoint are still in raw \
-             context.\n\n",
+             Showing {} entries ({} most recent checkpoints requested). {} messages since the \
+             last checkpoint are still in raw context.\n\n",
             stats.checkpoint_count,
             stats.total_messages,
-            checkpoints.len(),
+            visible.len(),
+            limit,
             stats.unsummarized_messages
         );
 
-        for checkpoint in &checkpoints {
+        for checkpoint in &visible {
             summary.push_str(&format!(
-                "- **#{}** {}{} — {} → {} · {} messages · {}{}\n",
+                "- **#{}** {}{} — {} → {} · {} messages · {}\n",
                 checkpoint.seq,
                 if checkpoint.level > 0 {
                     "[rollup] "
@@ -218,10 +227,6 @@ impl ChronicleTool {
                 checkpoint.covers_to_at.format("%Y-%m-%d %H:%M"),
                 checkpoint.message_count,
                 checkpoint.kind.as_str(),
-                match &checkpoint.rolled_up_into {
-                    Some(_) => " · rolled up",
-                    None => "",
-                }
             ));
         }
 
