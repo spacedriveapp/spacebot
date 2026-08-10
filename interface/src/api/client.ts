@@ -1076,9 +1076,42 @@ export interface TaskItem {
 	created_by: string;
 	approved_at?: string;
 	approved_by?: string;
+	last_enriched_at?: string;
 	created_at: string;
 	updated_at: string;
 	completed_at?: string;
+}
+
+export type TaskCommentAuthor = "agent" | "user" | "worker";
+
+export interface TaskComment {
+	seq: number;
+	id: string;
+	task_id: string;
+	author_type: TaskCommentAuthor;
+	author_id?: string;
+	body: string;
+	worker_id?: string;
+	metadata: Record<string, unknown>;
+	created_at: string;
+}
+
+export interface TaskCommentListResponse {
+	comments: TaskComment[];
+	total: number;
+	next_cursor?: number;
+}
+
+export interface TaskCommentResponse {
+	comment: TaskComment;
+}
+
+export interface CreateTaskCommentRequest {
+	author_type?: TaskCommentAuthor;
+	author_id?: string;
+	body: string;
+	worker_id?: string;
+	metadata?: Record<string, unknown>;
 }
 
 export interface TaskListResponse {
@@ -1103,6 +1136,7 @@ export interface CreateTaskRequest {
 	priority?: TaskPriority;
 	subtasks?: TaskSubtask[];
 	metadata?: Record<string, unknown>;
+	goal_id?: string;
 	source_memory_id?: string;
 	created_by?: string;
 }
@@ -2574,6 +2608,27 @@ export const api = {
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
+	},
+	listTaskComments: (taskNumber: number, params?: { after?: number; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.after !== undefined) search.set("after", String(params.after));
+		if (params?.limit) search.set("limit", String(params.limit));
+		const query = search.toString();
+		return fetchJson<TaskCommentListResponse>(
+			query ? `/tasks/${taskNumber}/comments?${query}` : `/tasks/${taskNumber}/comments`,
+		);
+	},
+	createTaskComment: async (
+		taskNumber: number,
+		request: CreateTaskCommentRequest,
+	): Promise<TaskCommentResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/comments`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskCommentResponse>;
 	},
 	assignTask: async (taskNumber: number, assignedAgentId: string): Promise<TaskResponse> => {
 		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/assign`, {

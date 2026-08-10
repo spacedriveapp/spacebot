@@ -20,6 +20,7 @@ import {
 	GithubMetadataBadges,
 	getGithubReferences,
 } from "@/components/TaskUtils";
+import {TaskComments} from "@/components/TaskComments";
 
 const TASK_LIMIT = 200;
 
@@ -225,6 +226,10 @@ export function AgentTasks({agentId}: {agentId: string}) {
 					{/* GitHub metadata (not part of the shared TaskDetail) */}
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
+					/>
+					<TaskComments
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						agentId={agentId}
 					/>
 				</div>
 			)}

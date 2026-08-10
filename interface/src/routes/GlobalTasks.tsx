@@ -26,6 +26,7 @@ import {
 	GithubMetadataBadges,
 	getGithubReferences,
 } from "@/components/TaskUtils";
+import {TaskComments} from "@/components/TaskComments";
 
 const TASK_LIMIT = 200;
 
@@ -313,6 +314,14 @@ export function GlobalTasks() {
 					/>
 					<GithubSection
 						metadata={(activeTask as unknown as TaskItem).metadata}
+					/>
+					<TaskComments
+						taskNumber={(activeTask as unknown as TaskItem).task_number}
+						agentId={
+							(activeTask as unknown as TaskItem).assigned_agent_id ??
+							(activeTask as unknown as TaskItem).owner_agent_id
+						}
+						resolveAgentName={resolveAgentName}
 					/>
 				</div>
 			)}

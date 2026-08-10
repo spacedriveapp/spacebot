@@ -328,6 +328,7 @@ mod tests {
                 priority: TaskPriority::Medium,
                 subtasks: Vec::new(),
                 metadata: serde_json::json!({}),
+                goal_id: None,
                 source_memory_id: None,
                 created_by: "branch".to_string(),
             })
@@ -378,6 +379,7 @@ mod tests {
                 priority: TaskPriority::Medium,
                 subtasks: Vec::new(),
                 metadata: serde_json::json!({}),
+                goal_id: None,
                 source_memory_id: None,
                 created_by: "branch".to_string(),
             })
@@ -426,6 +428,7 @@ mod tests {
                 priority: TaskPriority::Medium,
                 subtasks: Vec::new(),
                 metadata: serde_json::json!({}),
+                goal_id: None,
                 source_memory_id: None,
                 created_by: "branch".to_string(),
             })
@@ -441,6 +444,7 @@ mod tests {
                 priority: TaskPriority::Medium,
                 subtasks: Vec::new(),
                 metadata: serde_json::json!({}),
+                goal_id: None,
                 source_memory_id: None,
                 created_by: "branch".to_string(),
             })

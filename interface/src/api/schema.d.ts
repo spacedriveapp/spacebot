@@ -2487,6 +2487,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tasks/{number}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /tasks/{number}/comments` — list a task's comments, oldest first. */
+        get: operations["list_task_comments"];
+        put?: never;
+        /** `POST /tasks/{number}/comments` — append a comment to a task. */
+        post: operations["create_task_comment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/tasks/{number}/execute": {
         parameters: {
             query?: never;
@@ -3469,11 +3487,22 @@ export interface components {
             path: string;
             remote_url?: string | null;
         };
+        CreateTaskCommentRequest: {
+            author_id?: string | null;
+            /** @description Defaults to `user` — the interface is the human's comment surface. */
+            author_type?: string | null;
+            body: string;
+            metadata?: unknown;
+            /** @description Worker run this comment summarises, when applicable. */
+            worker_id?: string | null;
+        };
         CreateTaskRequest: {
             /** @description Agent assigned to execute. Defaults to `owner_agent_id`. */
             assigned_agent_id?: string | null;
             created_by?: string | null;
             description?: string | null;
+            /** @description Goal this task contributes to. */
+            goal_id?: string | null;
             metadata?: unknown;
             /** @description Agent that owns (created) this task. */
             owner_agent_id: string;
@@ -4569,6 +4598,8 @@ export interface components {
             /** @description Goal this task contributes to, when linked. */
             goal_id?: string | null;
             id: string;
+            /** @description Last time an autonomy run enriched this task. Drives selection order. */
+            last_enriched_at?: string | null;
             metadata: unknown;
             owner_agent_id: string;
             priority: components["schemas"]["TaskPriority"];
@@ -4584,6 +4615,43 @@ export interface components {
         TaskActionResponse: {
             message: string;
             success: boolean;
+        };
+        TaskComment: {
+            author_id?: string | null;
+            author_type: components["schemas"]["TaskCommentAuthor"];
+            body: string;
+            created_at: string;
+            id: string;
+            metadata: unknown;
+            /**
+             * Format: int64
+             * @description Monotonic sequence number. Stable pagination cursor.
+             */
+            seq: number;
+            task_id: string;
+            /** @description Worker run this comment summarises, when it summarises one. */
+            worker_id?: string | null;
+        };
+        /**
+         * @description Who wrote a comment.
+         * @enum {string}
+         */
+        TaskCommentAuthor: "agent" | "user" | "worker";
+        TaskCommentListResponse: {
+            comments: components["schemas"]["TaskComment"][];
+            /**
+             * Format: int64
+             * @description Cursor for the next page, absent when the page is the last one.
+             */
+            next_cursor?: number | null;
+            /**
+             * Format: int64
+             * @description Total comments on the task, independent of this page.
+             */
+            total: number;
+        };
+        TaskCommentResponse: {
+            comment: components["schemas"]["TaskComment"];
         };
         TaskListResponse: {
             tasks: components["schemas"]["Task"][];
@@ -11228,6 +11296,93 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskResponse"];
                 };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_comments: {
+        parameters: {
+            query?: {
+                /** @description Resume after this comment `seq`. Comments are returned oldest-first. */
+                after?: number | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskCommentListResponse"];
+                };
+            };
+            /** @description Task not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Task store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_task_comment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task number */
+                number: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTaskCommentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskCommentResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Task not found */
             404: {

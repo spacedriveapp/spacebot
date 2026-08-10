@@ -682,6 +682,7 @@ impl PromptEngine {
         wake_events: Vec<AutonomyWakeEventView>,
         run_history: Vec<AutonomyRunHistoryView>,
         task_state: &str,
+        enrichment_queue: Option<&str>,
         active_goals: Option<&str>,
         active_workers: Option<&str>,
         max_tasks_per_run: u32,
@@ -696,6 +697,7 @@ impl PromptEngine {
                 wake_events => wake_events,
                 run_history => run_history,
                 task_state => task_state,
+                enrichment_queue => enrichment_queue,
                 active_goals => active_goals,
                 active_workers => active_workers,
                 max_tasks_per_run => max_tasks_per_run,
@@ -1126,6 +1128,7 @@ mod tests {
                 wake_events.clone(),
                 run_history.clone(),
                 "### Pending approval\n- #4 [high] Investigate flaky test\n",
+                Some("1. #4 [high] Investigate flaky test — user_engaged\n"),
                 Some("### [HIGH] Ship v2"),
                 None,
                 2,
@@ -1143,6 +1146,8 @@ mod tests {
         assert!(observe.contains("up to 2 tasks this run"));
         assert!(observe.contains("about 8 minutes"));
         assert!(observe.contains("`pending_approval` are NEVER executed"));
+        assert!(observe.contains("## Enrichment Queue"));
+        assert!(observe.contains("user_engaged"));
 
         let act = engine
             .render_autonomy_channel_prompt(
@@ -1153,12 +1158,14 @@ mod tests {
                 "No active tasks.\n",
                 None,
                 None,
+                None,
                 1,
                 1,
                 false,
             )
             .expect("act prompt should render");
         assert!(act.contains("Scheduled interval — no wake events pending."));
+        assert!(!act.contains("## Enrichment Queue"));
         assert!(act.contains("Execute ready tasks"));
         assert!(act.contains("up to 1 task this run"));
         assert!(!act.contains("claim unowned tasks"));
@@ -1171,6 +1178,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 "No active tasks.\n",
+                None,
                 None,
                 None,
                 1,

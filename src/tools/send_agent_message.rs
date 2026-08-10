@@ -245,6 +245,7 @@ impl Tool for SendAgentMessageTool {
                 priority: crate::tasks::TaskPriority::Medium,
                 subtasks: Vec::new(),
                 metadata,
+                goal_id: None,
                 source_memory_id: None,
                 created_by: format!("agent:{}", sending_agent_id),
             })

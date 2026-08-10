@@ -39,20 +39,71 @@ pub const AUTONOMY_CONTRACT_MAX_RETRIES: usize =
 /// Fallback summary recorded when a run ends without calling `autonomy_complete`.
 pub const AUTONOMY_FALLBACK_SUMMARY: &str = "run ended without summary";
 
+/// The run's allowance of distinct tasks, enforced at the tool boundary.
+///
+/// `max_tasks_per_run` used to live only in the system prompt, where it was a
+/// request rather than a limit. Spending the allowance per task — not per
+/// comment — lets a run keep working something it already started while still
+/// refusing to open a new one.
+#[derive(Debug, Clone)]
+pub struct EnrichmentBudget {
+    max_tasks: u32,
+    touched: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
+}
+
+impl EnrichmentBudget {
+    pub fn new(max_tasks: u32) -> Self {
+        Self {
+            max_tasks: max_tasks.max(1),
+            touched: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    pub fn max_tasks(&self) -> u32 {
+        self.max_tasks
+    }
+
+    /// Reserve this run's allowance for `task_number`. Returns false only when
+    /// the allowance is spent and this is a task the run has not touched.
+    pub fn try_touch(&self, task_number: i64) -> bool {
+        let mut touched = self
+            .touched
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if touched.contains(&task_number) {
+            return true;
+        }
+        if touched.len() >= self.max_tasks as usize {
+            return false;
+        }
+        touched.insert(task_number);
+        true
+    }
+
+    pub fn touched_count(&self) -> usize {
+        self.touched
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
 /// Shared state between the run driver, the channel, and the
 /// `autonomy_complete` tool for a single autonomy run.
 #[derive(Debug, Clone)]
 pub struct AutonomyRunHandle {
     pub run_id: String,
     pub store: Arc<AutonomyRunStore>,
+    pub budget: EnrichmentBudget,
     completed: Arc<AtomicBool>,
 }
 
 impl AutonomyRunHandle {
-    pub fn new(run_id: String, store: Arc<AutonomyRunStore>) -> Self {
+    pub fn new(run_id: String, store: Arc<AutonomyRunStore>, max_tasks_per_run: u32) -> Self {
         Self {
             run_id,
             store,
+            budget: EnrichmentBudget::new(max_tasks_per_run),
             completed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -274,7 +325,11 @@ pub async fn run_autonomy_channel(
         ..ResolvedConversationSettings::default()
     };
 
-    let handle = AutonomyRunHandle::new(run_id.clone(), deps.autonomy_run_store.clone());
+    let handle = AutonomyRunHandle::new(
+        run_id.clone(),
+        deps.autonomy_run_store.clone(),
+        config.max_tasks_per_run,
+    );
 
     let screenshot_dir = deps
         .runtime_config
@@ -412,6 +467,42 @@ pub async fn run_autonomy_channel(
         }
     }
 
+    // Goals whose linked work all landed during this run get flagged for the
+    // user. The marker is deterministic rather than prompt-driven, and it
+    // never changes goal status — closing a goal stays the user's call.
+    match crate::goals::mark_goals_ready_for_review(&deps.goal_store).await {
+        Ok(marked) => {
+            for goal in marked {
+                tracing::info!(goal_id = %goal.id, title = %goal.title, "goal flagged ready for review");
+                deps.working_memory
+                    .emit(
+                        crate::memory::WorkingMemoryEventType::Outcome,
+                        format!(
+                            "Goal ready for review: {} — all linked tasks complete",
+                            goal.title
+                        ),
+                    )
+                    .importance(0.6)
+                    .record();
+                crate::wakes::emit_system_event(
+                    deps,
+                    crate::wakes::SystemEvent::GoalUpdated,
+                    &format!("goal:{}", goal.id),
+                    &serde_json::json!({
+                        "goal_id": goal.id,
+                        "title": goal.title,
+                        "status": goal.status.to_string(),
+                        "ready_for_review": true,
+                    }),
+                )
+                .await;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to flag goals ready for review");
+        }
+    }
+
     // Wake the ready-task pickup so side-effect tasks created during the run
     // (delegations, follow-ups) are noticed promptly. Fired after the channel
     // exits so the one-shot wake actually finds the rows.
@@ -497,12 +588,21 @@ async fn build_run_briefing(
         })
         .collect();
 
-    let run_history_views: Vec<AutonomyRunHistoryView> = deps
+    // This run's own row already exists, so "the previous run" is the newest
+    // one that is no longer running.
+    let previous_runs: Vec<crate::wakes::AutonomyRun> = deps
         .autonomy_run_store
         .recent(config.run_history_count.max(1))
         .await?
         .into_iter()
         .filter(|run| run.status != AutonomyRunStatus::Running)
+        .collect();
+    let last_run_started_at = previous_runs
+        .first()
+        .and_then(|run| crate::wakes::parse_run_timestamp(&run.started_at));
+
+    let run_history_views: Vec<AutonomyRunHistoryView> = previous_runs
+        .into_iter()
         .map(|run| AutonomyRunHistoryView {
             started_at: run.started_at,
             status: run.status.as_str().to_string(),
@@ -514,6 +614,7 @@ async fn build_run_briefing(
         .collect();
 
     let task_state = render_task_state(deps, config.claim_unowned).await?;
+    let enrichment_queue = render_enrichment_queue(deps, config, last_run_started_at).await?;
     let active_goals = crate::goals::render_active_goals_extended(&deps.goal_store).await?;
     let active_workers = render_active_workers(deps).await?;
 
@@ -525,6 +626,7 @@ async fn build_run_briefing(
             wake_event_views,
             run_history_views,
             &task_state,
+            enrichment_queue.as_deref(),
             (!active_goals.is_empty()).then_some(active_goals.as_str()),
             active_workers.as_deref(),
             config.max_tasks_per_run,
@@ -532,6 +634,92 @@ async fn build_run_briefing(
             config.claim_unowned,
         )
         .map_err(|error| anyhow::anyhow!("failed to render autonomy channel prompt: {error}"))
+}
+
+/// Statuses the enrichment loop reasons about. `ready` and `in_progress` are
+/// execution states, handled by the ready-task pickup rather than enrichment.
+const ENRICHABLE_STATUSES: [TaskStatus; 2] = [TaskStatus::PendingApproval, TaskStatus::Backlog];
+
+/// Comments rendered per task in the enrichment queue.
+const QUEUE_COMMENT_LIMIT: i64 = 6;
+
+/// Byte cap on a single rendered comment body.
+const QUEUE_COMMENT_BYTES: usize = 400;
+
+/// Staleness horizon: tasks untouched for this many intervals are back in play.
+const STALE_INTERVAL_MULTIPLIER: i64 = 3;
+
+/// Render the ordered enrichment selection for this run.
+///
+/// This is the deterministic half of task selection — the channel still
+/// reasons about which of these are worth its time, but the ordering, the
+/// staleness horizon, and the previous-run exclusion are settled in SQL
+/// before the model ever sees them.
+async fn render_enrichment_queue(
+    deps: &AgentDeps,
+    config: &AutonomyConfig,
+    last_run_started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Option<String>> {
+    let now = chrono::Utc::now();
+    let stale_after = chrono::Duration::seconds(
+        (config.interval_secs as i64).saturating_mul(STALE_INTERVAL_MULTIPLIER),
+    );
+    let candidates = deps
+        .task_store
+        .select_for_enrichment(crate::tasks::EnrichmentSelection {
+            agent_id: &deps.agent_id,
+            claim_unowned: config.claim_unowned,
+            statuses: &ENRICHABLE_STATUSES,
+            last_run_started_at: last_run_started_at.map(crate::tasks::sqlite_timestamp),
+            stale_before: crate::tasks::sqlite_timestamp(now - stale_after),
+            // One extra so the channel can see there was more to choose from
+            // than it is allowed to take.
+            limit: i64::from(config.max_tasks_per_run) + 1,
+        })
+        .await?;
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut output = String::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let task = &candidate.task;
+        output.push_str(&format!(
+            "{}. #{} [{}] {} — {}\n",
+            index + 1,
+            task.task_number,
+            task.priority.as_str(),
+            task.title,
+            candidate.reason
+        ));
+
+        let comments = deps
+            .task_store
+            .recent_comments(task.task_number, QUEUE_COMMENT_LIMIT)
+            .await?;
+        for comment in comments {
+            let author = match comment.author_id.as_deref() {
+                Some(author_id) => format!("{} {}", comment.author_type, author_id),
+                None => comment.author_type.to_string(),
+            };
+            output.push_str(&format!(
+                "   - [{} {}] {}\n",
+                author,
+                comment.created_at,
+                crate::tools::truncate_utf8_ellipsis(
+                    &comment
+                        .body
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    QUEUE_COMMENT_BYTES,
+                )
+            ));
+        }
+    }
+
+    Ok(Some(output))
 }
 
 /// One-line JSON payload preview, truncated for prompt hygiene.
@@ -553,6 +741,8 @@ async fn render_task_state(deps: &AgentDeps, claim_unowned: bool) -> anyhow::Res
         (TaskStatus::InProgress, "In progress"),
         (TaskStatus::Backlog, "Backlog"),
     ];
+
+    let comment_counts = deps.task_store.comment_counts().await?;
 
     let mut output = String::new();
     let mut any = false;
@@ -576,7 +766,8 @@ async fn render_task_state(deps: &AgentDeps, claim_unowned: bool) -> anyhow::Res
         any = true;
         output.push_str(&format!("### {label}\n"));
         for task in visible {
-            output.push_str(&render_task_line(&task, &deps.agent_id));
+            let comments = comment_counts.get(&task.id).copied().unwrap_or(0);
+            output.push_str(&render_task_line(&task, &deps.agent_id, comments));
         }
         output.push('\n');
     }
@@ -587,7 +778,7 @@ async fn render_task_state(deps: &AgentDeps, claim_unowned: bool) -> anyhow::Res
     Ok(output)
 }
 
-fn render_task_line(task: &Task, agent_id: &str) -> String {
+fn render_task_line(task: &Task, agent_id: &str, comment_count: i64) -> String {
     let ownership = match task.assigned_agent_id.as_deref() {
         Some(assigned) if assigned == agent_id => String::new(),
         Some(assigned) => format!(" (assigned to {assigned})"),
@@ -600,6 +791,15 @@ fn render_task_line(task: &Task, agent_id: &str) -> String {
         task.title,
         ownership
     );
+    if comment_count > 0 {
+        line.push_str(&format!(
+            " ({comment_count} comment{})",
+            if comment_count == 1 { "" } else { "s" }
+        ));
+    }
+    if let Some(enriched_at) = &task.last_enriched_at {
+        line.push_str(&format!(" (last enriched {enriched_at})"));
+    }
     if let Some(description) = task
         .description
         .as_deref()
@@ -784,6 +984,7 @@ mod tests {
             created_by: "user".to_string(),
             approved_at: None,
             approved_by: None,
+            last_enriched_at: None,
             created_at: String::new(),
             updated_at: String::new(),
             completed_at: None,

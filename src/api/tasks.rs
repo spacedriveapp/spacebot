@@ -48,6 +48,9 @@ pub(super) struct CreateTaskRequest {
     subtasks: Vec<crate::tasks::TaskSubtask>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    /// Goal this task contributes to.
+    #[serde(default)]
+    goal_id: Option<String>,
     #[serde(default)]
     source_memory_id: Option<String>,
     #[serde(default)]
@@ -89,6 +92,44 @@ pub(super) struct AssignRequest {
     assigned_agent_id: String,
 }
 
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub(super) struct TaskCommentListQuery {
+    /// Resume after this comment `seq`. Comments are returned oldest-first.
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default = "default_comment_limit")]
+    limit: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct CreateTaskCommentRequest {
+    /// Defaults to `user` — the interface is the human's comment surface.
+    #[serde(default)]
+    author_type: Option<String>,
+    #[serde(default)]
+    author_id: Option<String>,
+    body: String,
+    /// Worker run this comment summarises, when applicable.
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskCommentListResponse {
+    pub comments: Vec<crate::tasks::TaskComment>,
+    /// Total comments on the task, independent of this page.
+    pub total: i64,
+    /// Cursor for the next page, absent when the page is the last one.
+    pub next_cursor: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TaskCommentResponse {
+    pub comment: crate::tasks::TaskComment,
+}
+
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskListResponse {
     pub tasks: Vec<crate::tasks::Task>,
@@ -111,6 +152,10 @@ pub struct TaskActionResponse {
 
 fn default_task_limit() -> i64 {
     100
+}
+
+fn default_comment_limit() -> i64 {
+    50
 }
 
 /// Extract the global task store, returning 503 if not yet initialized.
@@ -208,6 +253,38 @@ async fn finish_task_mutation(
         crate::wakes::SystemEvent::TaskApproved,
         &format!("task:{}", task.task_number),
         &payload,
+    )
+    .await;
+}
+
+/// Post-comment fan-out: SSE for the dashboard, plus a `task.commented` wake
+/// routed to the task's agent so a user weighing in pulls the next autonomy
+/// run forward instead of waiting out the interval.
+///
+/// Shared with the `add_task_comment` tool so agent and user comments travel
+/// the same path.
+pub async fn fan_out_task_comment(
+    state: &ApiState,
+    task: &crate::tasks::Task,
+    author_type: crate::tasks::TaskCommentAuthor,
+) {
+    emit_task_event(state, task, "commented");
+
+    let key: crate::AgentId = Arc::from(task.effective_agent_id());
+    let deps = state.wake_registry.read().await.get(&key).cloned();
+    let Some(deps) = deps else {
+        return;
+    };
+
+    crate::wakes::emit_system_event(
+        &deps,
+        crate::wakes::SystemEvent::TaskCommented,
+        &format!("task:{}", task.task_number),
+        &serde_json::json!({
+            "task_number": task.task_number,
+            "title": task.title,
+            "author_type": author_type.as_str(),
+        }),
     )
     .await;
 }
@@ -323,6 +400,7 @@ pub(super) async fn create_task(
             priority,
             subtasks: request.subtasks,
             metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
+            goal_id: request.goal_id,
             source_memory_id: request.source_memory_id,
             created_by: request.created_by.unwrap_or_else(|| "human".to_string()),
         })
@@ -576,6 +654,125 @@ pub(super) async fn execute_task(
     )
     .await;
     Ok(Json(TaskResponse { task: update.task }))
+}
+
+/// `GET /tasks/{number}/comments` — list a task's comments, oldest first.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}/comments",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+        TaskCommentListQuery,
+    ),
+    responses(
+        (status = 200, body = TaskCommentListResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn list_task_comments(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Query(query): Query<TaskCommentListQuery>,
+) -> Result<Json<TaskCommentListResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    // Distinguish "no comments" from "no task" before reading the page.
+    store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to load task for comments");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let limit = query.limit.clamp(1, crate::tasks::MAX_COMMENT_PAGE);
+    let comments = store
+        .list_comments(number, limit, query.after)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to list task comments");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let total = store.count_comments(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to count task comments");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let next_cursor = (comments.len() as i64 == limit)
+        .then(|| comments.last().map(|comment| comment.seq))
+        .flatten();
+
+    Ok(Json(TaskCommentListResponse {
+        comments,
+        total,
+        next_cursor,
+    }))
+}
+
+/// `POST /tasks/{number}/comments` — append a comment to a task.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/comments",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    request_body = CreateTaskCommentRequest,
+    responses(
+        (status = 200, body = TaskCommentResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn create_task_comment(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<CreateTaskCommentRequest>,
+) -> Result<Json<TaskCommentResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let author_type = match request.author_type.as_deref() {
+        None => crate::tasks::TaskCommentAuthor::User,
+        Some(value) => {
+            crate::tasks::TaskCommentAuthor::parse(value).ok_or(StatusCode::BAD_REQUEST)?
+        }
+    };
+    crate::tasks::normalize_comment_body(&request.body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let task = store
+        .get_by_number(number)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to load task for comment");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let comment = store
+        .add_comment(crate::tasks::CreateTaskCommentInput {
+            task_number: number,
+            author_type,
+            author_id: request.author_id,
+            body: request.body,
+            worker_id: request.worker_id,
+            metadata: request.metadata.unwrap_or_else(|| serde_json::json!({})),
+            // A comment arriving through the API is human input. It must not
+            // move the enrichment clock — being commented on is exactly what
+            // pulls a task back to the front of the next run's queue.
+            mark_enriched: false,
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to create task comment");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    fan_out_task_comment(&state, &task, author_type).await;
+    Ok(Json(TaskCommentResponse { comment }))
 }
 
 /// `POST /tasks/{number}/assign` — reassign a task to a different agent.

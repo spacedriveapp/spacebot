@@ -40,7 +40,8 @@ The cortex assembles the autonomy channel's context before each wake. It gets:
 - **Memory bulletin** — the cortex's current knowledge synthesis.
 - **Working memory** — recent system events. What's been happening across all channels.
 - **Wake events** — what pulled this run forward, if anything: the wake's name, instructions, and payload for each pending event since the last run. Surfaced first, because they are usually why the run exists.
-- **Task state** — all active tasks: ready, in-progress, backlog, pending_approval. Full detail on each, including all comments.
+- **Task state** — all active tasks: ready, in-progress, backlog, pending_approval, each with its comment count and last enrichment time.
+- **Enrichment queue** — the ordered selection for this run, with the recent comments on each entry inlined. Full comment threads are rendered here rather than across the whole board, so context stays bounded as the board grows.
 - **Goals** — all active goals with descriptions and notes. Background context and direction, not a work queue. See [`goals.md`](goals.md).
 - **Active workers** — what's currently running so it doesn't duplicate work.
 - **Last few run summaries** — the `autonomy_complete` output from its previous runs, with timestamps. This is the primary continuity mechanism.
@@ -56,16 +57,23 @@ All tasks require human approval before execution. `pending_approval` tasks are 
 The autonomy channel reasons about which tasks to prioritise given goal context and current system state — it is not a FIFO queue.
 
 During a run it can:
-- **Enrich pending tasks** — spawn investigation workers, reason about their findings, and add comments to tasks with synthesised results. A task that arrived as a title becomes a fully researched brief before the user ever approves it.
+- **Enrich pending tasks** — spawn investigation workers, reason about their findings, and record synthesised results with `add_task_comment`. A task that arrived as a title becomes a fully researched brief before the user ever approves it.
 - **Execute ready tasks** — tasks the user has approved. Uses execution tools directly (shell, file, browser) with no forced delegation. Workers available for genuine parallelism.
 - **Create new tasks** — identifies follow-on work and adds it to `pending_approval`. The agent proposes; the user decides.
 - **Update task metadata** — priority, blockers, progress notes.
+- **Link work to goals** — set `goal_id` when creating a task toward a goal, and record where a goal now stands in its `notes`.
 
 What it **cannot** do:
 - Reply to users (no `reply` tool)
 - Execute tasks that are still in `pending_approval`
 - Create cron jobs
 - Spawn other autonomy channels
+- Change a goal's status. `goal_update` is registered without the `status`
+  field for autonomy runs, so completing or abandoning a goal is unreachable
+  rather than merely discouraged.
+
+At `observe` the task surface is not registered at all: the run reads and
+summarises, and has no tool with which to create, update, comment, or claim.
 
 ---
 
@@ -79,32 +87,54 @@ Both the agent and the user can comment on a task. This makes tasks a shared wor
 
 ```sql
 CREATE TABLE task_comments (
-    id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          TEXT NOT NULL UNIQUE,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     author_type TEXT NOT NULL,   -- 'agent' | 'user' | 'worker'
-    author_id   TEXT,            -- user_id for users, worker_id for workers, null for agent
+    author_id   TEXT,            -- agent id, user id, or worker id
     body        TEXT NOT NULL,   -- synthesised comment text (2-5 lines)
     worker_id   TEXT,            -- if this comment summarises a worker run, links to that worker
-    metadata    TEXT DEFAULT '{}',
+    metadata    TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-CREATE INDEX task_comments_task ON task_comments(task_id, created_at);
+CREATE INDEX task_comments_task ON task_comments(task_id, seq);
+CREATE INDEX task_comments_author ON task_comments(task_id, author_type, created_at);
 ```
+
+`seq` is the ordering key, not `created_at`: two comments inside the same
+millisecond would otherwise have no defined order, and pagination cursors would
+skip or repeat rows. `seq` is also the cursor the list API returns.
+
+Deletion is explicit as well as declared. `ON DELETE CASCADE` only fires when
+the connection has `PRAGMA foreign_keys` on, so `TaskStore::delete` removes a
+task's comments in the same transaction as the task.
+
+Comment bodies are capped at 4000 bytes. A finding longer than that is a
+transcript, and transcripts belong behind the `worker_id` link.
 
 `worker_id` links a comment to a specific worker run. The UI renders it as a pill on the comment — click to expand the full worker output. The comment body is always the agent's synthesised 2-5 line summary; the worker output is available on demand, never inlined.
 
 ### `add_task_comment` tool
 
-Available to the autonomy channel and to workers (via the task tools toolset).
+Comments are append-only. There is no edit and no delete: the store exposes
+neither, and the UI offers no affordance for either.
 
 ```rust
-struct AddTaskCommentInput {
-    task_id: String,
+struct AddTaskCommentArgs {
+    task_number: i64,           // #N, matching every other task tool
     body: String,               // synthesised finding — 2-5 lines
     worker_id: Option<String>,  // tag the worker whose output this summarises
 }
 ```
+
+Registered for the autonomy channel (at `suggest` and above), for branches, for
+the cortex chat, and for task workers. A worker's registration drops the
+`worker_id` field and stamps its own id, so a worker cannot misattribute a
+finding to another run.
+
+Commenting is also where autonomous ownership is settled — see
+[Task Ownership](#task-ownership).
 
 ### Enrichment Pattern
 
@@ -122,7 +152,19 @@ The autonomy channel system prompt instructs: investigate and comment freely; ne
 
 ### Worker Briefing
 
-When a `ready` task is eventually executed, `WorkerContextMode::Briefed` pulls the task's comments as part of the briefing synthesis alongside memory recall and working memory events. The executing worker walks in knowing what was investigated, what solution was proposed, and what the user said — without re-doing any of the research.
+When a `ready` task is executed, its comments are appended to the worker's task
+prompt as a "Prior findings" block: oldest first, capped at 12 comments, 600
+bytes each, 4000 bytes total. The executing worker walks in knowing what was
+investigated, what solution was proposed, and what the user said — without
+re-doing any of the research.
+
+`WorkerContextMode::Briefed` does not exist in source. `WorkerContextMode` is a
+struct of `history` / `memory` / `wiki_write` modes, and the enum in
+[`worker-briefing.md`](worker-briefing.md) was never built. Comments are
+injected at the ready-task pickup path instead, which is where a worker is
+actually bound to a task — the only place the briefing has a task's comments to
+carry. Worker transcripts are never inlined; they stay behind the `worker_id`
+link on each comment.
 
 ---
 
@@ -140,7 +182,7 @@ ALTER TABLE tasks ADD COLUMN last_enriched_at TEXT;
 
 Tasks have an `assigned_agent_id` field. Once an agent claims a task, no other agent can work on it. Ownership is enforced at the query level and set atomically when a task is first enriched or executed.
 
-The global tasks table currently declares `assigned_agent_id TEXT NOT NULL` with assignment at creation time, so the unowned-task model requires making the column nullable. That migration touches the global database and every task consumer; it ships as its own change ahead of this system, not inside it.
+`assigned_agent_id` is nullable as of `20260809000001_tasks_nullable_assignment`, so tasks can exist unowned until an agent claims them.
 
 ```sql
 -- Atomic claim: only succeeds if still unassigned or already assigned to this agent
@@ -148,7 +190,14 @@ UPDATE tasks SET assigned_agent_id = ?1
 WHERE id = ?2 AND (assigned_agent_id IS NULL OR assigned_agent_id = ?1)
 ```
 
-If the UPDATE affects 0 rows, another agent claimed it first — skip and move on.
+If the UPDATE affects 0 rows, another agent claimed it first — the tool returns
+a skip ("task #N was claimed by <agent> first"), and the run moves on.
+
+The claim happens when the agent *acts* on a task, not when it lists one:
+`add_task_comment` claims before it writes, and `claim_next_ready` takes
+assignment and `in_progress` in one guarded UPDATE. Surveying the board claims
+nothing, and `observe` runs get no mutation tools at all, so they cannot claim
+by any path.
 
 `claim_unowned` is an agent-level config flag (default: `true`). Set to `false` for agents that should only work on tasks explicitly assigned to them — useful in multi-agent setups where task routing is intentional. Once claimed, ownership is permanent. Reassignment is user-initiated only.
 
@@ -163,7 +212,17 @@ On wake, tasks are ordered by:
 
 Rule 4 prevents just-worked-on tasks from floating to the top next wake. Rule 1 clears that exclusion when the user responds — natural gate, no separate flag needed.
 
-The channel selects up to `max_tasks_per_run` from this ordered list, reasoning about which are most valuable given goal context. Not a mechanical top-N pick. All queries filter to `assigned_agent_id = this_agent OR assigned_agent_id IS NULL` (when `claim_unowned = true`).
+This ordering is settled in SQL (`TaskStore::select_for_enrichment`) and
+rendered into the run briefing as an **Enrichment Queue**, so the channel opens
+with a list that already excludes last run's work. Visibility filters to
+`assigned_agent_id = this_agent OR assigned_agent_id IS NULL` (the latter only
+when `claim_unowned = true`).
+
+`max_tasks_per_run` is enforced, not requested: `add_task_comment` holds the
+run's allowance and refuses a task beyond it. The allowance is spent per task,
+so a run can keep commenting on work it already started. Within the allowance
+the channel still reasons about which tasks are most valuable given goal
+context — it is not a mechanical top-N pick.
 
 ### Run History as Context
 
@@ -269,18 +328,31 @@ Enforced at startup and on config reload — autonomy does not start if any rule
 - Task retry/failure handling (3 strikes → `failed`, working memory error event)
 - All config fields + validation
 
-**Phase 2 — Task Comments**
+**Phase 2 — Task Comments — shipped**
 - `task_comments` table migration
-- `add_task_comment` tool (autonomy channel + workers)
-- Task comments included in task state context on wake
-- Task comments pulled into `WorkerContextMode::Briefed` pipeline
+- `add_task_comment` tool (autonomy channel, branches, cortex chat, task workers)
+- Task comments in the wake briefing: counts on every surveyed task, full
+  recent comments on every enrichment-queue entry
+- Task comments injected into the executing worker's briefing at ready-task
+  pickup, bounded per comment and in total
+- `last_enriched_at` column, transactional with the comment that sets it
+- Atomic claim on first comment and on ready-task pickup
 - API endpoints: list and create comments per task
 - UI: chronological comments on task detail, worker pill with expandable full output
 
 **Phase 3 — Polish**
 - Autonomy UI surface: run history, last wake time, active enrichment progress
-- "Quiet while active" flag: suppress autonomy wakes when user channels have been recently active
 - Autonomy outcomes surfaced to relevant user channels via working memory synthesis
+
+**Rejected — "quiet while active"**
+
+Suppressing autonomy wakes while user channels have been recently active is
+rejected, not deferred. Enrichment is exactly the work that is most useful
+while the user is around to react to it, and the wake already carries the
+signals that matter: a user comment on a task pulls the next run forward
+rather than pushing it away. A global "someone is talking, stand down" flag
+would suppress the run for reasons unrelated to the task it was going to work
+on. Do not reintroduce it.
 
 ---
 

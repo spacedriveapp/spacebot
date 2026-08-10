@@ -778,6 +778,85 @@ mod tests {
         assert!(!rendered.contains("More detail below"));
     }
 
+    /// Insert a task linked to `goal_id` with the given status.
+    async fn linked_task(store: &GoalStore, goal_id: &str, number: i64, status: &str) {
+        sqlx::query(
+            "INSERT INTO tasks (id, task_number, title, status, owner_agent_id, created_by, goal_id) \
+             VALUES (?, ?, ?, ?, 'agent-test', 'autonomy', ?)",
+        )
+        .bind(format!("task-{number}"))
+        .bind(number)
+        .bind(format!("linked task {number}"))
+        .bind(status)
+        .bind(goal_id)
+        .execute(&store.pool)
+        .await
+        .expect("linked task should insert");
+    }
+
+    #[tokio::test]
+    async fn goals_are_flagged_for_review_only_when_every_linked_task_is_done() {
+        let store = setup_test_store().await;
+        let complete = store.create(basic_input("all done")).await.expect("create");
+        let partial = store
+            .create(basic_input("still going"))
+            .await
+            .expect("create");
+        let untouched = store.create(basic_input("no tasks")).await.expect("create");
+        let failing = store
+            .create(basic_input("has a failure"))
+            .await
+            .expect("create");
+
+        linked_task(&store, &complete.id, 1, "done").await;
+        linked_task(&store, &complete.id, 2, "done").await;
+        linked_task(&store, &partial.id, 3, "done").await;
+        linked_task(&store, &partial.id, 4, "in_progress").await;
+        linked_task(&store, &failing.id, 5, "done").await;
+        linked_task(&store, &failing.id, 6, "failed").await;
+
+        store
+            .update(
+                &complete.id,
+                UpdateGoalInput {
+                    notes: Some("Migration finished, docs updated.".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("notes should set");
+
+        let marked = crate::goals::mark_goals_ready_for_review(&store)
+            .await
+            .expect("review pass should succeed");
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].id, complete.id);
+
+        let notes = marked[0].notes.as_deref().expect("notes should be set");
+        assert!(notes.starts_with(crate::goals::GOAL_READY_FOR_REVIEW_NOTE));
+        assert!(
+            notes.contains("Migration finished, docs updated."),
+            "the agent's own assessment must survive the marker"
+        );
+        // The signal never closes the goal.
+        assert_eq!(marked[0].status, GoalStatus::Active);
+
+        for untouched_goal in [&partial.id, &untouched.id, &failing.id] {
+            let goal = store
+                .get(untouched_goal)
+                .await
+                .expect("get")
+                .expect("goal exists");
+            assert!(goal.notes.is_none(), "only completed goals are flagged");
+        }
+
+        // Running again is a no-op rather than stacking markers.
+        let repeat = crate::goals::mark_goals_ready_for_review(&store)
+            .await
+            .expect("review pass should succeed");
+        assert!(repeat.is_empty());
+    }
+
     #[tokio::test]
     async fn render_active_goals_is_empty_without_active_goals() {
         let store = setup_test_store().await;

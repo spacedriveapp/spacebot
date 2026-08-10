@@ -3911,17 +3911,77 @@ async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow:
     }
 }
 
+/// Comments carried into a task worker's briefing.
+const BRIEFING_COMMENT_LIMIT: i64 = 12;
+
+/// Byte cap per comment in the briefing.
+const BRIEFING_COMMENT_BYTES: usize = 600;
+
+/// Total byte cap on the briefing block.
+const BRIEFING_TOTAL_BYTES: usize = 4000;
+
+/// Render a task's accumulated comments as a briefing block for the worker
+/// about to execute it.
+///
+/// This is the continuity the enrichment loop exists to produce: the worker
+/// walks in knowing what was investigated and what the user decided, instead
+/// of re-doing the research. Bounded on both axes — worker transcripts stay
+/// behind their own links and never land here.
+async fn render_task_comment_briefing(deps: &AgentDeps, task_number: i64) -> Option<String> {
+    let comments = match deps
+        .task_store
+        .recent_comments(task_number, BRIEFING_COMMENT_LIMIT)
+        .await
+    {
+        Ok(comments) if !comments.is_empty() => comments,
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!(%error, task_number, "failed to load task comments for worker briefing");
+            return None;
+        }
+    };
+
+    let mut block = String::from(
+        "\n\nPrior findings on this task, oldest first. This is what has already been \
+         investigated or decided — do not redo it.\n",
+    );
+    for comment in comments {
+        let author = match comment.author_id.as_deref() {
+            Some(author_id) => format!("{} {}", comment.author_type, author_id),
+            None => comment.author_type.to_string(),
+        };
+        let line = format!(
+            "- [{} {}] {}\n",
+            author,
+            comment.created_at,
+            crate::tools::truncate_utf8_ellipsis(
+                &comment
+                    .body
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                BRIEFING_COMMENT_BYTES,
+            )
+        );
+        if block.len() + line.len() > BRIEFING_TOTAL_BYTES {
+            block.push_str(
+                "- (earlier comments omitted — read the task board for the full thread)\n",
+            );
+            break;
+        }
+        block.push_str(&line);
+    }
+
+    Some(block)
+}
+
 async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
     // Ready-task execution is Act-only. Observe and Suggest agents survey and
     // propose but never execute approved work without a user present, and Off
     // disables autonomous pickup entirely. The instance ceiling caps the
     // per-agent dial. See docs/design-docs/autonomy.md.
-    let autonomy_level = deps
-        .runtime_config
-        .autonomy
-        .load()
-        .level
-        .min(**deps.autonomy_ceiling.load());
+    let autonomy = **deps.runtime_config.autonomy.load();
+    let autonomy_level = autonomy.level.min(**deps.autonomy_ceiling.load());
     if !crate::agent::autonomy::ready_pickup_allowed(autonomy_level) {
         tracing::debug!(
             agent_id = %deps.agent_id,
@@ -3931,7 +3991,13 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         return Ok(());
     }
 
-    let Some(task) = deps.task_store.claim_next_ready(&deps.agent_id).await? else {
+    // Claiming and starting are one guarded UPDATE, so two agents racing for
+    // the same unowned ready task leave one winner and one empty result.
+    let Some(task) = deps
+        .task_store
+        .claim_next_ready(&deps.agent_id, autonomy.claim_unowned)
+        .await?
+    else {
         return Ok(());
     };
 
@@ -4023,6 +4089,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             let marker = if subtask.completed { "[x]" } else { "[ ]" };
             task_prompt.push_str(&format!("{}. {} {}\n", index + 1, marker, subtask.title));
         }
+    }
+    if let Some(prior_findings) = render_task_comment_briefing(deps, task.task_number).await {
+        task_prompt.push_str(&prior_findings);
     }
 
     let screenshot_dir = deps
@@ -4693,10 +4762,8 @@ mod tests {
     use crate::agent::process_control::ControlActionResult;
     use crate::memory::MemoryType;
     use crate::tasks::TaskStatus;
-    use crate::tasks::TaskStore;
     use futures::FutureExt;
     use futures::future;
-    use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -5557,67 +5624,30 @@ mod tests {
 
     #[tokio::test]
     async fn register_detached_worker_for_pickup_registers_entry_and_updates_task_record() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("failed to create sqlite memory pool");
-
-        sqlx::query(
-            "CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL DEFAULT 'backlog',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT,
-                metadata TEXT,
-                goal_id TEXT,
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("failed to create tasks table");
-
-        let task_store = TaskStore::new(pool.clone());
+        // The real instance migrations back this fixture so the schema cannot
+        // drift away from what the store queries.
+        let task_store = crate::tasks::store::setup_test_store().await;
         let registry = crate::agent::process_control::ProcessControlRegistry::new();
         let agent_id: crate::AgentId = Arc::from("agent-1");
-        let task_number = 2_i64;
         let worker_id = uuid::Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO tasks (
-                id, task_number, title, description, status, priority,
-                owner_agent_id, assigned_agent_id,
-                subtasks, metadata, source_memory_id, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(task_number)
-        .bind("test task")
-        .bind(Some("description".to_string()))
-        .bind("ready")
-        .bind("medium")
-        .bind(&*agent_id)
-        .bind(&*agent_id)
-        .bind("[]")
-        .bind("{}")
-        .bind(Option::<String>::None)
-        .bind("system")
-        .execute(&pool)
-        .await
-        .expect("failed to insert task fixture");
+        let task = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: agent_id.to_string(),
+                assigned_agent_id: Some(agent_id.to_string()),
+                title: "test task".to_string(),
+                description: Some("description".to_string()),
+                status: crate::tasks::TaskStatus::Ready,
+                priority: crate::tasks::TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                goal_id: None,
+                source_memory_id: None,
+                created_by: "system".to_string(),
+            })
+            .await
+            .expect("failed to insert task fixture");
+        let task_number = task.task_number;
 
         let (lifecycle, _cancel_rx) = super::register_detached_worker_for_pickup(
             &registry,
@@ -5642,70 +5672,32 @@ mod tests {
 
     #[tokio::test]
     async fn register_detached_worker_for_pickup_unregisters_control_on_task_update_error() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("failed to create sqlite memory pool");
-
-        sqlx::query(
-            "CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL DEFAULT 'backlog',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT,
-                metadata TEXT,
-                goal_id TEXT,
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("failed to create tasks table");
-
-        let task_store = TaskStore::new(pool.clone());
+        let task_store = crate::tasks::store::setup_test_store().await;
         let registry = crate::agent::process_control::ProcessControlRegistry::new();
         let agent_id: crate::AgentId = Arc::from("agent-1");
-        let task_number = 1_i64;
         let worker_id = uuid::Uuid::new_v4();
 
-        sqlx::query(
-            "INSERT INTO tasks (
-                id, task_number, title, description, status, priority,
-                owner_agent_id, assigned_agent_id,
-                subtasks, metadata, source_memory_id, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(task_number)
-        .bind("test task")
-        .bind(Some("description".to_string()))
-        .bind("ready")
-        .bind("medium")
-        .bind(&*agent_id)
-        .bind(&*agent_id)
-        .bind("[]")
-        .bind("{}")
-        .bind(Option::<String>::None)
-        .bind("system")
-        .execute(&pool)
-        .await
-        .expect("failed to insert task fixture");
+        let task = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: agent_id.to_string(),
+                assigned_agent_id: Some(agent_id.to_string()),
+                title: "test task".to_string(),
+                description: Some("description".to_string()),
+                status: crate::tasks::TaskStatus::Ready,
+                priority: crate::tasks::TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                goal_id: None,
+                source_memory_id: None,
+                created_by: "system".to_string(),
+            })
+            .await
+            .expect("failed to insert task fixture");
+        let task_number = task.task_number;
 
+        // Force the task update to fail after the control entry is registered.
         sqlx::query("DROP TABLE tasks")
-            .execute(&pool)
+            .execute(task_store.pool())
             .await
             .expect("failed to drop tasks table");
 

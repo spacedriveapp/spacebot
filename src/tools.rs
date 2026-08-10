@@ -31,6 +31,7 @@
 //! - branch + worker tool superset plus `spacebot_docs`, `config_inspect`, `spawn_worker`,
 //!   and `restart`
 
+pub mod add_task_comment;
 pub mod attachment_recall;
 pub mod autonomy_complete;
 pub mod branch_tool;
@@ -90,6 +91,9 @@ pub mod factory_search_context;
 pub mod factory_update_config;
 pub mod factory_update_identity;
 
+pub use add_task_comment::{
+    AddTaskCommentArgs, AddTaskCommentError, AddTaskCommentOutput, AddTaskCommentTool,
+};
 pub use attachment_recall::{
     AttachmentRecallArgs, AttachmentRecallError, AttachmentRecallOutput, AttachmentRecallTool,
 };
@@ -487,6 +491,7 @@ pub async fn add_channel_tools(
     let chronicle_pool = state.deps.sqlite_pool.clone();
     let compaction = **state.deps.runtime_config.compaction.load();
     let autonomy_run = state.autonomy_run.clone();
+    let autonomy_deps = state.deps.clone();
 
     if allow_direct_reply {
         let agent_display_name = state
@@ -608,10 +613,11 @@ pub async fn add_channel_tools(
             .add_tool(SetOutcomeTool::new(outcome, conversation_id.clone()))
             .await?;
     }
-    if channel_kind == crate::agent::channel::ChannelKind::Autonomy
-        && let Some(run) = autonomy_run
-    {
-        handle.add_tool(AutonomyCompleteTool::new(run)).await?;
+    if channel_kind == crate::agent::channel::ChannelKind::Autonomy {
+        if let Some(run) = autonomy_run.clone() {
+            handle.add_tool(AutonomyCompleteTool::new(run)).await?;
+        }
+        add_autonomy_task_tools(handle, &autonomy_deps, autonomy_run.as_ref()).await?;
     }
 
     // Chronicle index. The channel gets metadata access only — expanding a
@@ -627,6 +633,62 @@ pub async fn add_channel_tools(
             ))
             .await?;
     }
+
+    Ok(())
+}
+
+/// Add the task-board surface the autonomy channel works through.
+///
+/// Gated on the effective autonomy level. At `observe` the run surveys and
+/// summarises, so it gets no mutation tools at all — nothing to claim a task
+/// with, nothing to comment through. `suggest` and `act` get the enrichment
+/// surface; execution of approved work is gated separately, at pickup.
+///
+/// `goal_update` is registered without status changes: a run records progress
+/// in a goal's notes, but closing one stays the user's decision.
+async fn add_autonomy_task_tools(
+    handle: &ToolServerHandle,
+    deps: &crate::AgentDeps,
+    autonomy_run: Option<&crate::agent::autonomy::AutonomyRunHandle>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let autonomy = **deps.runtime_config.autonomy.load();
+    let level = autonomy.level.min(**deps.autonomy_ceiling.load());
+    if level < crate::config::AutonomyLevel::Suggest {
+        return Ok(());
+    }
+
+    let agent_id = deps.agent_id.to_string();
+    let mut task_create =
+        TaskCreateTool::new(deps.task_store.clone(), agent_id.clone(), "autonomy")
+            .with_goal_store(deps.goal_store.clone())
+            .with_working_memory(deps.working_memory.clone());
+    let mut add_comment = AddTaskCommentTool::for_agent(deps.task_store.clone(), agent_id.clone())
+        .with_claim_unowned(autonomy.claim_unowned)
+        .with_working_memory(deps.working_memory.clone());
+    if let Some(run) = autonomy_run {
+        add_comment = add_comment.with_budget(run.budget.clone());
+    }
+    let mut goal_update = GoalUpdateTool::new(deps.goal_store.clone())
+        .without_status_changes()
+        .with_working_memory(deps.working_memory.clone());
+    if let Some(api_state) = &deps.api_state {
+        task_create = task_create.with_api_state(api_state.clone());
+        add_comment = add_comment.with_api_state(api_state.clone());
+        goal_update = goal_update.with_api_state(api_state.clone());
+    }
+
+    handle.add_tool(task_create).await?;
+    handle
+        .add_tool(TaskListTool::new(deps.task_store.clone(), agent_id))
+        .await?;
+    handle
+        .add_tool(
+            TaskUpdateTool::for_branch(deps.task_store.clone(), deps.agent_id.clone())
+                .with_working_memory(deps.working_memory.clone()),
+        )
+        .await?;
+    handle.add_tool(add_comment).await?;
+    handle.add_tool(goal_update).await?;
 
     Ok(())
 }
@@ -870,6 +932,12 @@ pub async fn remove_channel_tools(
     remove_optional_tool(handle, AttachmentRecallTool::NAME).await;
     remove_optional_tool(handle, SetOutcomeTool::NAME).await;
     remove_optional_tool(handle, AutonomyCompleteTool::NAME).await;
+    // The autonomy task surface is registered per run and per level.
+    remove_optional_tool(handle, TaskCreateTool::NAME).await;
+    remove_optional_tool(handle, TaskListTool::NAME).await;
+    remove_optional_tool(handle, TaskUpdateTool::NAME).await;
+    remove_optional_tool(handle, AddTaskCommentTool::NAME).await;
+    remove_optional_tool(handle, GoalUpdateTool::NAME).await;
     remove_optional_tool(handle, SkillsSearchTool::NAME).await;
     remove_optional_tool(handle, InstallSkillTool::NAME).await;
     remove_optional_tool(handle, RestartTool::NAME).await;
@@ -970,9 +1038,13 @@ pub fn create_branch_tool_server(
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
-    let mut task_create = TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "branch");
+    let mut task_create = TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "branch")
+        .with_goal_store(goal_store.clone());
+    let mut add_task_comment =
+        AddTaskCommentTool::for_agent(task_store.clone(), agent_id.to_string());
     if let Some(ref api) = api_state {
         task_create = task_create.with_api_state(api.clone());
+        add_task_comment = add_task_comment.with_api_state(api.clone());
     }
 
     // Reflection passes read transcripts for error text and recovery steps,
@@ -998,7 +1070,13 @@ pub fn create_branch_tool_server(
         .tool(worker_inspect)
         .tool(task_create)
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
-        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
+        .tool(TaskUpdateTool::for_branch(
+            task_store.clone(),
+            agent_id.clone(),
+        ))
+        // A branch runs on a live user turn, so it records findings without
+        // taking ownership — claiming is the autonomy channel's business.
+        .tool(add_task_comment)
         .tool(GoalListTool::new(goal_store.clone()))
         .tool(FileReadTool::new(
             runtime_config.workspace_dir.clone(),
@@ -1155,8 +1233,15 @@ pub fn create_worker_tool_server(
             ),
         )
         .tool(TaskUpdateTool::for_worker(
-            task_store,
+            task_store.clone(),
             agent_id.clone(),
+            worker_id,
+        ))
+        // Findings go on the task, attributed to this run. The full transcript
+        // stays behind the worker link rather than in the comment body.
+        .tool(AddTaskCommentTool::for_worker(
+            task_store,
+            agent_id.to_string(),
             worker_id,
         ))
         .tool({
@@ -1329,10 +1414,18 @@ pub fn create_cortex_chat_tool_server(
         .tool(spawn_tool)
         .tool(
             TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "cortex")
+                .with_goal_store(goal_store.clone())
                 .with_api_state(api_state.clone()),
         )
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
-        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
+        .tool(TaskUpdateTool::for_branch(
+            task_store.clone(),
+            agent_id.clone(),
+        ))
+        .tool(
+            AddTaskCommentTool::for_agent(task_store, agent_id.to_string())
+                .with_api_state(api_state.clone()),
+        )
         .tool(GoalCreateTool::new(goal_store.clone()).with_api_state(api_state.clone()))
         .tool(GoalListTool::new(goal_store.clone()))
         .tool(GoalUpdateTool::new(goal_store).with_api_state(api_state))

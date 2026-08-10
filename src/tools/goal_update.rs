@@ -11,6 +11,11 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct GoalUpdateTool {
     goal_store: Arc<GoalStore>,
+    /// Whether this registration may move a goal between statuses. Cleared for
+    /// processes that run without a user present: closing or abandoning a goal
+    /// is the user's decision, so the field is removed from the schema and
+    /// rejected if it arrives anyway.
+    allow_status_change: bool,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
     api_state: Option<Arc<crate::api::ApiState>>,
 }
@@ -25,9 +30,16 @@ impl GoalUpdateTool {
     pub fn new(goal_store: Arc<GoalStore>) -> Self {
         Self {
             goal_store,
+            allow_status_change: true,
             working_memory: None,
             api_state: None,
         }
+    }
+
+    /// Restrict this registration to notes, priority, due date, and metadata.
+    pub fn without_status_changes(mut self) -> Self {
+        self.allow_status_change = false;
+        self
     }
 
     pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
@@ -72,18 +84,8 @@ impl Tool for GoalUpdateTool {
     type Output = GoalUpdateOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/goal_update").to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
+        let mut properties = serde_json::json!({
                     "id": { "type": "string", "description": "Goal id" },
-                    "status": {
-                        "type": "string",
-                        "enum": GoalStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                        "description": "Optional new status — only change on explicit user instruction"
-                    },
                     "priority": {
                         "type": "string",
                         "enum": TaskPriority::ALL.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
@@ -92,7 +94,21 @@ impl Tool for GoalUpdateTool {
                     "due_date": { "type": "string", "description": "New deadline as YYYY-MM-DD, or empty string to clear" },
                     "notes": { "type": "string", "description": "Replacement progress notes — the goal's current standing, not an append" },
                     "metadata_patch": { "type": "object", "description": "Metadata object deep-merged with current metadata" }
-                },
+        });
+        if self.allow_status_change {
+            properties["status"] = serde_json::json!({
+                "type": "string",
+                "enum": GoalStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "description": "Optional new status — only change on explicit user instruction",
+            });
+        }
+
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: crate::prompts::text::get("tools/goal_update").to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": properties,
                 "required": ["id"]
             }),
         }
@@ -101,10 +117,18 @@ impl Tool for GoalUpdateTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let status = match args.status.as_deref() {
             None => None,
-            Some(value) => Some(
-                GoalStatus::parse(value)
-                    .ok_or_else(|| GoalUpdateError(format!("invalid status: {value}")))?,
-            ),
+            Some(value) => {
+                if !self.allow_status_change {
+                    return Err(GoalUpdateError(
+                        "goal status is the user's call — record progress in notes instead"
+                            .to_string(),
+                    ));
+                }
+                Some(
+                    GoalStatus::parse(value)
+                        .ok_or_else(|| GoalUpdateError(format!("invalid status: {value}")))?,
+                )
+            }
         };
         let priority = match args.priority.as_deref() {
             None => None,

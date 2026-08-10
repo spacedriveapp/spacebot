@@ -13,6 +13,9 @@ pub struct TaskCreateTool {
     task_store: Arc<TaskStore>,
     agent_id: String,
     created_by: String,
+    /// Present when the caller may link new tasks to a goal. The store is used
+    /// to reject unknown ids, since SQLite foreign keys are not enforced here.
+    goal_store: Option<Arc<crate::goals::GoalStore>>,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
     api_state: Option<Arc<crate::api::ApiState>>,
 }
@@ -36,9 +39,16 @@ impl TaskCreateTool {
             task_store,
             agent_id: agent_id.into(),
             created_by: created_by.into(),
+            goal_store: None,
             working_memory: None,
             api_state: None,
         }
+    }
+
+    /// Allow this tool to link new tasks to an existing goal.
+    pub fn with_goal_store(mut self, store: Arc<crate::goals::GoalStore>) -> Self {
+        self.goal_store = Some(store);
+        self
     }
 
     pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
@@ -66,6 +76,9 @@ pub struct TaskCreateArgs {
     pub subtasks: Vec<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Goal this task contributes to.
+    #[serde(default)]
+    pub goal_id: Option<String>,
 }
 
 fn default_priority() -> String {
@@ -88,29 +101,37 @@ impl Tool for TaskCreateTool {
     type Output = TaskCreateOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let mut properties = serde_json::json!({
+            "title": { "type": "string", "description": "Short task title" },
+            "description": { "type": "string", "description": "Optional detailed description" },
+            "priority": {
+                "type": "string",
+                "enum": crate::tasks::TaskPriority::ALL.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                "description": "Task priority"
+            },
+            "subtasks": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional checklist items"
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional metadata object"
+            }
+        });
+        if self.goal_store.is_some() {
+            properties["goal_id"] = serde_json::json!({
+                "type": "string",
+                "description": "Id of the goal this task contributes to, as returned by goal_list",
+            });
+        }
+
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: crate::prompts::text::get("tools/task_create").to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "title": { "type": "string", "description": "Short task title" },
-                    "description": { "type": "string", "description": "Optional detailed description" },
-                    "priority": {
-                        "type": "string",
-                        "enum": crate::tasks::TaskPriority::ALL.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-                        "description": "Task priority"
-                    },
-                    "subtasks": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional checklist items"
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "Optional metadata object"
-                    }
-                },
+                "properties": properties,
                 "required": ["title"]
             }),
         }
@@ -130,6 +151,25 @@ impl Tool for TaskCreateTool {
             })
             .collect::<Vec<_>>();
 
+        // Resolve the goal before creating: an unknown id would otherwise
+        // persist as a dangling link that no linked-task count ever finds.
+        let goal_id = match (args.goal_id.as_deref(), &self.goal_store) {
+            (None, _) | (Some(""), _) => None,
+            (Some(goal_id), Some(store)) => {
+                let goal = store
+                    .get(goal_id)
+                    .await
+                    .map_err(|error| TaskCreateError(format!("{error}")))?
+                    .ok_or_else(|| TaskCreateError(format!("goal {goal_id} not found")))?;
+                Some(goal.id)
+            }
+            (Some(_), None) => {
+                return Err(TaskCreateError(
+                    "this process cannot link tasks to goals".to_string(),
+                ));
+            }
+        };
+
         let task = self
             .task_store
             .create(CreateTaskInput {
@@ -141,6 +181,7 @@ impl Tool for TaskCreateTool {
                 priority,
                 subtasks,
                 metadata: args.metadata.unwrap_or_else(|| serde_json::json!({})),
+                goal_id,
                 source_memory_id: None,
                 created_by: self.created_by.clone(),
             })
@@ -257,6 +298,7 @@ mod tests {
                 priority: "medium".to_string(),
                 subtasks: Vec::new(),
                 metadata: None,
+                goal_id: None,
             })
             .await
             .expect("task create should succeed");

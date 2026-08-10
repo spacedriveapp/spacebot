@@ -9,8 +9,6 @@ use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(test)]
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row as _, SqlitePool};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -132,6 +130,8 @@ pub struct Task {
     pub created_by: String,
     pub approved_at: Option<String>,
     pub approved_by: Option<String>,
+    /// Last time an autonomy run enriched this task. Drives selection order.
+    pub last_enriched_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
@@ -157,6 +157,8 @@ pub struct CreateTaskInput {
     pub priority: TaskPriority,
     pub subtasks: Vec<TaskSubtask>,
     pub metadata: Value,
+    /// Goal this task contributes to, when created from one.
+    pub goal_id: Option<String>,
     pub source_memory_id: Option<String>,
     pub created_by: String,
 }
@@ -214,7 +216,6 @@ impl TaskStore {
         Self { pool }
     }
 
-    #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -252,9 +253,9 @@ impl TaskStore {
                 INSERT INTO tasks (
                     id, task_number, title, description, status, priority,
                     owner_agent_id, assigned_agent_id,
-                    subtasks, metadata, source_memory_id, created_by
+                    subtasks, metadata, goal_id, source_memory_id, created_by
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&task_id)
@@ -267,6 +268,7 @@ impl TaskStore {
             .bind(&input.assigned_agent_id)
             .bind(&subtasks_json)
             .bind(&metadata_json)
+            .bind(&input.goal_id)
             .bind(&input.source_memory_id)
             .bind(&input.created_by)
             .execute(&mut *tx)
@@ -605,21 +607,54 @@ impl TaskStore {
         task_from_row(updated)
     }
 
+    /// Delete a task and everything hanging off it.
+    ///
+    /// The comment delete is explicit as well as declared `ON DELETE CASCADE`,
+    /// because the cascade only fires when the connection has
+    /// `PRAGMA foreign_keys` on — a connection setting this store does not own.
     pub async fn delete(&self, task_number: i64) -> Result<bool> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open task delete transaction")?;
+
+        sqlx::query(
+            "DELETE FROM task_comments \
+             WHERE task_id = (SELECT id FROM tasks WHERE task_number = ?)",
+        )
+        .bind(task_number)
+        .execute(&mut *tx)
+        .await
+        .context("failed to delete task comments")?;
+
         let result = sqlx::query("DELETE FROM tasks WHERE task_number = ?")
             .bind(task_number)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("failed to delete task")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit task delete transaction")?;
 
         Ok(result.rows_affected() > 0)
     }
 
-    /// Atomically claim the highest-priority ready task assigned to the given
-    /// agent. Moves it to `in_progress` and returns it.
-    pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
+    /// Atomically claim the highest-priority ready task this agent may run.
+    ///
+    /// With `claim_unowned` set, unassigned ready work is in scope and the
+    /// guarded UPDATE takes assignment and `in_progress` together, so a race
+    /// between agents leaves exactly one winner.
+    pub async fn claim_next_ready(
+        &self,
+        agent_id: &str,
+        claim_unowned: bool,
+    ) -> Result<Option<Task>> {
         let row = sqlx::query(
-            "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
+            "SELECT task_number FROM tasks \
+             WHERE status = 'ready' \
+               AND (assigned_agent_id = ? OR (assigned_agent_id IS NULL AND ?)) \
              ORDER BY CASE priority \
                WHEN 'critical' THEN 0 \
                WHEN 'high' THEN 1 \
@@ -629,7 +664,8 @@ impl TaskStore {
              task_number ASC \
              LIMIT 1",
         )
-        .bind(assigned_agent_id)
+        .bind(agent_id)
+        .bind(claim_unowned)
         .fetch_optional(&self.pool)
         .await
         .context("failed to find ready task")?;
@@ -642,11 +678,15 @@ impl TaskStore {
             .try_get("task_number")
             .context("failed to read task_number from ready task row")?;
         let result = sqlx::query(
-            "UPDATE tasks SET status = 'in_progress', \
+            "UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE task_number = ? AND status = 'ready'",
+             WHERE task_number = ? AND status = 'ready' \
+               AND (assigned_agent_id = ? OR (assigned_agent_id IS NULL AND ?))",
         )
+        .bind(agent_id)
         .bind(task_number)
+        .bind(agent_id)
+        .bind(claim_unowned)
         .execute(&self.pool)
         .await
         .context("failed to claim ready task")?;
@@ -672,9 +712,9 @@ impl TaskStore {
 }
 
 /// Column list used by all SELECT queries. Kept in sync with `task_from_row`.
-const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
+pub(crate) const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
      owner_agent_id, assigned_agent_id, subtasks, metadata, goal_id, source_memory_id, worker_id, \
-     created_by, approved_at, approved_by, created_at, updated_at, completed_at";
+     created_by, approved_at, approved_by, last_enriched_at, created_at, updated_at, completed_at";
 
 pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
     if current == next {
@@ -744,7 +784,7 @@ fn parse_metadata(value: &str) -> Value {
     serde_json::from_str(value).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
 }
 
-fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
+pub(crate) fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
     let status_value: String = row
         .try_get("status")
         .context("failed to read task status")?;
@@ -794,6 +834,7 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
             .context("failed to read task created_by")?,
         approved_at: read_optional_timestamp(&row, "approved_at"),
         approved_by: row.try_get("approved_by").ok(),
+        last_enriched_at: read_optional_timestamp(&row, "last_enriched_at"),
         created_at,
         updated_at,
         completed_at: read_optional_timestamp(&row, "completed_at"),
@@ -827,55 +868,26 @@ fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Optio
 
 #[cfg(test)]
 pub(crate) async fn setup_test_store() -> TaskStore {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    // A uniquely named shared-cache in-memory database: isolated per test, but
+    // reachable from several pool connections so concurrency tests are real.
+    let url = format!(
+        "sqlite:file:tasks-test-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(1)
+        .max_connections(4)
+        .idle_timeout(None)
+        .connect(&url)
         .await
         .expect("in-memory sqlite should connect");
 
-    sqlx::query(
-        r#"
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            task_number INTEGER NOT NULL UNIQUE,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL DEFAULT 'backlog',
-            priority TEXT NOT NULL DEFAULT 'medium',
-            owner_agent_id TEXT NOT NULL,
-            assigned_agent_id TEXT,
-            subtasks TEXT,
-            metadata TEXT,
-            goal_id TEXT,
-            source_memory_id TEXT,
-            worker_id TEXT,
-            created_by TEXT NOT NULL,
-            approved_at TEXT,
-            approved_by TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            completed_at TEXT
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .expect("tasks schema should be created");
-
-    sqlx::query(
-        "CREATE TABLE task_number_seq (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            next_number INTEGER NOT NULL DEFAULT 1
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("task_number_seq should be created");
-
-    sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
-        .execute(&pool)
+    // Run the real instance migrations so the test schema can never drift from
+    // what ships — including task_comments and last_enriched_at.
+    sqlx::migrate!("./migrations/global")
+        .run(&pool)
         .await
-        .expect("sequence seed should be inserted");
+        .expect("global migrations should run");
 
     TaskStore::new(pool)
 }
@@ -898,6 +910,7 @@ mod tests {
             priority: TaskPriority::Medium,
             subtasks: Vec::new(),
             metadata: serde_json::json!({}),
+            goal_id: None,
             source_memory_id: None,
             created_by: "branch".to_string(),
         }
@@ -1227,15 +1240,16 @@ mod tests {
                 priority: TaskPriority::High,
                 subtasks: Vec::new(),
                 metadata: serde_json::json!({}),
+                goal_id: None,
                 source_memory_id: None,
                 created_by: "branch".to_string(),
             })
             .await
             .expect("should create");
 
-        // agent-test should not be able to claim it
+        // agent-test should not be able to claim it, even with claim_unowned on
         let claimed = store
-            .claim_next_ready("agent-test")
+            .claim_next_ready("agent-test", true)
             .await
             .expect("claim should succeed");
         assert!(
@@ -1245,7 +1259,7 @@ mod tests {
 
         // agent-other should be able to claim it
         let claimed = store
-            .claim_next_ready("agent-other")
+            .claim_next_ready("agent-other", false)
             .await
             .expect("claim should succeed");
         assert!(claimed.is_some());

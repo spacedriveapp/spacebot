@@ -177,7 +177,7 @@ mod tests {
     async fn records_summary_and_actions() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id.clone(), Arc::new(store.clone()));
+        let handle = AutonomyRunHandle::new(run_id.clone(), Arc::new(store.clone()), 2);
         let tool = AutonomyCompleteTool::new(handle.clone());
 
         let output = tool
@@ -205,7 +205,7 @@ mod tests {
     async fn rejects_invalid_action_kind() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id, Arc::new(store));
+        let handle = AutonomyRunHandle::new(run_id, Arc::new(store), 2);
         let tool = AutonomyCompleteTool::new(handle.clone());
 
         let error = tool
@@ -228,7 +228,7 @@ mod tests {
     async fn rejects_trivial_summary() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id, Arc::new(store));
+        let handle = AutonomyRunHandle::new(run_id, Arc::new(store), 2);
         let tool = AutonomyCompleteTool::new(handle);
 
         let error = tool

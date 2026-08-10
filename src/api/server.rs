@@ -156,6 +156,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(tasks::approve_task))
         .routes(routes!(tasks::execute_task))
         .routes(routes!(tasks::assign_task))
+        .routes(routes!(
+            tasks::list_task_comments,
+            tasks::create_task_comment
+        ))
         // Wiki routes
         .routes(routes!(wiki::list_pages, wiki::create_page))
         .routes(routes!(wiki::search_pages))

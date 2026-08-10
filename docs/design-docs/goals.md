@@ -114,7 +114,10 @@ No token budget — autonomy channels and goal review get the full picture.
 - `goal_create(title, description?, priority?, due_date?)` — create a new goal
 - `goal_update(id, status?, priority?, due_date?, notes?, metadata_patch?)` — update fields
 - `goal_list(status?)` — list goals, optionally filtered by status
-- `goal_note(id, notes)` — update the progress notes field (shorthand for `goal_update`)
+
+There is no separate `goal_note` tool: `goal_update(id, notes)` is the notes
+path, and a second tool for one field would be a synonym rather than a
+capability.
 
 ### Channel Tools (read-only)
 
@@ -124,7 +127,11 @@ Channels get `goal_list` only. They can read goals and reference them in convers
 
 Goals are not completed by tool — they're completed by the user via the API or UI. The agent can call `goal_update(status: "completed")` only with explicit user instruction. The goal review process does not call this automatically.
 
-What the goal review *can* do: set `notes` to "All linked tasks complete — ready for your review" when it detects all tasks are done. This surfaces the completion candidate to the user without presuming to close it.
+What the autonomy run *does* do: prepend "All linked tasks complete — ready for
+your review." to the goal's notes when every linked task is `done`. This
+surfaces the completion candidate to the user without presuming to close it.
+The write is programmatic, so a goal cannot be flagged by a model that
+miscounted, and cannot be closed by one that overreached.
 
 ---
 
@@ -192,15 +199,22 @@ A goal without tasks is a signal the autonomy channel acts on — it creates `pe
 **Phase 1 — Data Model + Tools**
 - `goals` table migration
 - `goal_id` FK on tasks migration
-- `goal_create`, `goal_update`, `goal_list`, `goal_note` tools
+- `goal_create`, `goal_update`, `goal_list` tools
 - Active goals injected into channel system prompt (short format)
 - API endpoints: CRUD for goals
 
-**Phase 2 — Autonomy Integration**
+**Phase 2 — Autonomy Integration — shipped**
 - Autonomy channel receives all active goals in extended format on wake
-- Autonomy channel uses `goal_id` when creating tasks from goals
-- Autonomy channel updates `notes` as progress is made
-- Autonomy channel sets `notes` when all linked tasks are complete
+- Autonomy channel uses `goal_id` when creating tasks from goals. `task_create`
+  resolves the id against the goal store before insert, so an unknown goal is a
+  tool error rather than a dangling link.
+- Autonomy channel updates `notes` as progress is made, through a `goal_update`
+  registration with the `status` field removed
+- The ready-for-review marker is written deterministically at the end of each
+  run, not left to the model: `mark_goals_ready_for_review` prepends the marker
+  to any active goal whose linked tasks are all `done`, keeping the agent's own
+  progress notes beneath it. It is idempotent, treats `failed` as work
+  remaining, and never touches goal status.
 
 **Phase 3 — UI**
 - Goals tab: list, create, detail panel, linked task counts

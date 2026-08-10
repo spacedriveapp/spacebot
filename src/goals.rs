@@ -60,6 +60,69 @@ fn first_non_empty_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
+/// Marker the agent writes onto a goal whose linked work is all done.
+///
+/// It is a signal, not a decision: the goal stays `active` and only the user
+/// closes it. See `docs/design-docs/goals.md`.
+pub const GOAL_READY_FOR_REVIEW_NOTE: &str = "All linked tasks complete — ready for your review.";
+
+/// Flag active goals whose linked tasks have all finished.
+///
+/// Prepends [`GOAL_READY_FOR_REVIEW_NOTE`] to the goal's notes, keeping the
+/// agent's own progress assessment underneath it. Idempotent: a goal already
+/// carrying the marker is left alone, so repeated runs do not churn the row.
+/// Goal status is never touched.
+pub async fn mark_goals_ready_for_review(store: &GoalStore) -> Result<Vec<Goal>> {
+    let goals = store
+        .list(GoalListFilter {
+            status: Some(GoalStatus::Active),
+            limit: None,
+        })
+        .await?;
+
+    let mut marked = Vec::new();
+    for goal in goals {
+        if goal
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.trim_start().starts_with(GOAL_READY_FOR_REVIEW_NOTE))
+        {
+            continue;
+        }
+
+        let counts = store.linked_task_counts(&goal.id).await?;
+        // A goal with no tasks has nothing to be done with, and any task that
+        // is not `done` — including `failed` — means work remains.
+        if counts.total() == 0 || counts.done != counts.total() {
+            continue;
+        }
+
+        let notes = match goal
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            Some(existing) => format!("{GOAL_READY_FOR_REVIEW_NOTE}\n\n{existing}"),
+            None => GOAL_READY_FOR_REVIEW_NOTE.to_string(),
+        };
+        if let Some(updated) = store
+            .update(
+                &goal.id,
+                UpdateGoalInput {
+                    notes: Some(notes),
+                    ..Default::default()
+                },
+            )
+            .await?
+        {
+            marked.push(updated);
+        }
+    }
+
+    Ok(marked)
+}
+
 /// Render the extended active-goals block for the autonomy channel briefing.
 ///
 /// Unlike the short channel format, this includes each goal's full
