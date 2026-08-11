@@ -386,8 +386,8 @@ export function PortalTimeline({
 							</div>
 						);
 					}
-					if (item.type === "reflection_run") {
-						return <InlineReflectionRunCard key={item.id} item={item as TimelineReflectionRun} />;
+					if ((item as Record<string, unknown>).type === "reflection_run") {
+						return <InlineReflectionRunCard key={item.id} item={item as unknown as TimelineReflectionRun} />;
 					}
 					if (item.type === "checkpoint") {
 						return <InlineCheckpointCard key={item.id} item={item} />;

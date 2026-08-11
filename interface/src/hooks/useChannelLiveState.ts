@@ -557,6 +557,8 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 	// SSE and again in a history page loaded around the same moment.
 	const handleReflectionRunCompleted = useCallback((data: unknown) => {
 		const event = data as ReflectionRunCompletedEvent;
+		// reflection_run is a client-only timeline item not in the OpenAPI
+		// TimelineItem union; use a cast matching the existing branch_run pattern.
 		pushItem(event.channel_id, {
 			type: "reflection_run",
 			id: event.branch_id,
@@ -565,7 +567,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			trigger_source: event.trigger_source,
 			affected_skills: event.affected_skills,
 			started_at: new Date().toISOString(),
-		});
+		} as unknown as Parameters<typeof pushItem>[1]);
 	}, [pushItem]);
 
 	const handleChronicleCheckpoint = useCallback((data: unknown) => {
