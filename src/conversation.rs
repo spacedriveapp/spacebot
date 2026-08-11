@@ -17,7 +17,8 @@ pub use chronicle::{
     CommitOutcome, NewCheckpoint,
 };
 pub use history::{
-    ConversationLogger, ProcessRunLogger, TimelineItem, WorkerDetailRow, WorkerRunRow,
+    ConversationLogger, ProcessRunLogger, ReflectionRunLogger, ReflectionRunRow, TimelineItem,
+    WorkerDetailRow, WorkerRunRow,
 };
 pub use participants::{
     ActiveParticipant, participant_display_name, participant_memory_key, renderable_participants,

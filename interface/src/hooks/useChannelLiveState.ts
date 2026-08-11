@@ -5,6 +5,7 @@ import {
 	type BranchCompletedEvent,
 	type BranchStartedEvent,
 	type ChronicleCheckpointEvent,
+	type ReflectionRunCompletedEvent,
 	type InboundMessageEvent,
 	type OutboundMessageDeltaEvent,
 	type OutboundMessageEvent,
@@ -554,6 +555,21 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 	// A checkpoint carries its whole record, so it lands in the timeline without
 	// a refetch. Duplicate ids are ignored — the same checkpoint can arrive over
 	// SSE and again in a history page loaded around the same moment.
+	const handleReflectionRunCompleted = useCallback((data: unknown) => {
+		const event = data as ReflectionRunCompletedEvent;
+		// reflection_run is a client-only timeline item not in the OpenAPI
+		// TimelineItem union; use a cast matching the existing branch_run pattern.
+		pushItem(event.channel_id, {
+			type: "reflection_run",
+			id: event.branch_id,
+			status: event.status,
+			outcome_summary: event.outcome_summary,
+			trigger_source: event.trigger_source,
+			affected_skills: event.affected_skills,
+			started_at: new Date().toISOString(),
+		} as unknown as Parameters<typeof pushItem>[1]);
+	}, [pushItem]);
+
 	const handleChronicleCheckpoint = useCallback((data: unknown) => {
 		const event = data as ChronicleCheckpointEvent;
 		setLiveStates((prev) => {
@@ -908,6 +924,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		worker_completed: handleWorkerCompleted,
 		branch_started: handleBranchStarted,
 		chronicle_checkpoint: handleChronicleCheckpoint,
+		reflection_run_completed: handleReflectionRunCompleted,
 		branch_completed: handleBranchCompleted,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,

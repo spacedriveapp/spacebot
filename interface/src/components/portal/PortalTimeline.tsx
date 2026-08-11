@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {InlineBranchCard, MessageBubble} from "@spacedrive/ai";
 import {File as FileIcon} from "@phosphor-icons/react";
-import {api, type AttachmentMeta, type TimelineBranchRun, type TimelineCheckpoint, type TimelineItem, type WorkerListItem} from "@/api/client";
+import {api, type AttachmentMeta, type TimelineBranchRun, type TimelineCheckpoint, type TimelineItem, type TimelineReflectionRun, type WorkerListItem} from "@/api/client";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair, tryParseJson, isErrorResult} from "@/components/ToolCall";
 import {PortalWorkerCard} from "./PortalWorkerCard";
@@ -13,6 +13,32 @@ import clsx from "clsx";
  * the span it covers and opens to the summary. Not a message — it was written
  * by neither side of the conversation.
  */
+function InlineReflectionRunCard({item}: {item: TimelineReflectionRun}) {
+	const statusLabel =
+		item.status === "success" ? "Learned" :
+		item.status === "no_op" ? "No change" :
+		item.status === "error" ? "Error" :
+		"Reflection";
+	const statusColor =
+		item.status === "success" ? "text-green-11" :
+		item.status === "no_op" ? "text-ink-faint" :
+		item.status === "error" ? "text-red-11" :
+		"text-ink-dull";
+
+	return (
+		<div className="py-2">
+			<div className="flex w-full items-center gap-3">
+				<span className="h-px flex-1 bg-app-line/60" />
+				<span className={`flex-shrink-0 text-tiny ${statusColor}`}>
+					{statusLabel}
+					{item.outcome_summary ? `: ${item.outcome_summary}` : ""}
+				</span>
+				<span className="h-px flex-1 bg-app-line/60" />
+			</div>
+		</div>
+	);
+}
+
 function InlineCheckpointCard({item}: {item: TimelineCheckpoint}) {
 	const [expanded, setExpanded] = useState(false);
 	const from = new Date(item.covers_from);
@@ -359,6 +385,9 @@ export function PortalTimeline({
 								<ToolCall pair={pair} />
 							</div>
 						);
+					}
+					if ((item as Record<string, unknown>).type === "reflection_run") {
+						return <InlineReflectionRunCard key={item.id} item={item as unknown as TimelineReflectionRun} />;
 					}
 					if (item.type === "checkpoint") {
 						return <InlineCheckpointCard key={item.id} item={item} />;

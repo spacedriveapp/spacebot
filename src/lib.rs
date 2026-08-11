@@ -366,6 +366,23 @@ pub enum ProcessEvent {
         line: String,
         stream: String,
     },
+    /// A skill-reflection pass completed. Carries the full run record so
+    /// the timeline can render it without a refetch. Reflection runs are
+    /// silent in the conversation; they surface only in the activity timeline.
+    ReflectionRunCompleted {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        /// The branch_id that performed the reflection (UUID).
+        branch_id: BranchId,
+        /// Terminal status: "success", "no_op", "error", or "cancelled".
+        status: String,
+        /// User-legible one-line summary for the UI timeline.
+        outcome_summary: String,
+        /// Trigger source: "turn_work" | "worker_success" | "reflection".
+        trigger_source: String,
+        /// Comma-separated lowercase canonical skill names affected.
+        affected_skills: String,
+    },
     /// Conversation settings were updated via API. The channel should
     /// re-load its settings from the database.
     SettingsUpdated {
