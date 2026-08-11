@@ -79,6 +79,10 @@ impl PromptEngine {
             crate::prompts::text::get("chronicle_checkpoint"),
         )?;
         env.add_template(
+            "chronicle_rollup",
+            crate::prompts::text::get("chronicle_rollup"),
+        )?;
+        env.add_template(
             "memory_persistence",
             crate::prompts::text::get("memory_persistence"),
         )?;

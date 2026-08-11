@@ -176,9 +176,12 @@ impl ChronicleTool {
                 ChronicleError(format!("Failed to read chronicle stats: {error}"))
             })?;
 
+        // Every level, not just level 0: after a rollup absorbs a run of
+        // checkpoints the rollup is the entry the agent should see first, and
+        // the children remain reachable by opening it.
         let checkpoints = self
             .store
-            .list(&self.channel_id, 0, limit)
+            .list_all_levels(&self.channel_id, limit)
             .await
             .map_err(|error| ChronicleError(format!("Failed to list checkpoints: {error}")))?;
 
@@ -191,29 +194,39 @@ impl ChronicleTool {
             ));
         }
 
+        // A rolled-up checkpoint is already represented by its rollup, so it is
+        // hidden from the index. The rollup is the entry, and the children are
+        // reachable through `open`.
+        let visible: Vec<&ChronicleCheckpoint> = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.rolled_up_into.is_none())
+            .collect();
+
         let mut summary = format!(
             "## Session Chronicle — {} checkpoints, {} messages logged\n\n\
-             Showing the {} most recent. {} messages since the last checkpoint are still in raw \
-             context.\n\n",
+             Showing {} entries ({} most recent checkpoints requested). {} messages since the \
+             last checkpoint are still in raw context.\n\n",
             stats.checkpoint_count,
             stats.total_messages,
-            checkpoints.len(),
+            visible.len(),
+            limit,
             stats.unsummarized_messages
         );
 
-        for checkpoint in &checkpoints {
+        for checkpoint in &visible {
             summary.push_str(&format!(
-                "- **#{}** {} — {} → {} · {} messages · {}{}\n",
+                "- **#{}** {}{} — {} → {} · {} messages · {}\n",
                 checkpoint.seq,
+                if checkpoint.level > 0 {
+                    "[rollup] "
+                } else {
+                    ""
+                },
                 checkpoint.title,
                 checkpoint.covers_from_at.format("%Y-%m-%d %H:%M"),
                 checkpoint.covers_to_at.format("%Y-%m-%d %H:%M"),
                 checkpoint.message_count,
                 checkpoint.kind.as_str(),
-                match &checkpoint.rolled_up_into {
-                    Some(_) => " · rolled up",
-                    None => "",
-                }
             ));
         }
 
@@ -223,7 +236,44 @@ impl ChronicleTool {
 
     async fn open(&self, seq: Option<i64>) -> Result<ChronicleOutput, ChronicleError> {
         let checkpoint = self.require_checkpoint(seq, "open").await?;
-        Ok(self.output("open", render_checkpoint(&checkpoint)))
+        let mut summary = render_checkpoint(&checkpoint);
+
+        // A rollup is only trustworthy if you can see what it stands for, so
+        // opening one lists the checkpoints it covers. Those rows are never
+        // deleted; each can still be opened or expanded on its own.
+        if checkpoint.level > 0 {
+            let children = self
+                .store
+                .children_of(&checkpoint.id)
+                .await
+                .map_err(|error| {
+                    ChronicleError(format!("Failed to read rollup children: {error}"))
+                })?;
+
+            if children.is_empty() {
+                summary.push_str("\n_This rollup has no recorded children._\n");
+            } else {
+                summary.push_str(&format!(
+                    "\n### Covers {} checkpoint(s)\n\n",
+                    children.len()
+                ));
+                for child in &children {
+                    summary.push_str(&format!(
+                        "- **#{}** {} — {} → {} · {} messages\n",
+                        child.seq,
+                        child.title,
+                        child.covers_from_at.format("%Y-%m-%d %H:%M"),
+                        child.covers_to_at.format("%Y-%m-%d %H:%M"),
+                        child.message_count,
+                    ));
+                }
+                summary.push_str(
+                    "\nOpen any of them for its own summary, or expand it for raw messages.\n",
+                );
+            }
+        }
+
+        Ok(self.output("open", summary))
     }
 
     async fn expand(

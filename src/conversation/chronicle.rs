@@ -285,7 +285,9 @@ impl ChronicleStore {
                 sqlx::query("COMMIT").execute(&mut *connection).await?;
             }
             _ => {
-                sqlx::query("ROLLBACK").execute(&mut *connection).await.ok();
+                if let Err(error) = sqlx::query("ROLLBACK").execute(&mut *connection).await {
+                    tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
+                }
             }
         }
 
@@ -478,6 +480,216 @@ impl ChronicleStore {
         .map_err(|error| anyhow::anyhow!(error))?;
 
         Ok(checkpoints_from_rows(rows))
+    }
+
+    /// The most compact set of entries covering everything before `cutoff_seq`:
+    /// any checkpoint no rollup has absorbed, at whatever level it sits.
+    ///
+    /// A level-0 checkpoint a rollup covers is skipped, because the rollup
+    /// represents it. Ordered oldest first, capped at `limit` — that cap is
+    /// what rollups exist to keep meaningful, since without them the oldest
+    /// entries simply fall off the end.
+    ///
+    /// `cutoff_seq` is a coverage boundary (`covers_from_seq`), not a
+    /// checkpoint sequence. Entries whose coverage ends at or before this
+    /// boundary are eligible, so a rollup committed after the recent window's
+    /// first checkpoint but covering earlier history is still included.
+    pub async fn uncovered_before_seq(
+        &self,
+        channel_id: &str,
+        cutoff_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<ChronicleCheckpoint>> {
+        let rows = sqlx::query(
+            "SELECT * FROM ( \
+                SELECT * FROM channel_chronicle_checkpoints \
+                WHERE channel_id = ? AND covers_to_seq <= ? AND rolled_up_into IS NULL \
+                ORDER BY covers_from_seq DESC LIMIT ? \
+             ) ORDER BY covers_from_seq ASC, seq ASC",
+        )
+        .bind(channel_id)
+        .bind(cutoff_seq)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(checkpoints_from_rows(rows))
+    }
+
+    /// Checkpoints at every level, newest first.
+    pub async fn list_all_levels(
+        &self,
+        channel_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ChronicleCheckpoint>> {
+        let rows = sqlx::query(
+            "SELECT * FROM channel_chronicle_checkpoints \
+             WHERE channel_id = ? ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(channel_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(checkpoints_from_rows(rows))
+    }
+
+    /// Checkpoints at a level that no rollup covers yet, oldest first.
+    ///
+    /// This is the pool a rollup draws from. Rolling an already-covered
+    /// checkpoint a second time would double-count its span in the view.
+    pub async fn unrolled_at_level(
+        &self,
+        channel_id: &str,
+        level: i64,
+        limit: i64,
+    ) -> Result<Vec<ChronicleCheckpoint>> {
+        let rows = sqlx::query(
+            "SELECT * FROM channel_chronicle_checkpoints \
+             WHERE channel_id = ? AND level = ? AND rolled_up_into IS NULL \
+             ORDER BY seq ASC LIMIT ?",
+        )
+        .bind(channel_id)
+        .bind(level)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(checkpoints_from_rows(rows))
+    }
+
+    /// How many checkpoints at a level are not yet covered by a rollup.
+    pub async fn unrolled_count(&self, channel_id: &str, level: i64) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS total FROM channel_chronicle_checkpoints \
+             WHERE channel_id = ? AND level = ? AND rolled_up_into IS NULL",
+        )
+        .bind(channel_id)
+        .bind(level)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(row.try_get("total").unwrap_or(0))
+    }
+
+    /// The checkpoints a rollup covers, oldest first.
+    ///
+    /// The reverse of `rolled_up_into`: this is what makes a rollup
+    /// inspectable rather than an opaque summary-of-summaries.
+    pub async fn children_of(&self, rollup_id: &str) -> Result<Vec<ChronicleCheckpoint>> {
+        let rows = sqlx::query(
+            "SELECT * FROM channel_chronicle_checkpoints \
+             WHERE rolled_up_into = ? ORDER BY seq ASC",
+        )
+        .bind(rollup_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(checkpoints_from_rows(rows))
+    }
+
+    /// Commit a rollup and mark the checkpoints it covers, atomically.
+    ///
+    /// The insert and the `rolled_up_into` stamping have to be one transaction:
+    /// a rollup whose children are unmarked would be re-rolled forever, and
+    /// children marked without a surviving parent would vanish from the view
+    /// with nothing covering them.
+    ///
+    /// Children are never deleted or rewritten — only stamped — so a rollup can
+    /// always be expanded back into the checkpoints it summarizes.
+    pub async fn commit_rollup(
+        &self,
+        new: NewCheckpoint,
+        child_ids: &[String],
+    ) -> Result<CommitOutcome> {
+        if child_ids.is_empty() {
+            return Ok(CommitOutcome::Superseded {
+                expected: new.covers_from.seq,
+                found: new.covers_from.seq,
+            });
+        }
+
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let outcome = self
+            .commit_rollup_in_transaction(&new, child_ids, &mut connection)
+            .await;
+
+        match &outcome {
+            Ok(CommitOutcome::Committed(_)) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error))?;
+            }
+            _ => {
+                if let Err(error) = sqlx::query("ROLLBACK").execute(&mut *connection).await {
+                    tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
+                }
+            }
+        }
+
+        outcome.map_err(|error| anyhow::anyhow!(error).into())
+    }
+
+    async fn commit_rollup_in_transaction(
+        &self,
+        new: &NewCheckpoint,
+        child_ids: &[String],
+        connection: &mut sqlx::SqliteConnection,
+    ) -> std::result::Result<CommitOutcome, sqlx::Error> {
+        // Re-read the children inside the transaction: another rollup may have
+        // claimed them between selection and commit.
+        let placeholders = vec!["?"; child_ids.len()].join(",");
+        let claimed_sql = format!(
+            "SELECT COUNT(*) AS claimed FROM channel_chronicle_checkpoints \
+             WHERE id IN ({placeholders}) AND rolled_up_into IS NOT NULL"
+        );
+        let mut claimed_query = sqlx::query(&claimed_sql);
+        for id in child_ids {
+            claimed_query = claimed_query.bind(id);
+        }
+        let claimed: i64 = claimed_query
+            .fetch_one(&mut *connection)
+            .await?
+            .try_get("claimed")
+            .unwrap_or(0);
+        if claimed > 0 {
+            return Ok(CommitOutcome::Superseded {
+                expected: 0,
+                found: claimed,
+            });
+        }
+
+        let outcome = self.commit_in_transaction(new, &mut *connection).await?;
+        let CommitOutcome::Committed(rollup) = &outcome else {
+            return Ok(outcome);
+        };
+
+        let stamp_sql = format!(
+            "UPDATE channel_chronicle_checkpoints SET rolled_up_into = ? \
+             WHERE id IN ({placeholders})"
+        );
+        let mut stamp_query = sqlx::query(&stamp_sql).bind(&rollup.id);
+        for id in child_ids {
+            stamp_query = stamp_query.bind(id);
+        }
+        stamp_query.execute(&mut *connection).await?;
+
+        Ok(outcome)
     }
 
     /// Checkpoints for the channel timeline, newest first.
@@ -1140,6 +1352,210 @@ mod tests {
             vec!["m4", "m5", "m6"],
             "the newest three, still in chronological order"
         );
+    }
+
+    async fn commit_chain(store: &ChronicleStore, count: i64) -> Vec<ChronicleCheckpoint> {
+        let mut checkpoints = Vec::new();
+        let mut from = 0i64;
+        for index in 0..count {
+            let to = from + 10;
+            let CommitOutcome::Committed(checkpoint) = store
+                .commit(new_checkpoint("ch", from, to, 10))
+                .await
+                .expect("commit")
+            else {
+                panic!("commit {index} should succeed")
+            };
+            from = to;
+            checkpoints.push(*checkpoint);
+        }
+        checkpoints
+    }
+
+    fn rollup_over(children: &[ChronicleCheckpoint]) -> NewCheckpoint {
+        let first = children.first().expect("children");
+        let last = children.last().expect("children");
+        NewCheckpoint {
+            channel_id: "ch".into(),
+            level: first.level + 1,
+            kind: CheckpointKind::Rollup,
+            title: "a stretch".into(),
+            summary: "several spans condensed".into(),
+            covers_from: first.start_boundary(),
+            covers_to: last.end_boundary(),
+            covers_from_at: first.covers_from_at,
+            covers_to_at: last.covers_to_at,
+            covers_from_message_id: None,
+            covers_to_message_id: None,
+            message_count: children.iter().map(|c| c.message_count).sum(),
+            token_estimate: 20,
+            rolls_up_from_seq: Some(first.seq),
+            rolls_up_to_seq: Some(last.seq),
+            model: None,
+        }
+    }
+
+    /// A rollup must never destroy what it summarizes: children keep their
+    /// rows, get stamped, and stay reachable in both directions.
+    #[tokio::test]
+    async fn a_rollup_preserves_its_children_in_both_directions() {
+        let store = setup().await;
+        let children = commit_chain(&store, 4).await;
+        let ids: Vec<String> = children.iter().map(|c| c.id.clone()).collect();
+
+        let CommitOutcome::Committed(rollup) = store
+            .commit_rollup(rollup_over(&children), &ids)
+            .await
+            .expect("rollup")
+        else {
+            panic!("rollup should commit")
+        };
+
+        assert_eq!(rollup.level, 1);
+        assert_eq!(rollup.rolls_up_from_seq, Some(children[0].seq));
+        assert_eq!(rollup.rolls_up_to_seq, Some(children[3].seq));
+
+        // Coverage is exactly the union of the children's.
+        assert_eq!(rollup.covers_from_seq, children[0].covers_from_seq);
+        assert_eq!(rollup.covers_to_seq, children[3].covers_to_seq);
+        assert_eq!(
+            rollup.message_count,
+            children.iter().map(|c| c.message_count).sum::<i64>()
+        );
+
+        // Parent -> children.
+        let listed = store.children_of(&rollup.id).await.expect("children");
+        assert_eq!(listed.len(), 4);
+        assert_eq!(
+            listed.iter().map(|c| c.seq).collect::<Vec<_>>(),
+            children.iter().map(|c| c.seq).collect::<Vec<_>>()
+        );
+
+        // Children -> parent, and every original row still exists.
+        for child in &children {
+            let reloaded = store
+                .get_by_seq("ch", child.seq)
+                .await
+                .expect("get")
+                .expect("child row survives the rollup");
+            assert_eq!(reloaded.rolled_up_into.as_deref(), Some(rollup.id.as_str()));
+            assert_eq!(reloaded.summary, child.summary, "child text is untouched");
+        }
+    }
+
+    /// The stamping and the insert are one transaction, so the same children
+    /// can never be rolled twice.
+    #[tokio::test]
+    async fn children_cannot_be_rolled_up_twice() {
+        let store = setup().await;
+        let children = commit_chain(&store, 3).await;
+        let ids: Vec<String> = children.iter().map(|c| c.id.clone()).collect();
+
+        assert!(matches!(
+            store
+                .commit_rollup(rollup_over(&children), &ids)
+                .await
+                .expect("first"),
+            CommitOutcome::Committed(_)
+        ));
+        assert!(matches!(
+            store
+                .commit_rollup(rollup_over(&children), &ids)
+                .await
+                .expect("second"),
+            CommitOutcome::Superseded { .. }
+        ));
+
+        assert_eq!(
+            store.list_all_levels("ch", 50).await.expect("list").len(),
+            4,
+            "three checkpoints and exactly one rollup"
+        );
+    }
+
+    /// Once absorbed, a checkpoint is represented by its rollup in the view.
+    #[tokio::test]
+    async fn the_view_selection_prefers_a_rollup_over_its_children() {
+        let store = setup().await;
+        let children = commit_chain(&store, 4).await;
+        let ids: Vec<String> = children.iter().map(|c| c.id.clone()).collect();
+
+        let before = store
+            .uncovered_before_seq("ch", i64::MAX, 50)
+            .await
+            .expect("before");
+        assert_eq!(before.len(), 4, "no rollup yet: the children are the view");
+
+        let CommitOutcome::Committed(rollup) = store
+            .commit_rollup(rollup_over(&children), &ids)
+            .await
+            .expect("rollup")
+        else {
+            panic!("rollup should commit")
+        };
+
+        let after = store
+            .uncovered_before_seq("ch", i64::MAX, 50)
+            .await
+            .expect("after");
+        assert_eq!(after.len(), 1, "the rollup now stands for all four");
+        assert_eq!(after[0].id, rollup.id);
+        assert_eq!(
+            store.unrolled_count("ch", 0).await.expect("count"),
+            0,
+            "no level-0 checkpoint is left uncovered"
+        );
+    }
+
+    /// Rollups nest: level-1 entries roll into level-2 the same way.
+    #[tokio::test]
+    async fn rollups_nest_into_higher_levels() {
+        let store = setup().await;
+        let children = commit_chain(&store, 6).await;
+
+        let first_ids: Vec<String> = children[..3].iter().map(|c| c.id.clone()).collect();
+        let CommitOutcome::Committed(first_rollup) = store
+            .commit_rollup(rollup_over(&children[..3]), &first_ids)
+            .await
+            .expect("rollup")
+        else {
+            panic!("first rollup")
+        };
+        let second_ids: Vec<String> = children[3..].iter().map(|c| c.id.clone()).collect();
+        let CommitOutcome::Committed(second_rollup) = store
+            .commit_rollup(rollup_over(&children[3..]), &second_ids)
+            .await
+            .expect("rollup")
+        else {
+            panic!("second rollup")
+        };
+
+        let level_one = vec![*first_rollup, *second_rollup];
+        let level_one_ids: Vec<String> = level_one.iter().map(|c| c.id.clone()).collect();
+        let CommitOutcome::Committed(top) = store
+            .commit_rollup(rollup_over(&level_one), &level_one_ids)
+            .await
+            .expect("level 2")
+        else {
+            panic!("level-2 rollup")
+        };
+
+        assert_eq!(top.level, 2);
+        assert_eq!(top.covers_from_seq, children[0].covers_from_seq);
+        assert_eq!(top.covers_to_seq, children[5].covers_to_seq);
+
+        let view = store
+            .uncovered_before_seq("ch", i64::MAX, 50)
+            .await
+            .expect("view");
+        assert_eq!(view.len(), 1, "one entry stands for the whole session");
+        assert_eq!(view[0].id, top.id);
+
+        // And the chain back down is intact.
+        let mid = store.children_of(&top.id).await.expect("mid");
+        assert_eq!(mid.len(), 2);
+        let leaves = store.children_of(&mid[0].id).await.expect("leaves");
+        assert_eq!(leaves.len(), 3);
     }
 
     #[tokio::test]
