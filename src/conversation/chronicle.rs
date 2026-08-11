@@ -285,9 +285,7 @@ impl ChronicleStore {
                 sqlx::query("COMMIT").execute(&mut *connection).await?;
             }
             _ => {
-                if let Err(error) =
-                    sqlx::query("ROLLBACK").execute(&mut *connection).await
-                {
+                if let Err(error) = sqlx::query("ROLLBACK").execute(&mut *connection).await {
                     tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
                 }
             }
@@ -638,9 +636,7 @@ impl ChronicleStore {
                     .map_err(|error| anyhow::anyhow!(error))?;
             }
             _ => {
-                if let Err(error) =
-                    sqlx::query("ROLLBACK").execute(&mut *connection).await
-                {
+                if let Err(error) = sqlx::query("ROLLBACK").execute(&mut *connection).await {
                     tracing::warn!(%error, "chronicle rollback failed after a rejected commit");
                 }
             }
