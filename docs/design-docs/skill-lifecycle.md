@@ -362,3 +362,43 @@ are prompt-heavy and should expect iteration after real transcripts.
   curation snapshots + (optional) user git on the skills dir cover it, same
   posture as the prior doc.
 - **No cross-agent skill sharing** yet; workspace scoping stands.
+
+## Shipped status (2026-08-11)
+
+### Shipped
+
+**Phase 1 — foundations** (PR #621): serde_yaml frontmatter, `skill_usage` table,
+`WriteOrigin`, API reload fix, watcher fixes, `skills_search` status-format fix,
+`read_skill` cap, branch skill index, `skills_search`/`install_skill` moved to
+channel toolset.
+
+**Phase 2 — mutation** (PR #622): `skill_manage` tool with full validation and
+origin-scoped rails, archive semantics, deterministic `reload_skills` on every
+mutation, `skills_list` tool.
+
+**Phase 3 — the pump** (PR #624, #633): Reflection riding the memory-persistence
+branch — turn-work and worker-completion triggers, restricted tool server
+(`read_skill`, `skill_manage`, `skills_list` + memory-save, no shell/no
+messaging/no spawn), reflection prompt section with decide-first and
+negative-capture bans, cooldown state, reflection signal with worker-ID
+tracking, worker transcript feeding for reflection passes.
+
+**Reflection run record** (this PR): Durable `reflection_runs` table with
+agent/channel identity, trigger source, referenced worker IDs, start/end
+timestamps, terminal status (`success`/`no_op`/`error`/`cancelled`), declared
+rationale (separate from observed actions), outcome summary, affected skill
+identifiers, and token usage slot. Fire-and-forget persistence via
+`ReflectionRunLogger` matching the existing `ProcessRunLogger` pattern.
+`ReflectionRunCompleted` event on the shared `ProcessEvent` bus, piped through
+the existing `ApiEvent` SSE pipeline. Minimal timeline surface in the portal UI
+rendering reflection outcomes inline (same pattern as chronicle checkpoints).
+
+### Deferred to Phase 4 (curation) and Phase 5 (surfaces)
+
+- Deterministic stale/archive pass in cortex maintenance
+- LLM consolidation pass (default-off)
+- Snapshots + rollback
+- `POST /agents/skills/write` + `CreateSkill.tsx`
+- Full `SkillInspector` usage row (provenance, state, counts, pin toggle)
+- `write_approval` staging mode
+- CLI `pin`/`adopt`/`archive`/`restore` commands

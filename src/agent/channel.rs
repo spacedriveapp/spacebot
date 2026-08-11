@@ -21,7 +21,7 @@ use crate::conversation::settings::{
     DelegationMode, MemoryMode, ResolvedConversationSettings, ResponseMode,
 };
 use crate::conversation::{
-    ActiveParticipant, ChannelStore, ConversationLogger, ProcessRunLogger,
+    ActiveParticipant, ChannelStore, ConversationLogger, ProcessRunLogger, ReflectionRunLogger,
     participant_display_name, participant_memory_key, renderable_participants,
     track_active_participant,
 };
@@ -318,6 +318,97 @@ fn branch_working_memory_event_summary(
     )
 }
 
+/// Derive a reflection run outcome from the persistence branch conclusion.
+///
+/// Scans the conclusion for declarative signals that skill mutations
+/// happened (or that the pass was a deliberate no-op / error). Returns
+/// `(status, outcome_summary, affected_skills_csv)` where status is one of
+/// `"success"`, `"no_op"`, or `"error"`.
+pub(super) fn derive_reflection_outcome(conclusion: &str) -> (String, String, String) {
+    let trimmed = conclusion.trim();
+
+    // The branch conclusion starts with a JSON-like or structured line.
+    // Memory-persistence conclusions typically start with status keywords.
+    let lower = trimmed.to_lowercase();
+
+    // No-op detection: the branch explicitly decided nothing was worth saving.
+    if lower.contains("no skills")
+        || lower.contains("no changes")
+        || lower.contains("nothing to")
+        || lower.contains("no actionable")
+        || (lower.contains("no writes") && lower.contains("acceptable"))
+    {
+        let summary = crate::summarize_first_non_empty_line(trimmed, 160);
+        return ("no_op".to_string(), summary, String::new());
+    }
+
+    // Error detection.
+    if lower.starts_with("error")
+        || lower.starts_with("failed")
+        || lower.contains("reflection failed")
+        || lower.contains("skill reflection error")
+    {
+        let summary = crate::summarize_first_non_empty_line(trimmed, 160);
+        return ("error".to_string(), summary, String::new());
+    }
+
+    // Success: extract skill names from the conclusion.
+    // Look for patterns like "patched skill-name", "created skill-name",
+    // "updated skill-name", or skill names that match the canonical format.
+    let affected = extract_skill_names_from_text(trimmed);
+    let summary = if affected.is_empty() {
+        // Success but no explicit skill names found — still count it.
+        crate::summarize_first_non_empty_line(trimmed, 160)
+    } else {
+        let skill_list = affected.join(", ");
+        format!(
+            "Reflection: affected {} — {}",
+            skill_list,
+            crate::summarize_first_non_empty_line(trimmed, 120)
+        )
+    };
+
+    (String::new(), summary, affected.join(", "))
+}
+
+/// Extract canonical skill names from text. Skill names match `[a-z0-9][a-z0-9._-]*`.
+pub(super) fn extract_skill_names_from_text(text: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"\b([a-z][a-z0-9._-]{2,63})\b").ok();
+    let Some(re) = re else {
+        return Vec::new();
+    };
+
+    // Only consider names near action keywords.
+    let action_keywords = [
+        "patched", "created", "updated", "edited", "skill", "modified", "wrote", "authored",
+    ];
+
+    let mut names = Vec::new();
+    let lower = text.to_lowercase();
+
+    for keyword in &action_keywords {
+        // Find keyword occurrences and look for skill names nearby.
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(keyword) {
+            let abs_pos = start + pos + keyword.len();
+            // Look at the next ~80 chars for a skill name.
+            let end = (abs_pos + 80).min(text.len());
+            let following = &text[abs_pos..end];
+            for cap in re.captures_iter(following) {
+                if let Some(m) = cap.get(0) {
+                    let name = m.as_str().to_string();
+                    if !names.contains(&name) && !action_keywords.contains(&name.as_str()) {
+                        names.push(name);
+                    }
+                }
+            }
+            start = abs_pos;
+        }
+    }
+
+    names
+}
+
 fn parse_branch_cancellation_reason(conclusion: &str) -> Option<&str> {
     let trimmed = conclusion.trim();
     if let Some(rest) = trimmed.strip_prefix(BRANCH_CANCELLED_PREFIX) {
@@ -475,6 +566,7 @@ pub struct ChannelState {
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
     pub process_run_logger: ProcessRunLogger,
+    pub reflection_run_logger: ReflectionRunLogger,
     /// Discord message ID to reply to for work spawned in the current turn.
     pub reply_target_message_id: Arc<RwLock<Option<String>>>,
     pub channel_store: ChannelStore,
@@ -922,6 +1014,9 @@ pub struct Channel {
     last_reflection_at: Option<std::time::Instant>,
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
+    /// Branch IDs for active skill-reflection runs and their start metadata.
+    /// On completion the record is consumed and written to the reflection_runs table.
+    reflection_branches: HashMap<BranchId, ReflectionRunStart>,
     /// Optional Discord reply target captured when each branch was started.
     branch_reply_targets: HashMap<BranchId, String>,
     /// Buffer for coalescing rapid-fire messages.
@@ -985,6 +1080,15 @@ impl ReflectionSignal {
         }
         self.workers.push((worker_id, success));
     }
+}
+
+/// Metadata captured when a skill-reflection run starts, held until
+/// the persistence branch completes so the run record carries the
+/// trigger provenance and referenced worker set.
+#[derive(Debug, Clone)]
+struct ReflectionRunStart {
+    trigger_source: String,
+    referenced_workers: Vec<(WorkerId, bool)>,
 }
 
 /// RAII guard that records `message_handling_duration_seconds` when dropped,
@@ -1065,6 +1169,7 @@ impl Channel {
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
         let process_run_logger = ProcessRunLogger::new(deps.sqlite_pool.clone());
+        let reflection_run_logger = ReflectionRunLogger::new(deps.sqlite_pool.clone());
         let channel_store = ChannelStore::new(deps.sqlite_pool.clone());
 
         let compactor_model = resolved_settings
@@ -1103,6 +1208,7 @@ impl Channel {
             deps: deps.clone(),
             conversation_logger,
             process_run_logger,
+            reflection_run_logger,
             reply_target_message_id: Arc::new(RwLock::new(None)),
             channel_store: channel_store.clone(),
             screenshot_dir,
@@ -1170,6 +1276,7 @@ impl Channel {
             message_count: 0,
             last_persistence_at: std::time::Instant::now(),
             memory_persistence_branches: HashSet::new(),
+            reflection_branches: HashMap::new(),
             reflection_signal: std::sync::Mutex::new(ReflectionSignal::default()),
             last_reflection_at: None,
             branch_reply_targets: HashMap::new(),
@@ -3879,6 +3986,48 @@ impl Channel {
                 // happened inside the branch via tool calls.
                 if was_memory_persistence {
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
+
+                    // If this was a skill-reflection pass, complete the run record.
+                    if let Some(reflection_start) = self.reflection_branches.remove(branch_id) {
+                        let (status, outcome_summary, affected_skills) =
+                            derive_reflection_outcome(conclusion);
+
+                        let status_final = if status.is_empty() {
+                            "success"
+                        } else {
+                            &status
+                        };
+
+                        self.state.reflection_run_logger.log_reflection_completed(
+                            *branch_id,
+                            status_final,
+                            &outcome_summary,
+                            Some(conclusion),
+                            &[], // observed_actions observable from tool-call events in future
+                            if status_final == "no_op" || status_final == "error" {
+                                Some(&outcome_summary)
+                            } else {
+                                None
+                            },
+                            None, // token_usage available from branch run in future
+                            &affected_skills,
+                        );
+
+                        // Emit the event for the SSE timeline — same bus as
+                        // BranchResult, WorkerComplete, etc.
+                        let _ = self
+                            .deps
+                            .event_tx
+                            .send(ProcessEvent::ReflectionRunCompleted {
+                                agent_id: self.deps.agent_id.clone(),
+                                channel_id: self.id.clone(),
+                                branch_id: *branch_id,
+                                status: status_final.to_string(),
+                                outcome_summary,
+                                trigger_source: reflection_start.trigger_source,
+                                affected_skills,
+                            });
+                    }
                 } else {
                     // Regular branch: accumulate result for the next retrigger.
                     // The result text will be embedded directly in the retrigger
@@ -4462,6 +4611,22 @@ impl Channel {
                         .reflection_signal
                         .lock()
                         .expect("reflection signal lock") = ReflectionSignal::default();
+
+                    // Persist the reflection run start record.
+                    self.state.reflection_run_logger.log_reflection_started(
+                        branch_id,
+                        &self.deps.agent_id,
+                        &self.id,
+                        trigger,
+                        &reflection_workers,
+                    );
+                    self.reflection_branches.insert(
+                        branch_id,
+                        ReflectionRunStart {
+                            trigger_source: trigger.to_string(),
+                            referenced_workers: reflection_workers.clone(),
+                        },
+                    );
                 }
                 self.memory_persistence_branches.insert(branch_id);
                 tracing::info!(
@@ -4704,8 +4869,9 @@ mod tests {
     use super::{
         ObserveModeFallbackState, ReflectionSignal, branch_working_memory_event_summary,
         classify_conversational_event_summary, compute_listen_mode_invocation, decision_user_id,
-        extract_decision_summary_from_reply, format_conversational_event_summary,
-        is_dm_conversation_id, recv_channel_event, should_process_event_for_channel,
+        derive_reflection_outcome, extract_decision_summary_from_reply,
+        extract_skill_names_from_text, format_conversational_event_summary, is_dm_conversation_id,
+        recv_channel_event, should_process_event_for_channel,
         should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
     use crate::memory::{MemoryType, WorkingMemoryEventType};
@@ -4792,6 +4958,95 @@ mod tests {
             vec![(worker, false)],
             "the first completion is the terminal one"
         );
+    }
+
+    // ── derive_reflection_outcome tests ──
+
+    #[test]
+    fn reflection_outcome_detects_no_op() {
+        let (status, summary, affected) = derive_reflection_outcome(
+            "no skills were changed in this reflection pass. Nothing to do.",
+        );
+        assert_eq!(status, "no_op");
+        assert!(!summary.is_empty());
+        assert!(affected.is_empty());
+
+        let (status, summary, affected) =
+            derive_reflection_outcome("No actionable skills found. No writes — acceptable.");
+        assert_eq!(status, "no_op");
+        assert!(!summary.is_empty());
+        assert!(affected.is_empty());
+    }
+
+    #[test]
+    fn reflection_outcome_detects_error() {
+        let (status, summary, affected) =
+            derive_reflection_outcome("Failed to parse skill frontmatter: invalid YAML");
+        assert_eq!(status, "error");
+        assert!(!summary.is_empty());
+
+        let (status, summary, affected) =
+            derive_reflection_outcome("error: skill reflection pass terminated unexpectedly");
+        assert_eq!(status, "error");
+        assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn reflection_outcome_detects_success_with_skills() {
+        let (status, summary, affected) = derive_reflection_outcome(
+            "Patched discord-rendering with new line-length rule. Also patched git-workflow.",
+        );
+        // Default status is "success" - empty string signals success
+        assert!(status.is_empty());
+        assert!(!summary.is_empty());
+        assert!(affected.contains("discord-rendering"));
+        assert!(affected.contains("git-workflow"));
+    }
+
+    #[test]
+    fn reflection_outcome_no_skills_still_succeeds() {
+        let (status, summary, affected) =
+            derive_reflection_outcome("Memory persistence completed. Saved 3 new memories.");
+        assert!(status.is_empty());
+        assert!(!summary.is_empty());
+        // May or may not find skill names; that's fine for success
+    }
+
+    // ── extract_skill_names_from_text tests ──
+
+    #[test]
+    fn extract_skill_names_finds_near_action_keywords() {
+        let names = extract_skill_names_from_text(
+            "Patched discord-rendering to add message-length guidance. Also updated code-review.",
+        );
+        assert!(names.contains(&"discord-rendering".to_string()));
+    }
+
+    #[test]
+    fn extract_skill_names_avoids_duplicates() {
+        let names = extract_skill_names_from_text(
+            "Patched discord-rendering. Then reviewed discord-rendering again.",
+        );
+        let count = names
+            .iter()
+            .filter(|n| n.as_str() == "discord-rendering")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn extract_skill_names_avoids_action_keywords() {
+        let names = extract_skill_names_from_text("Patched skill with patched config.");
+        assert!(!names.contains(&"patched".to_string()));
+        assert!(!names.contains(&"skill".to_string()));
+    }
+
+    #[test]
+    fn reflection_signal_default_is_unset() {
+        let signal = ReflectionSignal::default();
+        assert!(!signal.is_set());
+        assert!(signal.workers.is_empty());
+        assert!(!signal.turn_work);
     }
 
     #[tokio::test]

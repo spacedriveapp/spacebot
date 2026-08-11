@@ -1284,6 +1284,172 @@ impl ProcessRunLogger {
     }
 }
 
+/// Persists skill-reflection run records for the activity timeline.
+///
+/// Follows the same fire-and-forget pattern as [`ProcessRunLogger`].
+/// A reflection run starts when the persistence branch spawns with
+/// `skill_reflection = true` and completes when that branch's result
+/// arrives, recording the trigger provenance, outcome summary, affected
+/// skills, and token usage.
+#[derive(Debug, Clone)]
+pub struct ReflectionRunLogger {
+    pool: SqlitePool,
+}
+
+impl ReflectionRunLogger {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Record a reflection run starting. Fire-and-forget.
+    pub fn log_reflection_started(
+        &self,
+        branch_id: crate::BranchId,
+        agent_id: &crate::AgentId,
+        channel_id: &crate::ChannelId,
+        trigger_source: &str,
+        referenced_workers: &[(crate::WorkerId, bool)],
+    ) {
+        let pool = self.pool.clone();
+        let id = branch_id.to_string();
+        let agent_id = agent_id.to_string();
+        let channel_id = channel_id.to_string();
+        let trigger_source = trigger_source.to_string();
+        let referenced_workers = serde_json::to_string(
+            &referenced_workers
+                .iter()
+                .map(|(wid, success)| {
+                    serde_json::json!({
+                        "id": wid.to_string(),
+                        "success": success,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT OR IGNORE INTO reflection_runs \
+                 (id, agent_id, channel_id, trigger_source, referenced_workers) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&agent_id)
+            .bind(&channel_id)
+            .bind(&trigger_source)
+            .bind(&referenced_workers)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, branch_id = %id, "failed to persist reflection run start");
+            }
+        });
+    }
+
+    /// Mark a reflection run as completed. Called when the persistence
+    /// branch result arrives. Fire-and-forget.
+    ///
+    /// `observed_actions` is a JSON array of `{action, skill_name, detail?}`
+    /// derived from the branch's tool-call results — what actually
+    /// happened, not what the branch claimed it did.
+    pub fn log_reflection_completed(
+        &self,
+        branch_id: crate::BranchId,
+        status: &str,
+        outcome_summary: &str,
+        declared_rationale: Option<&str>,
+        observed_actions: &[serde_json::Value],
+        terminal_reason: Option<&str>,
+        token_usage: Option<serde_json::Value>,
+        affected_skills: &str,
+    ) {
+        let pool = self.pool.clone();
+        let id = branch_id.to_string();
+        let status = status.to_string();
+        let outcome_summary = outcome_summary.to_string();
+        let declared_rationale = declared_rationale.map(|s| s.to_string());
+        let observed_actions = serde_json::to_string(observed_actions).unwrap_or_default();
+        let terminal_reason = terminal_reason.map(|s| s.to_string());
+        let token_usage = token_usage.map(|v| serde_json::to_string(&v).unwrap_or_default());
+        let affected_skills = affected_skills.to_string();
+
+        // Guard against duplicate completions: only update if still 'running'.
+        tokio::spawn(async move {
+            let result = sqlx::query(
+                "UPDATE reflection_runs SET \
+                 status = ?, completed_at = CURRENT_TIMESTAMP, \
+                 declared_rationale = ?, observed_actions = ?, \
+                 outcome_summary = ?, terminal_reason = ?, \
+                 token_usage = ?, affected_skills = ? \
+                 WHERE id = ? AND status = 'running'",
+            )
+            .bind(&status)
+            .bind(&declared_rationale)
+            .bind(&observed_actions)
+            .bind(&outcome_summary)
+            .bind(&terminal_reason)
+            .bind(&token_usage)
+            .bind(&affected_skills)
+            .bind(&id)
+            .execute(&pool)
+            .await;
+
+            match result {
+                Ok(result) if result.rows_affected() > 0 => {
+                    tracing::info!(branch_id = %id, status = %status, "reflection run completed");
+                }
+                Ok(_) => {
+                    tracing::debug!(branch_id = %id, "reflection run already completed or not found");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, branch_id = %id, "failed to persist reflection run completion");
+                }
+            }
+        });
+    }
+
+    /// Load reflection runs for a channel, ordered by start time descending.
+    pub async fn load_for_channel(
+        &self,
+        channel_id: &crate::ChannelId,
+        limit: i64,
+    ) -> std::result::Result<Vec<ReflectionRunRow>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, ReflectionRunRow>(
+            "SELECT id, agent_id, channel_id, trigger_source, referenced_workers, \
+             started_at, completed_at, status, declared_rationale, observed_actions, \
+             outcome_summary, terminal_reason, token_usage, affected_skills \
+             FROM reflection_runs WHERE channel_id = ? \
+             ORDER BY started_at DESC LIMIT ?",
+        )
+        .bind(channel_id.as_ref())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+}
+
+/// Query row for a reflection run.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ReflectionRunRow {
+    pub id: String,
+    pub agent_id: String,
+    pub channel_id: String,
+    pub trigger_source: String,
+    pub referenced_workers: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub declared_rationale: Option<String>,
+    pub observed_actions: Option<String>,
+    pub outcome_summary: Option<String>,
+    pub terminal_reason: Option<String>,
+    pub token_usage: Option<String>,
+    pub affected_skills: Option<String>,
+}
+
 /// A worker run row without the transcript blob (for list queries).
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerRunRow {

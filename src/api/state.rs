@@ -434,6 +434,17 @@ pub enum ApiEvent {
         branch_id: String,
         conclusion: String,
     },
+    /// A skill-reflection run completed. Silent in conversations; surfaced
+    /// in the activity timeline only.
+    ReflectionRunCompleted {
+        agent_id: String,
+        channel_id: String,
+        branch_id: String,
+        status: String,
+        outcome_summary: String,
+        trigger_source: String,
+        affected_skills: String,
+    },
     /// A tool call started on a process.
     ToolStarted {
         agent_id: String,
@@ -829,6 +840,27 @@ impl ApiState {
                                         channel_id: channel_id.to_string(),
                                         branch_id: branch_id.to_string(),
                                         conclusion: conclusion.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::ReflectionRunCompleted {
+                                branch_id,
+                                channel_id,
+                                status,
+                                outcome_summary,
+                                trigger_source,
+                                affected_skills,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::ReflectionRunCompleted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        branch_id: branch_id.to_string(),
+                                        status: status.clone(),
+                                        outcome_summary: outcome_summary.clone(),
+                                        trigger_source: trigger_source.clone(),
+                                        affected_skills: affected_skills.clone(),
                                     })
                                     .ok();
                             }

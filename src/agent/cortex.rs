@@ -1605,6 +1605,7 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         // durable and reachable through the timeline and the chronicle tool,
         // so they do not also need a slot in the signal buffer.
         ProcessEvent::ChronicleCheckpoint { .. }
+        | ProcessEvent::ReflectionRunCompleted { .. }
         | ProcessEvent::OpenCodeSessionCreated { .. }
         | ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::WorkerInitialResult { .. }

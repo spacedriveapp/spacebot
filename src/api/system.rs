@@ -159,6 +159,7 @@ pub(super) async fn events_sse(
                             ApiEvent::WorkerCompleted { .. } => "worker_completed",
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
+                            ApiEvent::ReflectionRunCompleted { .. } => "reflection_run_completed",
                             ApiEvent::ToolStarted { .. } => "tool_started",
                             ApiEvent::ToolCompleted { .. } => "tool_completed",
                             ApiEvent::ConfigReloaded => "config_reloaded",
