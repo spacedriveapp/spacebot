@@ -32,8 +32,8 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [x] **R8 — Empty sections treated as successful no-op** (`src/agent/cortex.rs:2558`)
   Returns before tasks can contribute to synthesis; dirty flag never clears, causing infinite rescheduling. **Fixed in PR #570:** true empty input clears the target version, while gather failures fail the synthesis path and keep it retryable.
 
-- [ ] **R9 — Missing `default_max_turns(1)` + inline preambles** (`src/agent/cortex.rs:2579`)
-  Three cortex agent builders lack explicit max_turns; two have inline preamble strings instead of prompt files. **Stacked in PR #571:** one-shot synthesis prompt hardening is kept out of PR #570 to keep the reliability diff focused.
+- [x] **R9 — Missing `default_max_turns(1)` + inline preambles** (`src/agent/cortex.rs`)
+  Cortex one-shot synthesis agents now set `default_max_turns(1)`, and intraday/daily system preambles live in prompt templates. **Fixed in PR #571:** kept out of PR #570 so the reliability diff stays focused.
 
 - [x] **R10 — Version snapshot after async work** (`src/agent/cortex.rs:2614`)
   `knowledge_synthesis_last_version` read after LLM call; concurrent writes can advance the version past what was actually synthesized. **Fixed in PR #570:** synthesis snapshots the target version before async work and only marks that version complete.
