@@ -1,12 +1,17 @@
 //! Worker: Independent task execution process.
 
 use crate::agent::compactor::estimate_history_tokens;
+use crate::agent::tool_history::{
+    atomic_history_cut, prepare_tool_mismatch_retry, repair_and_validate_tool_history,
+};
 use crate::config::BrowserConfig;
 use crate::conversation::settings::WorkerMemoryMode;
 use crate::error::Result;
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::llm::routing::{is_context_overflow_error, is_retriable_error};
+use crate::llm::routing::{
+    is_context_overflow_error, is_retriable_error, is_tool_history_mismatch_error,
+};
 use crate::{AgentDeps, ChannelId, ProcessId, ProcessType, WorkerId};
 use rig::agent::AgentBuilder;
 use rig::completion::CompletionModel;
@@ -639,6 +644,7 @@ impl Worker {
         let mut segments_run: usize = 0;
         let mut overflow_retries = 0;
         let mut transient_retries = 0;
+        let mut tool_history_repair_attempted = false;
         let mut hit_max_segments = false;
 
         let mut result = if resuming {
@@ -695,11 +701,19 @@ impl Worker {
                     .await
                 {
                     Ok(response) => {
+                        if tool_history_repair_attempted {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .tool_history_recovery_total
+                                .with_label_values(&[self.deps.agent_id.as_ref(), "retry_success"])
+                                .inc();
+                        }
                         break response;
                     }
                     Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
                         overflow_retries = 0;
                         transient_retries = 0;
+                        tool_history_repair_attempted = false;
 
                         if segments_run >= MAX_SEGMENTS {
                             tracing::warn!(
@@ -739,6 +753,39 @@ impl Worker {
                         self.persist_transcript(&compacted_history, &history).await;
                         tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
                         return Ok(WorkerOutcome::Cancelled { reason });
+                    }
+                    Err(error) if is_tool_history_mismatch_error(&error.to_string()) => {
+                        let repair = prepare_tool_mismatch_retry(
+                            &mut history,
+                            &mut tool_history_repair_attempted,
+                        )
+                        .expect("tool history repair must establish protocol invariant");
+                        let Some(repair) = repair else {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .tool_history_recovery_total
+                                .with_label_values(&[
+                                    self.deps.agent_id.as_ref(),
+                                    "terminal_failure",
+                                ])
+                                .inc();
+                            self.state = WorkerState::Failed;
+                            self.hook.send_status("failed");
+                            let reason =
+                                "provider rejected tool history after bounded repair".to_string();
+                            self.write_failure_log(&history, &format!("{reason}: {error}"));
+                            self.persist_transcript(&compacted_history, &history).await;
+                            tracing::error!(worker_id = %self.id, "tool-history mismatch is terminal; identical history will not be retried");
+                            return Ok(WorkerOutcome::Failed { reason });
+                        };
+
+                        #[cfg(feature = "metrics")]
+                        crate::telemetry::Metrics::global()
+                            .tool_history_recovery_total
+                            .with_label_values(&[self.deps.agent_id.as_ref(), "repaired"])
+                            .inc();
+                        tracing::warn!(worker_id = %self.id, ?repair, "provider tool mismatch; repaired history for one bounded retry");
+                        self.hook.send_status("repairing tool history");
                     }
                     Err(error) if is_context_overflow_error(&error.to_string()) => {
                         overflow_retries += 1;
@@ -881,6 +928,7 @@ impl Worker {
                 let mut follow_up_prompt = follow_up.clone();
                 let mut follow_up_overflow_retries = 0;
                 let mut follow_up_transient_retries = 0u32;
+                let mut follow_up_tool_history_repair_attempted = false;
 
                 let follow_up_result: std::result::Result<String, String> = loop {
                     match self
@@ -888,7 +936,19 @@ impl Worker {
                         .prompt_with_tool_nudge_retry(&agent, &mut history, &follow_up_prompt)
                         .await
                     {
-                        Ok(response) => break Ok(response),
+                        Ok(response) => {
+                            if follow_up_tool_history_repair_attempted {
+                                #[cfg(feature = "metrics")]
+                                crate::telemetry::Metrics::global()
+                                    .tool_history_recovery_total
+                                    .with_label_values(&[
+                                        self.deps.agent_id.as_ref(),
+                                        "retry_success",
+                                    ])
+                                    .inc();
+                            }
+                            break Ok(response);
+                        }
                         Err(rig::completion::PromptError::PromptCancelled {
                             ref reason, ..
                         }) if SpacebotHook::is_tool_nudge_reason(reason) => {
@@ -903,6 +963,40 @@ impl Worker {
                                 "follow-up completion contract retries exhausted"
                             );
                             break Err(failure_reason);
+                        }
+                        Err(error) if is_tool_history_mismatch_error(&error.to_string()) => {
+                            let repair = prepare_tool_mismatch_retry(
+                                &mut history,
+                                &mut follow_up_tool_history_repair_attempted,
+                            )
+                            .expect("tool history repair must establish protocol invariant");
+                            let Some(repair) = repair else {
+                                #[cfg(feature = "metrics")]
+                                crate::telemetry::Metrics::global()
+                                    .tool_history_recovery_total
+                                    .with_label_values(&[
+                                        self.deps.agent_id.as_ref(),
+                                        "terminal_failure",
+                                    ])
+                                    .inc();
+                                let failure_reason =
+                                    "follow-up provider rejected tool history after bounded repair"
+                                        .to_string();
+                                self.write_failure_log(
+                                    &history,
+                                    &format!("{failure_reason}: {error}"),
+                                );
+                                tracing::error!(worker_id = %self.id, "follow-up tool-history mismatch is terminal; identical history will not be retried");
+                                break Err(failure_reason);
+                            };
+
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .tool_history_recovery_total
+                                .with_label_values(&[self.deps.agent_id.as_ref(), "repaired"])
+                                .inc();
+                            tracing::warn!(worker_id = %self.id, ?repair, "follow-up provider tool mismatch; repaired history for one bounded retry");
+                            self.hook.send_status("repairing tool history");
                         }
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
@@ -1145,11 +1239,26 @@ impl Worker {
         let estimated = estimate_history_tokens(history);
         let usage = estimated as f32 / context_window as f32;
 
-        let remove_count = ((total as f32 * fraction) as usize)
+        let desired_remove_count = ((total as f32 * fraction) as usize)
             .max(1)
             .min(total.saturating_sub(2));
+        let remove_count =
+            atomic_history_cut(history, desired_remove_count, total.saturating_sub(2));
+        if remove_count == 0 {
+            tracing::warn!(
+                worker_id = %self.id,
+                desired_remove_count,
+                "worker compaction skipped because no atomic tool-history boundary fits the retention floor"
+            );
+            return;
+        }
         let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
         compacted_history.extend(removed.iter().cloned());
+        let repair = repair_and_validate_tool_history(history)
+            .expect("tool history repair must establish protocol invariant");
+        if repair.changed() {
+            tracing::warn!(worker_id = %self.id, ?repair, "repaired worker tool history after compaction cut");
+        }
 
         let recap = build_worker_recap(&removed);
         let prompt_engine = self.deps.runtime_config.prompts.load();

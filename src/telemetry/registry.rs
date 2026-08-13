@@ -170,6 +170,10 @@ pub struct Metrics {
     /// Labels: agent_id, process_type.
     pub context_overflow_total: IntCounterVec,
 
+    /// Worker tool-history recovery outcomes.
+    /// Labels: agent_id, outcome (repaired/retry_success/terminal_failure).
+    pub tool_history_recovery_total: IntCounterVec,
+
     // -- Cost --
     /// Worker cost tracking in USD.
     /// Labels: agent_id, worker_type.
@@ -502,6 +506,15 @@ impl Metrics {
         )
         .expect("hardcoded metric descriptor");
 
+        let tool_history_recovery_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_tool_history_recovery_total",
+                "Worker tool-history recovery outcomes",
+            ),
+            &["agent_id", "outcome"],
+        )
+        .expect("hardcoded metric descriptor");
+
         // Cost (1)
         let worker_cost_dollars = CounterVec::new(
             Opts::new(
@@ -652,6 +665,9 @@ impl Metrics {
         registry
             .register(Box::new(context_overflow_total.clone()))
             .expect("hardcoded metric");
+        registry
+            .register(Box::new(tool_history_recovery_total.clone()))
+            .expect("hardcoded metric");
 
         // New: Cost
         registry
@@ -709,6 +725,7 @@ impl Metrics {
             http_request_duration_seconds,
             branches_spawned_total,
             context_overflow_total,
+            tool_history_recovery_total,
             worker_cost_dollars,
             cron_executions_total,
             cron_delivery_total,

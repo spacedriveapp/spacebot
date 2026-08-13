@@ -196,6 +196,20 @@ pub fn default_model_candidates(provider: &str) -> Vec<String> {
     candidates
 }
 
+/// Whether a provider rejected the request because tool calls and results in
+/// the submitted history do not form a valid protocol sequence. These 400s
+/// are deterministic for an unchanged request and are recoverable only after
+/// repairing the history.
+pub fn is_tool_history_mismatch_error(error_message: &str) -> bool {
+    let lower = error_message.to_lowercase();
+    lower.contains("no tool call found for function call output")
+        || lower.contains("tool_call_id") && lower.contains("did not have a response message")
+        || lower.contains("tool result") && lower.contains("without") && lower.contains("tool call")
+        || lower.contains("unexpected tool_use_id")
+        || lower.contains("tool_use") && lower.contains("without") && lower.contains("tool_result")
+        || lower.contains("function call output") && lower.contains("call_id")
+}
+
 /// Whether a completion error indicates context window overflow.
 ///
 /// Providers return 400 with various phrasings when the request exceeds
@@ -603,6 +617,18 @@ mod tests {
         // Other errors should not be retriable
         assert!(!is_retriable_error("unexpected EOF"));
         assert!(!is_retriable_error("parse error"));
+    }
+
+    #[test]
+    fn is_tool_history_mismatch_error_detects_provider_400s() {
+        assert!(is_tool_history_mismatch_error(
+            "OpenAI ChatGPT Responses API error (400 Bad Request): No tool call found for function call output with call_id call_123"
+        ));
+        assert!(is_tool_history_mismatch_error(
+            "messages.4: `tool_use` ids were found without `tool_result` blocks immediately after"
+        ));
+        assert!(!is_tool_history_mismatch_error("400 Bad Request"));
+        assert!(!is_tool_history_mismatch_error("context length exceeded"));
     }
 
     #[test]

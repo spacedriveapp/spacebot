@@ -19,6 +19,7 @@ pub mod maintenance;
 pub mod process_control;
 pub mod prompt_snapshot;
 pub mod status;
+pub(crate) mod tool_history;
 pub mod wake;
 pub mod worker;
 

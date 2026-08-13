@@ -4,6 +4,7 @@
 //! spawns compaction workers when thresholds are crossed. The LLM work (summarization
 //! + memory extraction) happens in the spawned worker, not here.
 
+use crate::agent::tool_history::{atomic_history_cut, repair_and_validate_tool_history};
 use crate::error::Result;
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
@@ -224,10 +225,23 @@ impl Compactor {
             return Ok(());
         }
 
-        let remove_count = total / 2;
+        let desired_remove_count = total / 2;
+        let remove_count =
+            atomic_history_cut(&history, desired_remove_count, total.saturating_sub(2));
+        if remove_count == 0 {
+            return Ok(());
+        }
 
         let removed: Vec<Message> = history.drain(..remove_count).collect();
         drop(removed);
+        let repair = repair_and_validate_tool_history(&mut history)
+            .expect("tool history repair must establish protocol invariant");
+        if repair.changed() {
+            tracing::warn!(
+                ?repair,
+                "repaired channel tool history after emergency truncation"
+            );
+        }
         self.fence.note_head_mutation();
         self.fence.rebase_turns(remove_count);
 
@@ -275,13 +289,22 @@ async fn run_compaction(
         let _guard = fence.lock_mutation().await;
         let mut hist = history.write().await;
         let total = hist.len();
-        let remove_count = ((total as f32 * fraction) as usize)
+        let desired_remove_count = ((total as f32 * fraction) as usize)
             .max(1)
             .min(total.saturating_sub(2));
+        let remove_count = atomic_history_cut(&hist, desired_remove_count, total.saturating_sub(2));
         if remove_count == 0 {
             return Ok(0);
         }
         let removed: Vec<Message> = hist.drain(..remove_count).collect();
+        let repair = repair_and_validate_tool_history(&mut hist)
+            .expect("tool history repair must establish protocol invariant");
+        if repair.changed() {
+            tracing::warn!(
+                ?repair,
+                "repaired channel tool history after rolling compaction cut"
+            );
+        }
         fence.note_head_mutation();
         fence.rebase_turns(remove_count);
         (removed, remove_count)
@@ -419,11 +442,27 @@ pub fn precompact_forked_history(
             break;
         }
 
-        let remove_count = ((total as f32 * fraction) as usize)
+        let desired_remove_count = ((total as f32 * fraction) as usize)
             .max(1)
             .min(total - FORK_MIN_RETAINED_MESSAGES);
+        let remove_count = atomic_history_cut(
+            history,
+            desired_remove_count,
+            total - FORK_MIN_RETAINED_MESSAGES,
+        );
+        if remove_count == 0 {
+            break;
+        }
         history.drain(..remove_count);
         removed_total += remove_count;
+        let repair = repair_and_validate_tool_history(history)
+            .expect("tool history repair must establish protocol invariant");
+        if repair.changed() {
+            tracing::warn!(
+                ?repair,
+                "repaired forked tool history after pre-compaction cut"
+            );
+        }
     }
 
     let retained_tokens = estimate_history_tokens(history);
