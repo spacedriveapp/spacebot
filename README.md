@@ -5,7 +5,7 @@
 <h1 align="center">Spacebot</h1>
 
 <p align="center">
-  <strong>The agent harness that runs teams, communities, and companies.</strong>
+  <strong>The multi-threaded agent harness. Built to run teams, communities, and companies.</strong>
 </p>
 
 <p align="center">
@@ -28,6 +28,7 @@
   <a href="https://spacebot.sh"><strong>spacebot.sh</strong></a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#chronicles">Chronicles</a> •
+  <a href="#built-for-teams">Teams</a> •
   <a href="#autonomy">Autonomy</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#spacebot--spacedrive">Spacedrive</a> •
@@ -42,49 +43,53 @@
 
 ---
 
-Spacebot is opinionated agent infrastructure, built for teams and usable by anyone. **State belongs in structured storage, not markdown files the LLM manages.** Memory lives in a typed graph in SQLite. Conversation history compacts into durable, navigable chronicles instead of one rolling summary. Autonomy runs on a task state machine linked to goals, not a heartbeat.json. The LLM reasons. The system holds state.
+Spacebot is opinionated agent infrastructure, built for teams and usable by anyone.
 
-**It gets smarter the more you use it.** After complex tasks, the agent captures what it learned as reusable skills. After conversations go idle, a background process silently saves skills and memories worth keeping. Every session builds on the last — without any user action.
+Agent harnesses are single-threaded. One conversation loop reads, calls a tool, and waits for it — delegation exists, but it's optional and the loop still blocks on the call it just made. That's the right shape for one person at a keyboard. It's the wrong shape for an agent whose job is to run work for other people.
 
-It works out of the box and scales from one person to a whole community.
+**Spacebot is multi-threaded, in both directions.** Work is threaded: a channel never executes anything itself, so thinking, execution, and compaction all run off the conversation. People are threaded: many humans across many platforms, each in their own channel, sharing one memory graph and one task system, none of them waiting on another.
+
+Everything else follows from one property — **an orchestrator has to stay available.** It takes your next message while the last one is still running. It doesn't go dark to compact. It doesn't make you queue, steer, or wait your turn.
+
+**And it gets better the more you use it.** Work becomes skills, conversations become memory, and goals pull it forward between them. Every session builds on the last, without any user action.
+
+Self-hosted, open source, local-first. One Rust binary, your own model keys, all state in embedded databases in a directory you own.
 
 ---
 
 ## The Problem
 
-Most AI agent frameworks run everything in a single session. One LLM thread handles conversation, thinking, tool execution, memory retrieval, and context compaction, all in one loop. When it's doing work, it can't talk to you. When it's compacting, it goes dark. When it retrieves memories, raw results pollute the context with noise.
+Agent harnesses have gotten good. Skills, persistent memory, cron, a messaging gateway, subagents to delegate to — the category is understood now, and the good ones are a pleasure to use.
 
-Spacebot splits the monolith into specialized processes that only do one thing, and delegate everything else.
+They also share one shape: a single conversation loop that owns everything. Subagents are available, but nothing forces the work out of the main thread, and the loop blocks on whatever it just called. For a solo operator that's the correct trade. You asked for the work; you were going to wait for it anyway.
 
----
+It stops being correct the moment the agent's job is to run work for other people:
 
-## Built for Teams
+- **It blocks.** While it's executing, your next message gets queued or turned into a steer. It can't just take the next thing.
+- **It goes dark to compact.** The one context holding the entire relationship is also the one that gets rewritten under pressure, and detail blurs a little more each time.
+- **The machinery leaks.** Compaction notices, skill edits, tool chatter — the implementation shows up in the conversation. It reads like a program, not a colleague.
+- **It's single-tenant.** One user, one context. No second person with different permissions, no third channel with its own history, nothing shared between them.
+- **Its state is markdown the model rewrites.** Fine for one person and one project. Not something an organization can query, audit, or gate.
 
-No other agent harness handles concurrent multi-user conversations, shared memory across channels, and true process-level concurrency. A Discord community with hundreds of active members, a Slack workspace running parallel workstreams, a Telegram group coordinating across time zones. Spacebot handles all of it without any user waiting on another.
-
-Solo users get the same infrastructure. Better memory, better concurrency, better structure. Everything teams rely on, for one person.
-
-**For communities:** drop Spacebot into a Discord server. It handles concurrent conversations across channels and threads, remembers context about every member, and does real work without going dark. Fifty people can interact simultaneously. A message coalescing system detects rapid-fire bursts, batches them into a single turn, and lets the agent read the room.
-
-**For teams:** connect it to Slack. Each channel gets a dedicated conversation with shared memory. One engineer gets a deep coding session while another gets a quick answer. Workers handle heavy lifting in the background while the channel stays responsive.
-
-**For multi-agent setups:** run multiple agents on one instance. A community bot on Discord, a dev assistant on Slack, a research agent handling background tasks. Each with its own identity, memory, and security permissions. One binary, one deploy.
+Spacebot inverts it. Delegation isn't an option the model can skip — it's the only way work gets done, enforced by which tools each process type has. The conversation stays a conversation. Everything else runs somewhere else.
 
 ---
 
 ## How It Works
 
-Five process types. Each does one job.
+Four process types. Each does one job, and delegates the rest.
 
-**Channels** are the user-facing LLM process. One per conversation, with soul, identity, and personality. A channel never executes tasks or searches memories directly. It branches to think, spawns workers to act, and stays responsive.
+**Channels** are the user-facing LLM process — one per conversation, with soul, identity, and personality. A channel has no shell, no filesystem, no memory search. It can reply, branch, spawn workers, and route. That's the whole point: a process that cannot block is a process that is always available.
 
-**Branches** fork from the channel's context to think. They have the full conversation history and run concurrently. The channel sees the conclusion, not the working.
+Channels come in three kinds, and they are the same process every time. A **user channel** wakes when a person sends a message. A **cron channel** wakes on a schedule. The **autonomy channel** wakes on a typed event — an approval, a webhook, an idle condition. Autonomy isn't a separate subsystem bolted on the side; it's the agent talking to itself with the same identity, the same tools, and the same task state it would have if you'd asked.
+
+**Branches** fork the channel's context to think. Full conversation history, running concurrently, several at once. They recall memories, weigh options, and hand back a conclusion. Raw search results never touch the channel.
 
 **Workers** are independent processes that execute real work. A worker begins as a full fork of the channel that delegated to it — it carries the conversation context behind the task, not just a one-line description, so it acts on intent instead of guessing at it. Chronicles keep that inherited history bounded as sessions age. Fire-and-forget for one-shot tasks, or interactive for longer sessions where follow-up routes to the active worker.
 
-**The Compactor** is a programmatic monitor (not an LLM) that watches context size per channel and triggers compaction before the channel fills up. Compaction workers run alongside without blocking. Two modes, selected by `compaction.mode`: `rolling` keeps one summary at the head of history and rewrites it under pressure, while `chronicle` cuts durable checkpoints designed for sessions that run for weeks. See [Chronicles](#chronicles).
+**The Compactor** is a programmatic monitor, not an LLM. It watches context size per channel and spawns a compaction worker before the channel fills up, so compaction never interrupts the conversation. Two modes, selected by `compaction.mode`: `rolling` keeps one summary at the head of history and rewrites it under pressure, while `chronicle` cuts durable checkpoints designed for sessions that run for weeks. See [Chronicles](#chronicles).
 
-**The Cortex** is the system's supervisor. It sees across all channels, workers, and branches, detects hung workers and stale branches, enforces timeout policy, and runs periodic memory-graph maintenance — decay, pruning, and merging near-duplicates. It's the only process with a whole-system view, and it stays out of the token budget: when there's no work to do, nothing runs.
+Underneath, a supervisor watches the whole instance — hung workers, stale branches, timeout policy, memory-graph maintenance. It has the only whole-system view and it stays out of the token budget: no work, no LLM calls.
 
 ```
 User sends message
@@ -106,6 +111,14 @@ Channel context hits 80%
 
 For process capabilities, tool access by type, memory internals, and multi-agent isolation, see the [architecture docs](<docs/content/docs/(core)/architecture.mdx>).
 
+### Workers run other agents
+
+Spacebot is not a coding agent, and it isn't trying to become one. It's the layer above: it holds the goal, breaks it into tasks with real specs, decides what runs where, and drives coding agents as workers.
+
+A task carries its own execution plan — worker type, project, worktree mode, required skills — so the decision of *how* work runs is made once, at planning time, and survives approval, restarts, and handoff. Today a task runs on the built-in worker or on [OpenCode](https://opencode.ai) as a full coding session. A backend boundary is landing next so the same task, unchanged, can run on any coding agent or a durable cloud agent instead.
+
+The coding agent is a puppet, not the pilot. Spacebot keeps approval, workspace policy, secrets, and terminal outcomes on its side of that line.
+
 ---
 
 ## Chronicles
@@ -123,6 +136,24 @@ The history stays navigable, not just compressed:
 Checkpoints survive restarts, cover the transcript without gaps, and render inline in the Portal timeline, so you can scrub through weeks of session history the same way the agent does.
 
 This is also what makes worker forks practical: a channel that has been alive for a month hands its workers a bounded chronicle view, not an unmanageable transcript.
+
+And it's what keeps an orchestrator responsive over months. Because every tool call is siphoned off to a branch or a worker, and every old span collapses to a checkpoint, the channel's context stays small by construction. What it holds is operational awareness — who's asking, what's running, what's blocked — not a transcript of everything it has ever done. A channel that never fills up is a channel that never has to stop and rebuild itself.
+
+---
+
+## Built for Teams
+
+Nothing else in this category handles concurrent multi-user conversations, shared memory across channels, and process-level concurrency at the same time. A Discord community with hundreds of active members, a Slack workspace running parallel workstreams, a Telegram group coordinating across time zones — all at once, on one instance, with nobody waiting on anybody.
+
+The agent knows *who* it's talking to, not just what was said. Each known human maps to an anchor memory, so identity survives across platforms and channels. Permissions are per-guild, per-channel, and per-DM, and commands carry explicit authority checks. Two people in the same workspace can have genuinely different access to the same agent.
+
+**For communities:** drop Spacebot into a Discord server. It handles concurrent conversations across channels and threads, remembers context about every member, and does real work without going dark. Fifty people can interact simultaneously. Message coalescing detects rapid-fire bursts, batches them into a single turn, and lets the agent read the room.
+
+**For teams:** connect it to Slack. Each channel gets a dedicated conversation with shared memory. One engineer gets a deep coding session while another gets a quick answer. Workers handle the heavy lifting in the background while the channel stays responsive.
+
+**For multi-agent setups:** run multiple agents on one instance. A community bot on Discord, a dev assistant on Slack, a research agent handling background tasks. Each with its own identity, memory, and permissions. One binary, one deploy.
+
+Solo users get the same infrastructure. Better memory, better concurrency, better structure — everything a team relies on, for one person.
 
 ---
 
@@ -142,6 +173,8 @@ Every agent gets a durable operating model for autonomous work:
 On wake, the channel has its identity, task state, goals, recent activity, and its own prior work. It enriches proposed tasks, executes approved work, and records findings as it goes. State lives in tasks — after a crash, the next wake reads task state and picks up where things left off.
 
 **The agent proposes. You decide.** Tasks the autonomy channel creates land in `pending_approval`. Nothing runs autonomously until you approve it. When the agent needs input mid-work, the `ask` tool files a durable question that waits for your answer — hours later, on a different platform, it still correlates back.
+
+Put together, the loop closes. Feedback arrives in a channel from you or from a user. The agent researches it, writes a spec, breaks it into tasks with dependencies, waits for approval, runs the work through coding workers, reviews what came back, and brings you something ready to merge. It keeps its own roadmap between runs and only interrupts you when it needs a decision. Human approval still gates every execution — autonomy here means the agent owns the *process*, not that it operates unsupervised.
 
 There is no idle loop burning tokens in the background. No work means no LLM calls.
 
@@ -258,7 +291,25 @@ Spacebot builds on itself over time through four specific mechanisms.
 
 **Goals drive autonomous work between conversations.** Wakes pull the autonomy channel forward, it works through approved tasks, and each run's summary is the first thing the next run reads. Nothing resets when you walk away.
 
-Everything goes through typed tools into structured storage. Nothing drifts.
+**State belongs in structured storage.** Everything the system relies on goes through typed tools into a database: memory into a typed graph in SQLite, history into append-only checkpoints, autonomy into a task state machine linked to goals. Markdown is still used where markdown is right — task specs, skills, identity files — but it's content the agent authors, never the state it depends on. The LLM reasons. The system holds state. Nothing drifts.
+
+---
+
+## Runs on Your Infrastructure
+
+The tooling for autonomous work is being built as SaaS. Those are good products, and the trade is always the same: you get the orchestration, they get your codebase, your conversations, and your org chart.
+
+Spacebot is the other option. One binary you run yourself, your own model keys, every database a file in a directory you own. Nothing phones home, no vendor sits between the agent and your work, and any OpenAI- or Anthropic-compatible endpoint works — including a local model over Ollama, if you want the whole loop to stay on your own hardware.
+
+That matters more the further a deployment goes. Multi-tenant conversations, per-channel permissions, approval gates on anything that executes, full transcripts for every branch and worker, token and cost accounting per process, kernel-level containment on shell access. These are the primitives an organization needs before it will let an agent touch anything real, and they're much harder to add to a harness afterwards than to build the system around.
+
+---
+
+## Status
+
+Spacebot is in beta and the roadmap is long. The `0.6` line is where it starts running its own development: feedback in, tasks out, work executed by coding workers, reviewed, and returned ready to merge — with the agent keeping its own roadmap between runs.
+
+Config and interfaces still move between minor versions. Each release is written up in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

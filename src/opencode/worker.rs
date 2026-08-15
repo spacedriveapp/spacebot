@@ -293,6 +293,8 @@ impl OpenCodeWorker {
                     let guard = server.lock().await;
                     guard.port()
                 };
+                self.persist_session_metadata(&resume.session_id, opencode_port)
+                    .await;
 
                 // Re-emit session metadata so the frontend can show the embed.
                 self.event_tx
@@ -349,6 +351,8 @@ impl OpenCodeWorker {
                     let guard = server.lock().await;
                     guard.port()
                 };
+                self.persist_session_metadata(&session_id, opencode_port)
+                    .await;
                 self.event_tx
                     .send(ProcessEvent::OpenCodeSessionCreated {
                         agent_id: self.agent_id.clone(),
@@ -934,6 +938,25 @@ impl OpenCodeWorker {
             worker_id: self.id,
             channel_id: self.channel_id.clone(),
         });
+    }
+
+    async fn persist_session_metadata(&self, session_id: &str, port: u16) {
+        let Some(pool) = &self.sqlite_pool else {
+            return;
+        };
+        let logger = crate::conversation::ProcessRunLogger::new(pool.clone());
+        match logger
+            .update_opencode_metadata(self.id, session_id, port)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(worker_id = %self.id, session_id, port, "OpenCode worker row missing while persisting session metadata");
+            }
+            Err(error) => {
+                tracing::warn!(%error, worker_id = %self.id, session_id, port, "failed to persist OpenCode session metadata");
+            }
+        }
     }
 
     /// Persist a snapshot of the transcript built from accumulated SSE parts.

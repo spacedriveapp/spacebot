@@ -186,6 +186,21 @@ impl crate::tasks::TaskStore {
         .context("failed to count task comments")
         .map_err(Into::into)
     }
+
+    /// Complete discussion for an internal task execution briefing.
+    pub(crate) async fn all_comments(&self, task_number: i64) -> Result<Vec<TaskComment>> {
+        let rows = sqlx::query(&format!(
+            "{COMMENT_SELECT_COLUMNS} FROM task_comments \
+             WHERE task_id = (SELECT id FROM tasks WHERE task_number = ?) \
+             ORDER BY seq ASC"
+        ))
+        .bind(task_number)
+        .fetch_all(self.pool())
+        .await
+        .context("failed to load complete task discussion")?;
+
+        rows.into_iter().map(comment_from_row).collect()
+    }
 }
 
 /// Column list used by all comment SELECT queries. Kept in sync with

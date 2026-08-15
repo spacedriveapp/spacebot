@@ -1,0 +1,17 @@
+## Spacebot Task Board
+
+Use the `spacebot` CLI on `PATH` to refresh task state and record durable findings when the task permits board writes. It connects to the local daemon with configured authentication. If it is unavailable, do not search for instance databases or edit them directly; report that the CLI could not be run.
+
+- `spacebot task get <number>` reads the current task.
+- `spacebot task comments <number> --limit 200` reads its discussion.
+- `spacebot task history <number> --limit 200` lists revisions.
+- `spacebot task revision <number> <revision>` reads a full historical snapshot.
+- `spacebot task diff <number> <from> [to]` compares revisions.
+- `spacebot task comment <number> "<finding>"` records a concise finding.
+- `spacebot task update <number> ... --expect <revision> --summary "<reason>"` updates supported fields with optimistic concurrency.
+- `spacebot task restore <number> <revision> --expect <current-revision> --summary "<reason>"` appends a restore revision.
+- `spacebot task --help` and `spacebot task <command> --help` show the full command surface.
+
+Put global flags before `task`, for example `spacebot --json task get 31`. Read the current revision immediately before a write and pass `--expect`. Only mutate the referenced task when the task instructions permit it. The injected task context is a spawn-time snapshot; use the CLI when current state matters.
+
+For bound task execution, keep the board current with concise comments and subtask updates. Mark the task done only after its acceptance criteria are met. For reference-only audits, leave the board unchanged unless the caller explicitly requests an update.

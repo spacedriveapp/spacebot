@@ -186,6 +186,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/projects_context") => {
             include_str!("../../prompts/en/fragments/projects_context.md.j2")
         }
+        ("en", "fragments/opencode_task_management") => {
+            include_str!("../../prompts/en/fragments/opencode_task_management.md.j2")
+        }
 
         // Tool Descriptions
         ("en", "tools/reply") => include_str!("../../prompts/en/tools/reply_description.md.j2"),

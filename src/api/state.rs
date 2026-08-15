@@ -332,6 +332,10 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by process kind and ID, cleared on process completion.
     pub live_process_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
+    /// OpenCode parts accumulated for active workers. Parts are upserted by
+    /// provider ID and projected into `live_process_transcripts` on each event.
+    pub live_opencode_parts:
+        Arc<RwLock<HashMap<String, Vec<crate::opencode::types::OpenCodePart>>>>,
     /// Bounded tombstone set of recently completed process keys.
     ///
     /// Prevents late/lagged `ToolOutput` events from recreating transcript
@@ -429,6 +433,14 @@ pub enum ApiEvent {
         worker_id: String,
         result: String,
         success: bool,
+    },
+    /// An OpenCode worker created or reattached to its provider session.
+    OpenCodeSessionCreated {
+        agent_id: String,
+        channel_id: Option<String>,
+        worker_id: String,
+        session_id: String,
+        port: u16,
     },
     /// A branch was started.
     BranchStarted {
@@ -638,6 +650,7 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_process_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            live_opencode_parts: Arc::new(RwLock::new(HashMap::new())),
             completed_process_tombstones: Arc::new(RwLock::new(HashSet::new())),
             live_channel_tool_calls: Arc::new(RwLock::new(HashMap::new())),
             ssh_mutex: tokio::sync::Mutex::new(()),
@@ -690,6 +703,7 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_process_transcripts.clone();
+        let live_opencode_parts = self.live_opencode_parts.clone();
         let completed_process_tombstones = self.completed_process_tombstones.clone();
         let live_channel_tools = self.live_channel_tool_calls.clone();
         // Snapshot the notification store at registration time. It is set once
@@ -744,6 +758,13 @@ impl ApiState {
                                     .await
                                     .entry(process_key)
                                     .or_default();
+                                if worker_type == "opencode" {
+                                    live_opencode_parts
+                                        .write()
+                                        .await
+                                        .entry(worker_id.to_string())
+                                        .or_default();
+                                }
                                 api_tx
                                     .send(ApiEvent::WorkerStarted {
                                         agent_id: agent_id.clone(),
@@ -868,6 +889,10 @@ impl ApiState {
                                 }
                                 completed_guard.insert(process_key.clone());
                                 live_transcripts.write().await.remove(&process_key);
+                                live_opencode_parts
+                                    .write()
+                                    .await
+                                    .remove(&worker_id.to_string());
                                 api_tx
                                     .send(ApiEvent::WorkerCompleted {
                                         agent_id: agent_id.clone(),
@@ -1124,11 +1149,52 @@ impl ApiState {
                             ProcessEvent::OpenCodePartUpdated {
                                 worker_id, part, ..
                             } => {
+                                let process_key = ProcessId::Worker(*worker_id).to_string();
+                                let completed_guard = completed_process_tombstones.read().await;
+                                if !completed_guard.contains(&process_key) {
+                                    drop(completed_guard);
+                                    let transcript = {
+                                        let mut parts_by_worker = live_opencode_parts.write().await;
+                                        let parts = parts_by_worker
+                                            .entry(worker_id.to_string())
+                                            .or_default();
+                                        if let Some(existing) = parts
+                                            .iter_mut()
+                                            .find(|existing| existing.id() == part.id())
+                                        {
+                                            *existing = part.clone();
+                                        } else {
+                                            parts.push(part.clone());
+                                        }
+                                        crate::conversation::worker_transcript::convert_opencode_parts(parts)
+                                    };
+                                    live_transcripts
+                                        .write()
+                                        .await
+                                        .insert(process_key, transcript);
+                                }
                                 api_tx
                                     .send(ApiEvent::OpenCodePartUpdated {
                                         agent_id: agent_id.clone(),
                                         worker_id: worker_id.to_string(),
                                         part: part.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::OpenCodeSessionCreated {
+                                worker_id,
+                                channel_id,
+                                session_id,
+                                port,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::OpenCodeSessionCreated {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(ToString::to_string),
+                                        worker_id: worker_id.to_string(),
+                                        session_id: session_id.clone(),
+                                        port: *port,
                                     })
                                     .ok();
                             }
@@ -1567,6 +1633,87 @@ mod tests {
         let sanitized = sanitize_live_tool_output_line(line);
         assert_ne!(sanitized, line);
         assert!(crate::secrets::scrub::scan_for_leaks(&sanitized).is_none());
+    }
+
+    #[tokio::test]
+    async fn opencode_session_and_parts_reach_api_state_without_channel_consumer() {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let api_state = super::ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        );
+        let mut api_rx = api_state.event_tx.subscribe();
+        let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
+        api_state.register_agent_events("agent".to_string(), control_rx);
+
+        let agent_id: crate::AgentId = Arc::from("agent");
+        let channel_id: crate::ChannelId = Arc::from("autonomy");
+        let worker_id = uuid::Uuid::new_v4();
+        let process_id = ProcessId::Worker(worker_id);
+        let _ = control_tx.send(ProcessEvent::WorkerStarted {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: Some(channel_id.clone()),
+            task: "coding task".to_string(),
+            worker_type: "opencode".to_string(),
+            interactive: true,
+            directory: Some("/tmp/worktree".to_string()),
+        });
+        let _ = control_tx.send(ProcessEvent::OpenCodeSessionCreated {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: Some(channel_id),
+            session_id: "session-1".to_string(),
+            port: 12_345,
+        });
+        let _ = control_tx.send(ProcessEvent::OpenCodePartUpdated {
+            agent_id,
+            worker_id,
+            part: crate::opencode::types::OpenCodePart::Text {
+                id: "part-1".to_string(),
+                text: "working".to_string(),
+            },
+        });
+
+        let session_forwarded = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(super::ApiEvent::OpenCodeSessionCreated {
+                    worker_id: event_worker_id,
+                    session_id,
+                    port,
+                    ..
+                }) = api_rx.recv().await
+                    && event_worker_id == worker_id.to_string()
+                {
+                    break session_id == "session-1" && port == 12_345;
+                }
+            }
+        })
+        .await;
+        assert!(matches!(session_forwarded, Ok(true)));
+
+        let transcript_cached = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if api_state
+                    .get_live_transcript(&process_id)
+                    .await
+                    .is_some_and(|steps| !steps.is_empty())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            transcript_cached.is_ok(),
+            "OpenCode parts should populate the live transcript cache"
+        );
     }
 
     #[tokio::test]
