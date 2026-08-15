@@ -14,6 +14,16 @@ This design complements [worker-reliability.md](worker-reliability.md). That
 document owns durable outcomes, staged termination, liveness, and supervision.
 This document defines the backend boundary those guarantees operate across.
 
+## Document Status
+
+This is a proposed implementation architecture, not a description of shipped
+backend-neutral behavior. The **Current System** section names behavior present
+in the repository at review time. Later contracts, schemas, state machines,
+adapters, APIs, and rollout phases are requirements for tasks #39-#45 unless a
+paragraph explicitly says that a component already exists. OpenCode is the only
+current external coding-worker implementation; Capy, ACP, generic profiles, the
+backend supervisor, and the generic workbench are not yet shipped.
+
 ## Goals
 
 - Execute the same task through builtin, local, and cloud coding workers.
@@ -68,6 +78,12 @@ calls this a session. Capy calls it a thread. Cursor calls it an agent.
 **Execution location** describes where code runs: in-process, a local
 directory, a remote host, or a provider-managed workspace.
 
+**Identity domains** are separate identifiers for the Spacebot worker, its
+attempt, its input and operation records, the backend profile, and the
+provider's session, run, message, and request objects. An identifier is only
+meaningful in its own domain. Provider IDs never stand in for `WorkerId`,
+`WorkerAttemptId`, or authorization to control another worker.
+
 ## Current System
 
 Spacebot already has most of the orchestration pieces, but OpenCode is a
@@ -86,18 +102,40 @@ special branch rather than an adapter.
 | Worker API | `src/api/workers.rs` |
 | OpenCode presentation | `interface/src/components/OpenCodeEmbed.tsx` |
 | Task execution plan | `src/tasks/store.rs` |
-| Autonomous ready-task pickup | `src/agent/cortex.rs` |
+| Autonomous task execution | `src/agent/autonomy.rs` via `SpawnWorkerTool` |
 
 The central event model is already mostly backend-neutral. `WorkerStarted`,
 `WorkerStatus`, `WorkerIdle`, `WorkerInitialResult`, and `WorkerComplete` can
 describe any provider. The remaining OpenCode-specific events, persistence
 columns, API fields, and UI branches show where the boundary needs extracting.
 
-There is also an execution correctness gap. `SpawnWorkerTool` resolves project
-defaults, required skills, worktree policy, and worker type. Cortex ready-task
-pickup constructs a builtin `Worker` directly and does not use that plan. A
-task can therefore run differently depending on what initiated it. The shared
-task executor must land before another backend is added.
+The current OpenCode path also exposes concrete trust and lifecycle gaps that
+this migration must close rather than preserve:
+
+- `OpenCodeServer` inherits the Spacebot process environment and only overlays
+  `OPENCODE_CONFIG_CONTENT` and `OPENCODE_PORT`; local backend launch needs an
+  explicit environment allowlist plus profile-selected secret references.
+- Permission and question events are emitted, but the worker then grants each
+  permission once and chooses the first answer. Observation is not approval;
+  requests must remain pending until profile policy or a named human response
+  resolves them.
+- The UI proxy accepts any loopback port in the deterministic range. A numeric
+  range is not endpoint ownership; proxying must resolve a live pooled server
+  bound to the requested Spacebot worker and backend generation.
+- OpenCode has an `/abort` client and some cancellation paths call it, but the
+  backend contract must make provider acknowledgement and subsequent terminal
+  evidence part of one staged cancellation operation.
+- SSE inactivity is a hard-coded 600-second failure and server HTTP/startup
+  timeouts are hard-coded. These become capability-aware liveness and profile
+  policy, not transport silence interpreted as death.
+
+Autonomy does not have a Cortex ready-task pickup loop. It starts a direct-tool
+autonomy channel, presents ready tasks to that channel, and task-bound spawns
+currently reach `SpawnWorkerTool`. The remaining execution correctness gap is
+the boundary itself: plan resolution, worker creation, and task binding are
+coupled to the tool and the task binding happens after the worker starts. A
+shared executor is still required before API, scheduling, or another backend
+can create work without duplicating or weakening those rules.
 
 ## Design Principles
 
@@ -129,6 +167,37 @@ idempotent or the provider offers a reliable reconciliation query. It never
 falls back to another creation path after the provider may have accepted the
 first request.
 
+### Events Have Exact Authority
+
+Every driver event carries the Spacebot worker and generation it is reporting
+for, plus an attempt ID when it concerns an attempt. The supervisor accepts an
+event only when that binding matches the persisted backend profile, external
+session, current driver generation, and active attempt where required. A
+provider event ID, session ID, port, process ID, or browser connection alone
+does not authorize a state transition. Events with an unknown or mismatched
+binding are recorded as rejected observations and cannot create, resume,
+complete, or control a worker.
+
+### Liveness Follows Capabilities
+
+The supervisor derives liveness from the capability snapshot, not from a
+generic "last event" timestamp. Each backend declares the progress evidence it
+can prove, such as a durable event cursor, a polling revision, a running tool,
+or a provider status transition, and the phase-specific intervals at which
+that evidence is expected. Transport reconnects, duplicate events, browser
+activity, and status rendering do not prove work is advancing. A backend that
+cannot prove progress uses the configured observation deadline and enters the
+same staged termination and reconciliation path as a stalled worker.
+
+### Identities Do Not Cross Domains
+
+Spacebot allocates worker, attempt, input, operation, and event identities.
+Adapters retain provider identities as opaque, backend-scoped metadata. A
+profile ID identifies policy and credentials, not an external session. API
+requests and driver commands resolve a Spacebot identity first, then verify
+the bound backend identity before acting. This prevents a reused provider
+identifier, local port, or stale resume token from targeting the wrong worker.
+
 ### Spacebot Owns Canonical State
 
 The provider owns its process or cloud session. Spacebot owns the canonical
@@ -141,6 +210,33 @@ Spacebot does not silently move work from a cloud backend to a local agent, or
 between credentials, after a failure. A fallback chain must be configured on
 the task or backend profile. Every fallback creates a new attempt with visible
 provenance.
+
+## Lessons From Orca
+
+Orca is useful as a source of orchestration invariants, not as the worker
+transport for this design. Its lifecycle reconciliation accepts completion and
+heartbeat messages only when the exact active dispatch and assignee pane (or a
+legacy exact handle) match. Stale dispatches are ignored, wrong-pane signals
+are retained as auditable rejections, and late heartbeats cannot refresh a
+newer dispatch. Spacebot applies the same pattern with worker, backend,
+generation, external-session, and attempt bindings.
+
+Orca's main runtime also demonstrates why presentation cannot own lifecycle.
+PTY generations, terminal panes, recent output, OSC status, hooks, and UI
+subscriptions are valuable observations, but redraws and browser activity do
+not prove agent progress or authorize completion. The transferable boundary is:
+
+- durable dispatch/session identity authorizes lifecycle changes;
+- generation fences reject stale process, stream, and pane observations;
+- terminal or provider output is normalized and bounded before persistence;
+- reconciliation owns recovery after a transport, renderer, or process dies;
+- operator-visible panes remain views over canonical orchestration state.
+
+Spacebot therefore does not introduce a PTY/TUI adapter abstraction into the
+core contract. ACP and native local adapters may use stdio, hooks, or a PTY
+internally, but they must emit the same authority-bound semantic events. Orca
+continues to own terminal surfaces and remote runtime topology; Spacebot owns
+approved task intent, backend credentials, worker state, outcomes, and policy.
 
 ## Architecture
 
@@ -256,6 +352,7 @@ reload can affect new workers without changing the contract of an active one.
 ```rust
 pub struct WorkerCapabilities {
     pub event_delivery: EventDelivery,
+    pub liveness: LivenessCapabilities,
     pub follow_up: FollowUpCapabilities,
     pub cancellation: CancellationCapabilities,
     pub resume: ResumeCapabilities,
@@ -304,6 +401,20 @@ pub struct IdempotencyCapabilities {
     pub cancel_attempt: bool,
     pub close_session: bool,
 }
+
+pub struct LivenessCapabilities {
+    pub progress_evidence: Vec<ProgressEvidence>,
+    pub observation_deadline: Duration,
+    pub running_deadline: Duration,
+    pub waiting_deadline: Option<Duration>,
+}
+
+pub enum ProgressEvidence {
+    EventCursor,
+    PollRevision,
+    ProviderStatusTransition,
+    ToolProgress,
+}
 ```
 
 Capabilities describe operations, not quality. `event_delivery: Poll` is not a
@@ -312,7 +423,7 @@ degraded stream. It tells the supervisor how reconnect and freshness work.
 ## Shared Task Execution
 
 `TaskExecutionService` becomes the only route from an approved task to a
-worker. `SpawnWorkerTool`, Cortex ready-task pickup, scheduled wakes, and API
+worker. `SpawnWorkerTool`, autonomy task execution, scheduled wakes, and API
 requests call the same service.
 
 ```rust
@@ -392,10 +503,11 @@ Backend selection uses this precedence:
 3. Explicit spawn argument for work not attached to a task.
 4. Agent `default_worker_backend_id`.
 
-Autonomous execution requires a resolved backend. It cannot leave the choice
-to the Cortex pickup loop. A missing or unavailable backend moves the claimed
-task back to `ready` with a structured execution error and a bounded retry
-time. It does not execute through builtin as an implicit fallback.
+Autonomous execution requires a resolved backend. The autonomy channel cannot
+leave the choice to a later turn or an implicit fallback. A missing or
+unavailable backend moves the claimed task back to `ready` with a structured
+execution error and a bounded retry time. It does not execute through builtin
+as an implicit fallback.
 
 Future capability routing can select from an explicit task policy such as
 `["capy-spacebot", "opencode-local"]`. The attempt history records each
@@ -466,9 +578,18 @@ pub struct WorkerBriefing {
 
 The briefing fixes two problems. Autonomous pickup receives the same task
 context as manual spawning, and cloud adapters do not need Rig history types.
-Builtin workers may still receive a forked channel history in addition to the
-briefing. Cloud workers receive rendered text and attachments allowed by the
-profile's context-delivery policy.
+A channel-started builtin worker may receive a forked channel history only when
+its explicit delivery policy selects `channel_fork`; it is not the universal
+backend default. Detached, scheduled, local-agent, and cloud execution all need
+the same bounded briefing to be reproducible without a live channel. Cloud
+workers receive only rendered text and attachments allowed by the profile's
+context-delivery policy.
+
+This decision supersedes the fork-by-default proposal in section 8 and rollout
+phase 7 of `worker-reliability.md`. That document remains authoritative for
+outcomes, liveness, staged termination, and bounded transcript recovery; task
+#30 owns the bounded briefing contract used here. Full channel history remains
+an explicit local policy, never an implicit cloud fallback.
 
 Cloud profiles default to task, project, task comments, and explicitly
 resolved memory. Sending a raw channel transcript to a third party requires an
@@ -522,9 +643,17 @@ pub enum WorkerCommand {
 }
 ```
 
-Drivers emit events:
+Drivers emit events in an authority envelope:
 
 ```rust
+pub struct WorkerBackendEventEnvelope {
+    pub worker_id: WorkerId,
+    pub backend_id: WorkerBackendId,
+    pub generation: u64,
+    pub observation: WorkerObservation,
+    pub event: WorkerBackendEvent,
+}
+
 pub enum WorkerBackendEvent {
     SessionCreated {
         external_id: String,
@@ -558,7 +687,27 @@ pub enum WorkerBackendEvent {
     },
     SessionClosed,
 }
+
+pub struct WorkerObservation {
+    pub source: WorkerObservationSource,
+    pub provider_event_key: Option<String>,
+    pub observed_at: String,
+    pub source_metadata: serde_json::Value,
+}
+
+pub enum WorkerObservationSource {
+    Stream,
+    Poll { revision: String },
+    Reconciliation,
+}
 ```
+
+The envelope binds an event to its backend profile and driver generation.
+`WorkerObservation` records its provider event key or poll revision, observed
+time, and bounded source metadata. It answers where a status came from without
+making that source authoritative by itself. The current materialized status
+stores the observation that produced it. Transcript, request, artifact, and
+terminal events carry equivalent provenance.
 
 Provider payloads are normalized inside the adapter. Core events do not carry
 `OpenCodePart`, Capy message types, or Cursor tool payloads. Adapters may store
@@ -718,6 +867,37 @@ Application validation and database checks require `outcome_kind` and
 `outcome_payload` for terminal lifecycle states and prohibit them for
 non-terminal states.
 
+Every externally visible create, submit, cancel, close, and request response
+also has an operation-ledger row:
+
+```sql
+CREATE TABLE worker_operations (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    attempt_id TEXT,
+    kind TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    state TEXT NOT NULL,
+    external_receipt TEXT,
+    reconciliation_evidence TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (worker_id) REFERENCES worker_runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES worker_attempts(id) ON DELETE RESTRICT,
+    UNIQUE (worker_id, id)
+);
+```
+
+The ledger records `prepared`, `submitted`, `confirmed`, `ambiguous`, and
+`rejected` states. An operation ID can be retried only with its original kind,
+worker and attempt binding, and request hash. A changed request is a new
+operation. An ambiguous operation fences replacement creation, follow-up, and
+terminal effects until an idempotent provider retry or reconciliation proves
+the original result. Operation rows and their evidence remain available for at
+least the retention lifetime of the worker, attempt, task execution, and any
+resume metadata they fence. They are never TTL-pruned while ambiguous or while
+the worker is non-terminal.
+
 Inputs are recorded separately because several inputs may affect one active
 attempt:
 
@@ -755,6 +935,31 @@ CREATE TABLE worker_events (
     UNIQUE (worker_id, provider_event_key)
 );
 ```
+
+Every driver delivery receives a durable ingestion disposition before it can
+affect materialized state:
+
+```sql
+CREATE TABLE worker_event_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id TEXT NOT NULL,
+    attempt_id TEXT,
+    generation INTEGER NOT NULL,
+    provider_event_key TEXT,
+    disposition TEXT NOT NULL,
+    reason TEXT,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY (worker_id) REFERENCES worker_runs(id) ON DELETE CASCADE
+);
+```
+
+`accepted`, `duplicate`, `stale_generation`, `unknown_binding`,
+`attempt_mismatch`, and `terminal_conflict` are distinct dispositions. The
+supervisor records stale and rejected deliveries without applying their state
+change. Receipts are bounded diagnostic records, but retain the latest
+disposition for every provider event key through the worker's retention
+lifetime. This makes ignored events auditable without turning the event stream
+into an authority source.
 
 An adapter derives `provider_event_key` from a stable provider ID or stable
 semantic identity. When a provider cannot supply either, the adapter reconciles
@@ -806,9 +1011,10 @@ Recovery outcomes:
 | Profile or credential is missing | Mark worker blocked for operator action |
 
 Every driver incarnation receives a monotonically increasing generation.
-Events from an older generation are ignored after a reconnect. Stable provider
-event or message IDs deduplicate replay across generations. A provider cursor
-commits in the same transaction as the normalized events it covers.
+Events from an older generation receive a `stale_generation` ingestion
+disposition after a reconnect. Stable provider event or message IDs deduplicate
+replay across generations. A provider cursor commits in the same transaction as
+the accepted normalized events it covers.
 
 Local same-host adapters may fail recovery when their process disappeared.
 Durable cloud adapters recover independently of the original Spacebot process.
@@ -873,10 +1079,11 @@ pub enum WorkerRequestKind {
 ```
 
 The profile defines an approval policy: require human input, allow a bounded
-safe default, or deny. OpenCode's current behavior of always granting once and
-selecting the first answer is replaced by this policy. A request awaiting a
-human maps the attempt to `waiting` and appears in channel, worker, and Portal
-views.
+safe default, or deny. Today OpenCode emits permission and question events,
+then automatically grants each permission once and selects the first answer.
+Its adapter migration replaces that behavior with the profile policy. A request
+awaiting a human maps the attempt to `waiting` and appears in channel, worker,
+and Portal views.
 
 Adapters advertise structured requests only when the provider supplies a
 stable request ID and response contract. A provider status that merely says it
@@ -1084,9 +1291,13 @@ Migration steps:
    and presentation metadata.
 5. Route cancellation through the OpenCode abort endpoint.
 6. Make directory claims supervisor-owned and safe across failure and resume.
-7. Restrict the UI proxy to pooled server identities.
-8. Wire configured startup timeout, restart policy, and model selection into
-   the adapter rather than hard-coded constants.
+7. Restrict the UI proxy to pooled server identities and verify the worker,
+   backend, generation, loopback address, and live server binding on every
+   request; a caller-supplied port or allowed numeric range is insufficient.
+8. Launch OpenCode from an environment allowlist with only profile-approved
+   variables and secret references.
+9. Wire configured startup timeout, restart policy, model selection, and
+   liveness evidence into the adapter rather than hard-coded constants.
 
 The external behavior should remain unchanged during extraction. OpenCode
 continues to provide the embedded UI after the generic workbench lands.
@@ -1198,7 +1409,11 @@ operation.
 
 Cloud execution crosses a stronger trust boundary than a local subprocess.
 
-- Backend credentials live in the encrypted secret store.
+- Backend credentials live in the encrypted secret store and profiles store
+  references, never raw credential values.
+- Local subprocesses start from an explicit environment allowlist. They do not
+  inherit the Spacebot daemon environment; only profile-approved variables and
+  resolved secret references are injected.
 - Profiles restrict projects and repositories that may be sent to a provider.
 - Cloud context delivery defaults to task-scoped briefing rather than raw
   channel history.
@@ -1302,6 +1517,8 @@ Required metrics:
 - Cancellation acknowledgement and terminal latency.
 - Duplicate events rejected.
 - Stale-generation events rejected.
+- Event ingestion dispositions by backend and reason.
+- Liveness deadline breaches by backend, phase, and progress evidence.
 - Backend availability failures.
 - Attempt outcomes and retries.
 
@@ -1317,7 +1534,7 @@ same lifecycle fixtures where its capabilities apply.
 
 Required orchestration tests:
 
-- Manual spawn and Cortex pickup resolve an identical `ResolvedWorkerSpec`.
+- Manual spawn and autonomy task execution resolve an identical `ResolvedWorkerSpec`.
 - Task and project backend precedence is deterministic.
 - An unavailable backend never triggers implicit fallback.
 - Duplicate task claims produce one worker.
@@ -1325,11 +1542,17 @@ Required orchestration tests:
 - Recovery creates a missing per-agent worker from a global execution record.
 - Outcome outbox replay applies one global task transition.
 - Ambiguous creation retries use one operation ID.
+- An ambiguous operation fences a changed request and replacement provider call.
 - Completion racing cancellation produces one terminal outcome.
 - Timeout racing completion converges through cancellation.
 - Unconfirmed cloud cancellation remains non-terminal and keeps its reservation.
 - Duplicate terminal events do not double-complete a task.
 - Old-generation events cannot mutate a resumed worker.
+- An unknown worker, backend, session, or attempt binding cannot mutate state.
+- Rejected and stale events retain their ingestion disposition without entering
+  the normalized event projection.
+- Materialized status identifies the observation that produced it.
+- A backend cannot reset liveness without capability-declared progress evidence.
 - Restart recovery restores active and idle durable workers.
 - Missing credentials block without destroying resume metadata.
 - Scheduled tasks cannot be claimed before `not_before`.
@@ -1344,6 +1567,8 @@ Required adapter tests:
 - Cancellation calls the provider and waits for terminal evidence.
 - Event replay and polling are idempotent.
 - Provider cursors persist only after event commit.
+- Event authority binding is checked before transcript, status, or terminal
+  state can be written.
 - Secrets are absent from backend state, events, logs, and API responses.
 - Artifact and presentation metadata are bounded and validated.
 
@@ -1372,56 +1597,91 @@ Frontend tests cover capability-based controls and renderer selection. No
 generic worker component may branch directly on `opencode_port` or a provider
 name after the migration.
 
-## Rollout
+## Rollout And Work Ownership
 
-### Phase 1: Shared Task Executor
+The implementation board is the executable decomposition of this design. Task
+#38 owns this document and closes when the design, dependencies, and ownership
+map agree. The reliability tasks are prerequisites rather than duplicate
+backend work: #20 owns durable outcome/CAS semantics, #21 owns supervision and
+staged termination, #30 owns bounded briefings, and #22 owns bounded transcript
+persistence and recovery. Workspace correctness is split across #28 (registry
+reconciliation), #36 (durable task/worktree binding), and #35 (atomic execution
+and attempt identity).
 
-Extract task-plan resolution, workspace preparation, required skills, backend
-selection, task binding, and reservation handling into `TaskExecutionService`.
-Move `SpawnWorkerTool` and Cortex ready-task pickup onto it. Keep builtin and
-OpenCode dispatch unchanged behind the service.
+| Phase | Primary task | Scope and exit criterion | Required predecessors |
+|---|---:|---|---|
+| Foundation A | #20 | Persist every terminal outcome before notification; one terminal CAS winner and replay-safe retirement | #38 and existing #3 |
+| Foundation B | #28 -> #36 -> #35 | Reconcile registered worktrees, persist task/worktree ownership, then create global execution and predetermined worker/attempt IDs atomically | #20, then the preceding task in the chain |
+| 1 | #39 | `TaskExecutionService` is the only approved-task start path for tool, autonomy, API, and later timers; task binding precedes provider I/O | #35, #36, #38 |
+| 2 | #40 | Durable profiles, capability snapshots, commands/events, operation records, generation fencing, supervisor, fake adapter, and conformance suite | #20, #39 |
+| Reliability integration | #21, #30, #22 | Capability-aware liveness and staged cancellation; bounded briefing; bounded transcript/outcome recovery | #21 after #20/#40; #30 after #39/#40; #22 after #20/#30/#40 |
+| 3 | #41 | OpenCode runs behind the contract; abort, claims, environment, requests, recovery, proxy ownership, and configuration are hardened | #21, #22, #30, #40 |
+| 4 | #42 | Backend-neutral API, normalized transcript workbench, capability controls, artifacts, and retained OpenCode embed | #40, #41 |
+| 5 | #43 | Capy profile/authentication, project binding, idempotent creation, cursor polling, follow-up modes, interruption, recovery, and PR artifacts | #21, #39, #40, #42 |
+| 6 | #44 | Durable due occurrences start their exact task through `TaskExecutionService`, including dormant-agent and retry behavior | #35, #39, #40, #43 |
+| 7 | #45 | Generic ACP subprocess adapter with negotiated capabilities, load, turns, updates, permission requests, and cancellation | #21, #40, #41, #42, #44 |
+| 8 | Future tasks | Cursor Cloud first, then Devin and other demanded providers; Codex and Claude cloud wait for stable service APIs | Production evidence from #43/#45 |
 
-### Phase 2: Durable Backend Contract
+The ordering intentionally proves the contract with the fake backend, then
+migrates the existing OpenCode path, then opens the UI/API boundary, and only
+then sends source and context to Capy. Scheduling follows the first cloud
+adapter so its dormant recovery path is exercised against a real durable
+provider. ACP lands after the generic workbench and supervision behavior are
+stable; it must not become an alternate shortcut around those layers.
 
-Add backend profiles, capabilities, attempts, normalized events, operation IDs,
-generation fencing, and supervisor-owned commands. Implement a fake backend
-and the conformance suite before moving a production adapter.
+### Architecture Ownership Matrix
 
-### Phase 3: OpenCode Extraction
+| Architecture concern | Owning task | Boundary |
+|---|---:|---|
+| Durable terminal outcome and lifecycle CAS | #20 | Persists one outcome before notification; does not define provider protocols |
+| Progress, cancellation, ownership transfer, and shutdown | #21 | Owns generic supervision policy; adapters supply capability-specific evidence and termination calls |
+| Initial briefing and context delivery | #30 | Builds, redacts, bounds, hashes, and authorizes context before execution |
+| Retained transcript, inspection, reflection, and recovery | #22 | Owns execution evidence after start; does not construct the initial briefing |
+| Worktree registry reconciliation | #28 | Proves local worktree identity and health |
+| Durable task/worktree binding | #36 | Records which workspace an approved task owns before execution |
+| Global execution and predetermined attempt identity | #35 | Atomically reserves intent before provider I/O |
+| Shared task start path | #39 | Resolves approval, plan, backend, workspace, briefing, and admission |
+| Backend contract and supervisor persistence | #40 | Defines profiles, capabilities, commands, events, operations, attempts, authority, and conformance |
+| OpenCode adapter and trust boundary | #41 | Migrates and hardens current OpenCode behavior |
+| Backend-neutral API and workbench | #42 | Exposes canonical state and capability controls |
+| Capy adapter | #43 | Implements the first durable cloud profile |
+| Scheduled execution | #44 | Claims due occurrences and invokes #39's service |
+| ACP adapter | #45 | Implements local ACP without bypassing #40 |
 
-Move OpenCode behind the driver contract without changing its user-facing
-behavior. Fix abort, directory claim cleanup, recovery claims, proxy ownership,
-and configuration wiring during the move.
+### Change Ownership Rules
 
-### Phase 4: Generic Workbench
+- #39 owns orchestration entry points and `ResolvedWorkerSpec`; adapters do not
+  recreate approval, task claim, skill, workspace, or briefing decisions.
+- #40 owns backend-neutral persistence and runtime contracts. Provider tasks may
+  extend versioned opaque backend state but not core lifecycle enums ad hoc.
+- #21 owns generic kill sites, progress policy, and shutdown drain. #41, #43,
+  and #45 implement provider cancellation hooks under that policy.
+- #30 owns briefing construction, redaction, size bounds, hashes, and delivery
+  policy. Provider adapters only render the approved briefing.
+- #22 owns normalized transcript retention and recovery projection. #42 owns
+  its API and Portal presentation, not its durability semantics.
+- #41 owns all remaining OpenCode-specific branches and trust-boundary fixes.
+  Generic components stop reading `opencode_port` or provider names after #42.
+- #43 and #45 cannot weaken authority, idempotency, cancellation, environment,
+  or secret policies to match a provider limitation; unsupported behavior is a
+  capability or availability result.
 
-Replace OpenCode fields in the worker API with backend, capabilities,
-presentation, workspace, attempts, and artifacts. Keep the existing embed as
-the OpenCode renderer. Make transcript rendering the baseline for every worker.
+### Rollout Gates And Rollback
 
-### Phase 5: Capy
+Each phase ships behind profile/creation feature flags while recovery for
+already-created workers remains enabled. A phase advances only when its
+required conformance tests, restart fixtures, race tests, redaction checks, and
+metrics are present. Rollback disables new creation for that adapter; it does
+not delete canonical rows, release reservations for unconfirmed external work,
+or discard resume metadata. Operators can drain local workers and reconcile
+cloud workers before removing a profile.
 
-Add Capy profile configuration, service-user authentication, project bindings,
-idempotent thread creation, message-cursor polling, follow-up delivery modes,
-interruption, status mapping, recovery, and PR artifact extraction.
-
-### Phase 6: Scheduling
-
-Add `not_before` and task wake references. Filter ready-task claims and route
-due wakes through `TaskExecutionService`. Add backend-aware retry wakes and
-operator-visible blocked status.
-
-### Phase 7: ACP
-
-Add the generic ACP subprocess driver with capability negotiation, session
-load, prompt turns, streamed updates, permission requests, and cancellation.
-Ship tested profiles for agents whose ACP implementations are stable.
-
-### Phase 8: Additional Cloud Adapters
-
-Add Cursor Cloud first, then Devin and other providers based on demand. Codex
-and Claude cloud adapters wait for stable service APIs rather than automating
-consumer web sessions.
+Before Capy is enabled outside development, #41 must have removed inherited
+daemon environment from local backend launch and #42 must have removed generic
+UI dependence on OpenCode fields. Before scheduling is enabled, #44 must prove
+that duplicate timers produce one occurrence, one task claim, and one global
+execution. Before ACP profiles ship, each command is pinned or version-probed
+and its advertised capability fixture passes the same supervisor contract.
 
 ## Open Questions
 
