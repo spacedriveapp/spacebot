@@ -245,6 +245,37 @@ impl SettingsStore {
         Ok(())
     }
 
+    fn remove_raw(&self, key: &str) -> Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| SettingsError::WriteFailed {
+                key: key.to_string(),
+                details: error.to_string(),
+            })?;
+        {
+            let mut table = write_txn.open_table(SETTINGS_TABLE).map_err(|error| {
+                SettingsError::WriteFailed {
+                    key: key.to_string(),
+                    details: error.to_string(),
+                }
+            })?;
+            table
+                .remove(key)
+                .map_err(|error| SettingsError::WriteFailed {
+                    key: key.to_string(),
+                    details: error.to_string(),
+                })?;
+        }
+        write_txn
+            .commit()
+            .map_err(|error| SettingsError::WriteFailed {
+                key: key.to_string(),
+                details: error.to_string(),
+            })?;
+        Ok(())
+    }
+
     /// Get the worker log mode setting.
     pub fn worker_log_mode(&self) -> WorkerLogMode {
         match self.get_raw(WORKER_LOG_MODE_KEY) {
@@ -395,6 +426,10 @@ impl SettingsStore {
         self.set_raw(AUTONOMY_RESUME_LEVEL_KEY, level.as_str())
     }
 
+    pub(crate) fn clear_autonomy_resume_level(&self) -> Result<()> {
+        self.remove_raw(AUTONOMY_RESUME_LEVEL_KEY)
+    }
+
     /// Drop the home channel, returning the instance to sending nothing on
     /// its own.
     pub fn clear_home_channel(&self) -> Result<()> {
@@ -444,6 +479,8 @@ mod tests {
                 .set_autonomy_resume_level(crate::config::AutonomyLevel::Off)
                 .is_err()
         );
+        store.clear_autonomy_resume_level().unwrap();
+        assert_eq!(store.autonomy_resume_level().unwrap(), None);
     }
 
     #[test]

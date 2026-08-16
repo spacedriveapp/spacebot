@@ -1434,7 +1434,7 @@ mod tests {
             Some("spacebot")
         ));
         assert!(telegram_command_addresses_bot(
-            "/autonomy_on@spacebot",
+            "/autonomy_on@spacebot act",
             Some("spacebot")
         ));
         assert!(!telegram_command_addresses_bot(

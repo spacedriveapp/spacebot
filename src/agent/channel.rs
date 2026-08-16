@@ -1940,11 +1940,13 @@ impl Channel {
                 self.send_builtin_text(reply, def.name).await;
             }
             ControlAction::AutonomyOn => {
-                let reply = crate::commands::control::set_autonomy_enabled(&self.deps, true).await;
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, true, args).await;
                 self.send_builtin_text(reply, def.name).await;
             }
             ControlAction::AutonomyOff => {
-                let reply = crate::commands::control::set_autonomy_enabled(&self.deps, false).await;
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, false, args).await;
                 self.send_builtin_text(reply, def.name).await;
             }
         }

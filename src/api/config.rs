@@ -616,9 +616,9 @@ fn persist_autonomy_resume_level(
     state: &ApiState,
     agent_id: &str,
     level: Option<crate::config::AutonomyLevel>,
-) -> Result<(), StatusCode> {
+) -> Result<Option<AutonomyResumeRollback>, StatusCode> {
     let Some(level) = level else {
-        return Ok(());
+        return Ok(None);
     };
     let settings = state
         .runtime_configs
@@ -626,10 +626,32 @@ fn persist_autonomy_resume_level(
         .get(agent_id)
         .and_then(|runtime_config| runtime_config.settings.load().as_ref().clone())
         .ok_or(StatusCode::NOT_FOUND)?;
+    let previous = settings.autonomy_resume_level().map_err(|error| {
+        tracing::warn!(%error, agent_id, "failed to read autonomy resume level");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if previous == Some(level) {
+        return Ok(None);
+    }
     settings.set_autonomy_resume_level(level).map_err(|error| {
         tracing::warn!(%error, agent_id, "failed to save autonomy resume level");
         StatusCode::INTERNAL_SERVER_ERROR
-    })
+    })?;
+    Ok(Some(AutonomyResumeRollback { settings, previous }))
+}
+
+struct AutonomyResumeRollback {
+    settings: Arc<crate::settings::SettingsStore>,
+    previous: Option<crate::config::AutonomyLevel>,
+}
+
+impl AutonomyResumeRollback {
+    fn restore(self) -> crate::Result<()> {
+        match self.previous {
+            Some(level) => self.settings.set_autonomy_resume_level(level),
+            None => self.settings.clear_autonomy_resume_level(),
+        }
+    }
 }
 
 /// Apply one serialized agent-config edit and converge the live runtime before
@@ -642,7 +664,7 @@ async fn edit_agent_config<R>(
         &mut toml_edit::DocumentMut,
         usize,
     ) -> Result<(R, bool), StatusCode>,
-    before_write: impl FnOnce(&R) -> Result<(), StatusCode>,
+    before_write: impl FnOnce(&R) -> Result<Option<AutonomyResumeRollback>, StatusCode>,
 ) -> Result<(crate::config::Config, R), StatusCode> {
     let config_path = state.config_path.read().await.clone();
     if config_path.as_os_str().is_empty() {
@@ -683,14 +705,17 @@ async fn edit_agent_config<R>(
         tracing::warn!(%error, "rejected config API update due to invalid resulting TOML");
         return Err(StatusCode::BAD_REQUEST);
     }
-    before_write(&edit_result)?;
+    let rollback = before_write(&edit_result)?;
 
-    tokio::fs::write(&config_path, updated_content)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    if let Err(error) = tokio::fs::write(&config_path, updated_content).await {
+        tracing::warn!(%error, "failed to write config.toml");
+        if let Some(rollback) = rollback
+            && let Err(rollback_error) = rollback.restore()
+        {
+            tracing::error!(%rollback_error, "failed to restore autonomy resume level after config write failure");
+        }
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     let new_config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
         tracing::warn!(%error, "config.toml written but failed to reload immediately");
@@ -1333,7 +1358,7 @@ mod tests {
         tokio::fs::write(&config_path, content).await.unwrap();
         let state = test_api_state(config_path.clone()).await;
 
-        edit_agent_config(&state, "main", |_, _, _| Ok(((), false)), |_| Ok(()))
+        edit_agent_config(&state, "main", |_, _, _| Ok(((), false)), |_| Ok(None))
             .await
             .unwrap();
 
@@ -1374,7 +1399,7 @@ mod tests {
             },
             move |_| {
                 side_effect.store(true, std::sync::atomic::Ordering::Release);
-                Ok(())
+                Ok(None)
             },
         )
         .await;

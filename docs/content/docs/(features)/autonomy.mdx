@@ -24,7 +24,7 @@ The instance can apply a ceiling that limits every agent regardless of its indiv
 
 ## Commands
 
-`/autonomy` reports the agent's configured level and the effective level after the instance ceiling is applied. `/autonomy-off` remembers the current non-off level and prevents new heartbeats, wake events, and epochs from being admitted. Work already active in the current epoch is allowed to settle. `/autonomy-on` restores the remembered level, or starts at `observe` when the agent has never been enabled.
+`/autonomy` reports the agent's configured level and the effective level after the instance ceiling is applied. `/autonomy-off` remembers the current non-off level and prevents new heartbeats, wake events, and epochs from being admitted. Work already active in the current epoch is allowed to settle. `/autonomy-on` restores the remembered level, or starts at `observe` when the agent has never been enabled. Pass a level to select it explicitly, such as `/autonomy-on act` (Telegram also accepts `/autonomy_on act`).
 
 Changing the configured level does not raise the instance ceiling. Restoring `act` under a `suggest` ceiling leaves the configured level at `act` and reports `suggest` as the effective level. The status command is available to everyone; enabling and disabling autonomy require authority in the current binding.
 

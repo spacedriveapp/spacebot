@@ -425,10 +425,10 @@ pub static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "autonomy-on",
-        description: "restore the last enabled autonomy level",
+        description: "enable autonomy at a level, or restore the last level",
         category: CommandCategory::Config,
         aliases: &[],
-        args: ArgSpec::None,
+        args: ArgSpec::Choice(&["observe", "suggest", "act"]),
         handler: CommandHandler::Control(ControlAction::AutonomyOn),
         access: CommandAccess::Authority,
         busy: BusyPolicy::Queue,
@@ -582,6 +582,7 @@ mod tests {
     fn autonomy_commands_have_separate_read_and_write_authority() {
         let status = parsed(REGISTRY.parse("/autonomy"));
         let enable = parsed(REGISTRY.parse("/autonomy-on"));
+        let enable_act = parsed(REGISTRY.parse("/autonomy-on ACT"));
         let disable = parsed(REGISTRY.parse("/autonomy-off"));
 
         assert_eq!(status.def.access, CommandAccess::Everyone);
@@ -590,6 +591,11 @@ mod tests {
         assert!(matches!(status.def.handler, CommandHandler::Control(_)));
         assert!(matches!(enable.def.handler, CommandHandler::Control(_)));
         assert!(matches!(disable.def.handler, CommandHandler::Control(_)));
+        assert_eq!(enable_act.args, "act");
+        assert!(matches!(
+            REGISTRY.parse("/autonomy-on unlimited"),
+            ParseResult::Usage(_, _)
+        ));
     }
 
     #[test]

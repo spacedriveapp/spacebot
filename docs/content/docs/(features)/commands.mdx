@@ -25,7 +25,7 @@ Spacebot handles built-in commands before normal LLM processing. The command set
 | `/pause [reason]` | Authority | Stop new work from starting. |
 | `/pause off` | Authority | Resume new work. |
 | `/autonomy` | Everyone | Show the configured level, effective level, ceiling, and current epoch state. |
-| `/autonomy-on` | Authority | Restore the last non-off autonomy level, defaulting to `observe`. |
+| `/autonomy-on [observe\|suggest\|act]` | Authority | Enable autonomy at an explicit level, or restore the last level when omitted. |
 | `/autonomy-off` | Authority | Stop new autonomy work while the current epoch settles. |
 
 Commands that request task information are sent through the agent after classification. Control commands are applied atomically and do not need an LLM turn.
