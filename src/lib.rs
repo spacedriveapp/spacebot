@@ -793,10 +793,23 @@ pub struct Attachment {
 /// when multiple threads share the same channel (e.g. Slack threads within a
 /// single channel). The paired `InboundMessage` carries the platform metadata
 /// (thread_ts, message_ts, etc.) needed to route the response correctly.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RoutedResponse {
     pub response: OutboundResponse,
     pub target: InboundMessage,
+    pub delivery_receipt: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RoutedDeliveryError {
+    #[error("outbound router is unavailable")]
+    RouterUnavailable,
+    #[error("outbound router dropped the delivery receipt")]
+    ReceiptDropped,
+    #[error("messaging adapter rejected delivery: {0}")]
+    Adapter(String),
+    #[error("timed out waiting for messaging adapter delivery")]
+    TimedOut,
 }
 
 /// A sender that automatically pairs outbound responses with a captured
@@ -821,8 +834,29 @@ impl RoutedSender {
             .send(RoutedResponse {
                 response,
                 target: self.target.clone(),
+                delivery_receipt: None,
             })
             .await
+    }
+
+    pub async fn send_confirmed(
+        &self,
+        response: OutboundResponse,
+    ) -> std::result::Result<(), RoutedDeliveryError> {
+        let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .send(RoutedResponse {
+                response,
+                target: self.target.clone(),
+                delivery_receipt: Some(delivery_tx),
+            })
+            .await
+            .map_err(|_| RoutedDeliveryError::RouterUnavailable)?;
+        tokio::time::timeout(std::time::Duration::from_secs(60), delivery_rx)
+            .await
+            .map_err(|_| RoutedDeliveryError::TimedOut)?
+            .map_err(|_| RoutedDeliveryError::ReceiptDropped)?
+            .map_err(RoutedDeliveryError::Adapter)
     }
 }
 
@@ -1207,6 +1241,50 @@ pub enum StatusUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn routed_sender_waits_for_delivery_confirmation() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sender = RoutedSender::new(tx, InboundMessage::empty());
+        let delivery = tokio::spawn(async move {
+            let mut routed = rx.recv().await.expect("missing routed response");
+            routed
+                .delivery_receipt
+                .take()
+                .expect("missing delivery receipt")
+                .send(Ok(()))
+                .expect("delivery receiver dropped");
+        });
+
+        sender
+            .send_confirmed(OutboundResponse::Text("delivered".into()))
+            .await
+            .expect("delivery should be confirmed");
+        delivery.await.expect("delivery task failed");
+    }
+
+    #[tokio::test]
+    async fn routed_sender_surfaces_adapter_failure() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sender = RoutedSender::new(tx, InboundMessage::empty());
+        let delivery = tokio::spawn(async move {
+            let mut routed = rx.recv().await.expect("missing routed response");
+            routed
+                .delivery_receipt
+                .take()
+                .expect("missing delivery receipt")
+                .send(Err("telegram rejected file".into()))
+                .expect("delivery receiver dropped");
+        });
+
+        let error = sender
+            .send_confirmed(OutboundResponse::Text("undelivered".into()))
+            .await
+            .expect_err("adapter failure should propagate");
+        delivery.await.expect("delivery task failed");
+
+        assert!(error.to_string().contains("telegram rejected file"));
+    }
 
     #[test]
     fn card_footer_deserializes_from_string() {

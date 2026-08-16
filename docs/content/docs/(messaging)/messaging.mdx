@@ -32,6 +32,12 @@ You can connect multiple platforms at the same time. An agent on Discord and Sla
 
 For Email specifically, Spacebot treats inbound mail as intake-first by default: triage, memory capture for meaningful non-spam messages, and escalation to other channels for urgent items. Inbound email channels do not auto-reply. When the Email adapter is configured, intentional outbound email can still be initiated from other channels using an explicit target such as `email:alice@example.com`.
 
+## Delivery
+
+Replies, questions, and files count as delivered only after the messaging adapter confirms the send. Unsupported payloads return an error instead of reporting a successful delivery. For example, Twitch and Webchat cannot accept file attachments from `send_file`.
+
+When background work finishes, the channel retries a failed result relay once. If delivery still fails, Spacebot sends a short notice and keeps the result pending. The next user message starts another bounded relay attempt, so the result is not lost or written into conversation history as internal control text.
+
 ## Bindings
 
 Bindings route messages from a platform to a specific agent. A binding says "messages from this place go to this agent."

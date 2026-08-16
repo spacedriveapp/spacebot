@@ -2,7 +2,9 @@
 
 use crate::config::MattermostPermissions;
 use crate::messaging::apply_runtime_adapter_to_conversation_id;
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::messaging::traits::{
+    HistoryMessage, InboundStream, Messaging, unsupported_broadcast_variant_error,
+};
 use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -659,7 +661,10 @@ impl Messaging for MattermostAdapter {
         let channel_id = self.extract_channel_id(message)?;
 
         match response {
-            OutboundResponse::Text(text) | OutboundResponse::Ephemeral { text, .. } => {
+            OutboundResponse::Text(text)
+            | OutboundResponse::ThreadReply { text, .. }
+            | OutboundResponse::Ephemeral { text, .. }
+            | OutboundResponse::RichMessage { text, .. } => {
                 self.stop_typing(channel_id).await;
                 // Use root_id for threading: prefer mattermost_root_id (when triggered from a
                 // threaded message) or REPLY_TO_MESSAGE_ID (set by channel.rs for branch/worker
@@ -892,11 +897,8 @@ impl Messaging for MattermostAdapter {
                 }
             }
 
-            _ => {
-                tracing::debug!(
-                    ?response,
-                    "mattermost adapter does not support this response type"
-                );
+            response => {
+                return Err(unsupported_broadcast_variant_error("mattermost", &response));
             }
         }
 
