@@ -691,9 +691,9 @@ impl Handler {
             return;
         }
 
-        // Control replies resolve the deferral ephemerally; Agent commands
-        // defer publicly and the real response arrives through the normal
-        // message path.
+        // Acknowledge before resolving thread metadata through Discord's REST
+        // API. Parent lookup can be slow, but interactions must be deferred
+        // within three seconds.
         let is_control = crate::commands::REGISTRY
             .resolve(&command.data.name)
             .is_some_and(|def| matches!(def.handler, crate::commands::CommandHandler::Control(_)));
@@ -707,6 +707,35 @@ impl Handler {
         if let Err(error) = command.create_response(&ctx.http, defer).await {
             tracing::warn!(%error, command = %command.data.name, "failed to defer slash command");
             return;
+        }
+
+        let parent_channel_id = if command.guild_id.is_some() {
+            command
+                .channel_id
+                .to_channel(&ctx.http)
+                .await
+                .ok()
+                .and_then(|channel| channel.guild().and_then(|channel| channel.parent_id))
+                .map(|parent_id| parent_id.get())
+        } else {
+            None
+        };
+        if let Some(guild_id) = command.guild_id
+            && let Some(allowed_channels) = permissions.channel_filter.get(&guild_id.get())
+            && !allowed_channels.is_empty()
+        {
+            let direct_match = allowed_channels.contains(&command.channel_id.get());
+            let parent_match = !direct_match
+                && parent_channel_id.is_some_and(|parent_id| allowed_channels.contains(&parent_id));
+            if !discord_channel_is_allowed(allowed_channels, command.channel_id.get(), parent_match)
+            {
+                let edit = EditInteractionResponse::new()
+                    .content("this command isn't available in this channel");
+                if let Err(error) = command.edit_response(&ctx.http, edit).await {
+                    tracing::warn!(%error, command = %command.data.name, "failed to resolve denied slash command");
+                }
+                return;
+            }
         }
 
         let interaction_id = command.id.to_string();
@@ -748,6 +777,12 @@ impl Handler {
             metadata.insert(
                 "discord_guild_id".into(),
                 serde_json::Value::Number(guild_id.get().into()),
+            );
+        }
+        if let Some(parent_channel_id) = parent_channel_id {
+            metadata.insert(
+                "discord_parent_channel_id".into(),
+                serde_json::Value::Number(parent_channel_id.into()),
             );
         }
         // A command invocation addresses the bot directly.
@@ -861,10 +896,10 @@ impl EventHandler for Handler {
                 .get("discord_parent_channel_id")
                 .and_then(|v| v.as_u64());
 
-            let direct_match = allowed_channels.contains(&message.channel_id.get());
             let parent_match = parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
 
-            if !direct_match && !parent_match {
+            if !discord_channel_is_allowed(allowed_channels, message.channel_id.get(), parent_match)
+            {
                 return;
             }
         }
@@ -1003,6 +1038,14 @@ impl EventHandler for Handler {
             );
         }
     }
+}
+
+fn discord_channel_is_allowed(
+    allowed_channels: &[u64],
+    channel_id: u64,
+    parent_matches: bool,
+) -> bool {
+    allowed_channels.contains(&channel_id) || parent_matches
 }
 
 /// Discord application-command field limits (CHAT_INPUT).
@@ -1759,6 +1802,14 @@ fn build_poll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_commands_share_message_channel_admission() {
+        let allowed = vec![10, 20];
+        assert!(discord_channel_is_allowed(&allowed, 10, false));
+        assert!(discord_channel_is_allowed(&allowed, 30, true));
+        assert!(!discord_channel_is_allowed(&allowed, 30, false));
+    }
     use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
 
     #[test]

@@ -127,7 +127,11 @@ fn is_control_command(message: &InboundMessage) -> bool {
         crate::MessageContent::Command { .. } => message.content.to_string(),
         _ => return false,
     };
-    match crate::commands::REGISTRY.parse(&text) {
+    let bot_username = message
+        .metadata
+        .get("telegram_bot_username")
+        .and_then(serde_json::Value::as_str);
+    match crate::commands::REGISTRY.parse_addressed(&text, bot_username) {
         crate::commands::ParseResult::Command(command) => matches!(
             command.def.handler,
             crate::commands::CommandHandler::Control(_)
@@ -1931,6 +1935,20 @@ impl Channel {
                 )
                 .await;
             }
+            ControlAction::AutonomyStatus => {
+                let reply = crate::commands::control::autonomy_status(&self.deps).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
+            ControlAction::AutonomyOn => {
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, true, args).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
+            ControlAction::AutonomyOff => {
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, false, args).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
         }
     }
 
@@ -2891,7 +2909,13 @@ impl Channel {
         let parsed_command = if message.source == "system" {
             crate::commands::ParseResult::NotACommand
         } else {
-            crate::commands::REGISTRY.parse(&raw_text)
+            crate::commands::REGISTRY.parse_addressed(
+                &raw_text,
+                message
+                    .metadata
+                    .get("telegram_bot_username")
+                    .and_then(serde_json::Value::as_str),
+            )
         };
         match &parsed_command {
             crate::commands::ParseResult::Command(cmd) => {

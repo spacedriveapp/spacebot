@@ -109,7 +109,7 @@ async fn agent_deps(state: &ApiState, agent_id: &str) -> Option<crate::AgentDeps
 }
 
 /// Build a status snapshot for one agent from its stores and live config.
-async fn build_status(
+pub(crate) async fn build_status(
     agent_id: &str,
     deps: &crate::AgentDeps,
     ceiling: AutonomyLevel,

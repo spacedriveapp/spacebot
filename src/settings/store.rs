@@ -25,6 +25,8 @@ const HOME_CHANNEL_EXPLICIT_KEY: &str = "home_channel_explicit";
 const PAUSED_KEY: &str = "paused";
 /// Operator-supplied reason shown wherever the pause surfaces.
 const PAUSE_REASON_KEY: &str = "pause_reason";
+/// Last non-off autonomy level selected before autonomy was disabled.
+const AUTONOMY_RESUME_LEVEL_KEY: &str = "autonomy_resume_level";
 
 /// How worker execution logs are stored.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -243,6 +245,37 @@ impl SettingsStore {
         Ok(())
     }
 
+    fn remove_raw(&self, key: &str) -> Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| SettingsError::WriteFailed {
+                key: key.to_string(),
+                details: error.to_string(),
+            })?;
+        {
+            let mut table = write_txn.open_table(SETTINGS_TABLE).map_err(|error| {
+                SettingsError::WriteFailed {
+                    key: key.to_string(),
+                    details: error.to_string(),
+                }
+            })?;
+            table
+                .remove(key)
+                .map_err(|error| SettingsError::WriteFailed {
+                    key: key.to_string(),
+                    details: error.to_string(),
+                })?;
+        }
+        write_txn
+            .commit()
+            .map_err(|error| SettingsError::WriteFailed {
+                key: key.to_string(),
+                details: error.to_string(),
+            })?;
+        Ok(())
+    }
+
     /// Get the worker log mode setting.
     pub fn worker_log_mode(&self) -> WorkerLogMode {
         match self.get_raw(WORKER_LOG_MODE_KEY) {
@@ -370,6 +403,33 @@ impl SettingsStore {
         }
     }
 
+    /// The non-off autonomy level restored by `/autonomy-on`.
+    pub fn autonomy_resume_level(&self) -> Result<Option<crate::config::AutonomyLevel>> {
+        let Some(value) = self.get_optional(AUTONOMY_RESUME_LEVEL_KEY)? else {
+            return Ok(None);
+        };
+        match crate::config::AutonomyLevel::parse(&value) {
+            Some(crate::config::AutonomyLevel::Off) | None => {
+                Err(SettingsError::Other(format!("invalid autonomy resume level: {value}")).into())
+            }
+            Some(level) => Ok(Some(level)),
+        }
+    }
+
+    /// Remember a non-off autonomy level for the next enable command.
+    pub fn set_autonomy_resume_level(&self, level: crate::config::AutonomyLevel) -> Result<()> {
+        if level == crate::config::AutonomyLevel::Off {
+            return Err(
+                SettingsError::Other("autonomy resume level cannot be off".to_string()).into(),
+            );
+        }
+        self.set_raw(AUTONOMY_RESUME_LEVEL_KEY, level.as_str())
+    }
+
+    pub(crate) fn clear_autonomy_resume_level(&self) -> Result<()> {
+        self.remove_raw(AUTONOMY_RESUME_LEVEL_KEY)
+    }
+
     /// Drop the home channel, returning the instance to sending nothing on
     /// its own.
     pub fn clear_home_channel(&self) -> Result<()> {
@@ -394,5 +454,43 @@ impl SettingsStore {
 impl std::fmt::Debug for SettingsStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettingsStore").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autonomy_resume_level_round_trips_and_rejects_off() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let store = SettingsStore::new(&directory.path().join("settings.redb")).expect("store");
+
+        assert_eq!(store.autonomy_resume_level().unwrap(), None);
+        store
+            .set_autonomy_resume_level(crate::config::AutonomyLevel::Suggest)
+            .unwrap();
+        assert_eq!(
+            store.autonomy_resume_level().unwrap(),
+            Some(crate::config::AutonomyLevel::Suggest)
+        );
+        assert!(
+            store
+                .set_autonomy_resume_level(crate::config::AutonomyLevel::Off)
+                .is_err()
+        );
+        store.clear_autonomy_resume_level().unwrap();
+        assert_eq!(store.autonomy_resume_level().unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_autonomy_resume_level_fails_closed() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let store = SettingsStore::new(&directory.path().join("settings.redb")).expect("store");
+        store
+            .set_raw(AUTONOMY_RESUME_LEVEL_KEY, "unlimited")
+            .unwrap();
+
+        assert!(store.autonomy_resume_level().is_err());
     }
 }

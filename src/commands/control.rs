@@ -119,6 +119,9 @@ impl ControlPlane {
             ControlAction::SetHome => self.set_home().await,
             ControlAction::SetPause => set_pause(&self.deps, args),
             ControlAction::WhoAmI => whoami_text(self.is_authority, self.surface),
+            ControlAction::AutonomyStatus => autonomy_status(&self.deps).await,
+            ControlAction::AutonomyOn => set_autonomy_enabled(&self.deps, true, args).await,
+            ControlAction::AutonomyOff => set_autonomy_enabled(&self.deps, false, args).await,
         }
     }
 
@@ -237,6 +240,137 @@ impl ControlPlane {
 
         mode_confirmation(mode).to_string()
     }
+}
+
+/// `/autonomy` reply built from the same status snapshot as the HTTP API.
+pub async fn autonomy_status(deps: &crate::AgentDeps) -> String {
+    let ceiling = **deps.autonomy_ceiling.load();
+    match crate::api::autonomy::build_status(&deps.agent_id, deps, ceiling).await {
+        Ok(status) => {
+            let epoch = if status.current_run.is_some() {
+                "running"
+            } else {
+                "idle"
+            };
+            let next = status.next_run_at.as_deref().unwrap_or("none");
+            format!(
+                "autonomy\n- configured: {}\n- effective: {}\n- ceiling: {}\n- epoch: {epoch}\n- next run: {next}",
+                status.level, status.effective_level, ceiling
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, agent = %deps.agent_id, "failed to read autonomy status");
+            "couldn't read autonomy status".to_string()
+        }
+    }
+}
+
+/// Toggle future autonomy epochs while preserving the last enabled level.
+pub async fn set_autonomy_enabled(deps: &crate::AgentDeps, enabled: bool, args: &str) -> String {
+    let Some(api_state) = deps.api_state.as_ref() else {
+        return "autonomy settings aren't available — level unchanged".to_string();
+    };
+    let Some(settings) = deps.settings() else {
+        return "settings storage isn't available — autonomy unchanged".to_string();
+    };
+    let requested_level = if enabled && !args.is_empty() {
+        match crate::config::AutonomyLevel::parse(args) {
+            Some(level) if level != crate::config::AutonomyLevel::Off => Some(level),
+            _ => return "usage: /autonomy-on [observe|suggest|act]".to_string(),
+        }
+    } else {
+        None
+    };
+
+    let result = crate::api::config::mutate_agent_autonomy_level(
+        api_state,
+        &deps.agent_id,
+        move |current| {
+            if enabled {
+                if requested_level == Some(current)
+                    || (requested_level.is_none() && current != crate::config::AutonomyLevel::Off)
+                {
+                    return Ok(crate::api::config::AutonomyLevelMutation::Unchanged);
+                }
+                let resume_level = if requested_level.is_none() {
+                    settings.autonomy_resume_level().map_err(|error| {
+                        tracing::warn!(%error, "failed to read autonomy resume level");
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+                } else {
+                    None
+                };
+                Ok(crate::api::config::AutonomyLevelMutation::Set(
+                    autonomy_enable_target(current, requested_level, resume_level),
+                ))
+            } else {
+                if current == crate::config::AutonomyLevel::Off {
+                    return Ok(crate::api::config::AutonomyLevelMutation::Unchanged);
+                }
+                Ok(crate::api::config::AutonomyLevelMutation::Set(
+                    crate::config::AutonomyLevel::Off,
+                ))
+            }
+        },
+    )
+    .await;
+
+    let change = match result {
+        Ok(change) => change,
+        Err(error) => {
+            tracing::warn!(status = %error, agent = %deps.agent_id, "failed to persist autonomy toggle");
+            return "couldn't save autonomy setting — level unchanged".to_string();
+        }
+    };
+
+    if change.previous != change.configured {
+        deps.autonomy_control.request_check();
+    }
+    if enabled {
+        if change.previous == change.configured {
+            return format!(
+                "autonomy is already enabled at {} (effective: {}).",
+                change.configured, change.effective
+            );
+        }
+        let action = if change.previous == crate::config::AutonomyLevel::Off {
+            format!("autonomy enabled at {}", change.configured)
+        } else {
+            format!(
+                "autonomy changed from {} to {}",
+                change.previous, change.configured
+            )
+        };
+        if change.configured == change.effective {
+            format!("{action}.")
+        } else {
+            format!(
+                "{action}; the instance ceiling limits it to {}.",
+                change.effective
+            )
+        }
+    } else if change.previous == crate::config::AutonomyLevel::Off {
+        "autonomy is already off.".to_string()
+    } else {
+        format!(
+            "autonomy off. new epochs won't start; current autonomy work can finish. /autonomy-on restores {}.",
+            change.previous
+        )
+    }
+}
+
+fn autonomy_enable_target(
+    current: crate::config::AutonomyLevel,
+    requested_level: Option<crate::config::AutonomyLevel>,
+    resume_level: Option<crate::config::AutonomyLevel>,
+) -> crate::config::AutonomyLevel {
+    if let Some(requested_level) = requested_level {
+        return requested_level;
+    }
+    if current != crate::config::AutonomyLevel::Off {
+        return current;
+    }
+    resume_level.unwrap_or(crate::config::AutonomyLevel::Observe)
 }
 
 /// Resolve a conversation into the canonical delivery target that reaches it.
@@ -510,6 +644,31 @@ mod tests {
             .count();
         assert!(authority.contains(&restricted.to_string()));
         assert!(everyone.contains(&restricted.to_string()));
+    }
+
+    #[test]
+    fn autonomy_enable_restores_the_last_level_or_observe() {
+        use crate::config::AutonomyLevel;
+
+        assert_eq!(
+            autonomy_enable_target(AutonomyLevel::Off, None, None),
+            AutonomyLevel::Observe
+        );
+        for level in [
+            AutonomyLevel::Observe,
+            AutonomyLevel::Suggest,
+            AutonomyLevel::Act,
+        ] {
+            assert_eq!(
+                autonomy_enable_target(AutonomyLevel::Off, None, Some(level)),
+                level
+            );
+            assert_eq!(
+                autonomy_enable_target(AutonomyLevel::Observe, Some(level), None),
+                level
+            );
+            assert_eq!(autonomy_enable_target(level, None, None), level);
+        }
     }
 
     #[test]

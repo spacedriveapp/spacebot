@@ -494,6 +494,178 @@ pub(super) async fn update_agent_config(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<AgentConfigUpdateRequest>,
 ) -> Result<Json<AgentConfigResponse>, StatusCode> {
+    let _autonomy_guard = if request
+        .autonomy
+        .as_ref()
+        .is_some_and(|autonomy| autonomy.level.is_some())
+    {
+        let key: crate::AgentId = Arc::from(request.agent_id.as_str());
+        let control = state
+            .wake_registry
+            .read()
+            .await
+            .get(&key)
+            .map(|deps| deps.autonomy_control.clone())
+            .ok_or(StatusCode::NOT_FOUND)?;
+        Some(control.lock_transition().await)
+    } else {
+        None
+    };
+    let (new_config, _resume_level) = edit_agent_config(
+        &state,
+        &request.agent_id,
+        |current_config, doc, agent_idx| {
+            if let Some(routing) = &request.routing {
+                update_routing_table(doc, agent_idx, routing)?;
+            }
+            if let Some(tuning) = &request.tuning {
+                update_tuning_table(doc, agent_idx, tuning)?;
+            }
+            if let Some(compaction) = &request.compaction {
+                update_compaction_table(doc, agent_idx, compaction)?;
+            }
+            if let Some(cortex) = &request.cortex {
+                update_cortex_table(doc, agent_idx, cortex)?;
+            }
+            let mut resume_level = None;
+            if let Some(autonomy) = &request.autonomy {
+                if let Some(target) = autonomy.level {
+                    let current = current_config
+                        .agents
+                        .iter()
+                        .find(|agent| agent.id == request.agent_id)
+                        .map(|agent| {
+                            agent
+                                .resolve(&current_config.instance_dir, &current_config.defaults)
+                                .autonomy
+                                .level
+                        });
+                    resume_level = current
+                        .and_then(|current| autonomy_resume_level_for_transition(current, target))
+                }
+                update_autonomy_table(doc, agent_idx, autonomy)?;
+            }
+            if let Some(warmup) = &request.warmup {
+                update_warmup_table(doc, agent_idx, warmup)?;
+            }
+            if let Some(coalesce) = &request.coalesce {
+                update_coalesce_table(doc, agent_idx, coalesce)?;
+            }
+            if let Some(memory_persistence) = &request.memory_persistence {
+                update_memory_persistence_table(doc, agent_idx, memory_persistence)?;
+            }
+            if let Some(browser) = &request.browser {
+                update_browser_table(doc, agent_idx, browser)?;
+            }
+            if let Some(channel) = &request.channel {
+                update_channel_table(doc, agent_idx, channel)?;
+            }
+            if let Some(sandbox) = &request.sandbox {
+                update_sandbox_table(doc, agent_idx, sandbox)?;
+            }
+            if let Some(projects) = &request.projects {
+                update_projects_table(doc, agent_idx, projects)?;
+            }
+            if let Some(discord) = &request.discord {
+                update_discord_table(doc, discord)?;
+            }
+            Ok((resume_level, true))
+        },
+        |resume_level| persist_autonomy_resume_level(&state, &request.agent_id, *resume_level),
+    )
+    .await?;
+
+    tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
+
+    if request.discord.is_some()
+        && let Some(discord_config) = &new_config.messaging.discord
+    {
+        let new_permissions =
+            crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+        let permissions = state.discord_permissions.read().await;
+        if let Some(arc_swap) = permissions.as_ref() {
+            arc_swap.store(std::sync::Arc::new(new_permissions));
+        }
+    }
+
+    get_agent_config(
+        State(state),
+        Query(AgentConfigQuery {
+            agent_id: request.agent_id,
+        }),
+    )
+    .await
+}
+
+fn autonomy_resume_level_for_transition(
+    current: crate::config::AutonomyLevel,
+    target: crate::config::AutonomyLevel,
+) -> Option<crate::config::AutonomyLevel> {
+    match (current, target) {
+        (current, crate::config::AutonomyLevel::Off)
+            if current != crate::config::AutonomyLevel::Off =>
+        {
+            Some(current)
+        }
+        (_, target) if target != crate::config::AutonomyLevel::Off => Some(target),
+        _ => None,
+    }
+}
+
+fn persist_autonomy_resume_level(
+    state: &ApiState,
+    agent_id: &str,
+    level: Option<crate::config::AutonomyLevel>,
+) -> Result<Option<AutonomyResumeRollback>, StatusCode> {
+    let Some(level) = level else {
+        return Ok(None);
+    };
+    let settings = state
+        .runtime_configs
+        .load()
+        .get(agent_id)
+        .and_then(|runtime_config| runtime_config.settings.load().as_ref().clone())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let previous = settings.autonomy_resume_level().map_err(|error| {
+        tracing::warn!(%error, agent_id, "failed to read autonomy resume level");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if previous == Some(level) {
+        return Ok(None);
+    }
+    settings.set_autonomy_resume_level(level).map_err(|error| {
+        tracing::warn!(%error, agent_id, "failed to save autonomy resume level");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Some(AutonomyResumeRollback { settings, previous }))
+}
+
+struct AutonomyResumeRollback {
+    settings: Arc<crate::settings::SettingsStore>,
+    previous: Option<crate::config::AutonomyLevel>,
+}
+
+impl AutonomyResumeRollback {
+    fn restore(self) -> crate::Result<()> {
+        match self.previous {
+            Some(level) => self.settings.set_autonomy_resume_level(level),
+            None => self.settings.clear_autonomy_resume_level(),
+        }
+    }
+}
+
+/// Apply one serialized agent-config edit and converge the live runtime before
+/// another API or command writer can observe the new file with stale state.
+async fn edit_agent_config<R>(
+    state: &Arc<ApiState>,
+    agent_id: &str,
+    edit: impl FnOnce(
+        &crate::config::Config,
+        &mut toml_edit::DocumentMut,
+        usize,
+    ) -> Result<(R, bool), StatusCode>,
+    before_write: impl FnOnce(&R) -> Result<Option<AutonomyResumeRollback>, StatusCode>,
+) -> Result<(crate::config::Config, R), StatusCode> {
     let config_path = state.config_path.read().await.clone();
     if config_path.as_os_str().is_empty() {
         tracing::error!("config_path not set in ApiState");
@@ -510,6 +682,10 @@ pub(super) async fn update_agent_config(
             tracing::warn!(%error, "failed to read config.toml");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    let current_config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
+        tracing::warn!(%error, "failed to load current config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let mut doc = config_content
         .parse::<toml_edit::DocumentMut>()
@@ -518,46 +694,10 @@ pub(super) async fn update_agent_config(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let agent_idx = find_or_create_agent_table(&mut doc, &request.agent_id)?;
-
-    if let Some(routing) = &request.routing {
-        update_routing_table(&mut doc, agent_idx, routing)?;
-    }
-    if let Some(tuning) = &request.tuning {
-        update_tuning_table(&mut doc, agent_idx, tuning)?;
-    }
-    if let Some(compaction) = &request.compaction {
-        update_compaction_table(&mut doc, agent_idx, compaction)?;
-    }
-    if let Some(cortex) = &request.cortex {
-        update_cortex_table(&mut doc, agent_idx, cortex)?;
-    }
-    if let Some(autonomy) = &request.autonomy {
-        update_autonomy_table(&mut doc, agent_idx, autonomy)?;
-    }
-    if let Some(warmup) = &request.warmup {
-        update_warmup_table(&mut doc, agent_idx, warmup)?;
-    }
-    if let Some(coalesce) = &request.coalesce {
-        update_coalesce_table(&mut doc, agent_idx, coalesce)?;
-    }
-    if let Some(memory_persistence) = &request.memory_persistence {
-        update_memory_persistence_table(&mut doc, agent_idx, memory_persistence)?;
-    }
-    if let Some(browser) = &request.browser {
-        update_browser_table(&mut doc, agent_idx, browser)?;
-    }
-    if let Some(channel) = &request.channel {
-        update_channel_table(&mut doc, agent_idx, channel)?;
-    }
-    if let Some(sandbox) = &request.sandbox {
-        update_sandbox_table(&mut doc, agent_idx, sandbox)?;
-    }
-    if let Some(projects) = &request.projects {
-        update_projects_table(&mut doc, agent_idx, projects)?;
-    }
-    if let Some(discord) = &request.discord {
-        update_discord_table(&mut doc, discord)?;
+    let agent_idx = find_or_create_agent_table(&mut doc, agent_id)?;
+    let (edit_result, changed) = edit(&current_config, &mut doc, agent_idx)?;
+    if !changed {
+        return Ok((current_config, edit_result));
     }
 
     let updated_content = doc.to_string();
@@ -565,59 +705,120 @@ pub(super) async fn update_agent_config(
         tracing::warn!(%error, "rejected config API update due to invalid resulting TOML");
         return Err(StatusCode::BAD_REQUEST);
     }
+    let rollback = before_write(&edit_result)?;
 
-    tokio::fs::write(&config_path, updated_content)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    // Release the config write mutex — remaining work is read-only state updates.
-    drop(_config_guard);
-
-    tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
-
-    match crate::config::Config::load_from_path(&config_path) {
-        Ok(new_config) => {
-            // Keep in-memory defaults fresh so newly created agents inherit
-            // the latest routing values.
-            state.set_defaults_config(new_config.defaults.clone()).await;
-
-            let runtime_configs = state.runtime_configs.load();
-            let mcp_managers = state.mcp_managers.load();
-            if let (Some(rc), Some(mcp_manager)) = (
-                runtime_configs.get(&request.agent_id).cloned(),
-                mcp_managers.get(&request.agent_id).cloned(),
-            ) {
-                rc.reload_config(&new_config, &request.agent_id, &mcp_manager)
-                    .await;
-            }
-            if request.discord.is_some()
-                && let Some(discord_config) = &new_config.messaging.discord
-            {
-                let new_perms = crate::config::DiscordPermissions::from_config(
-                    discord_config,
-                    &new_config.bindings,
-                );
-                let perms = state.discord_permissions.read().await;
-                if let Some(arc_swap) = perms.as_ref() {
-                    arc_swap.store(std::sync::Arc::new(new_perms));
-                }
-            }
+    if let Err(error) = tokio::fs::write(&config_path, updated_content).await {
+        tracing::warn!(%error, "failed to write config.toml");
+        if let Some(rollback) = rollback
+            && let Err(rollback_error) = rollback.restore()
+        {
+            tracing::error!(%rollback_error, "failed to restore autonomy resume level after config write failure");
         }
-        Err(error) => {
-            tracing::warn!(%error, "config.toml written but failed to reload immediately");
-        }
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    get_agent_config(
-        State(state),
-        Query(AgentConfigQuery {
-            agent_id: request.agent_id,
-        }),
+    let new_config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
+        tracing::warn!(%error, "config.toml written but failed to reload immediately");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    state.set_defaults_config(new_config.defaults.clone()).await;
+    let runtime_config = state.runtime_configs.load().get(agent_id).cloned();
+    let mcp_manager = state.mcp_managers.load().get(agent_id).cloned();
+    let mcp_reconciliation = runtime_config
+        .as_ref()
+        .and_then(|runtime_config| runtime_config.publish_config(&new_config, agent_id));
+    drop(_config_guard);
+    if let (Some(mcp_manager), Some((old_mcp, new_mcp))) = (mcp_manager, mcp_reconciliation)
+        && old_mcp != new_mcp
+    {
+        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
+    }
+
+    Ok((new_config, edit_result))
+}
+
+pub(crate) enum AutonomyLevelMutation {
+    Unchanged,
+    Set(crate::config::AutonomyLevel),
+}
+
+pub(crate) struct AutonomyLevelChange {
+    pub previous: crate::config::AutonomyLevel,
+    pub configured: crate::config::AutonomyLevel,
+    pub effective: crate::config::AutonomyLevel,
+}
+
+/// Persist a level selected by an operator command and return both dial and
+/// effective values after the shared ceiling is applied.
+pub(crate) async fn mutate_agent_autonomy_level(
+    state: &Arc<ApiState>,
+    agent_id: &str,
+    mutation: impl FnOnce(crate::config::AutonomyLevel) -> Result<AutonomyLevelMutation, StatusCode>,
+) -> Result<AutonomyLevelChange, StatusCode> {
+    let key: crate::AgentId = Arc::from(agent_id);
+    let control = state
+        .wake_registry
+        .read()
+        .await
+        .get(&key)
+        .map(|deps| deps.autonomy_control.clone())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let _transition_guard = control.lock_transition().await;
+    if !state.runtime_configs.load().contains_key(agent_id)
+        || !state.mcp_managers.load().contains_key(agent_id)
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let (_new_config, (previous, configured, _resume_level)) = edit_agent_config(
+        state,
+        agent_id,
+        move |current_config, doc, agent_idx| {
+            let agent = current_config
+                .agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .ok_or(StatusCode::NOT_FOUND)?;
+            let current = agent
+                .resolve(&current_config.instance_dir, &current_config.defaults)
+                .autonomy
+                .level;
+            let configured = match mutation(current)? {
+                AutonomyLevelMutation::Unchanged => {
+                    return Ok(((current, current, None), false));
+                }
+                AutonomyLevelMutation::Set(configured) => configured,
+            };
+            update_autonomy_table(
+                doc,
+                agent_idx,
+                &AutonomyUpdate {
+                    level: Some(configured),
+                    interval_secs: None,
+                    active_hours: None,
+                    max_turns: None,
+                    max_tasks_per_run: None,
+                    run_history_count: None,
+                    claim_unowned: None,
+                },
+            )?;
+            Ok((
+                (
+                    current,
+                    configured,
+                    autonomy_resume_level_for_transition(current, configured),
+                ),
+                true,
+            ))
+        },
+        |(_, _, resume_level)| persist_autonomy_resume_level(state, agent_id, *resume_level),
     )
-    .await
+    .await?;
+    Ok(AutonomyLevelChange {
+        previous,
+        configured,
+        effective: configured.min(**state.autonomy_ceiling.load()),
+    })
 }
 
 // -- TOML edit helpers --
@@ -1133,6 +1334,146 @@ fn update_discord_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn test_api_state(config_path: std::path::PathBuf) -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _) = tokio::sync::mpsc::channel(1);
+        let state = Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+        ));
+        state.set_config_path(config_path).await;
+        state
+    }
+
+    #[tokio::test]
+    async fn unchanged_edit_preserves_the_config_file_byte_for_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let content = "# keep this comment\n\n[[agents]]\nid = \"main\"\ndefault = true\n";
+        tokio::fs::write(&config_path, content).await.unwrap();
+        let state = test_api_state(config_path.clone()).await;
+
+        edit_agent_config(&state, "main", |_, _, _| Ok(((), false)), |_| Ok(None))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(config_path).await.unwrap(),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_edit_does_not_run_prewrite_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let content = "[[agents]]\nid = \"main\"\ndefault = true\n";
+        tokio::fs::write(&config_path, content).await.unwrap();
+        let state = test_api_state(config_path.clone()).await;
+        let side_effect_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let side_effect = side_effect_ran.clone();
+
+        let result = edit_agent_config(
+            &state,
+            "main",
+            |_, doc, agent_idx| {
+                update_autonomy_table(
+                    doc,
+                    agent_idx,
+                    &AutonomyUpdate {
+                        level: Some(crate::config::AutonomyLevel::Act),
+                        interval_secs: Some(1),
+                        active_hours: None,
+                        max_turns: None,
+                        max_tasks_per_run: None,
+                        run_history_count: None,
+                        claim_unowned: None,
+                    },
+                )?;
+                Ok((Some(crate::config::AutonomyLevel::Act), true))
+            },
+            move |_| {
+                side_effect.store(true, std::sync::atomic::Ordering::Release);
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
+        assert!(!side_effect_ran.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            tokio::fs::read_to_string(config_path).await.unwrap(),
+            content
+        );
+    }
+
+    #[test]
+    fn api_level_changes_keep_the_latest_resume_level() {
+        use crate::config::AutonomyLevel;
+
+        assert_eq!(
+            autonomy_resume_level_for_transition(AutonomyLevel::Act, AutonomyLevel::Off),
+            Some(AutonomyLevel::Act)
+        );
+        assert_eq!(
+            autonomy_resume_level_for_transition(AutonomyLevel::Off, AutonomyLevel::Suggest),
+            Some(AutonomyLevel::Suggest)
+        );
+        assert_eq!(
+            autonomy_resume_level_for_transition(AutonomyLevel::Off, AutonomyLevel::Off),
+            None
+        );
+    }
+
+    #[test]
+    fn autonomy_level_update_preserves_other_tuning() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[defaults.autonomy]
+interval_secs = 900
+
+[[agents]]
+id = "main"
+
+[agents.autonomy]
+level = "act"
+max_tasks_per_run = 4
+claim_unowned = true
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+        let agent_idx = find_or_create_agent_table(&mut doc, "main").unwrap();
+
+        update_autonomy_table(
+            &mut doc,
+            agent_idx,
+            &AutonomyUpdate {
+                level: Some(crate::config::AutonomyLevel::Off),
+                interval_secs: None,
+                active_hours: None,
+                max_turns: None,
+                max_tasks_per_run: None,
+                run_history_count: None,
+                claim_unowned: None,
+            },
+        )
+        .unwrap();
+
+        let autonomy = doc["agents"]
+            .as_array_of_tables()
+            .and_then(|agents| agents.get(agent_idx))
+            .and_then(|agent| agent.get("autonomy"))
+            .and_then(toml_edit::Item::as_table)
+            .unwrap();
+        assert_eq!(autonomy["level"].as_str(), Some("off"));
+        assert_eq!(autonomy["max_tasks_per_run"].as_integer(), Some(4));
+        assert_eq!(autonomy["claim_unowned"].as_bool(), Some(true));
+        assert!(autonomy.get("interval_secs").is_none());
+    }
 
     #[test]
     fn test_update_warmup_table_writes_values() {

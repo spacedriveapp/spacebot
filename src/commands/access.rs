@@ -257,24 +257,15 @@ mod authority_gate_tests {
         )])));
     }
 
-    /// The channel re-parses raw text without the receiving bot's username,
-    /// so text the router declined as addressed elsewhere still resolves
-    /// there. That path must gate on the stamped verdict.
     #[test]
-    fn addressed_commands_diverge_between_the_two_parsers() {
+    fn addressed_commands_are_rejected_consistently() {
         let registry = &crate::commands::REGISTRY;
-        assert!(matches!(
+        for parsed in [
             registry.parse_addressed("/sethome@otherbot", Some("spacebot")),
-            crate::commands::ParseResult::NotACommand
-        ));
-        let reparsed = registry.parse("/sethome@otherbot");
-        let crate::commands::ParseResult::Command(parsed) = reparsed else {
-            panic!("channel-side parse should still resolve the command");
-        };
-        assert_eq!(parsed.def.name, "sethome");
-        assert_eq!(parsed.def.access, CommandAccess::Authority);
-        assert!(!access_allows(parsed.def, false));
-        assert!(access_allows(parsed.def, true));
+            registry.parse_addressed("/autonomy_off@otherbot", Some("spacebot")),
+        ] {
+            assert!(matches!(parsed, crate::commands::ParseResult::NotACommand));
+        }
     }
 }
 

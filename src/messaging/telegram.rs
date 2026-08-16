@@ -987,6 +987,12 @@ fn build_metadata(
     // Matches the pattern used by Discord/Slack/Twitch adapters.
     let mut mentions_or_replies_to_bot = false;
 
+    if let Some(text) = extract_text(message)
+        && telegram_command_addresses_bot(&text, bot_username.as_deref())
+    {
+        mentions_or_replies_to_bot = true;
+    }
+
     // Check text-based @mention in message text/caption.
     // Uses a word-boundary check so "@spacebot" doesn't match "@spacebot_extra".
     if let Some(bot_username) = bot_username {
@@ -1056,6 +1062,13 @@ fn build_metadata(
     );
 
     (metadata, formatted_author)
+}
+
+fn telegram_command_addresses_bot(text: &str, bot_username: Option<&str>) -> bool {
+    matches!(
+        crate::commands::REGISTRY.parse_addressed(text, bot_username),
+        crate::commands::ParseResult::Command(_) | crate::commands::ParseResult::Usage(_, _)
+    )
 }
 
 /// Build a display name from a Telegram user, preferring full name.
@@ -1413,6 +1426,26 @@ async fn send_formatted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognized_commands_address_the_receiving_bot() {
+        assert!(telegram_command_addresses_bot(
+            "/autonomy",
+            Some("spacebot")
+        ));
+        assert!(telegram_command_addresses_bot(
+            "/autonomy_on@spacebot act",
+            Some("spacebot")
+        ));
+        assert!(!telegram_command_addresses_bot(
+            "/autonomy@other_bot",
+            Some("spacebot")
+        ));
+        assert!(!telegram_command_addresses_bot(
+            "/unknown",
+            Some("spacebot")
+        ));
+    }
 
     #[test]
     fn bold() {
