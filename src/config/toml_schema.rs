@@ -438,8 +438,6 @@ pub(super) struct TomlAutonomyConfig {
     pub(super) active_hours: Option<(u8, u8)>,
     pub(super) max_turns: Option<u32>,
     pub(super) max_tasks_per_run: Option<u32>,
-    pub(super) timeout_secs: Option<u64>,
-    pub(super) warn_secs: Option<u64>,
     pub(super) run_history_count: Option<u32>,
     pub(super) claim_unowned: Option<bool>,
 }

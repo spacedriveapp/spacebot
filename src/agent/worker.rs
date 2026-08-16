@@ -931,6 +931,22 @@ impl Worker {
                     WorkerLifecycle::WaitingForInput,
                 )
                 .await;
+                let scrubbed = if let Some(store) =
+                    self.deps.runtime_config.secrets.load().as_ref().as_ref()
+                {
+                    crate::secrets::scrub::scrub_with_store(&result, store, &self.deps.agent_id)
+                } else {
+                    result.clone()
+                };
+                self.deps
+                    .event_tx
+                    .send(crate::ProcessEvent::WorkerInitialResult {
+                        agent_id: self.deps.agent_id.clone(),
+                        worker_id: self.id,
+                        channel_id: self.channel_id.clone(),
+                        result: crate::secrets::scrub::scrub_leaks(&scrubbed),
+                    })
+                    .ok();
                 self.hook.send_status("waiting for input");
                 self.hook.send_worker_idle();
             }

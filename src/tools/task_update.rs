@@ -13,6 +13,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum TaskUpdateScope {
     Branch,
+    Autonomy(crate::config::AutonomyLevel),
     Worker(WorkerId),
 }
 
@@ -43,6 +44,19 @@ impl TaskUpdateTool {
         }
     }
 
+    pub fn for_autonomy(
+        task_store: Arc<TaskStore>,
+        agent_id: AgentId,
+        level: crate::config::AutonomyLevel,
+    ) -> Self {
+        Self {
+            task_store,
+            agent_id,
+            scope: TaskUpdateScope::Autonomy(level),
+            working_memory: None,
+        }
+    }
+
     pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
         self.working_memory = Some(store);
         self
@@ -53,7 +67,7 @@ impl TaskUpdateTool {
 #[error("task_update failed: {0}")]
 pub struct TaskUpdateError(String);
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct TaskUpdateArgs {
     pub task_number: i32,
     pub title: Option<String>,
@@ -209,6 +223,30 @@ impl Tool for TaskUpdateTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
+        if matches!(self.scope, TaskUpdateScope::Autonomy(_))
+            && (args.approved_by.is_some() || args.status.as_deref() == Some("ready"))
+        {
+            return Err(TaskUpdateError(
+                "autonomy cannot approve tasks or move them to ready".to_string(),
+            ));
+        }
+        if matches!(
+            self.scope,
+            TaskUpdateScope::Autonomy(crate::config::AutonomyLevel::Suggest)
+        ) && (args.status.is_some()
+            || args.worker_id.is_some()
+            || args.approved_by.is_some()
+            || args.complete_subtask.is_some()
+            || args
+                .subtasks
+                .as_ref()
+                .is_some_and(|subtasks| subtasks.iter().any(|subtask| subtask.completed)))
+        {
+            return Err(TaskUpdateError(
+                "suggest autonomy may enrich task content and execution plans, but cannot approve, execute, bind, or complete task work"
+                    .to_string(),
+            ));
+        }
         if matches!(self.scope, TaskUpdateScope::Worker(_))
             && (args.title.is_some()
                 || args.description.is_some()
@@ -267,7 +305,7 @@ impl Tool for TaskUpdateTool {
         };
 
         let (author_type, author_id, source) = match &self.scope {
-            TaskUpdateScope::Branch => (
+            TaskUpdateScope::Branch | TaskUpdateScope::Autonomy(_) => (
                 crate::tasks::TaskAuthorKind::Agent,
                 self.agent_id.to_string(),
                 crate::tasks::TaskMutationSource::Tool,
@@ -312,7 +350,7 @@ impl Tool for TaskUpdateTool {
             .map_err(TaskUpdateError)?;
 
         let update_result = match &self.scope {
-            TaskUpdateScope::Branch => self
+            TaskUpdateScope::Branch | TaskUpdateScope::Autonomy(_) => self
                 .task_store
                 .update_with_dependencies_and_status_transition(
                     task_number,
@@ -553,6 +591,101 @@ mod tests {
             event.summary,
             format!("Task #{} updated to done", created.task_number)
         );
+    }
+
+    #[tokio::test]
+    async fn suggest_autonomy_cannot_approve_or_execute_tasks() {
+        let task_store = Arc::new(setup_test_store().await);
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: Some("agent-test".to_string()),
+                title: "Needs approval".to_string(),
+                status: TaskStatus::PendingApproval,
+                priority: TaskPriority::Medium,
+                created_by: "autonomy".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("task should be created");
+        let tool = TaskUpdateTool::for_autonomy(
+            task_store,
+            AgentId::from("agent-test"),
+            crate::config::AutonomyLevel::Suggest,
+        );
+
+        let error = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: None,
+                description: None,
+                status: Some("ready".to_string()),
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: Some("autonomy".to_string()),
+                worker_type: None,
+                project_id: None,
+                repo_id: None,
+                worktree_mode: None,
+                worktree_id: None,
+                required_skills: None,
+                depends_on: None,
+                edit_summary: Some("self approve".to_string()),
+                expected_revision: None,
+            })
+            .await
+            .expect_err("suggest autonomy must not approve tasks");
+
+        assert!(error.to_string().contains("cannot approve"));
+
+        let error = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                subtasks: Some(vec![crate::tasks::TaskSubtask {
+                    title: "implementation".to_string(),
+                    completed: true,
+                }]),
+                ..Default::default()
+            })
+            .await
+            .expect_err("suggest autonomy must not complete subtasks");
+        assert!(error.to_string().contains("cannot approve, execute"));
+    }
+
+    #[tokio::test]
+    async fn act_autonomy_cannot_self_approve_tasks() {
+        let task_store = Arc::new(setup_test_store().await);
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: Some("agent-test".to_string()),
+                title: "Needs human approval".to_string(),
+                status: TaskStatus::PendingApproval,
+                priority: TaskPriority::Medium,
+                created_by: "autonomy".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("task should be created");
+        let tool = TaskUpdateTool::for_autonomy(
+            task_store,
+            AgentId::from("agent-test"),
+            crate::config::AutonomyLevel::Act,
+        );
+
+        let error = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                status: Some("ready".to_string()),
+                approved_by: Some("autonomy".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("act autonomy must not self approve");
+        assert!(error.to_string().contains("cannot approve"));
     }
 
     #[tokio::test]

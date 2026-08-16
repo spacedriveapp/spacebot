@@ -423,8 +423,8 @@ struct AgentTurnResult {
 /// What kind of conversation a channel is serving.
 ///
 /// Channels behave differently depending on who is on the other end: user
-/// channels are driven by incoming messages, while cron and autonomy channels
-/// are system-initiated runs that do their work and exit.
+/// channels are driven by incoming messages, cron channels are one-shot, and
+/// autonomy is a resident system channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelKind {
     User,
@@ -443,10 +443,9 @@ impl std::fmt::Display for ChannelKind {
 }
 
 impl ChannelKind {
-    /// System-initiated channels receive no further user messages after the
-    /// initial prompt, so the event loop exits once all work settles.
+    /// Cron channels receive one prompt and exit once all work settles.
     pub fn self_exits(&self) -> bool {
-        matches!(self, ChannelKind::Cron | ChannelKind::Autonomy)
+        matches!(self, ChannelKind::Cron)
     }
 
     /// System-initiated runs repeat the same procedure on a schedule and
@@ -456,8 +455,7 @@ impl ChannelKind {
     }
 
     /// System-initiated channels have no user to send a reset message, so the
-    /// retrigger cap would permanently stall multi-worker jobs. The job
-    /// timeout is the natural bound instead.
+    /// retrigger cap would permanently stall multi-worker jobs.
     pub fn caps_retriggers(&self) -> bool {
         matches!(self, ChannelKind::User)
     }
@@ -535,13 +533,18 @@ pub struct ChannelState {
     /// router-side control plane can apply a mode change mid-turn; the
     /// channel reads it at every gate instead of its startup snapshot.
     pub response_mode: Arc<std::sync::atomic::AtomicU8>,
-    /// Autonomy run state for the `autonomy_complete` tool. Set only on
-    /// `ChannelKind::Autonomy` channels; the run loop uses it to enforce the
-    /// completion contract before self-exit.
-    pub autonomy_run: Option<crate::agent::autonomy::AutonomyRunHandle>,
+    /// Current autonomy epoch. The slot survives between epochs while each
+    /// generation gets a fresh handle and completion contract.
+    pub autonomy_run: Option<crate::agent::autonomy::AutonomyRunSlot>,
 }
 
 impl ChannelState {
+    pub fn autonomy_run(&self) -> Option<crate::agent::autonomy::AutonomyRunHandle> {
+        self.autonomy_run
+            .as_ref()
+            .and_then(crate::agent::autonomy::AutonomyRunSlot::current)
+    }
+
     /// Append a message this agent sent into the channel from outside the
     /// channel's own turn loop, so the next turn sees what was said.
     ///
@@ -734,7 +737,7 @@ impl ChannelState {
         Ok(())
     }
 
-    async fn cleanup_worker_routing(&self, worker_id: WorkerId) {
+    pub(crate) async fn cleanup_worker_routing(&self, worker_id: WorkerId) {
         self.worker_inputs.write().await.remove(&worker_id);
         self.worker_injections.write().await.remove(&worker_id);
         self.active_workers.write().await.remove(&worker_id);
@@ -980,6 +983,57 @@ impl ChannelControlHandle {
                 .await;
         }
     }
+
+    /// Stop local tasks for idle interactive workers without changing their
+    /// durable waiting state. Startup reconnects these sessions by worker id.
+    pub async fn detach_idle_workers_for_restart(&self) {
+        let idle_worker_ids: Vec<WorkerId> = self
+            .inner
+            .state
+            .status_block
+            .read()
+            .await
+            .active_workers
+            .iter()
+            .filter(|worker| worker.interactive && worker.status == "idle")
+            .map(|worker| worker.id)
+            .collect();
+        for worker_id in idle_worker_ids {
+            if let Some(mut control) = self
+                .inner
+                .state
+                .worker_handles
+                .write()
+                .await
+                .remove(&worker_id)
+            {
+                control.handle.abort();
+                if let Err(error) = (&mut control.handle).await
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, %worker_id, "idle worker task failed while detaching for restart");
+                }
+            }
+            self.inner
+                .state
+                .worker_inputs
+                .write()
+                .await
+                .remove(&worker_id);
+            self.inner
+                .state
+                .worker_injections
+                .write()
+                .await
+                .remove(&worker_id);
+            self.inner
+                .state
+                .active_workers
+                .write()
+                .await
+                .remove(&worker_id);
+        }
+    }
 }
 
 /// RAII flag for the shared turn-active cell: set on entry to message
@@ -1094,10 +1148,11 @@ pub struct Channel {
     /// Injected into the system prompt (not into chat history) so the LLM
     /// treats it as read-only context rather than actionable user messages.
     backfill_transcript: Option<String>,
-    /// Retry-prompts sent so far for the autonomy completion contract.
-    /// Autonomy channels must call `autonomy_complete` before self-exit;
-    /// this bounds how many times the run loop nudges them.
+    /// Retry prompts sent for the current autonomy epoch's completion contract.
     autonomy_contract_retries: usize,
+    /// A lifecycle event was dropped from the broadcast receiver. While set,
+    /// heartbeats reconcile owned workers from durable lifecycle state.
+    autonomy_event_lagged: bool,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
     /// Per-conversation resolved settings (memory mode, delegation mode, model override).
@@ -1195,7 +1250,7 @@ impl Channel {
         live_process_transcripts: Option<LiveProcessTranscripts>,
         resolved_settings: ResolvedConversationSettings,
         cron_outcome: Option<crate::cron::CronOutcome>,
-        autonomy_run: Option<crate::agent::autonomy::AutonomyRunHandle>,
+        autonomy_run: Option<crate::agent::autonomy::AutonomyRunSlot>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -1334,6 +1389,7 @@ impl Channel {
             send_agent_message_tool,
             backfill_transcript: None,
             autonomy_contract_retries: 0,
+            autonomy_event_lagged: false,
             control_handle,
             resolved_settings,
         };
@@ -1344,11 +1400,10 @@ impl Channel {
     /// Set the backfill transcript for injection into the system prompt.
     /// Whether this channel sheds history through the chronicle.
     ///
-    /// Cron and autonomy channels self-exit once their work settles, so
-    /// chronicling them costs an LLM call for a story nobody will read.
+    /// System channels use bounded run summaries instead of chronicles.
     fn uses_chronicle(&self) -> bool {
         self.deps.runtime_config.compaction.load().mode == CompactionMode::Chronicle
-            && !self.state.kind.self_exits()
+            && self.state.kind == ChannelKind::User
     }
 
     /// Run whichever context monitor this channel is configured for.
@@ -1391,7 +1446,7 @@ impl Channel {
     /// fresh single-shot session whose prior rows are its own wake prompts, and
     /// its briefing carries the continuity it needs.
     async fn hydrate_history(&mut self) {
-        if self.state.kind.self_exits() {
+        if self.state.kind != ChannelKind::User {
             return;
         }
         if !self.state.history.read().await.is_empty() {
@@ -1879,6 +1934,185 @@ impl Channel {
         }
     }
 
+    async fn begin_autonomy_epoch(&mut self, generation: u64) -> bool {
+        let Some(run) = self.state.autonomy_run() else {
+            return false;
+        };
+        if run.generation != generation {
+            tracing::debug!(
+                generation,
+                current = run.generation,
+                "ignoring stale autonomy epoch message"
+            );
+            return false;
+        }
+
+        self.state.history.write().await.clear();
+        self.state.history_fence.note_head_mutation();
+        self.message_count = 0;
+        self.retrigger_count = 0;
+        self.pending_retrigger = false;
+        self.pending_retrigger_metadata.clear();
+        self.retrigger_deadline = None;
+        self.coalesce_buffer.clear();
+        self.coalesce_deadline = None;
+        self.autonomy_contract_retries = 0;
+        if !self.pending_results.is_empty() {
+            self.pending_retrigger = true;
+            self.retrigger_deadline = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+            );
+        }
+        true
+    }
+
+    async fn drive_autonomy_contract(&mut self) -> Result<()> {
+        if self.state.kind != ChannelKind::Autonomy {
+            return Ok(());
+        }
+        let Some(run) = self.state.autonomy_run() else {
+            return Ok(());
+        };
+        if run.finish_requested() {
+            if !run.has_active_children()
+                && !self.pending_retrigger
+                && self.retrigger_deadline.is_none()
+            {
+                run.mark_quiescent();
+            }
+            return Ok(());
+        }
+        if self.message_count == 0
+            || run.has_active_children()
+            || self.pending_retrigger
+            || self.retrigger_deadline.is_some()
+        {
+            return Ok(());
+        }
+
+        if self.autonomy_contract_retries < crate::agent::autonomy::AUTONOMY_CONTRACT_MAX_RETRIES {
+            self.autonomy_contract_retries += 1;
+            let retry_prompt = self
+                .deps
+                .runtime_config
+                .prompts
+                .load()
+                .render_system_autonomy_contract_retry()?;
+            self.handle_message(InboundMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: "system".into(),
+                adapter: None,
+                conversation_id: crate::agent::autonomy::AUTONOMY_CONVERSATION_ID.to_string(),
+                sender_id: "system".into(),
+                agent_id: Some(self.deps.agent_id.clone()),
+                content: crate::MessageContent::Text(retry_prompt),
+                timestamp: chrono::Utc::now(),
+                metadata: HashMap::new(),
+                formatted_author: None,
+            })
+            .await?;
+            return Ok(());
+        }
+
+        if run
+            .request_finish(crate::agent::autonomy::AutonomyFinishRequest {
+                summary: crate::agent::autonomy::AUTONOMY_FALLBACK_SUMMARY.to_string(),
+                actions: Vec::new(),
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+        run.mark_quiescent();
+        Ok(())
+    }
+
+    async fn recover_lagged_autonomy_children(&mut self) -> Result<()> {
+        let Some(run) = self.state.autonomy_run() else {
+            return Ok(());
+        };
+        let mut recovered = 0usize;
+        for child in run.active_children() {
+            let crate::agent::autonomy::AutonomyChild::Worker(worker_id) = child else {
+                tracing::warn!(
+                    ?child,
+                    "cannot recover a lagged autonomy branch result from durable state"
+                );
+                continue;
+            };
+            let Some(lifecycle) = self
+                .state
+                .process_run_logger
+                .read_worker_lifecycle(worker_id)
+                .await?
+            else {
+                continue;
+            };
+            if lifecycle == crate::conversation::WorkerLifecycle::WaitingForInput {
+                self.state
+                    .status_block
+                    .write()
+                    .await
+                    .update(&ProcessEvent::WorkerIdle {
+                        agent_id: self.deps.agent_id.clone(),
+                        worker_id,
+                        channel_id: Some(self.id.clone()),
+                    });
+                self.pending_results.push(PendingResult {
+                    process_type: "worker",
+                    process_id: worker_id.to_string(),
+                    result: "The interactive worker reached idle, but its live result event was lost. Inspect its durable transcript with worker_inspect before deciding the follow-up."
+                        .to_string(),
+                    success: true,
+                });
+                run.settle_child(child);
+                recovered += 1;
+            } else if lifecycle.is_terminal()
+                && let Some(terminal) = self
+                    .state
+                    .process_run_logger
+                    .read_worker_terminal(worker_id)
+                    .await?
+            {
+                self.consumed_worker_outcomes
+                    .insert(worker_id, terminal.outcome_version);
+                self.state.worker_handles.write().await.remove(&worker_id);
+                self.state.worker_inputs.write().await.remove(&worker_id);
+                self.state
+                    .worker_injections
+                    .write()
+                    .await
+                    .remove(&worker_id);
+                self.state
+                    .status_block
+                    .write()
+                    .await
+                    .remove_worker(worker_id);
+                self.pending_results.push(PendingResult {
+                    process_type: "worker",
+                    process_id: worker_id.to_string(),
+                    result: terminal.result,
+                    success: terminal.outcome_kind.is_success(),
+                });
+                run.settle_child(child);
+                recovered += 1;
+            }
+        }
+        if recovered > 0 {
+            self.pending_retrigger = true;
+            self.retrigger_deadline = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+            );
+            tracing::warn!(
+                recovered,
+                "recovered autonomy child results after event receiver lag"
+            );
+        }
+        Ok(())
+    }
+
     /// Run the channel event loop.
     pub async fn run(mut self) -> Result<()> {
         tracing::info!(channel_id = %self.id, "channel started");
@@ -1887,7 +2121,9 @@ impl Channel {
         let mut last_lag_warning: Option<std::time::Instant> = None;
 
         loop {
-            // Self-exiting channels (cron, autonomy) have no further user messages
+            self.drive_autonomy_contract().await?;
+
+            // Self-exiting cron channels have no further user messages
             // after the initial prompt. Once all workers/branches finish and no
             // retrigger is pending, exit so the caller can flush the reply buffer.
             // Without this the channel would wait on the broadcast event_rx (which
@@ -1899,64 +2135,6 @@ impl Channel {
                 && self.state.worker_handles.read().await.is_empty()
                 && self.state.active_branches.read().await.is_empty()
             {
-                // Autonomy runs must record their outcome via autonomy_complete
-                // before exiting. When the call is missing, nudge the LLM with
-                // a retry prompt (same budget as the memory-persistence
-                // contract) before giving up; the run driver records a
-                // fallback summary if the budget is exhausted.
-                if let Some(run) = self.state.autonomy_run.clone()
-                    && !run.completed()
-                    && !run.finish_requested()
-                    && self.autonomy_contract_retries
-                        < crate::agent::autonomy::AUTONOMY_CONTRACT_MAX_RETRIES
-                {
-                    self.autonomy_contract_retries += 1;
-                    tracing::warn!(
-                        channel_id = %self.id,
-                        attempt = self.autonomy_contract_retries,
-                        "autonomy run missing autonomy_complete call, retrying"
-                    );
-                    let retry_prompt = match self
-                        .deps
-                        .runtime_config
-                        .prompts
-                        .load()
-                        .render_system_autonomy_contract_retry()
-                    {
-                        Ok(text) => text,
-                        Err(error) => {
-                            tracing::error!(
-                                %error,
-                                channel_id = %self.id,
-                                "failed to render autonomy contract retry prompt"
-                            );
-                            break;
-                        }
-                    };
-                    let retry = InboundMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        source: "system".into(),
-                        adapter: None,
-                        conversation_id: self.conversation_id.clone().unwrap_or_else(|| {
-                            crate::agent::autonomy::AUTONOMY_CONVERSATION_ID.to_string()
-                        }),
-                        sender_id: "system".into(),
-                        agent_id: Some(self.deps.agent_id.clone()),
-                        content: crate::MessageContent::Text(retry_prompt),
-                        timestamp: chrono::Utc::now(),
-                        metadata: HashMap::new(),
-                        formatted_author: None,
-                    };
-                    if let Err(error) = self.handle_message(retry).await {
-                        tracing::error!(
-                            %error,
-                            channel_id = %self.id,
-                            "autonomy completion-contract retry failed"
-                        );
-                        break;
-                    }
-                    continue;
-                }
                 tracing::info!(channel_id = %self.id, "self-exiting channel finished all work, exiting");
                 break;
             }
@@ -1981,6 +2159,35 @@ impl Channel {
 
             tokio::select! {
                 Some(message) = self.message_rx.recv() => {
+                    if self.state.kind == ChannelKind::Autonomy
+                        && let Some(generation) = message
+                            .metadata
+                            .get(crate::agent::autonomy::AUTONOMY_GENERATION_KEY)
+                            .and_then(serde_json::Value::as_u64)
+                    {
+                        let epoch_start = message
+                            .metadata
+                            .get(crate::agent::autonomy::AUTONOMY_EPOCH_START_KEY)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let current = self.state.autonomy_run().map(|run| run.generation);
+                        if current != Some(generation) {
+                            tracing::debug!(generation, ?current, "ignoring autonomy message for stale generation");
+                            continue;
+                        }
+                        if epoch_start && !self.begin_autonomy_epoch(generation).await {
+                            continue;
+                        }
+                        if self.autonomy_event_lagged {
+                            if let Err(error) = self.recover_lagged_autonomy_children().await {
+                                tracing::error!(%error, "failed to reconcile autonomy children on heartbeat");
+                            }
+                            self.autonomy_event_lagged = self
+                                .state
+                                .autonomy_run()
+                                .is_some_and(|run| run.has_active_children());
+                        }
+                    }
                     let config = self.deps.runtime_config.coalesce.load();
                     if self.should_coalesce(&message, &config) {
                         self.coalesce_buffer.push(message);
@@ -2022,6 +2229,9 @@ impl Channel {
                             }
                         }
                         crate::BroadcastRecvResult::Lagged(skipped) => {
+                            if self.state.kind == ChannelKind::Autonomy {
+                                self.autonomy_event_lagged = true;
+                            }
                             #[cfg(feature = "metrics")]
                             crate::telemetry::Metrics::global()
                                 .event_receiver_lagged_events_total
@@ -2041,6 +2251,11 @@ impl Channel {
                                     skipped,
                                     "channel event receiver lagged, dropping old events"
                                 );
+                            }
+                            if self.state.kind == ChannelKind::Autonomy
+                                && let Err(error) = self.recover_lagged_autonomy_children().await
+                            {
+                                tracing::error!(%error, "failed to recover autonomy children after event lag");
                             }
                         }
                         crate::BroadcastRecvResult::Closed => {
@@ -2835,7 +3050,11 @@ impl Channel {
             *reply_target = extract_message_id(&message);
         }
 
-        let is_retrigger = message.source == "system";
+        let is_autonomy_heartbeat = self.state.kind == ChannelKind::Autonomy
+            && message
+                .metadata
+                .contains_key(crate::agent::autonomy::AUTONOMY_GENERATION_KEY);
+        let is_retrigger = message.source == "system" && !is_autonomy_heartbeat;
         let attachment_content = if !attachments.is_empty() {
             if let Some(ref saved_data) = saved_attachment_data {
                 // Reuse already-downloaded bytes for images/text; audio still
@@ -3356,13 +3575,27 @@ impl Channel {
         let opencode_enabled = rc.opencode.load().enabled;
         let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_context = self.state.worker_context_settings.read().await.clone();
-        let worker_capabilities = prompt_engine.render_worker_capabilities(
-            browser_enabled,
-            web_search_enabled,
-            opencode_enabled,
-            &mcp_tool_names,
-            &worker_context,
-        )?;
+        let autonomy_level = self
+            .deps
+            .runtime_config
+            .autonomy
+            .load()
+            .level
+            .min(**self.deps.autonomy_ceiling.load());
+        let worker_capabilities = if self.state.kind == ChannelKind::Autonomy
+            && autonomy_level != crate::config::AutonomyLevel::Act
+        {
+            String::new()
+        } else {
+            prompt_engine.render_worker_capabilities(
+                browser_enabled,
+                web_search_enabled,
+                opencode_enabled,
+                &mcp_tool_names,
+                &worker_context,
+                self.state.kind != ChannelKind::Autonomy,
+            )?
+        };
 
         // Time no longer renders here — it rides on the current user message
         // envelope instead, so this prompt stays byte-stable across turns
@@ -3438,6 +3671,7 @@ impl Channel {
                 active_goals,
                 execution_mode,
                 authority,
+                autonomy_channel: self.state.kind == ChannelKind::Autonomy,
             })?;
 
         segmented.adopt_appended(
@@ -3506,53 +3740,62 @@ impl Channel {
         // them on the table to be talked into calling.
         let sender_is_authority = crate::commands::dispatch::sender_is_authority(&current_inbound);
 
-        match self.resolved_settings.delegation {
-            DelegationMode::Standard => {
-                // Current behavior - standard channel tools only
-                if let Err(error) = crate::tools::add_channel_tools(
-                    &self.tool_server,
-                    self.state.clone(),
-                    routed_sender,
-                    reply_target,
-                    conversation_id,
-                    skip_flag.clone(),
-                    replied_flag.clone(),
-                    self.deps.cron_tool.clone(),
-                    send_agent_message_tool,
-                    allow_direct_reply,
-                    adapter.map(|s| s.to_string()),
-                    slack_thread_ts.as_deref(),
-                    self.state.cron_outcome.clone(),
-                    sender_is_authority,
-                )
-                .await
-                {
-                    tracing::error!(%error, "failed to add channel tools");
-                    return Err(AgentError::Other(error.into()).into());
-                }
+        if self.state.kind == ChannelKind::Autonomy {
+            if let Err(error) =
+                crate::tools::add_autonomy_tools(&self.tool_server, self.state.clone()).await
+            {
+                tracing::error!(%error, "failed to add autonomy tools");
+                return Err(AgentError::Other(error.into()).into());
             }
-            DelegationMode::Direct => {
-                // Full tool access (cortex chat style)
-                if let Err(error) = crate::tools::add_direct_mode_tools(
-                    &self.tool_server,
-                    self.state.clone(),
-                    routed_sender,
-                    reply_target,
-                    conversation_id,
-                    skip_flag.clone(),
-                    replied_flag.clone(),
-                    self.deps.cron_tool.clone(),
-                    send_agent_message_tool,
-                    allow_direct_reply,
-                    adapter.map(|s| s.to_string()),
-                    slack_thread_ts.as_deref(),
-                    self.state.cron_outcome.clone(),
-                    sender_is_authority,
-                )
-                .await
-                {
-                    tracing::error!(%error, "failed to add direct mode tools");
-                    return Err(AgentError::Other(error.into()).into());
+        } else {
+            match self.resolved_settings.delegation {
+                DelegationMode::Standard => {
+                    // Current behavior - standard channel tools only
+                    if let Err(error) = crate::tools::add_channel_tools(
+                        &self.tool_server,
+                        self.state.clone(),
+                        routed_sender,
+                        reply_target,
+                        conversation_id,
+                        skip_flag.clone(),
+                        replied_flag.clone(),
+                        self.deps.cron_tool.clone(),
+                        send_agent_message_tool,
+                        allow_direct_reply,
+                        adapter.map(|s| s.to_string()),
+                        slack_thread_ts.as_deref(),
+                        self.state.cron_outcome.clone(),
+                        sender_is_authority,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to add channel tools");
+                        return Err(AgentError::Other(error.into()).into());
+                    }
+                }
+                DelegationMode::Direct => {
+                    // Full tool access (cortex chat style)
+                    if let Err(error) = crate::tools::add_direct_mode_tools(
+                        &self.tool_server,
+                        self.state.clone(),
+                        routed_sender,
+                        reply_target,
+                        conversation_id,
+                        skip_flag.clone(),
+                        replied_flag.clone(),
+                        self.deps.cron_tool.clone(),
+                        send_agent_message_tool,
+                        allow_direct_reply,
+                        adapter.map(|s| s.to_string()),
+                        slack_thread_ts.as_deref(),
+                        self.state.cron_outcome.clone(),
+                        sender_is_authority,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to add direct mode tools");
+                        return Err(AgentError::Other(error.into()).into());
+                    }
                 }
             }
         }
@@ -3758,12 +4001,17 @@ impl Channel {
             }
         }
 
-        let remove_result = match self.resolved_settings.delegation {
-            DelegationMode::Direct => {
-                crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
-            }
-            DelegationMode::Standard => {
-                crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+        let remove_result = if self.state.kind == ChannelKind::Autonomy {
+            crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
+        } else {
+            match self.resolved_settings.delegation {
+                DelegationMode::Direct => {
+                    crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply)
+                        .await
+                }
+                DelegationMode::Standard => {
+                    crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+                }
             }
         };
         if let Err(error) = remove_result {
@@ -4138,6 +4386,9 @@ impl Channel {
                     self.branch_reply_targets.remove(branch_id);
                     return Ok(());
                 }
+                if let Some(run) = self.state.autonomy_run() {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::Branch(*branch_id));
+                }
 
                 #[cfg(feature = "metrics")]
                 crate::telemetry::Metrics::global()
@@ -4241,6 +4492,9 @@ impl Channel {
                 self.consumed_worker_outcomes
                     .insert(*worker_id, terminal.outcome_version);
                 self.state.worker_handles.write().await.remove(worker_id);
+                if let Some(run) = self.state.autonomy_run() {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id));
+                }
                 let result = terminal.result;
                 let success = terminal.outcome_kind.is_success();
 
@@ -4338,6 +4592,13 @@ impl Channel {
             ProcessEvent::WorkerInitialResult {
                 worker_id, result, ..
             } => {
+                if self.state.kind == ChannelKind::Autonomy
+                    && let Some(run) = self.state.autonomy_run()
+                    && !run.owns_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id))
+                {
+                    tracing::debug!(%worker_id, "duplicate or stale autonomy worker result ignored");
+                    return Ok(());
+                }
                 // Interactive worker completed a task (initial or follow-up)
                 // but stays alive for more input. Deliver the result to the
                 // channel without removing the worker from the active set.
@@ -4347,6 +4608,9 @@ impl Channel {
                     result: result.clone(),
                     success: true,
                 });
+                if let Some(run) = self.state.autonomy_run() {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id));
+                }
                 should_retrigger = true;
                 tracing::info!(
                     worker_id = %worker_id,
@@ -4363,6 +4627,10 @@ impl Channel {
         // Multiple branch/worker completions within the debounce window are
         // coalesced into a single retrigger to prevent message spam.
         if should_retrigger {
+            if self.state.kind == ChannelKind::Autonomy && self.state.autonomy_run().is_none() {
+                self.deps.autonomy_control.request_check();
+                return Ok(());
+            }
             let cap_applies = self.state.kind.caps_retriggers();
             if cap_applies && self.retrigger_count >= MAX_RETRIGGERS_PER_TURN {
                 tracing::warn!(
@@ -4661,6 +4929,9 @@ impl Channel {
     /// trigger — reflection included — obeys the conversation's memory
     /// persistence controls.
     async fn check_memory_persistence(&mut self) {
+        if self.state.kind == ChannelKind::Autonomy {
+            return;
+        }
         let config = **self.deps.runtime_config.memory_persistence.load();
         let persistence_enabled = config.enabled
             && config.message_interval != 0

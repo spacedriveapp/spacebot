@@ -1,4 +1,4 @@
-[System: {{ results | length }} background process(es) just completed. This is an autonomy run — no human is present and nothing you say is delivered to anyone. Incorporate the results below into your work, then continue or finish the run.
+[System: {{ results | length }} background process result(s) arrived for the current autonomy epoch. No human is present and nothing you say is delivered. Reconcile these results before doing anything else.
 
 {% for r in results %}
 --- {{ r.process_type }} {{ r.process_id }}{% if not r.success %} (FAILED){% endif %} ---
@@ -6,5 +6,7 @@
 {% endfor %}
 Instructions:
 - Do not attempt to relay these results to any user — there is no reply surface from this channel.
-- Use them to decide your next action: keep working, or call `autonomy_complete` with a summary that reflects what these results changed.
+- Continue the intent that produced these results. This is not a fresh board survey and not permission to begin unrelated work.
+- Apply any required task comment, status, memory, or direct follow-up.
+- If the selected work is settled, call `autonomy_complete`. Otherwise route or spawn only the direct follow-up required to settle it.
 - Do not mention internal processes (branch, worker, retrigger, process IDs).]

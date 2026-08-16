@@ -363,8 +363,6 @@ impl AutonomyConfig {
             max_tasks_per_run: overrides
                 .max_tasks_per_run
                 .unwrap_or(defaults.max_tasks_per_run),
-            timeout_secs: overrides.timeout_secs.unwrap_or(defaults.timeout_secs),
-            warn_secs: overrides.warn_secs.unwrap_or(defaults.warn_secs),
             run_history_count: overrides
                 .run_history_count
                 .unwrap_or(defaults.run_history_count),
@@ -2930,10 +2928,6 @@ mod autonomy_config_tests {
         assert_eq!(resolved.interval_secs, 900);
         assert_eq!(resolved.active_hours, Some((8, 22)));
         // Untouched fields inherit the defaults.
-        assert_eq!(
-            resolved.timeout_secs,
-            AutonomyConfig::default().timeout_secs
-        );
         assert_eq!(
             resolved.claim_unowned,
             AutonomyConfig::default().claim_unowned

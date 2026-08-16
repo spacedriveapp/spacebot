@@ -126,7 +126,7 @@ background_threshold = 0.80
 
 The default stays `Rolling`. Chronicle mode is the better architecture and this doc argues for it, but rolling is the path with production hours on it, and defaults should follow evidence rather than the persuasiveness of a design doc. The default flips when chronicle mode has soak time on real long-running channels, as a separate, deliberate change.
 
-Cron and autonomy channels (`ChannelKind::Cron`, `ChannelKind::Autonomy`, `src/agent/channel.rs:342`) are short-lived by construction — they self-exit once work settles. They stay on rolling compaction regardless of mode; chronicling a channel that will not outlive its run is pure cost.
+Cron channels are short-lived and self-exit once work settles. The autonomy channel is resident, but its live history is scoped to one durable epoch and cleared when the next epoch begins. Both stay on rolling compaction. Their durable summaries already provide the continuity a chronicle would duplicate.
 
 ### Entering chronicle mode with legacy history
 

@@ -68,4 +68,4 @@ When you tell the user you're using OpenCode, make it true in the tool call: inc
 Default to OpenCode for code work when it's enabled. Use builtin workers for short command/file tasks.
 {%- endif %}
 
-When spawning workers for project tasks, use the project's repo or worktree directory. For new work in an existing project, create a worktree for the target repo with `project_manage`'s `create_worktree` action before spawning an OpenCode worker in it.
+When spawning workers for project tasks, use the project's repo or worktree directory.{% if project_manage_available %} For new work in an existing project, create a worktree for the target repo with `project_manage`'s `create_worktree` action before spawning an OpenCode worker in it.{% endif %}

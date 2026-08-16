@@ -1369,6 +1369,46 @@ async fn run(
             }
 
             for (conversation_id, workers) in by_channel {
+                if conversation_id == spacebot::agent::autonomy::AUTONOMY_CONVERSATION_ID {
+                    let Some(supervisor) = agent.autonomy_supervisor.as_ref() else {
+                        tracing::warn!(agent_id = %agent_id, "autonomy supervisor missing during idle worker recovery");
+                        continue;
+                    };
+                    let state = supervisor.channel_state();
+                    for idle_worker in workers {
+                        if idle_worker.worker_type == "opencode"
+                            && idle_worker.opencode_session_id.is_none()
+                        {
+                            if let Err(error) = run_logger.retire_idle_worker(&idle_worker.id).await
+                            {
+                                tracing::warn!(worker_id = %idle_worker.id, %error, "failed to retire idle autonomy worker");
+                            }
+                            continue;
+                        }
+                        match spacebot::agent::channel_dispatch::resume_idle_worker_into_state(
+                            &state,
+                            idle_worker,
+                        )
+                        .await
+                        {
+                            Ok(worker_id) => tracing::info!(
+                                %worker_id,
+                                agent_id = %agent_id,
+                                "resumed retained autonomy worker"
+                            ),
+                            Err(reason) => {
+                                if let Err(error) =
+                                    run_logger.retire_idle_worker(&idle_worker.id).await
+                                {
+                                    tracing::warn!(worker_id = %idle_worker.id, %error, "failed to retire autonomy worker after resume failure");
+                                }
+                                tracing::info!(worker_id = %idle_worker.id, %reason, "retired retained autonomy worker after resume failure");
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 // Ensure the channel exists. If it's already in active_channels
                 // (unlikely at startup), use its state. Otherwise, pre-create it.
                 let channel_key =
@@ -1636,6 +1676,12 @@ async fn run(
                     );
                 }
             }
+        }
+    }
+
+    if agents_initialized {
+        for agent in agents.values() {
+            agent.deps.autonomy_control.activate();
         }
     }
 
@@ -2042,7 +2088,10 @@ async fn run(
             }
             Some(agent_id) = agent_remove_rx.recv() => {
                 let key: spacebot::AgentId = Arc::from(agent_id.as_str());
-                if let Some(agent) = agents.remove(&key) {
+                if let Some(mut agent) = agents.remove(&key) {
+                    if let Some(supervisor) = agent.autonomy_supervisor.take() {
+                        supervisor.shutdown(false).await;
+                    }
                     agent.deps.mcp_manager.disconnect_all().await;
                     tracing::info!(agent_id = %agent_id, "removed agent from main loop");
                 } else {
@@ -2227,6 +2276,14 @@ async fn run(
 
     // Graceful shutdown
     drop(active_channels);
+
+    for agent in agents.values_mut() {
+        if let Some(supervisor) = agent.autonomy_supervisor.take() {
+            supervisor
+                .shutdown(final_state == spacebot::lifecycle::LifecycleState::Restart)
+                .await;
+        }
+    }
 
     for scheduler in &cron_schedulers_for_shutdown {
         scheduler.shutdown().await;
@@ -2674,6 +2731,7 @@ async fn initialize_agents(
             autonomy_ceiling: api_state.autonomy_ceiling.clone(),
             wake_def_store: Arc::new(spacebot::wakes::WakeDefStore::new(db.sqlite.clone())),
             autonomy_run_store: Arc::new(spacebot::wakes::AutonomyRunStore::new(db.sqlite.clone())),
+            autonomy_control: spacebot::agent::autonomy::AutonomyControl::default(),
             project_store: project_store.clone(),
             cron_tool: None,
             runtime_config,
@@ -2701,6 +2759,7 @@ async fn initialize_agents(
             config: agent_config.clone(),
             db,
             deps,
+            autonomy_supervisor: None,
         };
 
         // Register with the wake manager so external triggers can reach this agent.
@@ -3416,6 +3475,12 @@ async fn initialize_agents(
     api_state.set_cron_stores(cron_stores_map);
     api_state.set_cron_schedulers(cron_schedulers_map);
     tracing::info!("cron stores and schedulers registered with API state");
+
+    for (agent_id, agent) in agents.iter_mut() {
+        let supervisor = spacebot::agent::autonomy::spawn_autonomy_supervisor(agent.deps.clone());
+        agent.autonomy_supervisor = Some(supervisor);
+        tracing::info!(%agent_id, "resident autonomy channel started");
+    }
 
     // Start memory ingestion loops for each agent
     for (agent_id, agent) in agents.iter() {

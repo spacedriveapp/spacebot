@@ -131,10 +131,16 @@ impl Tool for AutonomyCompleteTool {
             });
         }
 
-        self.handle.request_finish(AutonomyFinishRequest {
-            summary: summary.to_string(),
-            actions: actions.clone(),
-        });
+        self.handle
+            .request_finish(AutonomyFinishRequest {
+                summary: summary.to_string(),
+                actions: actions.clone(),
+            })
+            .map_err(|active_children| {
+                AutonomyCompleteError(format!(
+                    "{active_children} owned background process(es) are still active; wait for and synthesize their results before completing the epoch"
+                ))
+            })?;
 
         Ok(AutonomyCompleteOutput {
             success: true,
@@ -166,7 +172,7 @@ mod tests {
     async fn records_summary_and_actions() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id.clone(), Arc::new(store.clone()));
+        let handle = AutonomyRunHandle::new(run_id.clone(), 1, Arc::new(store.clone()));
         let tool = AutonomyCompleteTool::new(handle.clone());
 
         let output = tool
@@ -194,7 +200,7 @@ mod tests {
     async fn rejects_invalid_action_kind() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id, Arc::new(store));
+        let handle = AutonomyRunHandle::new(run_id, 1, Arc::new(store));
         let tool = AutonomyCompleteTool::new(handle.clone());
 
         let error = tool
@@ -217,7 +223,7 @@ mod tests {
     async fn rejects_trivial_summary() {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
-        let handle = AutonomyRunHandle::new(run_id, Arc::new(store));
+        let handle = AutonomyRunHandle::new(run_id, 1, Arc::new(store));
         let tool = AutonomyCompleteTool::new(handle);
 
         let error = tool
@@ -229,5 +235,26 @@ mod tests {
             .expect_err("trivial summary must fail");
 
         assert!(error.to_string().contains("summary"));
+    }
+
+    #[tokio::test]
+    async fn rejects_completion_while_owned_work_is_active() {
+        let store = store().await;
+        let run_id = store.begin_run().await.expect("begin");
+        let handle = AutonomyRunHandle::new(run_id, 1, Arc::new(store));
+        handle.register_child(crate::agent::autonomy::AutonomyChild::Worker(
+            crate::WorkerId::new_v4(),
+        ));
+        let tool = AutonomyCompleteTool::new(handle);
+
+        let error = tool
+            .call(AutonomyCompleteArgs {
+                summary: "Tried to finish before the worker returned.".to_string(),
+                actions: Vec::new(),
+            })
+            .await
+            .expect_err("active work must block completion");
+
+        assert!(error.to_string().contains("still active"));
     }
 }

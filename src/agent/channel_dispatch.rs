@@ -358,8 +358,13 @@ async fn spawn_branch(
     dispatch_type: &'static str,
     branch_options: BranchSpawnOptions,
 ) -> std::result::Result<BranchId, AgentError> {
-    if state
-        .autonomy_run
+    let autonomy_run = state.autonomy_run();
+    if state.kind == crate::agent::channel::ChannelKind::Autonomy && autonomy_run.is_none() {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn branch: no active autonomy epoch"
+        )));
+    }
+    if autonomy_run
         .as_ref()
         .is_some_and(crate::agent::autonomy::AutonomyRunHandle::finish_requested)
     {
@@ -445,7 +450,15 @@ async fn spawn_branch(
 
     let prompt = prompt.to_owned();
 
-    state
+    if let Some(run) = &autonomy_run
+        && !run.register_child(crate::agent::autonomy::AutonomyChild::Branch(branch_id))
+    {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn branch: autonomy epoch is finishing"
+        )));
+    }
+
+    if let Err(error) = state
         .process_run_logger
         .log_branch_started(
             &state.channel_id,
@@ -455,13 +468,15 @@ async fn spawn_branch(
             &profile_name,
             &model_name,
             branch_max_turns,
-            state
-                .autonomy_run
-                .as_ref()
-                .map(|autonomy_run| autonomy_run.run_id.as_str()),
+            autonomy_run.as_ref().map(|run| run.run_id.as_str()),
         )
         .await
-        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    {
+        if let Some(run) = &autonomy_run {
+            run.settle_child(crate::agent::autonomy::AutonomyChild::Branch(branch_id));
+        }
+        return Err(AgentError::Other(anyhow::anyhow!(error)));
+    }
 
     // Capture what the spawned task needs to notify the channel on failure.
     // branch.run() only sends BranchResult on the success path, so the
@@ -733,8 +748,13 @@ pub async fn spawn_worker_from_state(
     worker_context: &WorkerContextMode,
     task_context: WorkerTaskContext<'_>,
 ) -> std::result::Result<WorkerId, AgentError> {
-    if state
-        .autonomy_run
+    let autonomy_run = state.autonomy_run();
+    if state.kind == crate::agent::channel::ChannelKind::Autonomy && autonomy_run.is_none() {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn worker: no active autonomy epoch"
+        )));
+    }
+    if autonomy_run
         .as_ref()
         .is_some_and(crate::agent::autonomy::AutonomyRunHandle::finish_requested)
     {
@@ -985,8 +1005,17 @@ async fn spawn_worker_inner(
 
     let worker_id = worker.id;
     let transcript_snapshot = worker.transcript_snapshot();
+    let autonomy_run = state.autonomy_run();
+    if let Some(run) = &autonomy_run
+        && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
+    {
+        state.cleanup_worker_routing(worker_id).await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn worker: autonomy epoch is finishing"
+        )));
+    }
 
-    state
+    if let Err(error) = state
         .process_run_logger
         .log_worker_started(
             Some(&state.channel_id),
@@ -996,14 +1025,17 @@ async fn spawn_worker_inner(
             &state.deps.agent_id,
             interactive,
             None,
-            state
-                .autonomy_run
-                .as_ref()
-                .map(|autonomy_run| autonomy_run.run_id.as_str()),
+            autonomy_run.as_ref().map(|run| run.run_id.as_str()),
             task_context.origin_branch_id,
         )
         .await
-        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    {
+        if let Some(run) = &autonomy_run {
+            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
+        }
+        state.cleanup_worker_routing(worker_id).await;
+        return Err(AgentError::Other(anyhow::anyhow!(error)));
+    }
 
     let worker_span = tracing::info_span!(
         "worker.run",
@@ -1225,8 +1257,17 @@ async fn spawn_opencode_worker_inner(
     };
 
     let worker_id = worker.id;
+    let autonomy_run = state.autonomy_run();
+    if let Some(run) = &autonomy_run
+        && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
+    {
+        state.cleanup_worker_routing(worker_id).await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn worker: autonomy epoch is finishing"
+        )));
+    }
 
-    state
+    if let Err(error) = state
         .process_run_logger
         .log_worker_started(
             Some(&state.channel_id),
@@ -1236,14 +1277,17 @@ async fn spawn_opencode_worker_inner(
             &state.deps.agent_id,
             interactive,
             Some(&persist_directory),
-            state
-                .autonomy_run
-                .as_ref()
-                .map(|autonomy_run| autonomy_run.run_id.as_str()),
+            autonomy_run.as_ref().map(|run| run.run_id.as_str()),
             task_context.origin_branch_id,
         )
         .await
-        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    {
+        if let Some(run) = &autonomy_run {
+            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
+        }
+        state.cleanup_worker_routing(worker_id).await;
+        return Err(AgentError::Other(anyhow::anyhow!(error)));
+    }
 
     let worker_span = tracing::info_span!(
         "worker.run",

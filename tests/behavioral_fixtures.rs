@@ -156,6 +156,7 @@ async fn bootstrap(instance_dir: &Path) -> anyhow::Result<AgentDeps> {
         )),
         wake_def_store: Arc::new(spacebot::wakes::WakeDefStore::new(db.sqlite.clone())),
         autonomy_run_store: Arc::new(spacebot::wakes::AutonomyRunStore::new(db.sqlite.clone())),
+        autonomy_control: spacebot::agent::autonomy::AutonomyControl::default(),
         project_store: Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone())),
         cron_tool: None,
         runtime_config,

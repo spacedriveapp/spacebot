@@ -128,6 +128,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         )),
         wake_def_store: Arc::new(spacebot::wakes::WakeDefStore::new(db.sqlite.clone())),
         autonomy_run_store: Arc::new(spacebot::wakes::AutonomyRunStore::new(db.sqlite.clone())),
+        autonomy_control: spacebot::agent::autonomy::AutonomyControl::default(),
         project_store: Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone())),
         cron_tool: None,
         runtime_config,
@@ -212,6 +213,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             opencode_enabled,
             &[],
             &spacebot::conversation::settings::WorkerContextMode::default(),
+            true,
         )
         .expect("failed to render worker capabilities");
 
