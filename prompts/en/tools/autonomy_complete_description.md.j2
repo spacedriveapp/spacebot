@@ -1,7 +1,7 @@
-Record the outcome of this autonomy run and end it. Required — every autonomy run must finish with exactly one call to this tool, including runs where nothing was worth doing.
+Record the outcome of the current autonomy epoch and return the resident channel to idle. Required once the epoch has nothing left to decide or supervise, including heartbeats where no action was needed. This does not stop retained interactive workers.
 
 Provide:
 - `summary`: 2-5 lines covering what you observed, what you did, and anything the next run should know. This is your primary continuity mechanism — the next run reads it verbatim.
 - `actions`: one entry per task you touched, with `kind` set to "enriched" (investigated and recorded findings), "created" (proposed a new pending_approval task), or "executed" (ran an approved ready task), the `task_number` when applicable, and a one-line `detail`.
 
-Do not call this while workers you spawned are still running work you intend to use — synthesize their results first. After this call, do not start any new work.
+Do not call this while workers are still running work this epoch needs. Synthesize their results first. After this call, do not start or route new work until a later heartbeat opens another epoch.

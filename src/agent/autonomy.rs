@@ -1,9 +1,9 @@
 //! The autonomy channel: the agent's process for self-directed work.
 //!
-//! One channel wakes on a configured interval (or when wake events are
-//! pending), surveys task state, enriches and proposes work according to the
-//! configured [`AutonomyLevel`], executes user-approved tasks at level `act`,
-//! records a run summary via `autonomy_complete`, and exits. See
+//! One resident channel receives interval heartbeats and durable wake events,
+//! surveys task state, enriches and proposes work according to the configured
+//! [`AutonomyLevel`], executes user-approved tasks at level `act`, and records
+//! durable run epochs via `autonomy_complete`. See
 //! `docs/design-docs/autonomy.md` and `docs/design-docs/wakes.md`.
 
 use crate::agent::channel::{Channel, ChannelKind};
@@ -14,10 +14,11 @@ use crate::tasks::{Task, TaskListFilter, TaskStatus};
 use crate::wakes::{AutonomyRunStatus, AutonomyRunStore};
 use crate::{AgentDeps, InboundMessage, MessageContent, RoutedResponse};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{Notify, mpsc, watch};
 
 /// Conversation id (and channel id) for the autonomy channel. One per agent.
 pub const AUTONOMY_CONVERSATION_ID: &str = "autonomy";
@@ -27,9 +28,6 @@ const WAKE_EVENT_RETENTION_DAYS: u32 = 30;
 
 /// Maximum pending wake events pulled into a single run's context.
 const WAKE_EVENT_BATCH_LIMIT: i64 = 200;
-
-/// Grace period after the hard-timeout wrap-up message before aborting.
-const HARD_TIMEOUT_GRACE_SECS: u64 = 60;
 
 /// Retry budget for the completion contract — the same budget the
 /// memory-persistence contract uses.
@@ -44,9 +42,24 @@ pub const AUTONOMY_FALLBACK_SUMMARY: &str = "run ended without summary";
 #[derive(Debug, Clone)]
 pub struct AutonomyRunHandle {
     pub run_id: String,
+    pub generation: u64,
     pub store: Arc<AutonomyRunStore>,
     completed: Arc<AtomicBool>,
-    finish_request: Arc<Mutex<Option<AutonomyFinishRequest>>>,
+    state: Arc<Mutex<AutonomyRunState>>,
+    changed: Arc<Notify>,
+}
+
+#[derive(Debug, Default)]
+struct AutonomyRunState {
+    finish_request: Option<AutonomyFinishRequest>,
+    active_children: HashSet<AutonomyChild>,
+    quiescent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutonomyChild {
+    Branch(crate::BranchId),
+    Worker(crate::WorkerId),
 }
 
 #[derive(Debug, Clone)]
@@ -56,12 +69,14 @@ pub struct AutonomyFinishRequest {
 }
 
 impl AutonomyRunHandle {
-    pub fn new(run_id: String, store: Arc<AutonomyRunStore>) -> Self {
+    pub fn new(run_id: String, generation: u64, store: Arc<AutonomyRunStore>) -> Self {
         Self {
             run_id,
+            generation,
             store,
             completed: Arc::new(AtomicBool::new(false)),
-            finish_request: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(AutonomyRunState::default())),
+            changed: Arc::new(Notify::new()),
         }
     }
 
@@ -76,32 +91,261 @@ impl AutonomyRunHandle {
 
     /// Store the first finish request so duplicate tool calls cannot replace
     /// the summary that will be committed after child workers settle.
-    pub fn request_finish(&self, request: AutonomyFinishRequest) -> bool {
-        let mut finish_request = self
-            .finish_request
+    pub fn request_finish(
+        &self,
+        request: AutonomyFinishRequest,
+    ) -> std::result::Result<bool, usize> {
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if finish_request.is_some() {
-            return false;
+        if state.finish_request.is_some() {
+            return Ok(false);
         }
-        *finish_request = Some(request);
-        true
+        if !state.active_children.is_empty() {
+            return Err(state.active_children.len());
+        }
+        state.finish_request = Some(request);
+        drop(state);
+        self.changed.notify_one();
+        Ok(true)
     }
 
     pub fn finish_requested(&self) -> bool {
-        let finish_request = self
-            .finish_request
+        let state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        finish_request.is_some()
+        state.finish_request.is_some()
     }
 
     pub fn finish_request(&self) -> Option<AutonomyFinishRequest> {
-        let finish_request = self
-            .finish_request
+        let state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        finish_request.clone()
+        state.finish_request.clone()
+    }
+
+    /// Register work before it can race the run's finish request.
+    pub fn register_child(&self, child: AutonomyChild) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.finish_request.is_some() {
+            return false;
+        }
+        state.quiescent = false;
+        state.active_children.insert(child)
+    }
+
+    pub fn settle_child(&self, child: AutonomyChild) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active_children.remove(&child) {
+            drop(state);
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn has_active_children(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.active_children.is_empty()
+    }
+
+    pub fn active_children(&self) -> Vec<AutonomyChild> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_children.iter().copied().collect()
+    }
+
+    pub fn owns_child(&self, child: AutonomyChild) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_children.contains(&child)
+    }
+
+    pub fn mark_quiescent(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.quiescent {
+            state.quiescent = true;
+            drop(state);
+            self.changed.notify_one();
+        }
+    }
+
+    pub fn is_quiescent(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.quiescent
+    }
+
+    pub async fn changed(&self) {
+        self.changed.notified().await;
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AutonomyRunSlot {
+    state: Arc<Mutex<AutonomyRunSlotState>>,
+}
+
+#[derive(Debug, Default)]
+struct AutonomyRunSlotState {
+    generation: u64,
+    current: Option<AutonomyRunHandle>,
+}
+
+impl AutonomyRunSlot {
+    pub fn begin(&self, run_id: String, store: Arc<AutonomyRunStore>) -> AutonomyRunHandle {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.generation = state.generation.saturating_add(1);
+        let handle = AutonomyRunHandle::new(run_id, state.generation, store);
+        state.current = Some(handle.clone());
+        handle
+    }
+
+    pub fn current(&self) -> Option<AutonomyRunHandle> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.current.clone()
+    }
+
+    pub fn clear_if_current(&self, generation: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.current.as_ref().map(|run| run.generation) != Some(generation) {
+            return false;
+        }
+        state.current = None;
+        true
+    }
+}
+
+/// Cloneable doorbell installed in every [`AgentDeps`]. The bounded channel
+/// coalesces repeated heartbeats while the resident supervisor is busy.
+#[derive(Debug, Clone, Default)]
+pub struct AutonomyControl {
+    check_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    shutdown_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    stopped: Arc<AtomicBool>,
+    stopped_notify: Arc<Notify>,
+    preserve_idle_workers: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+}
+
+impl AutonomyControl {
+    fn attach(&self, check_tx: mpsc::Sender<()>, shutdown_tx: watch::Sender<bool>) {
+        self.stopped.store(false, Ordering::Release);
+        *self
+            .check_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(check_tx);
+        *self
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(shutdown_tx);
+    }
+
+    pub fn request_check(&self) {
+        let sender = self
+            .check_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(sender) = sender {
+            match sender.try_send(()) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    tracing::debug!("autonomy supervisor doorbell is closed");
+                }
+            }
+        }
+    }
+
+    pub fn activate(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.request_check();
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    fn request_shutdown(&self, preserve_idle_workers: bool) {
+        self.preserve_idle_workers
+            .store(preserve_idle_workers, Ordering::Release);
+        let sender = self
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(sender) = sender {
+            sender.send_replace(true);
+        }
+    }
+
+    pub async fn shutdown_and_wait(&self) {
+        self.request_shutdown(false);
+        while !self.stopped.load(Ordering::Acquire) {
+            let notified = self.stopped_notify.notified();
+            if self.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn mark_stopped(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.stopped_notify.notify_waiters();
+    }
+
+    fn should_preserve_idle_workers(&self) -> bool {
+        self.preserve_idle_workers.load(Ordering::Acquire)
+    }
+}
+
+pub struct AutonomySupervisorHandle {
+    control: AutonomyControl,
+    task: tokio::task::JoinHandle<()>,
+    channel_state: crate::agent::channel::ChannelState,
+}
+
+impl AutonomySupervisorHandle {
+    pub fn channel_state(&self) -> crate::agent::channel::ChannelState {
+        self.channel_state.clone()
+    }
+
+    pub async fn shutdown(self, preserve_idle_workers: bool) {
+        self.control.request_shutdown(preserve_idle_workers);
+        if let Err(error) = self.task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "autonomy supervisor failed during shutdown");
+        }
     }
 }
 
@@ -150,179 +394,30 @@ pub fn task_visible_to_agent(task: &Task, agent_id: &str, claim_unowned: bool) -
     }
 }
 
-/// Cortex-tick check: start an autonomy run when one is due.
-///
-/// The run row is inserted before the run task is spawned so the next tick's
-/// `has_active_run` guard sees it — the cortex tick is serial, which makes
-/// this the single-flight gate.
+/// Ask the resident autonomy supervisor to inspect its durable wake state.
 pub async fn maybe_run_autonomy(deps: &AgentDeps) {
-    let config = **deps.runtime_config.autonomy.load();
-    // The instance ceiling caps the per-agent dial without overwriting it:
-    // the run executes at the intersection of the two levels.
-    let config = AutonomyConfig {
-        level: config.level.min(**deps.autonomy_ceiling.load()),
-        ..config
-    };
-    if config.level == AutonomyLevel::Off {
-        return;
-    }
-
-    // A pause is an emergency stop on new work, and a self-directed run is
-    // the most new work the agent can start.
-    if deps.pause_reason().is_some() {
-        return;
-    }
-
-    let stale_after_secs = config.timeout_secs.saturating_mul(2).max(60);
-    match deps
-        .autonomy_run_store
-        .has_active_run(stale_after_secs)
-        .await
-    {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => {
-            tracing::warn!(%error, "failed to check for active autonomy run");
-            return;
-        }
-    }
-
-    let last_run_started_at = match deps.autonomy_run_store.last_run_started_at().await {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "failed to read last autonomy run start");
-            return;
-        }
-    };
-    let pending_wake_events = match deps.wake_event_store.pending_count().await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "failed to count pending wake events");
-            return;
-        }
-    };
-    let (current_hour, _timezone) =
-        crate::cron::scheduler::current_hour_and_timezone(&deps.runtime_config);
-
-    if !autonomy_run_due(
-        config.level,
-        chrono::Utc::now(),
-        last_run_started_at,
-        pending_wake_events,
-        config.active_hours,
-        current_hour,
-        config.interval_secs,
-    ) {
-        return;
-    }
-
-    let run_id = match deps.autonomy_run_store.begin_run().await {
-        Ok(run_id) => run_id,
-        Err(error) => {
-            tracing::warn!(%error, "failed to begin autonomy run");
-            return;
-        }
-    };
-
-    tracing::info!(
-        agent_id = %deps.agent_id,
-        run_id = %run_id,
-        level = %config.level,
-        pending_wake_events,
-        "starting autonomy run"
-    );
-
-    let deps = deps.clone();
-    tokio::spawn(async move {
-        if let Err(error) = run_autonomy_channel(&deps, run_id.clone(), config).await {
-            tracing::error!(%error, run_id = %run_id, "autonomy run failed");
-            match deps
-                .autonomy_run_store
-                .finish_run_status(
-                    &run_id,
-                    AutonomyRunStatus::Failed,
-                    Some(&format!("run failed: {error}")),
-                )
-                .await
-            {
-                Ok(true) => {
-                    publish_terminal_summary(&deps, &run_id, &format!("run failed: {error}"))
-                }
-                Ok(false) => {}
-                Err(finish_error) => {
-                    tracing::warn!(%finish_error, run_id = %run_id, "failed to record autonomy run failure");
-                }
-            }
-        }
-    });
+    deps.autonomy_control.request_check();
 }
 
 /// Handle an external wake by checking whether an autonomy run is due.
 pub async fn wake_one(deps: &AgentDeps) {
-    maybe_run_autonomy(deps).await;
+    deps.autonomy_control.request_check();
 }
 
-/// Execute a single autonomy run: consume pending wake events, assemble the
-/// run briefing, drive the channel to completion under the soft/hard timeout,
-/// and record the outcome.
-pub async fn run_autonomy_channel(
-    deps: &AgentDeps,
-    run_id: String,
-    config: AutonomyConfig,
-) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(config.timeout_secs);
-    // Consume pending wake events at run start. A crash after this point does
-    // not replay events — crash semantics for tasks are handled by task
-    // status, not event replay.
-    let pending_events = deps
-        .wake_event_store
-        .pending(WAKE_EVENT_BATCH_LIMIT)
-        .await?;
-    let event_ids: Vec<String> = pending_events
-        .iter()
-        .map(|event| event.id.clone())
-        .collect();
-    if !event_ids.is_empty() {
-        deps.wake_event_store.consume(&event_ids, &run_id).await?;
-        deps.autonomy_run_store
-            .set_wake_events(&run_id, &event_ids)
-            .await?;
-    }
+pub fn spawn_autonomy_supervisor(deps: AgentDeps) -> AutonomySupervisorHandle {
+    let (check_tx, check_rx) = mpsc::channel(1);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    deps.autonomy_control
+        .attach(check_tx.clone(), shutdown_tx.clone());
 
-    let briefing = build_run_briefing(deps, &config, &pending_events).await?;
-
-    // Timeout prompts are rendered before the channel spawns so a template
-    // failure surfaces immediately instead of mid-run. Config validation
-    // guarantees warn < timeout.
-    let remaining_secs = config.timeout_secs.saturating_sub(config.warn_secs).max(1);
-    let (soft_warning_prompt, hard_timeout_prompt) = {
-        let prompt_engine = deps.runtime_config.prompts.load();
-        let soft = prompt_engine
-            .render_system_autonomy_soft_warning(remaining_secs.div_ceil(60).max(1))
-            .map_err(|error| anyhow::anyhow!("failed to render autonomy soft warning: {error}"))?;
-        let hard = prompt_engine
-            .render_system_autonomy_hard_timeout()
-            .map_err(|error| anyhow::anyhow!("failed to render autonomy hard timeout: {error}"))?;
-        (soft, hard)
-    };
-
+    let run_slot = AutonomyRunSlot::default();
     let channel_id: crate::ChannelId = Arc::from(AUTONOMY_CONVERSATION_ID);
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
-    // The autonomy channel has no delivery target — drain and drop anything
-    // the channel tries to send so the bounded channel never backs up.
-    tokio::spawn(async move { while response_rx.recv().await.is_some() {} });
+    let (response_tx, response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
     let event_rx = deps.event_tx.subscribe();
-
-    // Direct tool access: the autonomy channel does not branch — it has no
-    // user-facing context to protect, so it uses memory/execution tools
-    // directly.
     let resolved_settings = ResolvedConversationSettings {
         delegation: DelegationMode::Direct,
         ..ResolvedConversationSettings::default()
     };
-
-    let handle = AutonomyRunHandle::new(run_id.clone(), deps.autonomy_run_store.clone());
-
     let screenshot_dir = deps
         .runtime_config
         .workspace_dir
@@ -333,173 +428,430 @@ pub async fn run_autonomy_channel(
         .workspace_dir
         .join(".spacebot")
         .join("logs");
-
     let (channel, channel_tx) = Channel::new(
-        channel_id.clone(),
+        channel_id,
         ChannelKind::Autonomy,
         deps.clone(),
         response_tx,
         event_rx,
         screenshot_dir,
         logs_dir,
-        None, // autonomy channels don't share live transcript cache
+        None,
         resolved_settings,
-        None, // no cron outcome — delivery is not a concept here
-        Some(handle.clone()),
+        None,
+        Some(run_slot.clone()),
     );
+    let channel_state = channel.state.clone();
 
-    let mut channel_handle = tokio::spawn(channel.run());
-
-    let message = InboundMessage {
-        id: uuid::Uuid::new_v4().to_string(),
-        source: "autonomy".into(),
-        adapter: None,
-        conversation_id: AUTONOMY_CONVERSATION_ID.to_string(),
-        sender_id: "system".into(),
-        agent_id: Some(deps.agent_id.clone()),
-        content: MessageContent::Text(briefing),
-        timestamp: chrono::Utc::now(),
-        metadata: HashMap::new(),
-        formatted_author: None,
-    };
-
-    if let Err(error) = channel_tx.send(message).await {
-        channel_handle.abort();
-        anyhow::bail!("failed to send autonomy briefing to channel: {error}");
+    let control = deps.autonomy_control.clone();
+    let task_control = control.clone();
+    let task = tokio::spawn(async move {
+        if let Err(error) = run_autonomy_supervisor(
+            deps,
+            check_rx,
+            shutdown_rx,
+            run_slot,
+            channel,
+            channel_tx,
+            response_rx,
+        )
+        .await
+        {
+            tracing::error!(%error, "autonomy supervisor stopped with an error");
+        }
+        task_control.mark_stopped();
+    });
+    AutonomySupervisorHandle {
+        control,
+        task,
+        channel_state,
     }
+}
 
-    // Soft warning at warn_secs, hard timeout at timeout_secs.
-    let warn_after = Duration::from_secs(config.warn_secs.min(config.timeout_secs).max(1));
-    let mut timed_out = false;
-    let first_phase = tokio::time::timeout(warn_after, &mut channel_handle).await;
-    let join_result = match first_phase {
-        Ok(join_result) => Some(join_result),
-        Err(_elapsed) => {
-            tracing::info!(
-                run_id = %run_id,
-                remaining_secs,
-                "autonomy run reached soft warning, injecting wrap-up notice"
-            );
-            if channel_tx
-                .send(system_message(deps, soft_warning_prompt))
-                .await
-                .is_err()
-            {
-                tracing::debug!(
-                    run_id = %run_id,
-                    "soft warning not delivered; autonomy channel already exited"
-                );
-            }
+struct ActiveEpoch {
+    handle: AutonomyRunHandle,
+    config: AutonomyConfig,
+    wake_event_ids: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    last_heartbeat: tokio::time::Instant,
+}
 
-            match tokio::time::timeout(Duration::from_secs(remaining_secs), &mut channel_handle)
-                .await
-            {
-                Ok(join_result) => Some(join_result),
-                Err(_elapsed) => {
-                    // Hard timeout: give the LLM one direct turn to record the
-                    // run, mirroring the cron wrap-up pattern.
-                    timed_out = true;
-                    tracing::warn!(run_id = %run_id, "autonomy run hit hard timeout, sending wrap-up prompt");
-                    channel_tx
-                        .send(system_message(deps, hard_timeout_prompt))
-                        .await
-                        .ok();
-                    drop(channel_tx);
-
-                    let grace = Duration::from_secs(HARD_TIMEOUT_GRACE_SECS);
-                    match tokio::time::timeout(grace, &mut channel_handle).await {
-                        Ok(join_result) => Some(join_result),
-                        Err(_elapsed) => {
-                            channel_handle.abort();
-                            if let Err(join_error) = (&mut channel_handle).await
-                                && !join_error.is_cancelled()
-                            {
-                                tracing::warn!(
-                                    run_id = %run_id,
-                                    %join_error,
-                                    "autonomy channel task failed after abort"
-                                );
-                            }
-                            None
+async fn run_autonomy_supervisor(
+    deps: AgentDeps,
+    mut check_rx: mpsc::Receiver<()>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    run_slot: AutonomyRunSlot,
+    channel: Channel,
+    channel_tx: mpsc::Sender<InboundMessage>,
+    mut response_rx: mpsc::Receiver<RoutedResponse>,
+) -> anyhow::Result<()> {
+    loop {
+        match deps
+            .autonomy_run_store
+            .reconcile_running_runs("run interrupted by process restart")
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reconcile autonomy runs; retrying");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            return Ok(());
                         }
                     }
                 }
             }
         }
-    };
+    }
 
-    let channel_failed = match join_result {
-        Some(Ok(Ok(()))) => None,
-        Some(Ok(Err(error))) => Some(format!("autonomy channel failed: {error}")),
-        Some(Err(join_error)) => Some(format!("autonomy channel join failed: {join_error}")),
-        None => None,
-    };
+    let response_drain = tokio::spawn(async move { while response_rx.recv().await.is_some() {} });
+    let channel_control = channel.control_handle();
+    let mut channel_handle = tokio::spawn(channel.run());
+    let heartbeat_period = Duration::from_secs(60);
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + heartbeat_period,
+        heartbeat_period,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut active_epoch: Option<ActiveEpoch> = None;
+    let mut exit_error: Option<anyhow::Error> = None;
 
-    // A finish request closes dispatch before the channel exits. Wait for the
-    // durable child rows instead of cancelling useful work to make closure fit
-    // the parent deadline.
-    let settled = settle_owned_children(&handle, deadline).await?;
+    loop {
+        let run_changed = async {
+            match active_epoch.as_ref() {
+                Some(epoch) => epoch.handle.changed().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let mut should_check = false;
+        tokio::select! {
+            _ = heartbeat.tick() => should_check = true,
+            check = check_rx.recv() => {
+                if check.is_none() {
+                    break;
+                }
+                should_check = true;
+            }
+            _ = run_changed => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            result = &mut channel_handle => {
+                match result {
+                    Ok(Ok(())) => exit_error = Some(anyhow::anyhow!("resident autonomy channel exited")),
+                    Ok(Err(error)) => exit_error = Some(error.into()),
+                    Err(error) => exit_error = Some(anyhow::anyhow!("resident autonomy channel task failed: {error}")),
+                }
+                break;
+            }
+        }
 
-    // Record the run outcome after owned noninteractive children settled, or
-    // after the configured hard deadline. The latter retains child attribution
-    // and lets their normal terminal paths finish without parent cancellation.
-    if let Some(request) = handle.finish_request() {
-        let recorded = deps
+        if active_epoch
+            .as_ref()
+            .is_some_and(|epoch| epoch.handle.finish_requested() && epoch.handle.is_quiescent())
+        {
+            let epoch = active_epoch.as_ref().expect("epoch checked as present");
+            match finish_epoch(&deps, &run_slot, epoch).await {
+                Ok(true) => {
+                    active_epoch = None;
+                    should_check = true;
+                }
+                Ok(false) => {
+                    tracing::warn!(run_id = %epoch.handle.run_id, "autonomy epoch is quiescent but durable children have not settled");
+                }
+                Err(error) => {
+                    tracing::warn!(run_id = %epoch.handle.run_id, %error, "failed to finish autonomy epoch; will retry");
+                }
+            }
+        }
+
+        if should_check {
+            if !deps.autonomy_control.is_ready() {
+                continue;
+            }
+            match active_epoch.as_mut() {
+                Some(epoch) if !epoch.handle.finish_requested() => {
+                    if let Err(error) = send_heartbeat(&deps, &channel_tx, epoch).await {
+                        tracing::warn!(run_id = %epoch.handle.run_id, %error, "failed to deliver autonomy heartbeat; will retry");
+                    }
+                }
+                Some(_) => {}
+                None => match start_epoch_if_due(&deps, &run_slot, &channel_tx).await {
+                    Ok(epoch) => active_epoch = epoch,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to admit autonomy epoch; supervisor remains active");
+                        if let Some(handle) = run_slot.current() {
+                            let summary = format!("epoch admission failed: {error}");
+                            if deps
+                                .autonomy_run_store
+                                .finish_run_status(
+                                    &handle.run_id,
+                                    AutonomyRunStatus::Failed,
+                                    Some(&summary),
+                                )
+                                .await
+                                .unwrap_or(false)
+                            {
+                                publish_terminal_summary(&deps, &handle.run_id, &summary);
+                            }
+                            run_slot.clear_if_current(handle.generation);
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    let interrupted = active_epoch
+        .as_ref()
+        .map(|epoch| epoch.handle.clone())
+        .or_else(|| run_slot.current());
+    if deps.autonomy_control.should_preserve_idle_workers() {
+        if let Some(handle) = &interrupted {
+            for child in handle.active_children() {
+                match child {
+                    AutonomyChild::Branch(branch_id) => {
+                        channel_control
+                            .cancel_branch_with_reason(branch_id, "daemon restarting")
+                            .await;
+                    }
+                    AutonomyChild::Worker(worker_id) => {
+                        channel_control
+                            .cancel_worker_with_reason(worker_id, "daemon restarting")
+                            .await;
+                    }
+                }
+            }
+        }
+        channel_control.detach_idle_workers_for_restart().await;
+    } else {
+        channel_control
+            .cancel_all_workers_and_branches("autonomy supervisor shutting down")
+            .await;
+    }
+
+    if let Some(handle) = interrupted {
+        if deps
             .autonomy_run_store
-            .complete_run_if_children_settled(&run_id, &request.summary, &request.actions, !settled)
-            .await?;
-        if recorded {
-            handle.mark_completed();
-            publish_terminal_summary(deps, &run_id, &request.summary);
+            .finish_run_status(
+                &handle.run_id,
+                AutonomyRunStatus::Failed,
+                Some("run interrupted while autonomy supervisor stopped"),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, run_id = %handle.run_id, "failed to terminalize interrupted autonomy epoch");
+                false
+            })
+        {
+            publish_terminal_summary(
+                &deps,
+                &handle.run_id,
+                "run interrupted while autonomy supervisor stopped",
+            );
         }
-    } else if !handle.completed() {
-        if let Some(failure) = &channel_failed {
-            let recorded = deps
-                .autonomy_run_store
-                .finish_run_status(&run_id, AutonomyRunStatus::Failed, Some(failure))
-                .await?;
-            if recorded {
-                publish_terminal_summary(deps, &run_id, failure);
-            }
-        } else if timed_out {
-            let recorded = deps
-                .autonomy_run_store
-                .finish_run_status(
-                    &run_id,
-                    AutonomyRunStatus::Timeout,
-                    Some(AUTONOMY_FALLBACK_SUMMARY),
-                )
-                .await?;
-            if recorded {
-                publish_terminal_summary(deps, &run_id, AUTONOMY_FALLBACK_SUMMARY);
-            }
-        } else {
-            // The channel-side contract retries were exhausted without a
-            // completion call — record the run with a synthesized summary.
-            let recorded = deps
-                .autonomy_run_store
-                .complete_run(&run_id, AUTONOMY_FALLBACK_SUMMARY, &[])
-                .await?;
-            if recorded {
-                publish_terminal_summary(deps, &run_id, AUTONOMY_FALLBACK_SUMMARY);
-            }
-        }
+        run_slot.clear_if_current(handle.generation);
     }
-
-    if let Err(error) = deps
-        .wake_event_store
-        .prune_consumed(WAKE_EVENT_RETENTION_DAYS)
-        .await
+    channel_handle.abort();
+    if let Err(error) = channel_handle.await
+        && !error.is_cancelled()
     {
-        tracing::warn!(%error, "failed to prune consumed wake events");
+        tracing::warn!(%error, "resident autonomy channel failed while stopping");
     }
-
-    if let Some(failure) = channel_failed {
-        anyhow::bail!(failure);
+    drop(channel_control);
+    response_drain.abort();
+    match exit_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
+}
 
-    tracing::info!(run_id = %run_id, timed_out, completed = handle.completed(), "autonomy run finished");
+async fn start_epoch_if_due(
+    deps: &AgentDeps,
+    run_slot: &AutonomyRunSlot,
+    channel_tx: &mpsc::Sender<InboundMessage>,
+) -> anyhow::Result<Option<ActiveEpoch>> {
+    let raw_config = **deps.runtime_config.autonomy.load();
+    let config = AutonomyConfig {
+        level: raw_config.level.min(**deps.autonomy_ceiling.load()),
+        ..raw_config
+    };
+    if config.level == AutonomyLevel::Off || deps.pause_reason().is_some() {
+        return Ok(None);
+    }
+    let pending_count = deps.wake_event_store.pending_count().await?;
+    let last_run_started_at = deps.autonomy_run_store.last_run_started_at().await?;
+    let (current_hour, _) = crate::cron::scheduler::current_hour_and_timezone(&deps.runtime_config);
+    if !autonomy_run_due(
+        config.level,
+        chrono::Utc::now(),
+        last_run_started_at,
+        pending_count,
+        config.active_hours,
+        current_hour,
+        config.interval_secs,
+    ) {
+        return Ok(None);
+    }
+    let permit = match channel_tx.try_reserve() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            anyhow::bail!("resident autonomy channel inbox is closed")
+        }
+    };
+    let Some(run_id) = deps.autonomy_run_store.try_begin_run().await? else {
+        return Ok(None);
+    };
+    let handle = run_slot.begin(run_id.clone(), deps.autonomy_run_store.clone());
+    let events = deps
+        .wake_event_store
+        .pending(WAKE_EVENT_BATCH_LIMIT)
+        .await?;
+    let event_ids: Vec<String> = events.iter().map(|event| event.id.clone()).collect();
+    let briefing = build_run_briefing(deps, &config, &events, "heartbeat", None).await?;
+    commit_wake_claim(&deps.sqlite_pool, &run_id, &event_ids, &event_ids).await?;
+    permit.send(autonomy_message(deps, briefing, handle.generation, true));
+    tracing::info!(agent_id = %deps.agent_id, %run_id, generation = handle.generation, "autonomy epoch started");
+    Ok(Some(ActiveEpoch {
+        handle,
+        config,
+        wake_event_ids: event_ids,
+        started_at: chrono::Utc::now(),
+        last_heartbeat: tokio::time::Instant::now(),
+    }))
+}
+
+async fn send_heartbeat(
+    deps: &AgentDeps,
+    channel_tx: &mpsc::Sender<InboundMessage>,
+    epoch: &mut ActiveEpoch,
+) -> anyhow::Result<()> {
+    let config = **deps.runtime_config.autonomy.load();
+    let pending_count = deps.wake_event_store.pending_count().await?;
+    if pending_count == 0
+        && epoch.last_heartbeat.elapsed() < Duration::from_secs(config.interval_secs.max(1))
+    {
+        return Ok(());
+    }
+    let permit = match channel_tx.try_reserve() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::debug!(run_id = %epoch.handle.run_id, "autonomy heartbeat coalesced behind queued channel work");
+            return Ok(());
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            anyhow::bail!("resident autonomy channel inbox is closed");
+        }
+    };
+    epoch.config = AutonomyConfig {
+        level: config.level.min(**deps.autonomy_ceiling.load()),
+        ..config
+    };
+    let events = deps
+        .wake_event_store
+        .pending(WAKE_EVENT_BATCH_LIMIT)
+        .await?;
+    let event_ids: Vec<String> = events.iter().map(|event| event.id.clone()).collect();
+    let elapsed = chrono::Utc::now()
+        .signed_duration_since(epoch.started_at)
+        .num_seconds()
+        .max(0) as u64;
+    let briefing =
+        build_run_briefing(deps, &epoch.config, &events, "heartbeat", Some(elapsed)).await?;
+    let mut all_event_ids = epoch.wake_event_ids.clone();
+    all_event_ids.extend(event_ids.iter().cloned());
+    commit_wake_claim(
+        &deps.sqlite_pool,
+        &epoch.handle.run_id,
+        &event_ids,
+        &all_event_ids,
+    )
+    .await?;
+    permit.send(autonomy_message(
+        deps,
+        briefing,
+        epoch.handle.generation,
+        false,
+    ));
+    epoch.wake_event_ids = all_event_ids;
+    epoch.last_heartbeat = tokio::time::Instant::now();
     Ok(())
+}
+
+async fn commit_wake_claim(
+    pool: &sqlx::SqlitePool,
+    run_id: &str,
+    event_ids: &[String],
+    all_event_ids: &[String],
+) -> anyhow::Result<()> {
+    if event_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = vec!["?"; event_ids.len()].join(", ");
+    let mut transaction = pool.begin().await?;
+    let query = format!(
+        "UPDATE wake_events SET consumed_by = ? WHERE consumed_by IS NULL AND id IN ({placeholders})"
+    );
+    let mut consume = sqlx::query(&query).bind(run_id);
+    for event_id in event_ids {
+        consume = consume.bind(event_id);
+    }
+    let claimed = consume.execute(&mut *transaction).await?.rows_affected();
+    anyhow::ensure!(
+        claimed == event_ids.len() as u64,
+        "wake event claim lost a concurrency race"
+    );
+    let run_updated = sqlx::query(
+        "UPDATE autonomy_runs SET wake_event_ids = ? WHERE id = ? AND status = 'running'",
+    )
+    .bind(serde_json::to_string(all_event_ids)?)
+    .bind(run_id)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(run_updated == 1, "autonomy run is no longer active");
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn finish_epoch(
+    deps: &AgentDeps,
+    run_slot: &AutonomyRunSlot,
+    epoch: &ActiveEpoch,
+) -> anyhow::Result<bool> {
+    let Some(request) = epoch.handle.finish_request() else {
+        anyhow::bail!("quiescent autonomy epoch has no finish request");
+    };
+    let recorded = deps
+        .autonomy_run_store
+        .complete_run_if_children_settled(
+            &epoch.handle.run_id,
+            &request.summary,
+            &request.actions,
+            false,
+        )
+        .await?;
+    if recorded {
+        epoch.handle.mark_completed();
+        publish_terminal_summary(deps, &epoch.handle.run_id, &request.summary);
+    } else if deps
+        .autonomy_run_store
+        .run_is_active(&epoch.handle.run_id)
+        .await?
+    {
+        return Ok(false);
+    }
+    run_slot.clear_if_current(epoch.handle.generation);
+    deps.wake_event_store
+        .prune_consumed(WAKE_EVENT_RETENTION_DAYS)
+        .await?;
+    tracing::info!(run_id = %epoch.handle.run_id, generation = epoch.handle.generation, "autonomy epoch finished; channel remains resident");
+    Ok(true)
 }
 
 /// The run table transition is the idempotency boundary. Only the caller that
@@ -523,26 +875,18 @@ fn publish_terminal_summary(deps: &AgentDeps, run_id: &str, summary: &str) {
     }
 }
 
-async fn settle_owned_children(
-    handle: &AutonomyRunHandle,
-    deadline: tokio::time::Instant,
-) -> anyhow::Result<bool> {
-    loop {
-        if !handle
-            .store
-            .has_active_owned_children(&handle.run_id)
-            .await?
-        {
-            return Ok(true);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
+pub const AUTONOMY_GENERATION_KEY: &str = "autonomy_generation";
+pub const AUTONOMY_EPOCH_START_KEY: &str = "autonomy_epoch_start";
 
-fn system_message(deps: &AgentDeps, text: String) -> InboundMessage {
+fn autonomy_message(
+    deps: &AgentDeps,
+    text: String,
+    generation: u64,
+    epoch_start: bool,
+) -> InboundMessage {
+    let mut metadata = HashMap::new();
+    metadata.insert(AUTONOMY_GENERATION_KEY.to_string(), generation.into());
+    metadata.insert(AUTONOMY_EPOCH_START_KEY.to_string(), epoch_start.into());
     InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "system".into(),
@@ -552,7 +896,7 @@ fn system_message(deps: &AgentDeps, text: String) -> InboundMessage {
         agent_id: Some(deps.agent_id.clone()),
         content: MessageContent::Text(text),
         timestamp: chrono::Utc::now(),
-        metadata: HashMap::new(),
+        metadata,
         formatted_author: None,
     }
 }
@@ -562,6 +906,8 @@ async fn build_run_briefing(
     deps: &AgentDeps,
     config: &AutonomyConfig,
     wake_events: &[crate::wakes::WakeEvent],
+    trigger_reason: &str,
+    elapsed_secs: Option<u64>,
 ) -> anyhow::Result<String> {
     let agent_name = deps
         .agent_names
@@ -646,9 +992,10 @@ async fn build_run_briefing(
             (!active_goals.is_empty()).then_some(active_goals.as_str()),
             active_workers.as_deref(),
             config.max_tasks_per_run,
-            config.warn_secs.div_ceil(60).max(1),
             config.claim_unowned,
             instance_is_empty,
+            trigger_reason,
+            elapsed_secs,
         )
         .map_err(|error| anyhow::anyhow!("failed to render autonomy channel prompt: {error}"))
 }
@@ -775,12 +1122,22 @@ fn render_task_line(task: &Task, agent_id: &str, prior_attempts: Option<&str>) -
     line
 }
 
-/// Render currently running workers so the run doesn't duplicate in-flight work.
+/// Render every nonterminal worker so heartbeats can tend retained interactive
+/// sessions as well as actively running work.
 async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String>> {
     let logger = crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let (workers, _total) = logger
-        .list_worker_runs(&deps.agent_id, 20, 0, Some("running"))
+        .list_worker_runs(&deps.agent_id, 100, 0, None)
         .await?;
+    let workers: Vec<_> = workers
+        .into_iter()
+        .filter(|worker| {
+            !matches!(
+                worker.lifecycle.as_str(),
+                "succeeded" | "partial" | "cancelled" | "timed_out" | "blocked" | "failed"
+            )
+        })
+        .collect();
     if workers.is_empty() {
         return Ok(None);
     }
@@ -788,9 +1145,19 @@ async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String
     let mut output = String::new();
     for worker in workers {
         let task_line = crate::summarize_first_non_empty_line(&worker.task, 160);
+        let ownership = worker
+            .run_id
+            .as_deref()
+            .map(|run_id| format!(", originating epoch {run_id}"))
+            .unwrap_or_default();
+        let interaction = if worker.interactive {
+            ", interactive"
+        } else {
+            ""
+        };
         output.push_str(&format!(
-            "- {} [{}] {}\n",
-            worker.id, worker.worker_type, task_line
+            "- {} [{}; {}{}{}] {}\n",
+            worker.id, worker.worker_type, worker.lifecycle, interaction, ownership, task_line
         ));
     }
     Ok(Some(output))
@@ -800,6 +1167,26 @@ async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String
 mod tests {
     use super::*;
     use chrono::TimeZone as _;
+
+    async fn run_store() -> Arc<AutonomyRunStore> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        Arc::new(AutonomyRunStore::new(pool))
+    }
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
 
     fn utc(secs: i64) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc.timestamp_opt(secs, 0).unwrap()
@@ -959,5 +1346,84 @@ mod tests {
         assert!(!task_visible_to_agent(&theirs, "agent-a", true));
         assert!(task_visible_to_agent(&unowned, "agent-a", true));
         assert!(!task_visible_to_agent(&unowned, "agent-a", false));
+    }
+
+    #[tokio::test]
+    async fn finish_waits_for_owned_children() {
+        let store = run_store().await;
+        let run_id = store.begin_run().await.unwrap();
+        let handle = AutonomyRunHandle::new(run_id, 1, store);
+        let worker_id = crate::WorkerId::new_v4();
+
+        assert!(handle.register_child(AutonomyChild::Worker(worker_id)));
+        assert_eq!(
+            handle.request_finish(AutonomyFinishRequest {
+                summary: "worker still active".to_string(),
+                actions: Vec::new(),
+            }),
+            Err(1)
+        );
+        handle.settle_child(AutonomyChild::Worker(worker_id));
+        assert_eq!(
+            handle.request_finish(AutonomyFinishRequest {
+                summary: "worker result incorporated".to_string(),
+                actions: Vec::new(),
+            }),
+            Ok(true)
+        );
+        assert!(!handle.register_child(AutonomyChild::Worker(crate::WorkerId::new_v4())));
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_clear_current_epoch() {
+        let store = run_store().await;
+        let slot = AutonomyRunSlot::default();
+        let first = slot.begin("first".to_string(), store.clone());
+        assert!(slot.clear_if_current(first.generation));
+        let second = slot.begin("second".to_string(), store);
+
+        assert!(!slot.clear_if_current(first.generation));
+        assert_eq!(slot.current().unwrap().run_id, "second");
+        assert!(slot.clear_if_current(second.generation));
+        assert!(slot.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn autonomy_doorbell_coalesces_while_pending() {
+        let control = AutonomyControl::default();
+        let (check_tx, mut check_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        control.attach(check_tx, shutdown_tx);
+
+        assert!(!control.is_ready());
+        control.activate();
+        assert!(control.is_ready());
+        control.request_check();
+
+        assert_eq!(check_rx.recv().await, Some(()));
+        assert!(check_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn wake_claim_rolls_back_when_epoch_is_not_active() {
+        let pool = test_pool().await;
+        let wake_store = crate::wakes::WakeEventStore::new(pool.clone());
+        wake_store
+            .enqueue("task.approved", "task:7", &serde_json::json!({"task": 7}))
+            .await
+            .unwrap();
+        let event = wake_store.pending(1).await.unwrap().remove(0);
+
+        assert!(
+            commit_wake_claim(
+                &pool,
+                "missing-run",
+                std::slice::from_ref(&event.id),
+                std::slice::from_ref(&event.id),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(wake_store.pending_count().await.unwrap(), 1);
     }
 }

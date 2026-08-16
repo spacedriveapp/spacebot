@@ -96,15 +96,29 @@ impl Tool for RouteTool {
         match worker_is_idle {
             // Worker is idle (WaitingForInput) — deliver as interactive follow-up.
             Some(true) => {
+                let autonomy_run = self.state.autonomy_run();
+                if let Some(run) = &autonomy_run
+                    && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
+                {
+                    return Err(RouteError(
+                        "The autonomy epoch is finishing or already owns an active operation for this worker"
+                            .to_string(),
+                    ));
+                }
                 let inputs = self.state.worker_inputs.read().await;
                 if let Some(input_tx) = inputs.get(&worker_id).cloned() {
                     drop(inputs);
 
-                    input_tx.send(args.message).await.map_err(|_| {
-                        RouteError(format!(
+                    if input_tx.send(args.message).await.is_err() {
+                        if let Some(run) = autonomy_run {
+                            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(
+                                worker_id,
+                            ));
+                        }
+                        return Err(RouteError(format!(
                             "Worker {worker_id} has stopped accepting input (channel closed)"
-                        ))
-                    })?;
+                        )));
+                    }
 
                     tracing::info!(
                         worker_id = %worker_id,
@@ -121,6 +135,9 @@ impl Tool for RouteTool {
                     });
                 }
                 drop(inputs);
+                if let Some(run) = autonomy_run {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
+                }
 
                 // Worker is idle but has no input channel — shouldn't happen
                 // for interactive workers, but fall through to injection.
@@ -131,11 +148,31 @@ impl Tool for RouteTool {
                 if let Some(inject_tx) = injections.get(&worker_id).cloned() {
                     drop(injections);
 
-                    inject_tx.send(args.message).await.map_err(|_| {
-                        RouteError(format!(
+                    let autonomy_run = self.state.autonomy_run();
+                    let child = crate::agent::autonomy::AutonomyChild::Worker(worker_id);
+                    let registered_here = if let Some(run) = &autonomy_run {
+                        if run.owns_child(child) {
+                            false
+                        } else if run.register_child(child) {
+                            true
+                        } else {
+                            return Err(RouteError(
+                                "The autonomy epoch is finishing and cannot route more work"
+                                    .to_string(),
+                            ));
+                        }
+                    } else {
+                        false
+                    };
+
+                    if inject_tx.send(args.message).await.is_err() {
+                        if registered_here && let Some(run) = autonomy_run {
+                            run.settle_child(child);
+                        }
+                        return Err(RouteError(format!(
                             "Worker {worker_id} has stopped running (injection channel closed)"
-                        ))
-                    })?;
+                        )));
+                    }
 
                     tracing::info!(
                         worker_id = %worker_id,

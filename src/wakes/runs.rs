@@ -100,6 +100,35 @@ impl AutonomyRunStore {
         Ok(id)
     }
 
+    /// Atomically begin a run when no other run is active.
+    pub async fn try_begin_run(&self) -> Result<Option<String>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open autonomy run transaction")?;
+        let active: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM autonomy_runs WHERE status = 'running'")
+                .fetch_one(&mut *tx)
+                .await
+                .context("failed to count active autonomy runs")?;
+        if active > 0 {
+            tx.commit()
+                .await
+                .context("failed to close autonomy run transaction")?;
+            return Ok(None);
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO autonomy_runs (id) VALUES (?)")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to insert autonomy run")?;
+        tx.commit().await.context("failed to commit autonomy run")?;
+        Ok(Some(id))
+    }
+
     /// Record the wake events this run consumed ("woken by" provenance).
     pub async fn set_wake_events(&self, run_id: &str, wake_event_ids: &[String]) -> Result<()> {
         let ids_json =
@@ -267,6 +296,22 @@ impl AutonomyRunStore {
         Ok(count > 0)
     }
 
+    /// Close running rows left behind by a previous process before the
+    /// resident supervisor starts accepting heartbeats.
+    pub async fn reconcile_running_runs(&self, summary: &str) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE autonomy_runs SET status = 'failed', summary = COALESCE(summary, ?), \
+             finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+             duration_secs = CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) \
+             WHERE status = 'running'",
+        )
+        .bind(summary)
+        .execute(&self.pool)
+        .await
+        .context("failed to reconcile interrupted autonomy runs")?;
+        Ok(result.rows_affected())
+    }
+
     /// When the most recent run started, if any. Tracked from the table (not
     /// in-memory) so restarts keep the interval anchored.
     pub async fn last_run_started_at(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
@@ -276,6 +321,17 @@ impl AutonomyRunStore {
             .context("failed to read last autonomy run start")?;
 
         Ok(value.as_deref().and_then(parse_run_timestamp))
+    }
+
+    pub async fn run_is_active(&self, run_id: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM autonomy_runs WHERE id = ? AND status = 'running'",
+        )
+        .bind(run_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to read autonomy run status")?;
+        Ok(count > 0)
     }
 }
 
@@ -556,6 +612,55 @@ mod tests {
         let recent = store.recent(1).await.expect("recent");
         assert_eq!(recent[0].status, AutonomyRunStatus::Failed);
         assert!(recent[0].summary.as_deref().unwrap_or("").contains("dead"));
+    }
+
+    #[tokio::test]
+    async fn try_begin_run_is_single_flight() {
+        let store = store().await;
+        let first = store.try_begin_run().await.expect("first admission");
+        let second = store.try_begin_run().await.expect("second admission");
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        assert_eq!(
+            store
+                .recent(10)
+                .await
+                .expect("runs")
+                .into_iter()
+                .filter(|run| run.status == AutonomyRunStatus::Running)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_closes_only_running_epochs() {
+        let store = store().await;
+        let interrupted = store.begin_run().await.expect("interrupted run");
+        let completed = store.begin_run().await.expect("completed run");
+        store
+            .complete_run(&completed, "already complete", &[])
+            .await
+            .expect("complete run");
+
+        assert_eq!(
+            store
+                .reconcile_running_runs("interrupted by restart")
+                .await
+                .expect("reconcile"),
+            1
+        );
+        let runs = store.recent(10).await.expect("runs");
+        let interrupted = runs.iter().find(|run| run.id == interrupted).unwrap();
+        let completed = runs.iter().find(|run| run.id == completed).unwrap();
+        assert_eq!(interrupted.status, AutonomyRunStatus::Failed);
+        assert_eq!(
+            interrupted.summary.as_deref(),
+            Some("interrupted by restart")
+        );
+        assert_eq!(completed.status, AutonomyRunStatus::Completed);
+        assert_eq!(completed.summary.as_deref(), Some("already complete"));
     }
 
     #[tokio::test]

@@ -62,7 +62,7 @@ condition into a terminal outcome. Replace each with checkpoint and recovery.
 | Provider retry ceiling | Fails the worker | Persist backoff state, retry through the routing chain, then suspend until the provider is available. |
 | OpenCode SSE inactivity timeout | Fails the worker | Reattach by session ID, poll the backend, or suspend with a reconnect action. |
 | Cortex liveness intervention | Aborts the handle | Request cooperative checkpointing. Escalate only to `Suspended` after the grace period. |
-| Channel or autonomy timeout | Orphans or cancels children | Transfer worker ownership to the durable supervisor. |
+| Cron channel timeout | Orphans or cancels children | Transfer worker ownership to the durable supervisor. Autonomy has a resident channel and no run timeout. |
 | Process shutdown | Leaves active work for startup failure reconciliation | Drain checkpoints before exit. On boot, restore active workers into `Recovering`. |
 | Startup reconciliation | Marks `Running` workers failed | Resume from checkpoint or mark `Suspended` with recovery evidence. |
 | Backend/session reconnect failure | Fails or retires the worker | Retain resume metadata and suspend for retry or operator remediation. |

@@ -857,6 +857,7 @@ impl CortexChatSession {
             opencode_enabled,
             &mcp_tool_names,
             &worker_context,
+            true,
         )?;
 
         // Load channel transcript if a channel context is active

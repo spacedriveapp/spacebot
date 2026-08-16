@@ -24,7 +24,7 @@ Why workers "die or time out frequently," concretely:
 | 2 | Cortex idle sweep, 600s without *events* | `cortex.rs:1227-1418` | Synthetic `WorkerComplete` | Partial -- live transcript drained if API map is shared |
 | 3 | `handle.abort()` (supervisor, API, `cancel` tool) | `channel.rs:423-544` | Synthetic `WorkerComplete` | Same caveat |
 | 4 | Turn/segment/retry ceilings (6 hard-coded constants) | `worker.rs:26-49`, `hooks/spacebot.rs:94` | Mixed: `Partial`, `Failed`, or `Cancelled` | Varies |
-| 5 | Channel hard-timeout aborts channel, workers orphaned | `cron/scheduler.rs:1488-1495`, `autonomy.rs:330-366` | **None, ever** | Worker keeps running into a void |
+| 5 | Cron channel hard-timeout aborts channel, workers orphaned | `cron/scheduler.rs` | **None, ever** | Worker keeps running into a void |
 | 6 | Broadcast lag drops `WorkerComplete` | `lib.rs:349`, `channel.rs:1433-1452` | **Lost in transit** | Slot leaks, self-exiting channels wedge |
 | 7 | Process shutdown | `main.rs:1780-1810` | **None** -- next boot marks rows `failed` | No |
 | 8 | OpenCode SSE 600s inactivity | `opencode/worker.rs:541-546` | `Failed` | No |
@@ -123,13 +123,13 @@ This inverts the current relationship between the cortex and workers. Today the 
 
 ### 6. Ownership survives channel death
 
-When a cron or autonomy channel hits its hard timeout, its workers transfer to cortex supervision instead of being orphaned. The channel abort path enumerates `worker_handles` and re-registers each worker as detached (same shape as task-pickup workers: cancel oneshot, lifecycle CAS, progress struct). The workers keep running -- their work is usually the valuable part of the cron run -- under stall monitoring, and their outcomes land in the outbox where the reconciliation pass delivers them.
+Autonomy no longer has a channel or run timeout. Its resident channel retains worker handles across heartbeats and consumes their results while active or idle. Cron still needs an ownership transfer path when its hard timeout fires. That abort path should enumerate `worker_handles` and re-register each worker as detached so useful work continues under stall monitoring and its outcome lands in the outbox.
 
-`cancel_all_workers_and_branches` (`channel.rs:668-701`), which was written for this and never wired up, is replaced by this adoption path.
+The resident autonomy supervisor now owns shutdown convergence. Final shutdown and agent deletion cancel and persist every retained child before the database closes. Restart cancels active epoch work but preserves idle interactive workers for session recovery.
 
 ### 7. Shutdown drains
 
-`std::process::exit(0)` with workers in flight is a crash that runs on every restart. Shutdown gains a bounded drain: signal every worker's cancellation token (stage 1), wait up to `shutdown_drain_secs` (default 30), persist what lands, and write `Stalled { phase: "shutdown" }` outbox rows for anything still running so the next boot's reconciliation has truth instead of guesswork. The existing next-boot pass (`history.rs:603-625`) stops inventing `"Spacebot restarted before completion"` failures for workers that actually completed their drain.
+The resident autonomy supervisor performs its drain before agent databases close. A future process-wide worker supervisor still needs the staged `shutdown_drain_secs` contract for user channels and cron-owned workers.
 
 ### 8. Workers are forks
 

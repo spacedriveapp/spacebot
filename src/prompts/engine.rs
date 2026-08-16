@@ -109,6 +109,7 @@ pub struct ChannelPromptInputs {
     pub active_goals: Option<String>,
     pub execution_mode: String,
     pub authority: String,
+    pub autonomy_channel: bool,
 }
 
 impl ChannelPromptInputs {
@@ -132,6 +133,7 @@ impl ChannelPromptInputs {
             .text("active_goals", self.active_goals)
             .text("execution_mode", Some(self.execution_mode))
             .text("authority", Some(self.authority))
+            .inline("autonomy_channel", self.autonomy_channel)
             .inline("agent_links", self.agent_links)
     }
 }
@@ -315,14 +317,6 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/system/autonomy_contract_retry"),
         )?;
         env.add_template(
-            "fragments/system/autonomy_soft_warning",
-            crate::prompts::text::get("fragments/system/autonomy_soft_warning"),
-        )?;
-        env.add_template(
-            "fragments/system/autonomy_hard_timeout",
-            crate::prompts::text::get("fragments/system/autonomy_hard_timeout"),
-        )?;
-        env.add_template(
             "fragments/system/profile_synthesis",
             crate::prompts::text::get("fragments/system/profile_synthesis"),
         )?;
@@ -464,6 +458,7 @@ impl PromptEngine {
         opencode_enabled: bool,
         mcp_tool_names: &[String],
         worker_context: &crate::conversation::settings::WorkerContextMode,
+        project_manage_available: bool,
     ) -> Result<String> {
         self.render(
             "fragments/worker_capabilities",
@@ -477,6 +472,7 @@ impl PromptEngine {
                     crate::conversation::settings::WorkerHistoryMode::Fork
                 ),
                 worker_memory => worker_context.memory.as_str(),
+                project_manage_available => project_manage_available,
             },
         )
     }
@@ -700,21 +696,6 @@ impl PromptEngine {
         self.render_static("fragments/system/autonomy_contract_retry")
     }
 
-    /// Soft-timeout warning injected into an autonomy run at `warn_secs`.
-    pub fn render_system_autonomy_soft_warning(&self, remaining_minutes: u64) -> Result<String> {
-        self.render(
-            "fragments/system/autonomy_soft_warning",
-            context! {
-                remaining_minutes => remaining_minutes,
-            },
-        )
-    }
-
-    /// Hard-timeout wrap-up injected when an autonomy run's `timeout_secs` elapses.
-    pub fn render_system_autonomy_hard_timeout(&self) -> Result<String> {
-        self.render_static("fragments/system/autonomy_hard_timeout")
-    }
-
     /// Render the profile synthesis prompt with identity context.
     pub fn render_system_profile_synthesis(
         &self,
@@ -826,9 +807,10 @@ impl PromptEngine {
         active_goals: Option<&str>,
         active_workers: Option<&str>,
         max_tasks_per_run: u32,
-        warn_minutes: u64,
         claim_unowned: bool,
         instance_is_empty: bool,
+        trigger_reason: &str,
+        elapsed_secs: Option<u64>,
     ) -> Result<String> {
         self.render(
             "autonomy_channel",
@@ -841,9 +823,10 @@ impl PromptEngine {
                 active_goals => active_goals,
                 active_workers => active_workers,
                 max_tasks_per_run => max_tasks_per_run,
-                warn_minutes => warn_minutes,
                 claim_unowned => claim_unowned,
                 instance_is_empty => instance_is_empty,
+                trigger_reason => trigger_reason,
+                elapsed_secs => elapsed_secs,
             },
         )
     }
@@ -1614,21 +1597,22 @@ mod tests {
                 Some("### [HIGH] Ship v2"),
                 None,
                 2,
-                8,
                 true,
                 false,
+                "heartbeat",
+                Some(480),
             )
             .expect("observe prompt should render");
         assert!(observe.contains("You are Iris."));
         assert!(observe.contains("CI failed on main"));
         assert!(observe.contains("Instructions: Investigate the failing job."));
-        assert!(observe.contains("observed only, below your current autonomy level"));
+        assert!(observe.contains("observe only; this event requires a higher autonomy level"));
         assert!(observe.contains("3 coalesced firings"));
         assert!(observe.contains("Enriched task #4."));
-        assert!(observe.contains("survey and summarize only"));
-        assert!(observe.contains("up to 2 tasks this run"));
-        assert!(observe.contains("about 8 minutes"));
-        assert!(observe.contains("`pending_approval` are NEVER executed"));
+        assert!(observe.contains("Your autonomy level is **observe**"));
+        assert!(observe.contains("at most 2 tasks in this epoch"));
+        assert!(observe.contains("active for 480 seconds"));
+        assert!(observe.contains("Never execute `pending_approval` tasks"));
 
         let act = engine
             .render_autonomy_channel_prompt(
@@ -1640,19 +1624,18 @@ mod tests {
                 None,
                 None,
                 1,
-                1,
                 false,
                 true,
+                "heartbeat",
+                None,
             )
             .expect("act prompt should render");
-        assert!(act.contains("Scheduled interval — no wake events pending."));
-        assert!(act.contains("Execute ready tasks"));
-        assert!(act.contains("up to 1 task this run"));
-        assert!(!act.contains("claim unowned tasks"));
-        // An empty instance gets cold-start guidance instead of a bare survey.
-        assert!(act.contains("There are no tasks and no goals."));
-        assert!(act.contains("spacebot_docs"));
-        assert!(act.contains("Do not invent tasks to look busy."));
+        assert!(act.contains("No new wake events"));
+        assert!(act.contains("execute `ready` tasks"));
+        assert!(act.contains("at most 1 task in this epoch"));
+        assert!(!act.contains("claim unowned work"));
+        assert!(act.contains("The board and goal list are empty"));
+        assert!(act.contains("Never invent tasks to look busy."));
 
         // An unrecognized level falls back to observe-only rules.
         let unknown = engine
@@ -1665,15 +1648,15 @@ mod tests {
                 None,
                 None,
                 1,
-                1,
                 false,
                 false,
+                "heartbeat",
+                None,
             )
             .expect("unknown level prompt should render");
-        assert!(unknown.contains("Treat this run as observe: survey and summarize only."));
-        // Recording is instructed at every level; cold-start guidance is not.
-        assert!(unknown.contains("Record what you notice as you go"));
-        assert!(!unknown.contains("There are no tasks and no goals."));
+        assert!(unknown.contains("Treat this epoch as observe-only."));
+        assert!(unknown.contains("Record reusable discoveries"));
+        assert!(!unknown.contains("The board and goal list are empty"));
     }
 
     #[test]
@@ -1685,31 +1668,10 @@ mod tests {
             .expect("contract retry should render");
         assert_eq!(
             retry,
-            "You must finish this autonomy run by calling autonomy_complete. Provide a 2-5 \
-             line summary of what this run observed and did, plus an actions entry for every \
-             task you enriched, created, or executed. Do not start new work."
-        );
-
-        let singular = engine
-            .render_system_autonomy_soft_warning(1)
-            .expect("soft warning should render");
-        assert_eq!(
-            singular,
-            "You have approximately 1 minute remaining in this run. Finish your current task, \
-             add any final notes, and call autonomy_complete. Do not start a new task."
-        );
-        let plural = engine
-            .render_system_autonomy_soft_warning(5)
-            .expect("soft warning should render");
-        assert!(plural.contains("approximately 5 minutes remaining"));
-
-        let hard = engine
-            .render_system_autonomy_hard_timeout()
-            .expect("hard timeout should render");
-        assert_eq!(
-            hard,
-            "Time is up. Some work may not have finished. Call autonomy_complete NOW with a \
-             summary of whatever this run accomplished. Do not start any new work."
+            "This autonomy epoch has no active work but has not called autonomy_complete. Call \
+             autonomy_complete now with a concise final summary and one action per task actually \
+             enriched, created, or executed. If no action was needed, use an empty actions list. \
+             Do not start new work."
         );
     }
 

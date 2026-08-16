@@ -153,12 +153,6 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/autonomy_contract_retry") => {
             include_str!("../../prompts/en/fragments/system/autonomy_contract_retry.md.j2")
         }
-        ("en", "fragments/system/autonomy_soft_warning") => {
-            include_str!("../../prompts/en/fragments/system/autonomy_soft_warning.md.j2")
-        }
-        ("en", "fragments/system/autonomy_hard_timeout") => {
-            include_str!("../../prompts/en/fragments/system/autonomy_hard_timeout.md.j2")
-        }
         ("en", "fragments/system/profile_synthesis") => {
             include_str!("../../prompts/en/fragments/system/profile_synthesis.md.j2")
         }

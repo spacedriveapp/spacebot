@@ -512,7 +512,7 @@ pub async fn add_channel_tools(
     let chronicle_channel_id = state.channel_id.to_string();
     let chronicle_pool = state.deps.sqlite_pool.clone();
     let compaction = **state.deps.runtime_config.compaction.load();
-    let autonomy_run = state.autonomy_run.clone();
+    let autonomy_run = state.autonomy_run();
 
     if allow_direct_reply {
         let agent_display_name = state
@@ -866,6 +866,226 @@ pub async fn add_direct_mode_tools(
     Ok(())
 }
 
+/// Add the resident autonomy channel's level-scoped capability set.
+pub async fn add_autonomy_tools(
+    handle: &ToolServerHandle,
+    state: ChannelState,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let level = state
+        .deps
+        .runtime_config
+        .autonomy
+        .load()
+        .level
+        .min(**state.deps.autonomy_ceiling.load());
+    handle
+        .add_tool(memory_save_with_events(
+            state.deps.memory_search.clone(),
+            state.deps.agent_id.clone(),
+            state.deps.memory_event_tx.clone(),
+            Some(state.deps.working_memory.clone()),
+        ))
+        .await?;
+    handle
+        .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
+        .await?;
+    handle.add_tool(SpacebotDocsTool::new()).await?;
+    handle
+        .add_tool(FileReadTool::new(
+            state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(FileListTool::new(
+            state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(ReadSkillTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    handle
+        .add_tool(SkillsSearchTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    handle
+        .add_tool(GoalListTool::new(state.deps.goal_store.clone()))
+        .await?;
+    let Some(run) = state.autonomy_run() else {
+        return Ok(());
+    };
+    handle.add_tool(AutonomyCompleteTool::new(run)).await?;
+
+    let mut task_history =
+        TaskHistoryTool::new(state.deps.task_store.clone(), state.deps.agent_id.clone());
+    if let Some(api_state) = &state.deps.api_state {
+        task_history = task_history.with_api_state(api_state.clone());
+    }
+    handle
+        .add_tool(TaskListTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+    handle.add_tool(task_history).await?;
+    handle
+        .add_tool(WorkerInspectTool::new(
+            state.process_run_logger.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+
+    if level >= crate::config::AutonomyLevel::Suggest {
+        let mut task_create = TaskCreateTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+            "autonomy",
+        )
+        .with_execution_context(
+            state.deps.project_store.clone(),
+            state.deps.runtime_config.clone(),
+        );
+        let mut add_task_comment = AddTaskCommentTool::for_branch(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.clone(),
+        );
+        if let Some(api_state) = &state.deps.api_state {
+            task_create = task_create.with_api_state(api_state.clone());
+            add_task_comment = add_task_comment.with_api_state(api_state.clone());
+        }
+        handle.add_tool(task_create).await?;
+        handle
+            .add_tool(TaskUpdateTool::for_autonomy(
+                state.deps.task_store.clone(),
+                state.deps.agent_id.clone(),
+                level,
+            ))
+            .await?;
+        handle.add_tool(add_task_comment).await?;
+    }
+
+    if let Some(key) = state
+        .deps
+        .runtime_config
+        .brave_search_key
+        .load()
+        .as_ref()
+        .clone()
+    {
+        handle.add_tool(WebSearchTool::new(key)).await?;
+    }
+    if let Some(store) = &state.deps.wiki_store {
+        handle.add_tool(WikiReadTool::new(store.clone())).await?;
+        handle.add_tool(WikiListTool::new(store.clone())).await?;
+        handle.add_tool(WikiSearchTool::new(store.clone())).await?;
+        handle.add_tool(WikiHistoryTool::new(store.clone())).await?;
+    }
+
+    if level == crate::config::AutonomyLevel::Act {
+        handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
+        handle.add_tool(RouteTool::new(state.clone())).await?;
+        handle.add_tool(CancelTool::new(state.clone())).await?;
+        let workspace = state.deps.runtime_config.workspace_dir.clone();
+        let sandbox = state.deps.sandbox.clone();
+        handle
+            .add_tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+            .await?;
+        handle
+            .add_tool(FileWriteTool::new(workspace.clone(), sandbox.clone()))
+            .await?;
+        handle
+            .add_tool(FileEditTool::new(workspace, sandbox))
+            .await?;
+
+        let browser_config = state.deps.runtime_config.browser_config.load();
+        if browser_config.enabled {
+            let context = browser::BrowserContext::new(
+                if let Some(shared) = state
+                    .deps
+                    .runtime_config
+                    .shared_browser
+                    .as_ref()
+                    .filter(|_| browser_config.persist_session)
+                {
+                    shared.clone()
+                } else {
+                    browser::new_shared_browser_handle()
+                },
+                BrowserConfig::clone(&browser_config),
+                state.screenshot_dir.clone(),
+                state
+                    .deps
+                    .runtime_config
+                    .secrets
+                    .load()
+                    .as_ref()
+                    .as_ref()
+                    .cloned(),
+            );
+            handle
+                .add_tool(browser::BrowserLaunchTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserNavigateTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserSnapshotTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserClickTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTypeTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserPressKeyTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserScreenshotTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserEvaluateTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabOpenTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabListTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabCloseTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserCloseTool { context })
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
 fn default_delivery_target_for_conversation(
     conversation_id: &str,
     slack_thread_ts: Option<&str>,
@@ -982,6 +1202,12 @@ pub async fn remove_direct_mode_tools(
     remove_optional_tool(handle, WikiListTool::NAME).await;
     remove_optional_tool(handle, WikiSearchTool::NAME).await;
     remove_optional_tool(handle, WikiHistoryTool::NAME).await;
+    remove_optional_tool(handle, TaskCreateTool::NAME).await;
+    remove_optional_tool(handle, TaskListTool::NAME).await;
+    remove_optional_tool(handle, TaskUpdateTool::NAME).await;
+    remove_optional_tool(handle, TaskHistoryTool::NAME).await;
+    remove_optional_tool(handle, AddTaskCommentTool::NAME).await;
+    remove_optional_tool(handle, WorkerInspectTool::NAME).await;
 
     Ok(())
 }

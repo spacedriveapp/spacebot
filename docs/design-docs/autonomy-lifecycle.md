@@ -18,9 +18,10 @@ Related: [autonomy.md](autonomy.md), [wakes.md](wakes.md),
 
 ## Current state (source-grounded)
 
-- `maybe_run_autonomy` fires from the cortex tick when
-  `autonomy_run_due(...)` says the interval elapsed or wake events are
-  pending. `interval_secs` defaults to 1800 and never varies.
+- A resident per-agent supervisor owns the autonomy channel. Its bounded
+  doorbell coalesces external wake notifications, and its interval heartbeat
+  calls `autonomy_run_due(...)` when no epoch is active. `interval_secs`
+  defaults to 1800 and never varies.
 - **Ready tasks are picked up by the cortex, not by autonomy.**
   `spawn_ready_task_loop` → `pickup_one_ready_task` claims the
   highest-priority ready task on the cortex tick interval, gated only by
@@ -32,8 +33,9 @@ Related: [autonomy.md](autonomy.md), [wakes.md](wakes.md),
   four status buckets (limit 200 each), plus 5 run summaries, wake events,
   goals, and active workers. No retrieval — everything the run knows is what
   was rendered.
-- The run ends with `autonomy_complete { summary, actions[] }`. It records
-  what happened; it says nothing about what should happen next or when.
+- The epoch ends with `autonomy_complete { summary, actions[] }`. The resident
+  channel returns to idle. The completion says nothing about what should
+  happen next or when.
 - Enrichment exists only as a prompt instruction ("enrich pending_approval
   tasks"), with no state marking a task as researched. Nothing stops a run
   from re-enriching the same task forever — and the 2026-08-12 audit found

@@ -525,6 +525,9 @@ pub struct AgentDeps {
     pub wake_def_store: Arc<wakes::WakeDefStore>,
     /// Per-agent autonomy run history (begin/complete + recent summaries).
     pub autonomy_run_store: Arc<wakes::AutonomyRunStore>,
+    /// Doorbell for the resident autonomy channel. The shared cell is wired
+    /// when the supervisor starts, so cloned dependency bundles stay valid.
+    pub autonomy_control: agent::autonomy::AutonomyControl,
     pub project_store: Arc<projects::ProjectStore>,
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
@@ -603,6 +606,7 @@ pub struct Agent {
     pub config: config::ResolvedAgentConfig,
     pub db: db::Db,
     pub deps: AgentDeps,
+    pub autonomy_supervisor: Option<agent::autonomy::AutonomySupervisorHandle>,
 }
 
 /// Standard metadata keys set by all adapters.
