@@ -254,6 +254,7 @@ pub struct AutonomyControl {
     stopped_notify: Arc<Notify>,
     preserve_idle_workers: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
+    transition: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AutonomyControl {
@@ -283,6 +284,10 @@ impl AutonomyControl {
                 }
             }
         }
+    }
+
+    pub async fn lock_transition(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.transition.clone().lock_owned().await
     }
 
     pub fn activate(&self) {
@@ -675,6 +680,7 @@ async fn start_epoch_if_due(
     run_slot: &AutonomyRunSlot,
     channel_tx: &mpsc::Sender<InboundMessage>,
 ) -> anyhow::Result<Option<ActiveEpoch>> {
+    let _transition_guard = deps.autonomy_control.lock_transition().await;
     let raw_config = **deps.runtime_config.autonomy.load();
     let config = AutonomyConfig {
         level: raw_config.level.min(**deps.autonomy_ceiling.load()),
@@ -731,7 +737,12 @@ async fn send_heartbeat(
     channel_tx: &mpsc::Sender<InboundMessage>,
     epoch: &mut ActiveEpoch,
 ) -> anyhow::Result<()> {
+    let _transition_guard = deps.autonomy_control.lock_transition().await;
     let config = **deps.runtime_config.autonomy.load();
+    let Some(effective_level) = heartbeat_level(config.level, **deps.autonomy_ceiling.load())
+    else {
+        return Ok(());
+    };
     let pending_count = deps.wake_event_store.pending_count().await?;
     if pending_count == 0
         && epoch.last_heartbeat.elapsed() < Duration::from_secs(config.interval_secs.max(1))
@@ -749,7 +760,7 @@ async fn send_heartbeat(
         }
     };
     epoch.config = AutonomyConfig {
-        level: config.level.min(**deps.autonomy_ceiling.load()),
+        level: effective_level,
         ..config
     };
     let events = deps
@@ -781,6 +792,11 @@ async fn send_heartbeat(
     epoch.wake_event_ids = all_event_ids;
     epoch.last_heartbeat = tokio::time::Instant::now();
     Ok(())
+}
+
+fn heartbeat_level(level: AutonomyLevel, ceiling: AutonomyLevel) -> Option<AutonomyLevel> {
+    let effective = level.min(ceiling);
+    (effective != AutonomyLevel::Off).then_some(effective)
 }
 
 async fn commit_wake_claim(
@@ -1212,6 +1228,40 @@ mod tests {
             12,
             1800
         ));
+    }
+
+    #[test]
+    fn heartbeat_admission_stops_when_dial_or_ceiling_is_off() {
+        assert_eq!(
+            heartbeat_level(AutonomyLevel::Act, AutonomyLevel::Suggest),
+            Some(AutonomyLevel::Suggest)
+        );
+        assert_eq!(
+            heartbeat_level(AutonomyLevel::Off, AutonomyLevel::Act),
+            None
+        );
+        assert_eq!(
+            heartbeat_level(AutonomyLevel::Act, AutonomyLevel::Off),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn autonomy_transitions_serialize_with_admission() {
+        let control = AutonomyControl::default();
+        let guard = control.lock_transition().await;
+        let contender = {
+            let control = control.clone();
+            tokio::spawn(async move { control.lock_transition().await })
+        };
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!contender.is_finished());
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), contender)
+            .await
+            .expect("transition lock should become available")
+            .expect("contender should not panic");
     }
 
     #[test]

@@ -430,6 +430,38 @@ fn resolve_slack_subcommand(
         .filter(|def| def.availability.on(crate::commands::Surface::Slack))
 }
 
+fn validate_slack_subcommand_args(
+    command: &str,
+    def: &crate::commands::CommandDef,
+    args: &str,
+) -> Result<String, String> {
+    use crate::commands::ArgSpec;
+
+    let args = args.trim();
+    let usage = || {
+        let suffix = def
+            .args
+            .hint()
+            .map(|hint| format!(" {hint}"))
+            .unwrap_or_default();
+        format!("usage: {command} {}{suffix}", def.name)
+    };
+    match def.args {
+        ArgSpec::None if !args.is_empty() => Err(usage()),
+        ArgSpec::Required(_) if args.is_empty() => Err(usage()),
+        ArgSpec::Choice(options)
+            if !args.is_empty()
+                && !options
+                    .iter()
+                    .any(|option| option.eq_ignore_ascii_case(args)) =>
+        {
+            Err(usage())
+        }
+        ArgSpec::Choice(_) => Ok(args.to_ascii_lowercase()),
+        ArgSpec::None | ArgSpec::Optional(_) | ArgSpec::Required(_) => Ok(args.to_string()),
+    }
+}
+
 /// Handle Slack slash command events (e.g. `/ask What is the weather?`).
 ///
 /// Slack requires an acknowledgement within 3 seconds. This handler acks
@@ -527,6 +559,15 @@ async fn handle_command_event(
             response_type: Some(SlackMessageResponseType::Ephemeral),
         });
     };
+    let args = match validate_slack_subcommand_args(&command_str, def, &args) {
+        Ok(args) => args,
+        Err(usage) => {
+            return Ok(SlackCommandEventResponse {
+                content: SlackMessageContent::new().with_text(usage),
+                response_type: Some(SlackMessageResponseType::Ephemeral),
+            });
+        }
+    };
 
     let base_conversation_id = format!("slack:{}:{}", team_id, channel_id);
     let conversation_id =
@@ -557,6 +598,7 @@ async fn handle_command_event(
         "slack_user_mention".into(),
         serde_json::Value::String(format!("<@{}>", user_id)),
     );
+    metadata.insert("slack_mentions_or_replies_to_bot".into(), true.into());
 
     let content = MessageContent::Command {
         name: def.name.to_string(),
@@ -1736,6 +1778,19 @@ fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIden
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slack_subcommands_validate_no_argument_commands() {
+        let def = crate::commands::REGISTRY.resolve("autonomy-off").unwrap();
+        assert_eq!(
+            validate_slack_subcommand_args("/spacebot", def, "typo"),
+            Err("usage: /spacebot autonomy-off".to_string())
+        );
+        assert_eq!(
+            validate_slack_subcommand_args("/spacebot", def, ""),
+            Ok(String::new())
+        );
+    }
 
     #[test]
     fn slack_subcommands_resolve_only_when_available_on_slack() {

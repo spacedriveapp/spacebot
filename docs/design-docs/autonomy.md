@@ -55,6 +55,8 @@ Generation tags fence late messages from older epochs. A bounded doorbell coales
 
 Worker results are also control messages. They continue the intent that spawned or routed the worker. They do not grant permission to start unrelated work.
 
+Changing the effective level to `off` suppresses further heartbeat and wake admission immediately. An active epoch is not cancelled: its current turn and owned children can settle, but the supervisor does not feed it additional work. Once that epoch completes, the resident channel remains idle until autonomy is enabled again.
+
 The transcript holds the current epoch's work. System scaffolding and previous epoch detail do not accumulate.
 
 ## What It Does

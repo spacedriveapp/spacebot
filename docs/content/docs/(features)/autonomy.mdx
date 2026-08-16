@@ -22,6 +22,12 @@ Each agent has an autonomy level:
 
 The instance can apply a ceiling that limits every agent regardless of its individual setting.
 
+## Commands
+
+`/autonomy` reports the agent's configured level and the effective level after the instance ceiling is applied. `/autonomy-off` remembers the current non-off level and prevents new heartbeats, wake events, and epochs from being admitted. Work already active in the current epoch is allowed to settle. `/autonomy-on` restores the remembered level, or starts at `observe` when the agent has never been enabled.
+
+Changing the configured level does not raise the instance ceiling. Restoring `act` under a `suggest` ceiling leaves the configured level at `act` and reports `suggest` as the effective level. The status command is available to everyone; enabling and disabling autonomy require authority in the current binding.
+
 ## Goals and Tasks
 
 Goals are standing direction. They remain active until an operator closes them. Tasks are the concrete units of work linked to those goals.
@@ -64,13 +70,11 @@ level = "off"
 interval_secs = 1800
 max_turns = 20
 max_tasks_per_run = 2
-timeout_secs = 600
-warn_secs = 480
 run_history_count = 5
 claim_unowned = true
 ```
 
-`interval_secs` must be at least 60 seconds. `timeout_secs` must not exceed the interval. `active_hours`, when configured, uses the agent's cron timezone.
+`interval_secs` must be at least 60 seconds. `active_hours`, when configured, uses the agent's cron timezone.
 
 ## Related Documentation
 

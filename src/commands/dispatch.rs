@@ -165,7 +165,9 @@ pub async fn dispatch_inbound(
                 // over the network, and that stays on a spawned task.
                 ControlAction::SetResponseMode(_)
                 | ControlAction::SetHome
-                | ControlAction::SetPause => {
+                | ControlAction::SetPause
+                | ControlAction::AutonomyOn
+                | ControlAction::AutonomyOff => {
                     let reply = plane.execute(action, &parsed.args).await;
                     reply_ephemeral(messaging, deps, message, reply);
                 }
@@ -174,7 +176,8 @@ pub async fn dispatch_inbound(
                 ControlAction::Status
                 | ControlAction::Help
                 | ControlAction::AgentId
-                | ControlAction::WhoAmI => {
+                | ControlAction::WhoAmI
+                | ControlAction::AutonomyStatus => {
                     let messaging = messaging.clone();
                     let deps = deps.clone();
                     let target = message.clone();

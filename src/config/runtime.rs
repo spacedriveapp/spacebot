@@ -219,10 +219,25 @@ impl RuntimeConfig {
         agent_id: &str,
         mcp_manager: &crate::mcp::McpManager,
     ) {
+        let Some((old_mcp, new_mcp)) = self.publish_config(config, agent_id) else {
+            return;
+        };
+        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
+        tracing::info!(agent_id, "runtime config reloaded");
+    }
+
+    /// Publish reloadable local values and return the MCP delta for separate
+    /// reconciliation. Config writers use this while holding their file
+    /// transaction lock, then release it before any network work begins.
+    pub(crate) fn publish_config(
+        &self,
+        config: &Config,
+        agent_id: &str,
+    ) -> Option<(Vec<McpServerConfig>, Vec<McpServerConfig>)> {
         let agent = config.agents.iter().find(|a| a.id == agent_id);
         let Some(agent) = agent else {
             tracing::warn!(agent_id, "agent not found in reloaded config, skipping");
-            return;
+            return None;
         };
 
         let resolved = agent.resolve(&config.instance_dir, &config.defaults);
@@ -301,9 +316,7 @@ impl RuntimeConfig {
             );
         }
 
-        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
-
-        tracing::info!(agent_id, "runtime config reloaded");
+        Some((old_mcp, new_mcp))
     }
 
     /// Reload identity files from disk.

@@ -24,12 +24,15 @@ Spacebot handles built-in commands before normal LLM processing. The command set
 | `/sethome` | Authority | Set the current chat as the agent's home channel. |
 | `/pause [reason]` | Authority | Stop new work from starting. |
 | `/pause off` | Authority | Resume new work. |
+| `/autonomy` | Everyone | Show the configured level, effective level, ceiling, and current epoch state. |
+| `/autonomy-on` | Authority | Restore the last non-off autonomy level, defaulting to `observe`. |
+| `/autonomy-off` | Authority | Stop new autonomy work while the current epoch settles. |
 
 Commands that request task information are sent through the agent after classification. Control commands are applied atomically and do not need an LLM turn.
 
 ## Authority
 
-Authority is configured per binding or adapter. Binding-level authority lists take precedence over adapter defaults. Everyone can use conversational and read-only commands. Only authority members can alter response mode, pause state, or the home channel.
+Authority is configured per binding or adapter. Binding-level authority lists take precedence over adapter defaults. Everyone can use conversational and read-only commands. Only authority members can alter response mode, pause state, autonomy, or the home channel.
 
 Run `/whoami` before using a control command to see the access available in the current chat.
 

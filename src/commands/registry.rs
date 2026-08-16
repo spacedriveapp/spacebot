@@ -177,6 +177,12 @@ pub enum ControlAction {
     SetPause,
     /// Report the sender's authority in this scope.
     WhoAmI,
+    /// Report the configured and effective autonomy levels.
+    AutonomyStatus,
+    /// Restore the most recently enabled autonomy level.
+    AutonomyOn,
+    /// Disable future autonomy epochs while current work settles.
+    AutonomyOff,
 }
 
 /// Agent-turn commands.
@@ -407,6 +413,39 @@ pub static COMMANDS: &[CommandDef] = &[
         availability: CommandAvailability::ALL,
     },
     CommandDef {
+        name: "autonomy",
+        description: "show configured and effective autonomy",
+        category: CommandCategory::Config,
+        aliases: &[],
+        args: ArgSpec::None,
+        handler: CommandHandler::Control(ControlAction::AutonomyStatus),
+        access: CommandAccess::Everyone,
+        busy: BusyPolicy::Queue,
+        availability: CommandAvailability::ALL,
+    },
+    CommandDef {
+        name: "autonomy-on",
+        description: "restore the last enabled autonomy level",
+        category: CommandCategory::Config,
+        aliases: &[],
+        args: ArgSpec::None,
+        handler: CommandHandler::Control(ControlAction::AutonomyOn),
+        access: CommandAccess::Authority,
+        busy: BusyPolicy::Queue,
+        availability: CommandAvailability::ALL,
+    },
+    CommandDef {
+        name: "autonomy-off",
+        description: "stop new autonomy epochs; current work settles",
+        category: CommandCategory::Config,
+        aliases: &[],
+        args: ArgSpec::None,
+        handler: CommandHandler::Control(ControlAction::AutonomyOff),
+        access: CommandAccess::Authority,
+        busy: BusyPolicy::Queue,
+        availability: CommandAvailability::ALL,
+    },
+    CommandDef {
         name: "active",
         description: "normal reply mode",
         category: CommandCategory::Response,
@@ -540,6 +579,20 @@ mod tests {
     }
 
     #[test]
+    fn autonomy_commands_have_separate_read_and_write_authority() {
+        let status = parsed(REGISTRY.parse("/autonomy"));
+        let enable = parsed(REGISTRY.parse("/autonomy-on"));
+        let disable = parsed(REGISTRY.parse("/autonomy-off"));
+
+        assert_eq!(status.def.access, CommandAccess::Everyone);
+        assert_eq!(enable.def.access, CommandAccess::Authority);
+        assert_eq!(disable.def.access, CommandAccess::Authority);
+        assert!(matches!(status.def.handler, CommandHandler::Control(_)));
+        assert!(matches!(enable.def.handler, CommandHandler::Control(_)));
+        assert!(matches!(disable.def.handler, CommandHandler::Control(_)));
+    }
+
+    #[test]
     fn parses_with_surrounding_whitespace() {
         let cmd = parsed(REGISTRY.parse("  /help  "));
         assert_eq!(cmd.def.name, "help");
@@ -670,13 +723,13 @@ mod tests {
     fn help_lists_every_command_exactly_once() {
         let help = REGISTRY.help_text();
         for def in COMMANDS {
-            let needle = format!("- /{}", def.name);
-            assert_eq!(
-                help.matches(&needle).count(),
-                1,
-                "help must list /{} exactly once",
-                def.name
-            );
+            let count = help
+                .lines()
+                .filter_map(|line| line.strip_prefix("- /"))
+                .filter_map(|line| line.split([' ', ':']).next())
+                .filter(|name| *name == def.name)
+                .count();
+            assert_eq!(count, 1, "help must list /{} exactly once", def.name);
         }
     }
 

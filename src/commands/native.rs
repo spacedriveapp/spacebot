@@ -252,4 +252,22 @@ mod tests {
         });
         assert!(has_control && has_agent);
     }
+
+    #[test]
+    fn autonomy_controls_are_exposed_on_native_surfaces() {
+        let expected = ["autonomy", "autonomy-on", "autonomy-off"];
+        let (discord, _) = discord_commands();
+        let telegram = telegram_menu();
+        let slack = slack_subcommands();
+
+        for command in expected {
+            assert!(discord.iter().any(|spec| spec.name == command));
+            assert!(
+                telegram
+                    .iter()
+                    .any(|entry| entry.command == command.replace('-', "_"))
+            );
+            assert!(slack.iter().any(|spec| spec.name == command));
+        }
+    }
 }
