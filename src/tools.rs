@@ -157,7 +157,8 @@ pub use project_manage::{
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{
-    RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool, new_replied_flag,
+    DeliveredFlag, RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool,
+    new_delivered_flag, new_replied_flag,
 };
 pub use restart::{RestartArgs, RestartError, RestartOutput, RestartTool};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
@@ -499,9 +500,11 @@ pub async fn add_channel_tools(
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    delivered_flag: DeliveredFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    allow_ask: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
     cron_outcome: Option<crate::cron::CronOutcome>,
@@ -528,10 +531,18 @@ pub async fn add_channel_tools(
                 state.conversation_logger.clone(),
                 state.channel_id.clone(),
                 replied_flag.clone(),
-                agent_display_name.clone(),
+                agent_display_name,
                 state.deps.api_state.clone(),
             ))
             .await?;
+    }
+    if allow_ask {
+        let agent_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(AskTool::new(
                 crate::questions::QuestionStore::new(state.deps.sqlite_pool.clone()),
@@ -580,13 +591,16 @@ pub async fn add_channel_tools(
             ))
             .await?;
     }
-    handle
-        .add_tool(SendFileTool::new(
-            response_tx.clone(),
-            state.deps.runtime_config.workspace_dir.clone(),
-            state.deps.sandbox.clone(),
-        ))
-        .await?;
+    if channel_kind == crate::agent::channel::ChannelKind::User {
+        handle
+            .add_tool(SendFileTool::new(
+                response_tx.clone(),
+                state.deps.runtime_config.workspace_dir.clone(),
+                state.deps.sandbox.clone(),
+                delivered_flag,
+            ))
+            .await?;
+    }
     handle
         .add_tool(ProjectManageTool::new(state.deps.project_store.clone()))
         .await?;
@@ -695,9 +709,11 @@ pub async fn add_direct_mode_tools(
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    delivered_flag: DeliveredFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    allow_ask: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
     cron_outcome: Option<crate::cron::CronOutcome>,
@@ -712,9 +728,11 @@ pub async fn add_direct_mode_tools(
         conversation_id,
         skip_flag.clone(),
         replied_flag.clone(),
+        delivered_flag,
         cron_tool.clone(),
         send_agent_message_tool.clone(),
         allow_direct_reply,
+        allow_ask,
         current_adapter.clone(),
         slack_thread_ts,
         cron_outcome,

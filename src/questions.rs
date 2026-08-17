@@ -155,6 +155,18 @@ impl QuestionStore {
         Ok(affected > 0)
     }
 
+    pub async fn delete_unresolved(&self, question_id: &str) -> Result<bool> {
+        let affected = sqlx::query(
+            "DELETE FROM pending_questions WHERE question_id = ? AND resolved_at IS NULL",
+        )
+        .bind(question_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to delete undelivered question")?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
     /// Prune resolved questions older than the TTL, and unanswered questions
     /// older than the TTL (expired). Returns the count of removed rows.
     pub async fn prune_expired(&self, ttl_days: i64) -> Result<u64> {

@@ -1784,6 +1784,7 @@ mod tests {
                     poll: None,
                 },
                 target: InboundMessage::empty(),
+                delivery_receipt: None,
             })
             .await
             .expect("send test response");

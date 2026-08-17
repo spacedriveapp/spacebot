@@ -7,7 +7,9 @@
 
 use crate::api::ApiEvent;
 use crate::conversation::ConversationLogger;
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::messaging::traits::{
+    HistoryMessage, InboundStream, Messaging, unsupported_broadcast_variant_error,
+};
 use crate::{InboundMessage, OutboundResponse};
 
 use anyhow::Context as _;
@@ -64,13 +66,19 @@ impl Messaging for PortalAdapter {
     async fn respond(
         &self,
         _message: &InboundMessage,
-        _response: OutboundResponse,
+        response: OutboundResponse,
     ) -> crate::Result<()> {
         // Outbound delivery is handled by the global SSE event bus in main.rs.
         // The portal adapter itself doesn't need to do anything — the API events
         // stream already pushes outbound_message events to all connected clients,
         // and the portal chat UI consumes the same timeline as regular channels.
-        Ok(())
+        match response {
+            OutboundResponse::Text(_)
+            | OutboundResponse::ThreadReply { .. }
+            | OutboundResponse::Ephemeral { .. }
+            | OutboundResponse::RichMessage { .. } => Ok(()),
+            response => Err(unsupported_broadcast_variant_error("portal", &response)),
+        }
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {

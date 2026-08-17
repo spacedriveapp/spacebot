@@ -26,8 +26,15 @@ static DISCORD_ID_REGEX: LazyLock<Regex> =
 /// after the LLM turn to decide whether to suppress fallback text output.
 pub type RepliedFlag = Arc<AtomicBool>;
 
+/// Shared flag set after any non-text user delivery succeeds.
+pub type DeliveredFlag = Arc<AtomicBool>;
+
 /// Create a new replied flag (defaults to false).
 pub fn new_replied_flag() -> RepliedFlag {
+    Arc::new(AtomicBool::new(false))
+}
+
+pub fn new_delivered_flag() -> DeliveredFlag {
     Arc::new(AtomicBool::new(false))
 }
 
@@ -527,7 +534,7 @@ impl Tool for ReplyTool {
         match &self.target {
             ReplyTarget::Live(sender) => {
                 sender
-                    .send(response)
+                    .send_confirmed(response)
                     .await
                     .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 

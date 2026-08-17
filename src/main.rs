@@ -255,19 +255,24 @@ async fn route_outbound(
     messaging: &std::sync::Arc<spacebot::messaging::MessagingManager>,
     target: &spacebot::InboundMessage,
     response: spacebot::OutboundResponse,
-) {
-    match response {
-        spacebot::OutboundResponse::Status(status) => {
-            if let Err(error) = messaging.send_status(target, status).await {
-                tracing::warn!(%error, "failed to send status update");
-            }
-        }
-        response => {
-            if let Err(error) = messaging.respond(target, response).await {
+) -> Result<(), String> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        match response {
+            spacebot::OutboundResponse::Status(status) => messaging
+                .send_status(target, status)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "failed to send status update");
+                    error.to_string()
+                }),
+            response => messaging.respond(target, response).await.map_err(|error| {
                 tracing::error!(%error, "failed to send outbound response");
-            }
+                error.to_string()
+            }),
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| Err("messaging adapter delivery timed out".to_string()))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1645,14 +1650,22 @@ async fn run(
                     let sse_channel_id = conversation_id.clone();
                     let outbound_handle = tokio::spawn(async move {
                         while let Some(routed) = response_rx.recv().await {
-                            let spacebot::RoutedResponse { response, target } = routed;
+                            let spacebot::RoutedResponse {
+                                response,
+                                target,
+                                delivery_receipt,
+                            } = routed;
                             forward_sse_event(
                                 &api_event_tx,
                                 &sse_agent_id,
                                 &sse_channel_id,
                                 &response,
                             );
-                            route_outbound(&messaging_for_outbound, &target, response).await;
+                            let delivery =
+                                route_outbound(&messaging_for_outbound, &target, response).await;
+                            if let Some(receipt) = delivery_receipt {
+                                receipt.send(delivery).ok();
+                            }
                         }
                     });
 
@@ -1987,9 +2000,12 @@ async fn run(
                     let sse_channel_id = conversation_id.clone();
                     let outbound_handle = tokio::spawn(async move {
                         while let Some(routed) = response_rx.recv().await {
-                            let spacebot::RoutedResponse { response, target } = routed;
+                            let spacebot::RoutedResponse { response, target, delivery_receipt } = routed;
                             forward_sse_event(&api_event_tx, &sse_agent_id, &sse_channel_id, &response);
-                            route_outbound(&messaging_for_outbound, &target, response).await;
+                            let delivery = route_outbound(&messaging_for_outbound, &target, response).await;
+                            if let Some(receipt) = delivery_receipt {
+                                receipt.send(delivery).ok();
+                            }
                         }
                         tracing::debug!(
                             conversation_id = %outbound_conversation_id,

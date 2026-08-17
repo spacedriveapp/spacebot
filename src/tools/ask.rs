@@ -315,10 +315,12 @@ impl Tool for AskTool {
             poll: None,
         };
 
-        self.sender
-            .send(response)
-            .await
-            .map_err(|e| AskError(format!("failed to send question: {e}")))?;
+        if let Err(error) = self.sender.send_confirmed(response).await {
+            if let Err(cleanup_error) = self.question_store.delete_unresolved(&question_id).await {
+                tracing::warn!(%cleanup_error, %question_id, "failed to remove undelivered question");
+            }
+            return Err(AskError(format!("failed to send question: {error}")));
+        }
 
         // Drain accumulated channel tool calls and pack into message metadata
         let tool_calls_json = if let Some(ref api_state) = self.api_state {

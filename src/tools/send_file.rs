@@ -1,6 +1,7 @@
 //! Send file tool for delivering file attachments to users (channel only).
 
 use crate::sandbox::Sandbox;
+use crate::tools::DeliveredFlag;
 use crate::{OutboundResponse, RoutedSender};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -8,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Tool for sending files to users.
 ///
@@ -21,14 +23,21 @@ pub struct SendFileTool {
     response_tx: RoutedSender,
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    delivered_flag: DeliveredFlag,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: RoutedSender, workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
+    pub fn new(
+        response_tx: RoutedSender,
+        workspace: PathBuf,
+        sandbox: Arc<Sandbox>,
+        delivered_flag: DeliveredFlag,
+    ) -> Self {
         Self {
             response_tx,
             workspace,
             sandbox,
+            delivered_flag,
         }
     }
 
@@ -204,9 +213,10 @@ impl Tool for SendFileTool {
         };
 
         self.response_tx
-            .send(response)
+            .send_confirmed(response)
             .await
             .map_err(|error| SendFileError(format!("failed to send file: {error}")))?;
+        self.delivered_flag.store(true, Ordering::Release);
 
         Ok(SendFileOutput {
             success: true,
@@ -236,7 +246,12 @@ mod tests {
         let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let response_tx = RoutedSender::new(tx, crate::InboundMessage::empty());
-        SendFileTool::new(response_tx, workspace, sandbox)
+        SendFileTool::new(
+            response_tx,
+            workspace,
+            sandbox,
+            crate::tools::new_delivered_flag(),
+        )
     }
 
     #[test]
@@ -318,7 +333,18 @@ mod tests {
         let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
         let (tx, mut response_rx) = tokio::sync::mpsc::channel(1);
         let response_tx = RoutedSender::new(tx, crate::InboundMessage::empty());
-        let tool = SendFileTool::new(response_tx, workspace, sandbox);
+        let delivered_flag = crate::tools::new_delivered_flag();
+        let tool = SendFileTool::new(response_tx, workspace, sandbox, delivered_flag.clone());
+        let delivery = tokio::spawn(async move {
+            let mut routed = response_rx.recv().await.expect("missing file response");
+            routed
+                .delivery_receipt
+                .take()
+                .expect("missing delivery receipt")
+                .send(Ok(()))
+                .ok();
+            routed
+        });
 
         let result = tool
             .call(SendFileArgs {
@@ -329,13 +355,12 @@ mod tests {
             .expect("should succeed when sandbox is disabled");
 
         assert!(result.success);
+        assert!(delivered_flag.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(result.filename, "report.txt");
         assert_eq!(result.size_bytes, 11);
 
         // Verify the file data was actually sent through the channel.
-        let routed = response_rx
-            .try_recv()
-            .expect("should have received response");
+        let routed = delivery.await.expect("delivery task failed");
         match routed.response {
             crate::OutboundResponse::File { filename, data, .. } => {
                 assert_eq!(filename, "report.txt");
@@ -343,5 +368,40 @@ mod tests {
             }
             other => panic!("expected File response, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn adapter_failure_does_not_mark_file_delivered() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        let file = workspace.join("report.txt");
+        fs::write(&file, "public data").expect("failed to write file");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let (tx, mut response_rx) = tokio::sync::mpsc::channel(1);
+        let response_tx = RoutedSender::new(tx, crate::InboundMessage::empty());
+        let delivered_flag = crate::tools::new_delivered_flag();
+        let tool = SendFileTool::new(response_tx, workspace, sandbox, delivered_flag.clone());
+        let delivery = tokio::spawn(async move {
+            let mut routed = response_rx.recv().await.expect("missing file response");
+            routed
+                .delivery_receipt
+                .take()
+                .expect("missing delivery receipt")
+                .send(Err("adapter failure".into()))
+                .ok();
+        });
+
+        let result = tool
+            .call(SendFileArgs {
+                file_path: file.to_string_lossy().into_owned(),
+                caption: None,
+            })
+            .await;
+        delivery.await.expect("delivery task failed");
+
+        assert!(result.is_err());
+        assert!(!delivered_flag.load(std::sync::atomic::Ordering::Acquire));
     }
 }

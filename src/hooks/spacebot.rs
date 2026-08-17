@@ -505,7 +505,6 @@ impl SpacebotHook {
         let mut current_max_turns = 0usize;
         let mut last_text_response = String::new();
         let mut aggregated_reasoning = String::new();
-        let mut did_call_tool = false;
 
         loop {
             let current_prompt = chat_history
@@ -513,7 +512,7 @@ impl SpacebotHook {
                 .cloned()
                 .expect("chat history should always include current prompt");
 
-            if current_max_turns > max_turns + 1 {
+            if current_max_turns >= max_turns {
                 return Err(PromptError::MaxTurnsError {
                     max_turns,
                     chat_history: Box::new(chat_history),
@@ -522,6 +521,7 @@ impl SpacebotHook {
             }
 
             current_max_turns += 1;
+            last_text_response.clear();
 
             if let HookAction::Terminate { reason } =
                 <SpacebotHook as PromptHook<M>>::on_completion_call(
@@ -553,6 +553,7 @@ impl SpacebotHook {
             let mut tool_calls = vec![];
             let mut tool_results = vec![];
             let mut is_text_response = false;
+            let mut did_call_tool = false;
 
             while let Some(content) = stream.next().await {
                 match content.map_err(PromptError::CompletionError)? {
@@ -575,7 +576,6 @@ impl SpacebotHook {
                                 reason,
                             });
                         }
-                        did_call_tool = false;
                     }
                     StreamedAssistantContent::ToolCall {
                         tool_call,
@@ -1502,7 +1502,7 @@ where
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Channel turns should end immediately after a successful reply or skip
+        // Channel turns should end immediately after successful user delivery or skip
         // tool call. This avoids extra post-reply LLM iterations that add latency,
         // cost, and noisy logs when providers return empty trailing responses.
         // For skip, terminating is critical: without it the model receives the tool
@@ -1510,13 +1510,14 @@ where
         // which either leaks to the user (retrigger path) or wastes tokens.
         if !is_tool_error
             && self.process_type == ProcessType::Channel
-            && (tool_name == "reply" || tool_name == "skip")
+            && matches!(tool_name, "ask" | "reply" | "send_file" | "skip")
         {
             return HookAction::Terminate {
-                reason: if tool_name == "reply" {
-                    "reply delivered".into()
-                } else {
-                    "skip".into()
+                reason: match tool_name {
+                    "reply" => "reply delivered".into(),
+                    "ask" => "question delivered".into(),
+                    "send_file" => "file delivered".into(),
+                    _ => "skip".into(),
                 },
             };
         }
@@ -1547,6 +1548,17 @@ mod tests {
             ProcessId::Worker(uuid::Uuid::new_v4()),
             ProcessType::Worker,
             None,
+            event_tx,
+        )
+    }
+
+    fn make_channel_hook() -> SpacebotHook {
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Channel(std::sync::Arc::<str>::from("telegram:test")),
+            ProcessType::Channel,
+            Some(std::sync::Arc::<str>::from("telegram:test")),
             event_tx,
         )
     }
@@ -1593,6 +1605,25 @@ mod tests {
                 body: serde_json::json!({}),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn successful_send_file_terminates_channel_turn() {
+        let hook = make_channel_hook();
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "send_file",
+            None,
+            "internal_1",
+            "{\"file_path\":\"/tmp/report.txt\"}",
+            "{\"success\":true,\"filename\":\"report.txt\",\"size_bytes\":1}",
+        )
+        .await;
+
+        assert!(matches!(
+            action,
+            HookAction::Terminate { reason } if reason == "file delivered"
+        ));
     }
 
     #[tokio::test]

@@ -44,6 +44,52 @@ pub(crate) fn apply_history_after_turn(
     is_retrigger: bool,
     persisted_user_text: Option<(&str, &str)>,
 ) -> AppliedHistory {
+    if is_retrigger {
+        let replaced_bridge = pop_retrigger_bridge_message(guard);
+        let new_messages = match result {
+            Ok(_) => history.get(history_len_before..).unwrap_or_default(),
+            Err(rig::completion::PromptError::MaxTurnsError { chat_history, .. })
+            | Err(rig::completion::PromptError::PromptCancelled { chat_history, .. }) => {
+                chat_history.get(history_len_before..).unwrap_or_default()
+            }
+            Err(_) => &[],
+        };
+
+        let reply_was_delivered = matches!(
+            result,
+            Err(rig::completion::PromptError::PromptCancelled { reason, .. })
+                if reason == "reply delivered"
+        );
+        if reply_was_delivered
+            && let Some(reply_content) = extract_reply_content_from_cancelled_history(new_messages)
+        {
+            guard.push(rig::message::Message::Assistant {
+                id: None,
+                content: rig::OneOrMany::one(rig::message::AssistantContent::text(
+                    reply_content.clone(),
+                )),
+            });
+            tracing::debug!(
+                channel_id = %channel_id,
+                total_new = new_messages.len(),
+                replaced_bridge,
+                "preserved retrigger assistant reply"
+            );
+            return AppliedHistory {
+                retrigger_reply_preserved: true,
+                reply_text: Some(reply_content),
+            };
+        }
+
+        tracing::debug!(
+            channel_id = %channel_id,
+            total_new = new_messages.len(),
+            replaced_bridge,
+            "discarding retrigger turn scaffolding without a reply payload"
+        );
+        return AppliedHistory::default();
+    }
+
     match result {
         Ok(_) => {
             // prompt_once_streaming writes *history = chat_history in the Ok
@@ -79,42 +125,6 @@ pub(crate) fn apply_history_after_turn(
             // Rig appended the user prompt and possibly an assistant tool-call
             // message to history before cancellation.
             //
-            // Retrigger turns use a synthetic system user prompt, so we never
-            // preserve user text there. Instead, keep only a clean assistant
-            // message extracted from reply tool args when available.
-            if is_retrigger {
-                let replaced_bridge = pop_retrigger_bridge_message(guard);
-                if let Some(reply_content) =
-                    extract_reply_content_from_cancelled_history(new_messages)
-                {
-                    guard.push(rig::message::Message::Assistant {
-                        id: None,
-                        content: rig::OneOrMany::one(rig::message::AssistantContent::text(
-                            reply_content.clone(),
-                        )),
-                    });
-
-                    tracing::debug!(
-                        channel_id = %channel_id,
-                        total_new = new_messages.len(),
-                        replaced_bridge,
-                        "preserved retrigger assistant reply after PromptCancelled"
-                    );
-                    return AppliedHistory {
-                        retrigger_reply_preserved: true,
-                        reply_text: Some(reply_content),
-                    };
-                }
-
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    total_new = new_messages.len(),
-                    replaced_bridge,
-                    "discarding retrigger PromptCancelled messages (no reply content found)"
-                );
-                return AppliedHistory::default();
-            }
-
             // For regular turns we preserve:
             // 1. The first user text message (the actual user prompt)
             // 2. A clean assistant text message extracted from the reply tool call
@@ -876,6 +886,89 @@ mod tests {
         assert_eq!(
             guard, initial,
             "retrigger scaffolding should be removed when no reply payload exists"
+        );
+    }
+
+    #[test]
+    fn successful_retrigger_without_reply_discards_scaffolding() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg(""));
+        let len_before = guard.len();
+
+        let result = Ok(String::new());
+        let preserved =
+            apply_history_after_turn(&result, &mut guard, history, len_before, "test", true, None);
+
+        assert!(!preserved.retrigger_reply_preserved);
+        assert_eq!(
+            guard, initial,
+            "successful retrigger scaffolding should be discarded"
+        );
+    }
+
+    #[test]
+    fn max_turns_retrigger_without_reply_discards_scaffolding() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg("relay attempt without delivery"));
+        let len_before = guard.len();
+        let error = Err(PromptError::MaxTurnsError {
+            max_turns: 3,
+            chat_history: Box::new(history.clone()),
+            prompt: Box::new(user_msg("retrigger")),
+        });
+
+        let preserved =
+            apply_history_after_turn(&error, &mut guard, history, len_before, "test", true, None);
+
+        assert!(!preserved.retrigger_reply_preserved);
+        assert_eq!(
+            guard, initial,
+            "max-turn retrigger scaffolding should be discarded"
+        );
+    }
+
+    #[test]
+    fn failed_retrigger_reply_is_not_preserved_as_delivered_text() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = guard.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "unsent worker result"}),
+            )),
+        });
+        let len_before = guard.len();
+        let error = Err(PromptError::MaxTurnsError {
+            max_turns: 3,
+            chat_history: Box::new(history.clone()),
+            prompt: Box::new(user_msg("retrigger")),
+        });
+
+        let preserved =
+            apply_history_after_turn(&error, &mut guard, history, len_before, "test", true, None);
+
+        assert!(!preserved.retrigger_reply_preserved);
+        assert_eq!(
+            guard, initial,
+            "failed reply content must not enter assistant history"
         );
     }
 

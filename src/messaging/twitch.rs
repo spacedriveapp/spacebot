@@ -2,7 +2,7 @@
 
 use crate::config::TwitchPermissions;
 use crate::messaging::apply_runtime_adapter_to_conversation_id;
-use crate::messaging::traits::{InboundStream, Messaging};
+use crate::messaging::traits::{InboundStream, Messaging, unsupported_broadcast_variant_error};
 use crate::{InboundMessage, MessageContent, OutboundResponse};
 
 use anyhow::Context as _;
@@ -410,18 +410,8 @@ impl Messaging for TwitchAdapter {
                     }
                 }
             }
-            OutboundResponse::File {
-                filename, caption, ..
-            } => {
-                // Twitch is text-only — send a note about the file
-                let text = match caption {
-                    Some(caption) => format!("[File: {filename}] {caption}"),
-                    None => format!("[File: {filename}]"),
-                };
-                client
-                    .say(channel.to_owned(), text)
-                    .await
-                    .context("failed to send twitch file notice")?;
+            response @ OutboundResponse::File { .. } => {
+                return Err(unsupported_broadcast_variant_error("twitch", &response));
             }
             // Twitch doesn't support message editing, so buffer streaming and
             // send the final result as a single message
