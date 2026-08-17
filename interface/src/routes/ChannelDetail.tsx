@@ -46,12 +46,14 @@ interface ChannelDetailProps {
 function LiveBranchRunItem({
   item,
   live,
+  agentId,
   channelId,
   selected,
   onSelect,
 }: {
   item: TimelineBranchRun;
   live: ActiveBranch;
+  agentId: string;
   channelId: string;
   selected: boolean;
   onSelect: () => void;
@@ -67,7 +69,7 @@ function LiveBranchRunItem({
       currentTool={live.currentTool ?? live.lastTool}
       selected={selected}
       onSelect={onSelect}
-      onCancel={() => api.cancelProcess(channelId, "branch", item.id).catch(console.warn)}
+      onCancel={() => api.cancelProcess(agentId, channelId, "branch", item.id).catch(console.warn)}
     />
   );
 }
@@ -75,12 +77,14 @@ function LiveBranchRunItem({
 function LiveWorkerRunItem({
   item,
   live,
+  agentId,
   channelId,
   selected,
   onSelect,
 }: {
   item: TimelineWorkerRun;
   live: ActiveWorker;
+  agentId: string;
   channelId: string;
   selected: boolean;
   onSelect: () => void;
@@ -90,14 +94,14 @@ function LiveWorkerRunItem({
       kind="worker"
       id={item.id}
       title={item.task}
-      status={live.isIdle ? "idle" : "running"}
+      status={live.runtimeState === "waiting_for_input" ? "idle" : "running"}
       startedAt={item.started_at}
       toolCalls={live.toolCalls}
       currentTool={live.currentTool ?? live.status}
       processType={live.workerType}
       selected={selected}
       onSelect={onSelect}
-      onCancel={() => api.cancelProcess(channelId, "worker", item.id).catch(console.warn)}
+      onCancel={() => api.cancelProcess(agentId, channelId, "worker", item.id).catch(console.warn)}
     />
   );
 }
@@ -237,6 +241,7 @@ function TimelineEntry({
   item,
   liveWorkers,
   liveBranches,
+  agentId,
   channelId,
   selection,
   onSelect,
@@ -245,6 +250,7 @@ function TimelineEntry({
   item: TimelineItem;
   liveWorkers: Record<string, ActiveWorker>;
   liveBranches: Record<string, ActiveBranch>;
+  agentId: string;
   channelId: string;
   selection: ProcessSelection | null;
   onSelect: (selection: ProcessSelection) => void;
@@ -295,6 +301,7 @@ function TimelineEntry({
           <LiveBranchRunItem
             item={item as TimelineBranchRun}
             live={live}
+            agentId={agentId}
             channelId={channelId}
             selected={selected}
             onSelect={() => onSelect({kind: "branch", id: item.id})}
@@ -316,6 +323,7 @@ function TimelineEntry({
           <LiveWorkerRunItem
             item={item as TimelineWorkerRun}
             live={live}
+            agentId={agentId}
             channelId={channelId}
             selected={selected}
             onSelect={() => onSelect({kind: "worker", id: item.id})}
@@ -392,7 +400,11 @@ function processFallback(
       id: item.id,
       input: item.task,
       output: item.result ?? null,
-      status: live ? (live.isIdle ? "idle" : "running") : item.status,
+      status: live
+        ? live.runtimeState === "waiting_for_input"
+          ? "idle"
+          : "running"
+        : item.status,
       process_type: live?.workerType,
       channel_name: channelName,
       started_at: item.started_at,
@@ -663,6 +675,7 @@ export function ChannelDetail({
 											item={row.item}
 											liveWorkers={workers}
 											liveBranches={branches}
+											agentId={agentId}
 											channelId={channelId}
 											selection={selection}
 											onSelect={setSelection}

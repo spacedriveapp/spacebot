@@ -16,11 +16,11 @@ This has a well-known failure mode: the agent writes malformed JSON, overwrites 
 
 ## The Autonomy Channel
 
-The autonomy channel starts with the agent and remains alive until shutdown. It is not per-task and not per-heartbeat. It waits while idle, retains interactive worker controls, and processes one event at a time.
+The autonomy channel starts with the agent and remains alive until shutdown. It is not per-task and not per-heartbeat. It waits while idle and processes one event at a time. Interactive worker controls live in the agent registry.
 
 The interval is the default trigger. Schedules, webhooks, task approvals, user comments, worker results, and idle conditions can wake it sooner. The channel is the single consumer of these sources. See [`wakes.md`](wakes.md) for queue semantics and authority rules.
 
-The resident channel and an autonomy run have different lifetimes. The channel owns live process state. A run is a durable decision epoch with a run id, claimed wake events, child attribution, and a terminal summary. `autonomy_complete` closes the epoch and returns the channel to idle.
+The resident channel and an autonomy run have different lifetimes. The agent registry owns live worker controls. A run is a durable decision epoch with a run id, claimed wake events, operation-scoped child attribution, and a terminal summary. `autonomy_complete` closes the epoch and returns the channel to idle.
 
 The autonomy channel is the only process that:
 - Enriches and researches `pending_approval` tasks without a user present
@@ -42,10 +42,10 @@ The autonomy supervisor assembles a fresh heartbeat briefing. It includes:
 - **Wake events** — what pulled this run forward, if anything: the wake's name, instructions, and payload for each pending event since the last run. Surfaced first, because they are usually why the run exists.
 - **Task state** — active tasks grouped by status, with descriptions, execution plans, dependencies, ownership, and prior attempt summaries.
 - **Goals** — all active goals with descriptions and notes. Background context and direction, not a work queue. See [`goals.md`](goals.md).
-- **Active workers** — what's currently running so it doesn't duplicate work.
+- **Workers** — registry-backed liveness and routability, plus durable nonterminal rows that require reconciliation.
 - **Recent epoch summaries** - compact continuity from `autonomy_complete`.
 
-The run store is the continuity index and provenance record. Live history belongs to the current epoch and is cleared before the next one. Retained worker controls are channel state, not transcript state.
+The run store is the continuity index and provenance record. Live history belongs to the current epoch and is cleared before the next one. Retained worker controls are agent runtime state, not transcript state.
 
 ### Heartbeats are control messages
 
@@ -266,7 +266,7 @@ Autonomy channel wakes with current tasks, goals, workers, and recent summaries
 Calls autonomy_complete after owned work settles
   → summary and actions recorded once
   ↓
-Epoch closes → channel returns to idle and keeps retained worker controls
+Epoch closes → channel returns to idle; retained worker controls remain in the agent registry
 ```
 
 If the channel crashes mid-execution, the task returns to `ready`. If a task fails 3 consecutive times, it moves to `failed` and emits a working memory `Error` event. Enrichment runs (comments only) do not count as failures. `failed` is a new `TaskStatus` variant — the current set is pending_approval, backlog, ready, in_progress, done — so adding it includes the transition table, API, and UI sweep.

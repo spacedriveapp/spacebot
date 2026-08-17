@@ -59,7 +59,10 @@ struct AutonomyRunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AutonomyChild {
     Branch(crate::BranchId),
-    Worker(crate::WorkerId),
+    WorkerOperation {
+        worker_id: crate::WorkerId,
+        operation_id: crate::agent::process_control::WorkerOperationId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -624,19 +627,22 @@ async fn run_autonomy_supervisor(
                             .cancel_branch_with_reason(branch_id, "daemon restarting")
                             .await;
                     }
-                    AutonomyChild::Worker(worker_id) => {
-                        channel_control
-                            .cancel_worker_with_reason(worker_id, "daemon restarting")
-                            .await;
-                    }
+                    AutonomyChild::WorkerOperation { .. } => {}
                 }
             }
         }
-        channel_control.detach_idle_workers_for_restart().await;
     } else {
-        channel_control
-            .cancel_all_workers_and_branches("autonomy supervisor shutting down")
-            .await;
+        for child in interrupted
+            .as_ref()
+            .map(|handle| handle.active_children())
+            .unwrap_or_default()
+        {
+            if let AutonomyChild::Branch(branch_id) = child {
+                channel_control
+                    .cancel_branch_with_reason(branch_id, "autonomy supervisor shutting down")
+                    .await;
+            }
+        }
     }
 
     if let Some(handle) = interrupted {
@@ -1141,6 +1147,11 @@ fn render_task_line(task: &Task, agent_id: &str, prior_attempts: Option<&str>) -
 /// Render every nonterminal worker so heartbeats can tend retained interactive
 /// sessions as well as actively running work.
 async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String>> {
+    let live_workers = deps.process_control_registry.list_worker_snapshots().await;
+    let live_ids = live_workers
+        .iter()
+        .map(|worker| worker.worker_id.to_string())
+        .collect::<HashSet<_>>();
     let logger = crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let (workers, _total) = logger
         .list_worker_runs(&deps.agent_id, 100, 0, None)
@@ -1154,12 +1165,30 @@ async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String
             )
         })
         .collect();
-    if workers.is_empty() {
+    if workers.is_empty() && live_workers.is_empty() {
         return Ok(None);
     }
 
     let mut output = String::new();
+    for worker in live_workers {
+        let task_line = crate::summarize_first_non_empty_line(&worker.provenance.task, 160);
+        output.push_str(&format!(
+            "- {} [{}; {}; runtime attached{}] {}\n",
+            worker.worker_id,
+            worker.backend,
+            worker.state,
+            if worker.interactive {
+                ", interactive"
+            } else {
+                ""
+            },
+            task_line,
+        ));
+    }
     for worker in workers {
+        if live_ids.contains(&worker.id) {
+            continue;
+        }
         let task_line = crate::summarize_first_non_empty_line(&worker.task, 160);
         let ownership = worker
             .run_id
@@ -1172,7 +1201,7 @@ async fn render_active_workers(deps: &AgentDeps) -> anyhow::Result<Option<String
             ""
         };
         output.push_str(&format!(
-            "- {} [{}; {}{}{}] {}\n",
+            "- {} [{}; {}{}{}; unavailable] {}\n",
             worker.id, worker.worker_type, worker.lifecycle, interaction, ownership, task_line
         ));
     }
@@ -1404,8 +1433,12 @@ mod tests {
         let run_id = store.begin_run().await.unwrap();
         let handle = AutonomyRunHandle::new(run_id, 1, store);
         let worker_id = crate::WorkerId::new_v4();
+        let child = AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+        };
 
-        assert!(handle.register_child(AutonomyChild::Worker(worker_id)));
+        assert!(handle.register_child(child));
         assert_eq!(
             handle.request_finish(AutonomyFinishRequest {
                 summary: "worker still active".to_string(),
@@ -1413,7 +1446,7 @@ mod tests {
             }),
             Err(1)
         );
-        handle.settle_child(AutonomyChild::Worker(worker_id));
+        handle.settle_child(child);
         assert_eq!(
             handle.request_finish(AutonomyFinishRequest {
                 summary: "worker result incorporated".to_string(),
@@ -1421,7 +1454,32 @@ mod tests {
             }),
             Ok(true)
         );
-        assert!(!handle.register_child(AutonomyChild::Worker(crate::WorkerId::new_v4())));
+        assert!(!handle.register_child(AutonomyChild::WorkerOperation {
+            worker_id: crate::WorkerId::new_v4(),
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn stale_worker_operation_cannot_settle_later_child() {
+        let store = run_store().await;
+        let run_id = store.begin_run().await.unwrap();
+        let handle = AutonomyRunHandle::new(run_id, 1, store);
+        let worker_id = crate::WorkerId::new_v4();
+        let stale = AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+        };
+        let current = AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+        };
+        assert!(handle.register_child(current));
+
+        handle.settle_child(stale);
+
+        assert!(handle.owns_child(current));
+        assert!(handle.has_active_children());
     }
 
     #[tokio::test]

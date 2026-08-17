@@ -3160,10 +3160,6 @@ export interface components {
             max_turns: number;
             /** Format: int32 */
             run_history_count: number;
-            /** Format: int64 */
-            timeout_secs: number;
-            /** Format: int64 */
-            warn_secs: number;
         };
         AutonomyStatusResponse: {
             active_hours?: [
@@ -3211,10 +3207,6 @@ export interface components {
             max_turns?: number | null;
             /** Format: int32 */
             run_history_count?: number | null;
-            /** Format: int64 */
-            timeout_secs?: number | null;
-            /** Format: int64 */
-            warn_secs?: number | null;
         };
         BinaryEntry: {
             modified?: string | null;
@@ -3257,6 +3249,7 @@ export interface components {
             persist_session?: boolean | null;
         };
         CancelProcessRequest: {
+            agent_id: string;
             channel_id: string;
             process_id: string;
             process_type: string;
@@ -5651,6 +5644,7 @@ export interface components {
             wiki_write?: boolean;
         };
         WorkerDetailResponse: {
+            backend: string;
             channel_id?: string | null;
             channel_name?: string | null;
             completed_at?: string | null;
@@ -5666,7 +5660,11 @@ export interface components {
             opencode_port?: number | null;
             /** @description OpenCode session ID (for workers with an embeddable web UI). */
             opencode_session_id?: string | null;
+            registration_id?: string | null;
             result?: string | null;
+            routable: boolean;
+            runtime_attached: boolean;
+            runtime_state?: string | null;
             started_at: string;
             status: string;
             task: string;
@@ -5686,6 +5684,7 @@ export interface components {
          */
         WorkerHistoryMode: "fork" | "clean";
         WorkerListItem: {
+            backend: string;
             channel_id?: string | null;
             channel_name?: string | null;
             completed_at?: string | null;
@@ -5708,6 +5707,10 @@ export interface components {
             project_id?: string | null;
             /** @description Project name (resolved via join). */
             project_name?: string | null;
+            registration_id?: string | null;
+            routable: boolean;
+            runtime_attached: boolean;
+            runtime_state?: string | null;
             started_at: string;
             status: string;
             task: string;

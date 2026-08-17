@@ -205,6 +205,19 @@ impl ChannelStore {
     /// Branch/worker runs are cascade-deleted via FK constraints.
     pub async fn delete(&self, channel_id: &str) -> crate::error::Result<bool> {
         let mut tx = self.pool.begin().await.map_err(|e| anyhow::anyhow!(e))?;
+        let nonterminal_workers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM worker_runs WHERE channel_id = ? AND lifecycle NOT IN ('succeeded', 'partial', 'cancelled', 'timed_out', 'blocked', 'failed')",
+        )
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+        if nonterminal_workers > 0 {
+            return Err(anyhow::anyhow!(
+                "can't delete channel: {nonterminal_workers} nonterminal workers still reference it"
+            )
+            .into());
+        }
 
         sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
             .bind(channel_id)
@@ -379,6 +392,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("channels table should create");
+        sqlx::query("CREATE TABLE conversation_messages (channel_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("conversation messages table should create");
+        sqlx::query("CREATE TABLE worker_runs (channel_id TEXT, lifecycle TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("worker runs table should create");
 
         ChannelStore::new(pool)
     }
@@ -463,5 +484,25 @@ mod tests {
             .expect("get should succeed")
             .expect("channel should still exist");
         assert!(channel.is_active);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_channel_referenced_by_nonterminal_worker() {
+        let store = setup_store().await;
+        sqlx::query("INSERT INTO channels (id, platform) VALUES ('chan-live', 'portal')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_runs (channel_id, lifecycle) VALUES ('chan-live', 'waiting_for_input')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let error = store.delete("chan-live").await.unwrap_err();
+
+        assert!(error.to_string().contains("nonterminal workers"));
+        assert!(store.get("chan-live").await.unwrap().is_some());
     }
 }

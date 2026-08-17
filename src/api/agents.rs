@@ -1061,7 +1061,11 @@ pub async fn create_agent_internal(
     };
 
     let event_rx = event_tx.subscribe();
-    state.register_agent_events(agent_id.clone(), event_rx);
+    state.register_agent_events(
+        agent_id.clone(),
+        event_rx,
+        deps.process_control_registry.clone(),
+    );
     let tool_output_rx = tool_output_tx.subscribe();
     state.register_tool_output_stream(agent_id.clone(), tool_output_rx);
 
@@ -1159,6 +1163,7 @@ pub async fn create_agent_internal(
     let mut deps_with_cron = deps.clone();
     deps_with_cron.cron_tool = Some(cron_tool);
     let autonomy_control = deps_with_cron.autonomy_control.clone();
+    let process_control_registry = deps_with_cron.process_control_registry.clone();
     let autonomy_supervisor =
         crate::agent::autonomy::spawn_autonomy_supervisor(deps_with_cron.clone());
     let agent = crate::Agent {
@@ -1182,6 +1187,12 @@ pub async fn create_agent_internal(
         let mut pools = (**state.agent_pools.load()).clone();
         pools.insert(agent_id.clone(), sqlite_pool);
         state.agent_pools.store(std::sync::Arc::new(pools));
+
+        let mut registries = (**state.process_control_registries.load()).clone();
+        registries.insert(agent_id.clone(), process_control_registry);
+        state
+            .process_control_registries
+            .store(std::sync::Arc::new(registries));
 
         let mut searches = (**state.memory_searches.load()).clone();
         searches.insert(agent_id.clone(), memory_search);
@@ -1487,6 +1498,9 @@ pub(super) async fn delete_agent(
     };
     if let Some(deps) = removed_deps {
         deps.autonomy_control.shutdown_and_wait().await;
+        deps.process_control_registry
+            .drain_workers(std::time::Duration::from_secs(2))
+            .await;
     }
 
     // Close the SQLite pool before removing state
@@ -1508,6 +1522,12 @@ pub(super) async fn delete_agent(
         let mut pools = (**state.agent_pools.load()).clone();
         pools.remove(&agent_id);
         state.agent_pools.store(std::sync::Arc::new(pools));
+
+        let mut registries = (**state.process_control_registries.load()).clone();
+        registries.remove(&agent_id);
+        state
+            .process_control_registries
+            .store(std::sync::Arc::new(registries));
 
         let mut searches = (**state.memory_searches.load()).clone();
         searches.remove(&agent_id);

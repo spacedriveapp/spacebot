@@ -15,7 +15,6 @@ use crate::agent::chronicle::Chronicler;
 use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
-use crate::agent::worker::Worker;
 use crate::config::CompactionMode;
 use crate::conversation::settings::{
     DelegationMode, MemoryMode, ResolvedConversationSettings, ResponseMode,
@@ -480,23 +479,6 @@ pub struct ChannelState {
     /// holding an older snapshot declines to trim.
     pub history_fence: Arc<crate::agent::chronicle::HistoryFence>,
     pub active_branches: Arc<RwLock<HashMap<BranchId, tokio::task::JoinHandle<()>>>>,
-    pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
-    /// Runtime controls for active worker tasks.
-    pub worker_handles:
-        Arc<RwLock<HashMap<WorkerId, crate::agent::channel_dispatch::WorkerTaskControl>>>,
-    /// Input senders for interactive workers, keyed by worker ID.
-    /// Used by the route tool to deliver follow-up messages.
-    pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
-    /// Injection senders for all workers, keyed by worker ID.
-    /// Used by the route tool to deliver addendum context to running workers
-    /// without requiring the worker to be interactive.
-    pub worker_injections: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
-    /// Task descriptions reserved for spawn. Prevents the TOCTOU race where
-    /// two concurrent `spawn_worker` calls both pass `check_duplicate_task`
-    /// before either registers in the status block. Reservations are
-    /// claimed under a write lock before any async spawn work and released
-    /// when the worker is registered in the status block or the spawn fails.
-    pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -564,204 +546,6 @@ impl ChannelState {
             });
         }
         self.history_fence.note_head_mutation();
-    }
-
-    /// Cancel a running worker and converge with any completion already in flight.
-    /// Returns an error message if the worker is not found.
-    pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
-        self.cancel_worker_with_reason(worker_id, "cancelled by channel")
-            .await
-    }
-
-    pub async fn cancel_worker_with_reason(
-        &self,
-        worker_id: WorkerId,
-        reason: &str,
-    ) -> std::result::Result<(), String> {
-        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
-        let result = if reason.is_empty() {
-            "Worker cancelled.".to_string()
-        } else {
-            format!("Worker cancelled: {reason}")
-        };
-
-        let Some(lifecycle) = self
-            .process_run_logger
-            .read_worker_lifecycle(worker_id)
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Err(format!("Worker {worker_id} not found"));
-        };
-
-        if lifecycle.is_terminal() {
-            self.worker_handles.write().await.remove(&worker_id);
-            self.cleanup_worker_routing(worker_id).await;
-            return Ok(());
-        }
-
-        let lifecycle = if lifecycle == crate::conversation::WorkerLifecycle::Completing {
-            lifecycle
-        } else {
-            match self
-                .process_run_logger
-                .transition_worker(
-                    worker_id,
-                    lifecycle,
-                    crate::conversation::WorkerLifecycle::Cancelling,
-                )
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                crate::conversation::WorkerTransitionResult::Applied { current, .. } => current,
-                crate::conversation::WorkerTransitionResult::Conflict { current } => current,
-                crate::conversation::WorkerTransitionResult::NotFound => {
-                    return Err(format!("Worker {worker_id} not found"));
-                }
-            }
-        };
-
-        if lifecycle == crate::conversation::WorkerLifecycle::Completing {
-            let terminal_notify = self
-                .worker_handles
-                .read()
-                .await
-                .get(&worker_id)
-                .map(|control| control.terminal_notify.clone());
-            if let Some(terminal_notify) = terminal_notify {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    terminal_notify.notified(),
-                )
-                .await;
-            }
-            if self
-                .process_run_logger
-                .read_worker_terminal(worker_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                self.worker_handles.write().await.remove(&worker_id);
-                self.cleanup_worker_routing(worker_id).await;
-                return Ok(());
-            }
-        }
-        let mut control = self.worker_handles.write().await.remove(&worker_id);
-        if let Some(control) = &mut control {
-            if let Some(opencode_cancellation) = &control.opencode_cancellation
-                && let Some(session) = opencode_cancellation.lock().await.clone()
-                && let Err(error) = session
-                    .server
-                    .lock()
-                    .await
-                    .abort_session(&session.session_id)
-                    .await
-            {
-                tracing::warn!(%error, %worker_id, "failed to abort OpenCode session");
-            }
-            control.cancel_tx.send_replace(true);
-            if tokio::time::timeout(std::time::Duration::from_millis(500), &mut control.handle)
-                .await
-                .is_err()
-            {
-                control.handle.abort();
-                if let Err(error) = (&mut control.handle).await
-                    && !error.is_cancelled()
-                {
-                    tracing::warn!(%error, %worker_id, "cancelled worker task failed while joining");
-                }
-            }
-        }
-
-        let terminal = self
-            .process_run_logger
-            .read_worker_terminal(worker_id)
-            .await;
-        let terminal = match terminal {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                if let Some(control) = control {
-                    self.worker_handles.write().await.insert(worker_id, control);
-                }
-                return Err(error.to_string());
-            }
-        };
-        if terminal.is_some() {
-            self.cleanup_worker_routing(worker_id).await;
-            return Ok(());
-        }
-
-        let transcript = self
-            .live_worker_transcript_snapshot(worker_id)
-            .await
-            .or_else(|| {
-                control.as_ref().and_then(|control| {
-                    crate::agent::worker::read_worker_transcript_snapshot(
-                        &control.transcript_snapshot,
-                    )
-                })
-            });
-        let outcome_kind = if transcript.is_some()
-            && lifecycle == crate::conversation::WorkerLifecycle::Completing
-        {
-            crate::conversation::WorkerOutcomeKind::Partial
-        } else {
-            crate::conversation::WorkerOutcomeKind::Cancelled
-        };
-        let terminal = crate::agent::channel_dispatch::commit_worker_outcome(
-            &self.process_run_logger,
-            worker_id,
-            outcome_kind,
-            &result,
-            transcript.as_ref(),
-            crate::conversation::WorkerTerminalOwner::Cancel,
-        )
-        .await;
-        let terminal = match terminal {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                if let Some(control) = control {
-                    self.worker_handles.write().await.insert(worker_id, control);
-                }
-                return Err(error.to_string());
-            }
-        };
-        if let Some((terminal, true)) = terminal {
-            self.deps
-                .event_tx
-                .send(crate::agent::channel_dispatch::worker_complete_event(
-                    self.deps.agent_id.clone(),
-                    Some(self.channel_id.clone()),
-                    terminal,
-                    true,
-                ))
-                .ok();
-        }
-        self.cleanup_worker_routing(worker_id).await;
-        Ok(())
-    }
-
-    pub(crate) async fn cleanup_worker_routing(&self, worker_id: WorkerId) {
-        self.worker_inputs.write().await.remove(&worker_id);
-        self.worker_injections.write().await.remove(&worker_id);
-        self.active_workers.write().await.remove(&worker_id);
-    }
-
-    async fn live_worker_transcript_snapshot(
-        &self,
-        worker_id: WorkerId,
-    ) -> Option<crate::agent::worker::WorkerTranscriptPayload> {
-        let process_id = ProcessId::Worker(worker_id).to_string();
-        let live_transcripts = self.live_process_transcripts.read().await;
-        let steps = live_transcripts.get(&process_id)?;
-        if steps.is_empty() {
-            return None;
-        }
-        Some(crate::agent::worker::WorkerTranscriptPayload {
-            transcript: crate::conversation::worker_transcript::serialize_steps(steps),
-            tool_calls: count_transcript_tool_calls(steps),
-        })
     }
 
     /// Cancel a running branch by aborting its tokio task.
@@ -891,22 +675,6 @@ impl ChannelControlHandle {
         &self.inner.state
     }
 
-    pub async fn cancel_worker_with_reason(
-        &self,
-        worker_id: WorkerId,
-        reason: &str,
-    ) -> ControlActionResult {
-        match self
-            .inner
-            .state
-            .cancel_worker_with_reason(worker_id, reason)
-            .await
-        {
-            Ok(()) => ControlActionResult::Cancelled,
-            Err(_) => ControlActionResult::NotFound,
-        }
-    }
-
     pub async fn cancel_branch_with_reason(
         &self,
         branch_id: BranchId,
@@ -950,94 +718,6 @@ impl ChannelControlHandle {
             .state
             .response_mode
             .store(mode.to_u8(), std::sync::atomic::Ordering::Release);
-    }
-
-    /// Cancel all active workers and branches, emitting WorkerComplete/BranchResult
-    /// for each so the channel can retrigger and synthesize partial results.
-    pub async fn cancel_all_workers_and_branches(&self, reason: &str) {
-        let worker_ids: Vec<WorkerId> = self
-            .inner
-            .state
-            .worker_handles
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        for worker_id in worker_ids {
-            let _ = self
-                .inner
-                .state
-                .cancel_worker_with_reason(worker_id, reason)
-                .await;
-        }
-        let branch_ids: Vec<BranchId> = self
-            .inner
-            .state
-            .active_branches
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        for branch_id in branch_ids {
-            let _ = self
-                .inner
-                .state
-                .cancel_branch_with_reason(branch_id, reason)
-                .await;
-        }
-    }
-
-    /// Stop local tasks for idle interactive workers without changing their
-    /// durable waiting state. Startup reconnects these sessions by worker id.
-    pub async fn detach_idle_workers_for_restart(&self) {
-        let idle_worker_ids: Vec<WorkerId> = self
-            .inner
-            .state
-            .status_block
-            .read()
-            .await
-            .active_workers
-            .iter()
-            .filter(|worker| worker.interactive && worker.status == "idle")
-            .map(|worker| worker.id)
-            .collect();
-        for worker_id in idle_worker_ids {
-            if let Some(mut control) = self
-                .inner
-                .state
-                .worker_handles
-                .write()
-                .await
-                .remove(&worker_id)
-            {
-                control.handle.abort();
-                if let Err(error) = (&mut control.handle).await
-                    && !error.is_cancelled()
-                {
-                    tracing::warn!(%error, %worker_id, "idle worker task failed while detaching for restart");
-                }
-            }
-            self.inner
-                .state
-                .worker_inputs
-                .write()
-                .await
-                .remove(&worker_id);
-            self.inner
-                .state
-                .worker_injections
-                .write()
-                .await
-                .remove(&worker_id);
-            self.inner
-                .state
-                .active_workers
-                .write()
-                .await
-                .remove(&worker_id);
-        }
     }
 }
 
@@ -1271,7 +951,6 @@ impl Channel {
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
-        let active_workers = Arc::new(RwLock::new(HashMap::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
@@ -1306,11 +985,6 @@ impl Channel {
             history: history.clone(),
             history_fence: history_fence.clone(),
             active_branches: active_branches.clone(),
-            active_workers: active_workers.clone(),
-            worker_handles: Arc::new(RwLock::new(HashMap::new())),
-            worker_inputs: Arc::new(RwLock::new(HashMap::new())),
-            worker_injections: Arc::new(RwLock::new(HashMap::new())),
-            reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
@@ -2072,7 +1746,11 @@ impl Channel {
         };
         let mut recovered = 0usize;
         for child in run.active_children() {
-            let crate::agent::autonomy::AutonomyChild::Worker(worker_id) = child else {
+            let crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id,
+                operation_id,
+            } = child
+            else {
                 tracing::warn!(
                     ?child,
                     "cannot recover a lagged autonomy branch result from durable state"
@@ -2088,15 +1766,18 @@ impl Channel {
                 continue;
             };
             if lifecycle == crate::conversation::WorkerLifecycle::WaitingForInput {
-                self.state
-                    .status_block
-                    .write()
+                let operation_completed = self
+                    .state
+                    .deps
+                    .process_control_registry
+                    .worker_snapshot(worker_id)
                     .await
-                    .update(&ProcessEvent::WorkerIdle {
-                        agent_id: self.deps.agent_id.clone(),
-                        worker_id,
-                        channel_id: Some(self.id.clone()),
+                    .is_some_and(|snapshot| {
+                        snapshot.last_completed_operation_id == Some(operation_id)
                     });
+                if !operation_completed {
+                    continue;
+                }
                 self.pending_results.push(PendingResult {
                     process_type: "worker",
                     process_id: worker_id.to_string(),
@@ -2115,13 +1796,6 @@ impl Channel {
             {
                 self.consumed_worker_outcomes
                     .insert(worker_id, terminal.outcome_version);
-                self.state.worker_handles.write().await.remove(&worker_id);
-                self.state.worker_inputs.write().await.remove(&worker_id);
-                self.state
-                    .worker_injections
-                    .write()
-                    .await
-                    .remove(&worker_id);
                 self.state
                     .status_block
                     .write()
@@ -2166,11 +1840,19 @@ impl Channel {
             // retrigger is pending, exit so the caller can flush the reply buffer.
             // Without this the channel would wait on the broadcast event_rx (which
             // never closes) until the job timeout kills it.
+            let has_origin_workers = self
+                .state
+                .deps
+                .process_control_registry
+                .list_worker_snapshots()
+                .await
+                .iter()
+                .any(|worker| worker.provenance.origin_channel_id.as_ref() == Some(&self.id));
             if self.state.kind.self_exits()
                 && self.message_count > 0
                 && !self.pending_retrigger
                 && self.retrigger_deadline.is_none()
-                && self.state.worker_handles.read().await.is_empty()
+                && !has_origin_workers
                 && self.state.active_branches.read().await.is_empty()
             {
                 tracing::info!(channel_id = %self.id, "self-exiting channel finished all work, exiting");
@@ -3661,8 +3343,18 @@ impl Channel {
         // envelope instead, so this prompt stays byte-stable across turns
         // (see `with_time_envelope`).
         let system_info = self.build_system_info().await;
+        let registry_workers = self
+            .state
+            .deps
+            .process_control_registry
+            .list_worker_snapshots()
+            .await
+            .into_iter()
+            .filter(|worker| worker.provenance.origin_channel_id.as_ref() == Some(&self.id))
+            .collect();
         let status_text = {
-            let status = self.state.status_block.read().await;
+            let mut status = self.state.status_block.write().await;
+            status.replace_workers_from_registry(registry_workers);
             status.render_with_context(None, Some(&system_info))
         };
 
@@ -4561,28 +4253,10 @@ impl Channel {
                 self.branch_reply_targets.remove(branch_id);
             }
             ProcessEvent::WorkerStarted { .. } => {}
-            ProcessEvent::WorkerStatus {
-                worker_id, status, ..
-            } => {
-                if let Some(crate::conversation::WorkerTransitionResult::Conflict { current }) =
-                    run_logger.log_worker_status(*worker_id, status).await?
-                    && !current.is_terminal()
-                    && current != crate::conversation::WorkerLifecycle::Running
-                {
-                    tracing::debug!(%worker_id, lifecycle = current.as_str(), "worker resume status arrived outside waiting state");
-                }
-            }
-            ProcessEvent::WorkerIdle { worker_id, .. } => {
-                if let crate::conversation::WorkerTransitionResult::Conflict { current } =
-                    run_logger.log_worker_idle(*worker_id).await?
-                    && !current.is_terminal()
-                    && current != crate::conversation::WorkerLifecycle::WaitingForInput
-                {
-                    tracing::debug!(%worker_id, lifecycle = current.as_str(), "worker idle event arrived outside running state");
-                }
-            }
+            ProcessEvent::WorkerStatus { .. } | ProcessEvent::WorkerIdle { .. } => {}
             ProcessEvent::WorkerComplete {
                 worker_id,
+                active_operation,
                 notify,
                 outcome_kind,
                 outcome_version,
@@ -4617,9 +4291,13 @@ impl Channel {
                 }
                 self.consumed_worker_outcomes
                     .insert(*worker_id, terminal.outcome_version);
-                self.state.worker_handles.write().await.remove(worker_id);
-                if let Some(run) = self.state.autonomy_run() {
-                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id));
+                if let Some(run) = self.state.autonomy_run()
+                    && let Some(operation) = active_operation
+                {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                        worker_id: *worker_id,
+                        operation_id: operation.operation_id,
+                    });
                 }
                 let result = terminal.result;
                 let success = terminal.outcome_kind.is_success();
@@ -4666,10 +4344,6 @@ impl Channel {
                     }
                 }
 
-                self.state.active_workers.write().await.remove(worker_id);
-                self.state.worker_inputs.write().await.remove(worker_id);
-                self.state.worker_injections.write().await.remove(worker_id);
-
                 // Record worker completion in working memory.
                 let worker_summary = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -4707,20 +4381,20 @@ impl Channel {
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
             }
-            ProcessEvent::OpenCodeSessionCreated {
+            ProcessEvent::OpenCodeSessionCreated { .. } => {}
+            ProcessEvent::WorkerOperationResult {
                 worker_id,
-                session_id,
-                port,
+                operation_id,
+                result,
                 ..
             } => {
-                run_logger.log_opencode_metadata(*worker_id, session_id, *port);
-            }
-            ProcessEvent::WorkerInitialResult {
-                worker_id, result, ..
-            } => {
+                let child = crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                    worker_id: *worker_id,
+                    operation_id: *operation_id,
+                };
                 if self.state.kind == ChannelKind::Autonomy
                     && let Some(run) = self.state.autonomy_run()
-                    && !run.owns_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id))
+                    && !run.owns_child(child)
                 {
                     tracing::debug!(%worker_id, "duplicate or stale autonomy worker result ignored");
                     return Ok(());
@@ -4735,7 +4409,7 @@ impl Channel {
                     success: true,
                 });
                 if let Some(run) = self.state.autonomy_run() {
-                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(*worker_id));
+                    run.settle_child(child);
                 }
                 should_retrigger = true;
                 tracing::info!(
@@ -5571,6 +5245,7 @@ mod tests {
         let event = ProcessEvent::WorkerStatus {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
             channel_id: Some(channel_id.clone()),
             status: "running".to_string(),
         };
@@ -5600,6 +5275,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: Some(channel_id.clone()),
             result: "done".to_string(),
             notify: true,
@@ -5619,6 +5296,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: Some(Arc::from("channel-b")),
             result: "done".to_string(),
             notify: true,
@@ -5638,6 +5317,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: None,
             result: "done".to_string(),
             notify: true,

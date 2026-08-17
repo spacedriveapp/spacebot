@@ -127,6 +127,8 @@ route: worker_id=abc, message="now add the database layer"
 
 The OpenCode session accumulates context across follow-ups, so subsequent messages benefit from everything the agent learned during earlier work.
 
+The session is registered to the agent rather than held by its origin channel. A follow-up from another channel uses the same OpenCode session and returns its result to that requester. Retained idle sessions reconnect directly during startup, so Spacebot does not need to recreate the origin channel to make them routable.
+
 ## Model Override
 
 You can override the model used by OpenCode workers:
@@ -169,9 +171,9 @@ webfetch = "allow"
       │ ProcessEvent::WorkerComplete      │ (bash, edit, read, etc.)
       ↓                                   ↓
 ┌─────────────┐                   ┌──────────────────┐
-│   Channel    │                   │   Working Dir     │
-│  (status     │                   │   /code/myapp     │
-│   block)     │                   └──────────────────┘
+│ Agent worker │                   │   Working Dir     │
+│  registry    │                   │   /code/myapp     │
+│              │                   └──────────────────┘
 └─────────────┘
 ```
 

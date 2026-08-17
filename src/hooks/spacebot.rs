@@ -1,5 +1,6 @@
 //! SpacebotHook: Prompt hook for channels, branches, and workers.
 
+use crate::agent::process_control::WorkerRegistrationId;
 use crate::hooks::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::tools::{
     BranchDelegationState, MemoryPersistenceContractState, MemoryPersistenceTerminalOutcome,
@@ -42,6 +43,7 @@ pub struct SpacebotHook {
     agent_id: AgentId,
     process_id: ProcessId,
     process_type: ProcessType,
+    worker_registration_id: Option<WorkerRegistrationId>,
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
     tool_nudge_policy: ToolNudgePolicy,
@@ -124,6 +126,7 @@ impl SpacebotHook {
             agent_id,
             process_id,
             process_type,
+            worker_registration_id: None,
             channel_id,
             event_tx,
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
@@ -170,6 +173,11 @@ impl SpacebotHook {
 
     pub fn with_tool_call_registry(mut self, registry: crate::tools::ToolCallRegistry) -> Self {
         self.tool_call_registry = Some(registry);
+        self
+    }
+
+    pub fn with_worker_registration_id(mut self, registration_id: WorkerRegistrationId) -> Self {
+        self.worker_registration_id = Some(registration_id);
         self
     }
 
@@ -808,18 +816,6 @@ impl SpacebotHook {
         }
     }
 
-    /// Send a worker idle event. Only valid for worker processes.
-    pub fn send_worker_idle(&self) {
-        if let ProcessId::Worker(worker_id) = &self.process_id {
-            let event = ProcessEvent::WorkerIdle {
-                agent_id: self.agent_id.clone(),
-                worker_id: *worker_id,
-                channel_id: self.channel_id.clone(),
-            };
-            self.event_tx.send(event).ok();
-        }
-    }
-
     /// Scan content for potential secret leaks, including encoded forms.
     ///
     /// Delegates to the shared implementation in `secrets::scrub`.
@@ -927,6 +923,7 @@ impl SpacebotHook {
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
+            worker_registration_id: self.worker_registration_id,
             channel_id: self.channel_id.clone(),
             call_id,
             tool_name: tool_name.to_string(),
@@ -1169,6 +1166,7 @@ where
                 let event = ProcessEvent::ProcessText {
                     agent_id: self.agent_id.clone(),
                     process_id: self.process_id.clone(),
+                    worker_registration_id: self.worker_registration_id,
                     channel_id: self.channel_id.clone(),
                     text,
                 };
@@ -1324,6 +1322,7 @@ where
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
+            worker_registration_id: self.worker_registration_id,
             channel_id: self.channel_id.clone(),
             call_id,
             tool_name: tool_name.to_string(),

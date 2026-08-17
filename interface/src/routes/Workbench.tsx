@@ -66,15 +66,25 @@ export function Workbench() {
 
 					// Only show OpenCode workers
 					if (worker.worker_type !== "opencode") continue;
+					if (!worker.runtime_attached) continue;
 					// Must have a port to embed
 					if (!worker.opencode_port) continue;
 
-					const liveWorker = activeWorkers[worker.id];
+					const candidate = activeWorkers[worker.id];
+					const liveWorker =
+						candidate?.agentId === agent.id &&
+						candidate.registrationId === worker.registration_id
+							? candidate
+							: undefined;
 					result.push({
 						...worker,
 						agent_id: agent.id,
 						agent_name: agentName,
-						status: liveWorker?.status ?? worker.status,
+						status:
+							(liveWorker?.runtimeState ?? worker.runtime_state) ===
+							"waiting_for_input"
+								? "idle"
+								: "running",
 						live_tool_calls: liveWorker?.toolCalls,
 					});
 				}

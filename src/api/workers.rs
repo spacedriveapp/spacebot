@@ -38,14 +38,19 @@ pub(super) struct WorkerListItem {
     task: String,
     status: String,
     worker_type: String,
+    backend: String,
+    registration_id: Option<String>,
+    runtime_state: Option<String>,
+    runtime_attached: bool,
+    routable: bool,
     channel_id: Option<String>,
     channel_name: Option<String>,
     started_at: String,
     completed_at: Option<String>,
     has_transcript: bool,
-    /// Live status text from StatusBlock (running workers only).
+    /// Live status text from the process control registry.
     live_status: Option<String>,
-    /// Total tool calls. From DB for completed workers, from StatusBlock for running.
+    /// Total tool calls. From DB for completed workers, from the registry for live workers.
     tool_calls: i64,
     /// OpenCode server port (for workers with an embeddable web UI).
     opencode_port: Option<i32>,
@@ -74,6 +79,11 @@ pub(super) struct WorkerDetailResponse {
     result: Option<String>,
     status: String,
     worker_type: String,
+    backend: String,
+    registration_id: Option<String>,
+    runtime_state: Option<String>,
+    runtime_attached: bool,
+    routable: bool,
     channel_id: Option<String>,
     channel_name: Option<String>,
     started_at: String,
@@ -139,7 +149,7 @@ pub(super) struct ProcessResponse {
     project_id: Option<String>,
 }
 
-/// List worker runs for an agent, with live status merged from StatusBlocks.
+/// List worker runs for an agent, with live state merged from the process control registry.
 #[utoipa::path(
     get,
     path = "/agents/workers",
@@ -196,53 +206,49 @@ pub(super) async fn list_workers(
         names
     };
 
-    // Build a live status lookup from all channel StatusBlocks
-    let live_statuses = {
-        let blocks = state.channel_status_blocks.read().await;
-        let mut map = std::collections::HashMap::new();
-        for status_block in blocks.values() {
-            let block = status_block.read().await;
-            for worker in &block.active_workers {
-                map.insert(
-                    worker.id.to_string(),
-                    (worker.status.clone(), worker.tool_calls),
-                );
-            }
-        }
-        map
-    };
+    let registries = state.process_control_registries.load();
+    let registry = registries
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let live_workers = registry
+        .list_worker_snapshots()
+        .await
+        .into_iter()
+        .map(|worker| (worker.worker_id.to_string(), worker))
+        .collect::<std::collections::HashMap<_, _>>();
 
     let workers = rows
         .into_iter()
         .map(|row| {
-            let (live_status, live_tool_calls) = live_statuses
-                .get(&row.id)
-                .map(|(status, calls)| (Some(status.clone()), *calls as i64))
-                .unwrap_or((None, 0));
-
-            // Use live tool call count for running workers, DB count for completed
-            let tool_calls = if row.status == "running" && live_tool_calls > 0 {
-                live_tool_calls
-            } else {
-                row.tool_calls
-            };
+            let live = live_workers.get(&row.id);
+            let live_status = live.map(|worker| worker.status.clone());
+            let backend = live
+                .map(|worker| worker.backend.to_string())
+                .unwrap_or_else(|| row.worker_type.clone());
 
             WorkerListItem {
                 id: row.id,
                 task: row.task,
                 status: row.status,
                 worker_type: row.worker_type,
+                backend,
+                registration_id: live.map(|worker| worker.registration_id.to_string()),
+                runtime_state: live.map(|worker| worker.state.to_string()),
+                runtime_attached: live.is_some(),
+                routable: live.is_some_and(|worker| worker.routable),
                 channel_id: row.channel_id,
                 channel_name: row.channel_name,
                 started_at: row.started_at,
                 completed_at: row.completed_at,
                 has_transcript: row.has_transcript,
                 live_status,
-                tool_calls,
+                tool_calls: live.map_or(row.tool_calls, |worker| {
+                    i64::try_from(worker.tool_calls).unwrap_or(i64::MAX)
+                }),
                 opencode_port: row.opencode_port,
                 opencode_session_id: row.opencode_session_id,
                 directory: row.directory,
-                interactive: row.interactive,
+                interactive: live.map_or(row.interactive, |worker| worker.interactive),
                 project_name: row
                     .project_id
                     .as_deref()
@@ -287,6 +293,16 @@ pub(super) async fn worker_detail(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let worker_id = query.worker_id.parse().map_err(|error| {
+        tracing::warn!(%error, worker_id = %query.worker_id, "invalid worker ID");
+        StatusCode::BAD_REQUEST
+    })?;
+    let registries = state.process_control_registries.load();
+    let registry = registries
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let live = registry.worker_snapshot(worker_id).await;
+
     let transcript = match detail.transcript_blob.as_deref() {
         Some(blob) => worker_transcript::deserialize_transcript(blob)
             .map_err(|error| {
@@ -296,15 +312,18 @@ pub(super) async fn worker_detail(
         None => {
             // No persisted transcript yet — check the live transcript cache
             // so page refreshes can recover in-progress worker transcripts.
-            let worker_id = query.worker_id.parse().map_err(|error| {
-                tracing::warn!(%error, worker_id = %query.worker_id, "invalid worker ID");
-                StatusCode::BAD_REQUEST
-            })?;
             state
-                .get_live_transcript(&ProcessId::Worker(worker_id))
+                .get_live_transcript(
+                    &ProcessId::Worker(worker_id),
+                    live.as_ref().map(|worker| worker.registration_id),
+                )
                 .await
         }
     };
+    let backend = live
+        .as_ref()
+        .map(|worker| worker.backend.to_string())
+        .unwrap_or_else(|| detail.worker_type.clone());
 
     Ok(Json(WorkerDetailResponse {
         id: detail.id,
@@ -312,15 +331,26 @@ pub(super) async fn worker_detail(
         result: detail.result,
         status: detail.status,
         worker_type: detail.worker_type,
+        backend,
+        registration_id: live
+            .as_ref()
+            .map(|worker| worker.registration_id.to_string()),
+        runtime_state: live.as_ref().map(|worker| worker.state.to_string()),
+        runtime_attached: live.is_some(),
+        routable: live.as_ref().is_some_and(|worker| worker.routable),
         channel_id: detail.channel_id,
         channel_name: detail.channel_name,
         started_at: detail.started_at,
         completed_at: detail.completed_at,
         transcript,
-        tool_calls: detail.tool_calls,
+        tool_calls: live.as_ref().map_or(detail.tool_calls, |worker| {
+            i64::try_from(worker.tool_calls).unwrap_or(i64::MAX)
+        }),
         opencode_session_id: detail.opencode_session_id,
         opencode_port: detail.opencode_port,
-        interactive: detail.interactive,
+        interactive: live
+            .as_ref()
+            .map_or(detail.interactive, |worker| worker.interactive),
         directory: detail.directory,
     }))
 }
@@ -409,7 +439,23 @@ pub(super) async fn process_detail(
     };
     let transcript = match detail.transcript_blob.as_deref() {
         Some(blob) => worker_transcript::deserialize_transcript(blob).ok(),
-        None => state.get_live_transcript(&process_id).await,
+        None => {
+            let worker_registration_id = if let ProcessId::Worker(worker_id) = &process_id {
+                let registries = state.process_control_registries.load();
+                let registry = registries
+                    .get(&query.agent_id)
+                    .ok_or(StatusCode::NOT_FOUND)?;
+                registry
+                    .worker_snapshot(*worker_id)
+                    .await
+                    .map(|worker| worker.registration_id)
+            } else {
+                None
+            };
+            state
+                .get_live_transcript(&process_id, worker_registration_id)
+                .await
+        }
     };
 
     Ok(Json(process_response(detail.run, transcript)))

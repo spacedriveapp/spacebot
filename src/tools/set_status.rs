@@ -1,6 +1,6 @@
 //! Set status tool for workers.
 
-use crate::conversation::{ProcessRunLogger, WorkerLifecycle, WorkerTransitionResult};
+use crate::conversation::ProcessRunLogger;
 use crate::{AgentId, ChannelId, ProcessEvent, WorkerId};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 /// Tool for setting worker status.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SetStatusTool {
     agent_id: AgentId,
     worker_id: WorkerId,
@@ -17,12 +17,24 @@ pub struct SetStatusTool {
     event_tx: broadcast::Sender<ProcessEvent>,
     process_run_logger: ProcessRunLogger,
     interactive: bool,
+    callback: crate::agent::process_control::WorkerCallbackContext,
+    process_control_registry: std::sync::Arc<crate::agent::process_control::ProcessControlRegistry>,
     /// Tool secret pairs for scrubbing status text before it reaches the channel.
     tool_secret_pairs: Vec<(String, String)>,
 }
 
+impl std::fmt::Debug for SetStatusTool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetStatusTool")
+            .field("worker_id", &self.worker_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SetStatusTool {
     /// Create a new set status tool.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_id: AgentId,
         worker_id: WorkerId,
@@ -30,6 +42,10 @@ impl SetStatusTool {
         event_tx: broadcast::Sender<ProcessEvent>,
         process_run_logger: ProcessRunLogger,
         interactive: bool,
+        callback: crate::agent::process_control::WorkerCallbackContext,
+        process_control_registry: std::sync::Arc<
+            crate::agent::process_control::ProcessControlRegistry,
+        >,
     ) -> Self {
         Self {
             agent_id,
@@ -38,6 +54,8 @@ impl SetStatusTool {
             event_tx,
             process_run_logger,
             interactive,
+            callback,
+            process_control_registry,
             tool_secret_pairs: Vec::new(),
         }
     }
@@ -161,37 +179,35 @@ impl Tool for SetStatusTool {
         // live status stream.
         let outcome = (args.kind == StatusKind::Outcome).then_some(scrubbed);
 
-        if args.kind == StatusKind::Outcome && !self.interactive {
-            match self
-                .process_run_logger
-                .claim_worker_completion(self.worker_id, WorkerLifecycle::Running)
+        let mutation = if args.kind == StatusKind::Outcome && !self.interactive {
+            self.process_control_registry
+                .claim_worker_outcome_status(
+                    self.callback,
+                    &self.process_run_logger,
+                    status.clone(),
+                )
                 .await
                 .map_err(|error| SetStatusError(error.to_string()))?
-            {
-                WorkerTransitionResult::Applied { .. }
-                | WorkerTransitionResult::Conflict {
-                    current: WorkerLifecycle::Completing,
-                } => {}
-                WorkerTransitionResult::Conflict { current } => {
-                    return Err(SetStatusError(format!(
-                        "worker lifecycle conflict: expected running, found {}",
-                        current.as_str()
-                    )));
-                }
-                WorkerTransitionResult::NotFound => {
-                    return Err(SetStatusError("worker run was not found".to_string()));
-                }
-            }
+        } else {
+            self.process_control_registry
+                .update_worker_status(self.callback, status.clone())
+                .await
+        };
+        if mutation != crate::agent::process_control::WorkerMutationResult::Applied {
+            return Err(SetStatusError(format!(
+                "worker registration rejected status update: {mutation:?}"
+            )));
         }
 
         let event = ProcessEvent::WorkerStatus {
             agent_id: self.agent_id.clone(),
             worker_id: self.worker_id,
+            worker_registration_id: self.callback.registration_id,
             channel_id: self.channel_id.clone(),
             status: status.clone(),
         };
 
-        let _ = self.event_tx.send(event);
+        self.event_tx.send(event).ok();
 
         Ok(SetStatusOutput {
             success: true,
@@ -201,23 +217,6 @@ impl Tool for SetStatusTool {
             kind: args.kind,
         })
     }
-}
-
-/// Legacy function for setting worker status.
-pub fn set_status(
-    agent_id: AgentId,
-    worker_id: WorkerId,
-    status: impl Into<String>,
-    event_tx: &broadcast::Sender<ProcessEvent>,
-) {
-    let event = ProcessEvent::WorkerStatus {
-        agent_id,
-        worker_id,
-        channel_id: None,
-        status: status.into(),
-    };
-
-    let _ = event_tx.send(event);
 }
 
 #[cfg(test)]
@@ -254,6 +253,55 @@ mod tests {
             .await
             .unwrap();
         let (event_tx, _) = tokio::sync::broadcast::channel(8);
+        let registry = Arc::new(crate::agent::process_control::ProcessControlRegistry::new());
+        let provenance = crate::agent::process_control::WorkerProvenance {
+            origin_channel_id: None,
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker_in_scope(worker_id, &provenance, Arc::from("test"), 1)
+            .await
+            .unwrap();
+        let callback = reservation.callback_context();
+        let operation = crate::agent::process_control::WorkerOperationContext {
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+            requester: crate::agent::process_control::WorkerRequester::System,
+            result_target: crate::agent::process_control::WorkerResultTarget::None,
+            autonomy_run_id: None,
+        };
+        let control = crate::agent::process_control::WorkerRuntimeControl::new(
+            crate::agent::worker::new_worker_transcript_snapshot(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .0;
+        registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                crate::agent::process_control::WorkerBackend::Builtin,
+                interactive,
+                operation,
+                "running",
+                control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .update_worker_state(
+                    callback,
+                    crate::agent::process_control::WorkerRuntimeState::Running,
+                )
+                .await,
+            crate::agent::process_control::WorkerMutationResult::Applied
+        );
         (
             SetStatusTool::new(
                 Arc::from("agent"),
@@ -262,6 +310,8 @@ mod tests {
                 event_tx,
                 logger.clone(),
                 interactive,
+                callback,
+                registry,
             ),
             logger,
             worker_id,
@@ -298,14 +348,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_interactive_outcome_claims_completing_idempotently() {
+    async fn non_interactive_outcome_claims_completing_once() {
         let (tool, logger, worker_id) = setup(false).await;
         let args = || SetStatusArgs {
             status: "finished".to_string(),
             kind: StatusKind::Outcome,
         };
         assert!(tool.call(args()).await.is_ok());
-        assert!(tool.call(args()).await.is_ok());
+        assert!(tool.call(args()).await.is_err());
         assert_eq!(
             logger.read_worker_lifecycle(worker_id).await.unwrap(),
             Some(WorkerLifecycle::Completing)
@@ -370,6 +420,31 @@ mod tests {
         assert_eq!(
             logger.read_worker_lifecycle(worker_id).await.unwrap(),
             Some(WorkerLifecycle::Running)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_set_status_callback_emits_no_event() {
+        let (tool, _logger, _worker_id) = setup(true).await;
+        let mut events = tool.event_tx.subscribe();
+        assert!(
+            tool.process_control_registry
+                .remove_worker_if_registration_matches(tool.callback)
+                .await
+        );
+
+        assert!(
+            tool.call(SetStatusArgs {
+                status: "stale".to_string(),
+                kind: StatusKind::Progress,
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
         );
     }
 }

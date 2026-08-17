@@ -43,7 +43,7 @@ export function PortalWorkerCard({ agentId, worker }: PortalWorkerCardProps) {
 
 	const cancelMutation = useMutation({
 		mutationFn: () =>
-			api.cancelProcess(worker.channel_id ?? "", "worker", worker.id),
+			api.cancelProcess(agentId, worker.channel_id ?? "", "worker", worker.id),
 		onSuccess: async () => {
 			await Promise.all([
 				queryClient.invalidateQueries({
@@ -56,13 +56,19 @@ export function PortalWorkerCard({ agentId, worker }: PortalWorkerCardProps) {
 		},
 	});
 
-	const isRunning = worker.status === "running";
-	const canCancel = isRunning && !!worker.channel_id && !cancelMutation.isPending;
+	const canCancel = worker.runtime_attached && !cancelMutation.isPending;
+	const status =
+		!worker.runtime_attached &&
+		(worker.status === "running" || worker.status === "idle")
+			? "unavailable"
+			: worker.runtime_state === "waiting_for_input"
+				? "idle"
+				: worker.status;
 
 	return (
 		<InlineWorkerCard
 			title={worker.task}
-			status={worker.status}
+			status={status}
 			toolCallCount={worker.tool_calls}
 			liveStatus={worker.live_status}
 			transcript={(detailQuery.data?.transcript ?? []) as TranscriptStep[]}

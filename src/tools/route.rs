@@ -1,47 +1,39 @@
-//! Route tool for sending follow-ups to active workers.
+//! Route tool for sending follow-ups to agent-owned workers.
 
 use crate::WorkerId;
 use crate::agent::channel::ChannelState;
+use crate::agent::process_control::{WorkerRequester, WorkerResultTarget, WorkerRouteResult};
+
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Tool for routing messages to workers.
 #[derive(Debug, Clone)]
 pub struct RouteTool {
     state: ChannelState,
 }
 
 impl RouteTool {
-    /// Create a new route tool with access to channel state.
     pub fn new(state: ChannelState) -> Self {
         Self { state }
     }
 }
 
-/// Error type for route tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Route failed: {0}")]
 pub struct RouteError(String);
 
-/// Arguments for route tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RouteArgs {
-    /// The ID of the worker to route to (UUID format).
     pub worker_id: String,
-    /// The message to send to the worker.
     pub message: String,
 }
 
-/// Output from route tool.
 #[derive(Debug, Serialize)]
 pub struct RouteOutput {
-    /// Whether the message was routed successfully.
     pub routed: bool,
-    /// The worker ID.
     pub worker_id: WorkerId,
-    /// Status message.
     pub message: String,
 }
 
@@ -59,14 +51,8 @@ impl Tool for RouteTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "worker_id": {
-                        "type": "string",
-                        "description": "The worker ID to route to (from spawn_worker result)"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "The message to send to the worker"
-                    }
+                    "worker_id": { "type": "string", "description": "The worker ID" },
+                    "message": { "type": "string", "description": "The message to send" }
                 },
                 "required": ["worker_id", "message"]
             }),
@@ -77,148 +63,111 @@ impl Tool for RouteTool {
         let worker_id = args
             .worker_id
             .parse::<WorkerId>()
-            .map_err(|e| RouteError(format!("Invalid worker ID: {e}")))?;
-
-        // Check the status block to determine the worker's actual state.
-        // Using sender map presence alone is unreliable: interactive workers
-        // register both `worker_inputs` and `worker_injections` at spawn
-        // time, so the input sender is always present regardless of whether
-        // the worker is idle or running.
-        let worker_is_idle = {
-            let status = self.state.status_block.read().await;
-            status
-                .active_workers
-                .iter()
-                .find(|w| w.id == worker_id)
-                .map(|w| w.status == "idle")
+            .map_err(|error| RouteError(format!("Invalid worker ID: {error}")))?;
+        let autonomy_run = self.state.autonomy_run();
+        let requester = autonomy_run.as_ref().map_or_else(
+            || WorkerRequester::Channel {
+                channel_id: self.state.channel_id.clone(),
+            },
+            |run| WorkerRequester::Autonomy {
+                run_id: run.run_id.clone(),
+            },
+        );
+        let registry = &self.state.deps.process_control_registry;
+        let Some(snapshot) = registry.worker_snapshot(worker_id).await else {
+            return Err(RouteError(format!(
+                "Worker {worker_id} was not found in this agent's live registry."
+            )));
+        };
+        let result = if snapshot.state
+            == crate::agent::process_control::WorkerRuntimeState::WaitingForInput
+        {
+            let follow_up = registry
+                .claim_idle_follow_up(
+                    worker_id,
+                    requester,
+                    WorkerResultTarget::Channel {
+                        channel_id: self.state.channel_id.clone(),
+                    },
+                    autonomy_run.as_ref().map(|run| run.run_id.clone()),
+                    args.message,
+                )
+                .await
+                .map_err(|error| RouteError(error.to_string()))?;
+            let operation = follow_up.operation.clone();
+            let child = crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id,
+                operation_id: operation.operation_id,
+            };
+            if let Some(run) = &autonomy_run
+                && !run.register_child(child)
+            {
+                registry
+                    .rollback_failed_follow_up(
+                        crate::agent::process_control::WorkerCallbackContext {
+                            worker_id,
+                            registration_id: snapshot.registration_id,
+                        },
+                        operation.operation_id,
+                    )
+                    .await;
+                return Err(RouteError(
+                    "The autonomy epoch is finishing and cannot own this operation".to_string(),
+                ));
+            }
+            let delivered = registry
+                .deliver_claimed_follow_up(
+                    crate::agent::process_control::WorkerCallbackContext {
+                        worker_id,
+                        registration_id: snapshot.registration_id,
+                    },
+                    follow_up,
+                )
+                .await;
+            if delivered != crate::agent::process_control::WorkerMutationResult::Applied {
+                if let Some(run) = &autonomy_run {
+                    run.settle_child(child);
+                }
+                WorkerRouteResult::NotFound
+            } else {
+                WorkerRouteResult::Routed { operation }
+            }
+        } else if snapshot.state == crate::agent::process_control::WorkerRuntimeState::Running {
+            registry.inject_running(worker_id, args.message).await
+        } else {
+            WorkerRouteResult::Busy {
+                state: snapshot.state,
+            }
         };
 
-        match worker_is_idle {
-            // Worker is idle (WaitingForInput) — deliver as interactive follow-up.
-            Some(true) => {
-                let autonomy_run = self.state.autonomy_run();
-                if let Some(run) = &autonomy_run
-                    && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
-                {
-                    return Err(RouteError(
-                        "The autonomy epoch is finishing or already owns an active operation for this worker"
-                            .to_string(),
-                    ));
-                }
-                let inputs = self.state.worker_inputs.read().await;
-                if let Some(input_tx) = inputs.get(&worker_id).cloned() {
-                    drop(inputs);
-
-                    if input_tx.send(args.message).await.is_err() {
-                        if let Some(run) = autonomy_run {
-                            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(
-                                worker_id,
-                            ));
-                        }
-                        return Err(RouteError(format!(
-                            "Worker {worker_id} has stopped accepting input (channel closed)"
-                        )));
-                    }
-
-                    tracing::info!(
-                        worker_id = %worker_id,
-                        channel_id = %self.state.channel_id,
-                        "message routed to interactive worker (input)"
-                    );
-
-                    return Ok(RouteOutput {
-                        routed: true,
-                        worker_id,
-                        message: format!(
-                            "Message delivered to worker {worker_id} (follow-up input)."
-                        ),
-                    });
-                }
-                drop(inputs);
-                if let Some(run) = autonomy_run {
-                    run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
-                }
-
-                // Worker is idle but has no input channel — shouldn't happen
-                // for interactive workers, but fall through to injection.
-            }
-            // Worker is running — use context injection.
-            Some(false) => {
-                let injections = self.state.worker_injections.read().await;
-                if let Some(inject_tx) = injections.get(&worker_id).cloned() {
-                    drop(injections);
-
-                    let autonomy_run = self.state.autonomy_run();
-                    let child = crate::agent::autonomy::AutonomyChild::Worker(worker_id);
-                    let registered_here = if let Some(run) = &autonomy_run {
-                        if run.owns_child(child) {
-                            false
-                        } else if run.register_child(child) {
-                            true
-                        } else {
-                            return Err(RouteError(
-                                "The autonomy epoch is finishing and cannot route more work"
-                                    .to_string(),
-                            ));
-                        }
-                    } else {
-                        false
-                    };
-
-                    if inject_tx.send(args.message).await.is_err() {
-                        if registered_here && let Some(run) = autonomy_run {
-                            run.settle_child(child);
-                        }
-                        return Err(RouteError(format!(
-                            "Worker {worker_id} has stopped running (injection channel closed)"
-                        )));
-                    }
-
-                    tracing::info!(
-                        worker_id = %worker_id,
-                        channel_id = %self.state.channel_id,
-                        "context injected into running worker"
-                    );
-
-                    return Ok(RouteOutput {
-                        routed: true,
-                        worker_id,
-                        message: format!(
-                            "Context injected into running worker {worker_id}. \
-                             The worker will incorporate this at its next turn boundary."
-                        ),
-                    });
-                }
-                drop(injections);
-
-                // Worker is running but has no injection channel (e.g. OpenCode
-                // workers only support interactive follow-ups, not mid-flight
-                // injection). Return a structured result so the LLM knows to
-                // wait rather than falling through to "not found".
-                let has_input = self
-                    .state
-                    .worker_inputs
-                    .read()
-                    .await
-                    .contains_key(&worker_id);
-                if has_input {
-                    return Ok(RouteOutput {
-                        routed: false,
-                        worker_id,
-                        message: format!(
-                            "Worker {worker_id} is currently running and does not support \
-                             mid-flight context injection. Wait for it to finish or become \
-                             idle before sending follow-up input."
-                        ),
-                    });
-                }
-            }
-            // Worker not found in status block.
-            None => {}
+        match result {
+            WorkerRouteResult::Routed { operation: _ } => Ok(RouteOutput {
+                routed: true,
+                worker_id,
+                message: format!("Message delivered to worker {worker_id}."),
+            }),
+            WorkerRouteResult::Injected => Ok(RouteOutput {
+                routed: true,
+                worker_id,
+                message: format!(
+                    "Context injected into running worker {worker_id}; it remains part of the current operation."
+                ),
+            }),
+            WorkerRouteResult::WaitUntilIdle => Ok(RouteOutput {
+                routed: false,
+                worker_id,
+                message: format!(
+                    "Worker {worker_id} is running and does not support injection. Wait until it is idle."
+                ),
+            }),
+            WorkerRouteResult::Busy { state } => Ok(RouteOutput {
+                routed: false,
+                worker_id,
+                message: format!("Worker {worker_id} is {state}."),
+            }),
+            WorkerRouteResult::NotFound => Err(RouteError(format!(
+                "Worker {worker_id} was not found in this agent's live registry."
+            ))),
         }
-
-        Err(RouteError(format!(
-            "Worker {worker_id} not found. It may have already completed or been cancelled."
-        )))
     }
 }

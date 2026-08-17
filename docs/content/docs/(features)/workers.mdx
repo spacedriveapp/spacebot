@@ -22,11 +22,17 @@ This preserves the user intent behind delegated work without turning the worker 
 
 Workers can be one-shot or interactive. Interactive workers retain their own working history and accept channel follow-up through `route`.
 
+Workers belong to the agent that spawned them. The origin channel remains visible as provenance, but it does not own the task handle, cancellation, or interactive input path. Another channel for the same agent can route a follow-up to an idle worker, and that operation's result returns to the requesting channel.
+
 ## Lifecycle
 
 Workers report progress through `set_status` and must signal a terminal outcome. Their lifecycle converges on one durable terminal record, which drives task settlement, channel retriggers, and live process displays.
 
 The worker's own wall-clock timeout bounds a run. Cancellation and completion use the same terminal-state path so a late completion cannot overwrite a cancellation or failure.
+
+Live controls sit in one agent-scoped registry. Runtime registration IDs fence delayed status, result, and cleanup callbacks, while operation IDs prevent an earlier interactive result from settling a later follow-up. Durable worker rows without live controls appear unavailable rather than running.
+
+Stopping an origin channel leaves its workers reachable. After restart, retained idle built-in and OpenCode workers reconnect directly to the agent registry with their conversation-level worker settings. Running work still follows the configured interrupted-worker recovery policy.
 
 ## Task Execution
 

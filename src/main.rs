@@ -40,6 +40,42 @@ impl ActiveChannelKey {
 /// Maximum number of deferred messages per channel before oldest are dropped.
 const DEFERRED_INJECTION_CAP: usize = 64;
 
+async fn load_worker_restoration_settings(
+    pool: &sqlx::SqlitePool,
+    agent_id: &str,
+    conversation_id: &str,
+) -> spacebot::conversation::settings::ResolvedConversationSettings {
+    let portal_store = spacebot::conversation::PortalConversationStore::new(pool.clone());
+    let channel_store = spacebot::conversation::ChannelSettingsStore::new(pool.clone());
+    match portal_store.get(agent_id, conversation_id).await {
+        Ok(Some(conversation)) => {
+            spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                conversation.settings.as_ref(),
+                None,
+                None,
+            )
+        }
+        Ok(None) => match channel_store.get(agent_id, conversation_id).await {
+            Ok(Some(settings)) => {
+                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                    Some(&settings),
+                    None,
+                    None,
+                )
+            }
+            Ok(None) => Default::default(),
+            Err(error) => {
+                tracing::warn!(%error, %conversation_id, "idle worker restoration failed to load channel settings");
+                Default::default()
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, %conversation_id, "idle worker restoration failed to load portal settings");
+            Default::default()
+        }
+    }
+}
+
 fn queue_deferred_injection(
     deferred_injections: &mut HashMap<ActiveChannelKey, Vec<spacebot::InboundMessage>>,
     injection: spacebot::ChannelInjection,
@@ -99,98 +135,6 @@ fn render_platform_history_backfill(
                 .as_ref()
                 .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             content: entry.content.clone(),
-        })
-        .collect();
-
-    serialize_backfill_transcript(entries)
-}
-
-/// The raw tail a chronicle-mode channel should resume with: everything
-/// strictly after the latest committed checkpoint boundary.
-///
-/// Returns `None` when the channel is not chronicling or has no checkpoints,
-/// leaving the legacy "last N rows" path in charge. When the tail is longer
-/// than the backfill limit the oldest part is dropped and the transcript says
-/// so, rather than the chronicle header claiming context that is not there.
-async fn resume_chronicle_tail(
-    channel: &spacebot::agent::channel::Channel,
-    limit: i64,
-    conversation_id: &str,
-) -> Option<Vec<spacebot::conversation::history::ConversationMessage>> {
-    let compaction = **channel.deps.runtime_config.compaction.load();
-    if compaction.mode != spacebot::config::CompactionMode::Chronicle
-        || channel.state.kind.self_exits()
-    {
-        return None;
-    }
-
-    let store = channel.chronicler.store();
-    let latest = store.latest(&channel.id, 0).await.ok().flatten()?;
-    let boundary = latest.end_boundary();
-
-    let uncovered = store
-        .count_messages_after(&channel.id, boundary)
-        .await
-        .ok()?;
-    // Keep the newest end of the tail: the oldest uncovered rows are what the
-    // next checkpoint will summarize, while the newest are the conversation the
-    // channel is actually resuming. Returned oldest-first so the rendered
-    // transcript stays chronological.
-    let mut messages = store
-        .newest_messages_after(&channel.id, boundary, limit)
-        .await
-        .ok()?;
-
-    if uncovered > messages.len() as i64 {
-        let omitted = uncovered - messages.len() as i64;
-        tracing::warn!(
-            conversation_id = %conversation_id,
-            uncovered,
-            loaded = messages.len(),
-            omitted,
-            "chronicle raw tail exceeds the backfill limit; the oldest uncovered messages are \
-             omitted from the resumed context"
-        );
-        if let Some(first) = messages.first_mut() {
-            first.content = format!(
-                "[{omitted} older message(s) from this session are not shown here. They sit \
-                 after the last checkpoint but before the messages below — expand them with the \
-                 chronicle tool.]\n{}",
-                first.content
-            );
-        }
-    }
-
-    Some(messages)
-}
-
-fn render_conversation_history_backfill(
-    history_messages: &[spacebot::conversation::history::ConversationMessage],
-) -> Option<String> {
-    let entries = history_messages
-        .iter()
-        .filter(|entry| entry.role == "user" || entry.role == "assistant")
-        .map(|entry| {
-            let author = if entry.role == "assistant" {
-                "(you)".to_string()
-            } else {
-                entry
-                    .sender_name
-                    .clone()
-                    .or_else(|| entry.sender_id.clone())
-                    .unwrap_or_else(|| "user".to_string())
-            };
-
-            BackfillTranscriptEntry {
-                role: entry.role.clone(),
-                author,
-                timestamp_utc: Some(
-                    entry
-                        .created_at
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                ),
-                content: entry.content.clone(),
-            }
         })
         .collect();
 
@@ -1356,6 +1300,7 @@ async fn run(
                 String,
                 Vec<&spacebot::conversation::history::IdleWorkerRow>,
             > = HashMap::new();
+            let mut detached_workers = Vec::new();
             for worker in &idle_workers {
                 if let Some(channel_id) = &worker.channel_id {
                     by_channel
@@ -1363,13 +1308,7 @@ async fn run(
                         .or_default()
                         .push(worker);
                 } else {
-                    // Workers without a channel_id can't be resumed (no follow-up
-                    // routing). Leave them as idle — the transcript is preserved
-                    // for inspection in the UI.
-                    tracing::warn!(
-                        worker_id = %worker.id,
-                        "idle worker has no channel_id, cannot resume (leaving as idle)"
-                    );
+                    detached_workers.push(worker);
                 }
             }
 
@@ -1390,8 +1329,18 @@ async fn run(
                             }
                             continue;
                         }
-                        match spacebot::agent::channel_dispatch::resume_idle_worker_into_state(
-                            &state,
+                        let restoration_context =
+                            spacebot::agent::channel_dispatch::WorkerRestorationContext {
+                                deps: agent.deps.clone(),
+                                channel_id: Some(state.channel_id.clone()),
+                                process_run_logger: run_logger.clone(),
+                                screenshot_dir: agent.config.screenshot_dir(),
+                                logs_dir: agent.config.logs_dir(),
+                                worker_context: state.worker_context_settings.read().await.clone(),
+                                model_overrides: state.model_overrides.clone(),
+                            };
+                        match spacebot::agent::channel_dispatch::restore_idle_worker_into_registry(
+                            &restoration_context,
                             idle_worker,
                         )
                         .await
@@ -1414,279 +1363,65 @@ async fn run(
                     continue;
                 }
 
-                // Ensure the channel exists. If it's already in active_channels
-                // (unlikely at startup), use its state. Otherwise, pre-create it.
-                let channel_key =
-                    ActiveChannelKey::new(agent_id.to_string(), conversation_id.clone());
-                #[allow(clippy::map_entry)] // 250-line block is clearer with contains_key+insert
-                if !active_channels.contains_key(&channel_key) {
-                    // First pass: retire any workers whose sessions can't be
-                    // reconnected. Only create the channel if at least one
-                    // worker has a chance of resuming.
-                    let mut resumable: Vec<&spacebot::conversation::history::IdleWorkerRow> =
-                        Vec::new();
-                    for idle_worker in &workers {
-                        if idle_worker.worker_type == "opencode"
-                            && idle_worker.opencode_session_id.is_none()
-                        {
-                            // OpenCode workers without session metadata can never
-                            // resume — the server died with kill_on_drop.
+                let resolved_settings = load_worker_restoration_settings(
+                    &agent.deps.sqlite_pool,
+                    agent_id,
+                    &conversation_id,
+                )
+                .await;
+                let restoration_context =
+                    spacebot::agent::channel_dispatch::WorkerRestorationContext {
+                        deps: agent.deps.clone(),
+                        channel_id: Some(Arc::from(conversation_id.as_str())),
+                        process_run_logger: run_logger.clone(),
+                        screenshot_dir: agent.config.screenshot_dir(),
+                        logs_dir: agent.config.logs_dir(),
+                        worker_context: resolved_settings.worker_context.clone(),
+                        model_overrides: Arc::new(resolved_settings),
+                    };
+                for idle_worker in &workers {
+                    match spacebot::agent::channel_dispatch::restore_idle_worker_into_registry(
+                        &restoration_context,
+                        idle_worker,
+                    )
+                    .await
+                    {
+                        Ok(worker_id) => tracing::info!(
+                            %worker_id,
+                            channel_id = %conversation_id,
+                            "restored idle worker directly into agent registry"
+                        ),
+                        Err(reason) => {
                             if let Err(error) = run_logger.retire_idle_worker(&idle_worker.id).await
                             {
-                                tracing::warn!(
-                                    worker_id = %idle_worker.id,
-                                    %error,
-                                    "failed to retire idle worker"
-                                );
+                                tracing::warn!(worker_id = %idle_worker.id, %error, "failed to retire idle worker");
                             }
-                            tracing::info!(
-                                worker_id = %idle_worker.id,
-                                channel_id = %conversation_id,
-                                "retired idle opencode worker (no session metadata)"
-                            );
-                        } else {
-                            resumable.push(idle_worker);
+                            tracing::info!(worker_id = %idle_worker.id, %reason, "retired idle worker after restoration failure");
                         }
                     }
-                    if resumable.is_empty() {
-                        continue;
+                }
+            }
+            let detached_context = spacebot::agent::channel_dispatch::WorkerRestorationContext {
+                deps: agent.deps.clone(),
+                channel_id: None,
+                process_run_logger: run_logger.clone(),
+                screenshot_dir: agent.config.screenshot_dir(),
+                logs_dir: agent.config.logs_dir(),
+                worker_context: Default::default(),
+                model_overrides: Arc::new(Default::default()),
+            };
+            for idle_worker in detached_workers {
+                if let Err(reason) =
+                    spacebot::agent::channel_dispatch::restore_idle_worker_into_registry(
+                        &detached_context,
+                        idle_worker,
+                    )
+                    .await
+                {
+                    if let Err(error) = run_logger.retire_idle_worker(&idle_worker.id).await {
+                        tracing::warn!(worker_id = %idle_worker.id, %error, "failed to retire detached idle worker");
                     }
-
-                    let (response_tx, mut response_rx) =
-                        mpsc::channel::<spacebot::RoutedResponse>(32);
-                    let event_rx = agent.deps.event_tx.subscribe();
-                    let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
-
-                    // Load per-conversation settings (idle worker resume).
-                    // Try portal store first, then channel_settings for platform channels.
-                    let resolved_settings = {
-                        let agent_id_str = agent_id.to_string();
-                        let portal_store = spacebot::conversation::PortalConversationStore::new(
-                            agent.deps.sqlite_pool.clone(),
-                        );
-                        let channel_store = spacebot::conversation::ChannelSettingsStore::new(
-                            agent.deps.sqlite_pool.clone(),
-                        );
-                        match portal_store.get(&agent_id_str, &conversation_id).await {
-                            Ok(Some(conv)) => {
-                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
-                                    conv.settings.as_ref(),
-                                    None,
-                                    None,
-                                )
-                            }
-                            Ok(None) => {
-                                match channel_store.get(&agent_id_str, &conversation_id).await {
-                                    Ok(Some(settings)) => {
-                                        spacebot::conversation::settings::ResolvedConversationSettings::resolve(
-                                            Some(&settings),
-                                            None,
-                                            None,
-                                        )
-                                    }
-                                    Ok(None) => {
-                                        spacebot::conversation::settings::ResolvedConversationSettings::default()
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            %error,
-                                            %conversation_id,
-                                            "idle worker resume: failed to load channel settings, using defaults"
-                                        );
-                                        spacebot::conversation::settings::ResolvedConversationSettings::default()
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    %conversation_id,
-                                    "idle worker resume: failed to load portal settings, using defaults"
-                                );
-                                spacebot::conversation::settings::ResolvedConversationSettings::default()
-                            }
-                        }
-                    };
-
-                    let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
-                        channel_id,
-                        spacebot::agent::channel::ChannelKind::User,
-                        agent.deps.clone(),
-                        response_tx,
-                        event_rx,
-                        agent.config.screenshot_dir(),
-                        agent.config.logs_dir(),
-                        Some(api_state.live_process_transcripts.clone()),
-                        resolved_settings,
-                        None, // no cron outcome for normal channels
-                        None, // no autonomy run for normal channels
-                    );
-                    let channel_registration_id = agent
-                        .deps
-                        .process_control_registry
-                        .register_channel(channel.id.clone(), channel.control_handle().downgrade())
-                        .await;
-                    api_state
-                        .register_channel_status(
-                            conversation_id.clone(),
-                            channel.state.status_block.clone(),
-                        )
-                        .await;
-                    api_state
-                        .register_channel_state(conversation_id.clone(), channel.state.clone())
-                        .await;
-
-                    let backfill_count = agent.config.history_backfill_count();
-                    if backfill_count > 0 {
-                        let backfill_limit =
-                            std::cmp::min(backfill_count, i64::MAX as usize) as i64;
-
-                        // In chronicle mode the checkpoint view already covers
-                        // everything up to the latest boundary, so the raw tail
-                        // must start strictly after it. Loading the last N rows
-                        // unconditionally would duplicate covered messages and
-                        // silently omit an uncovered tail longer than N, while
-                        // the chronicle header claims all of it is present.
-                        let chronicle_tail =
-                            resume_chronicle_tail(&channel, backfill_limit, &conversation_id).await;
-
-                        let loaded = match chronicle_tail {
-                            Some(messages) => Ok(messages),
-                            None => {
-                                channel
-                                    .state
-                                    .conversation_logger
-                                    .load_recent(&channel.id, backfill_limit)
-                                    .await
-                            }
-                        };
-
-                        match loaded {
-                            Ok(history_messages) => {
-                                if let Some(transcript) =
-                                    render_conversation_history_backfill(&history_messages)
-                                {
-                                    channel.set_backfill_transcript(transcript);
-                                    tracing::info!(
-                                        conversation_id = %conversation_id,
-                                        message_count = history_messages.len(),
-                                        "backfilled resumed channel history from conversation log"
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    conversation_id = %conversation_id,
-                                    %error,
-                                    "failed to backfill resumed channel history from conversation log"
-                                );
-                            }
-                        }
-                    }
-
-                    // Resume workers into the channel state before spawning the event loop.
-                    let mut any_resumed = false;
-                    for idle_worker in &resumable {
-                        match spacebot::agent::channel_dispatch::resume_idle_worker_into_state(
-                            &channel.state,
-                            idle_worker,
-                        )
-                        .await
-                        {
-                            Ok(worker_id) => {
-                                any_resumed = true;
-                                tracing::info!(
-                                    worker_id = %worker_id,
-                                    channel_id = %conversation_id,
-                                    "resumed idle worker"
-                                );
-                            }
-                            Err(reason) => {
-                                // Resume failed at runtime (e.g. OpenCode disabled,
-                                // transcript corrupt). Retire the worker.
-                                if let Err(error) =
-                                    run_logger.retire_idle_worker(&idle_worker.id).await
-                                {
-                                    tracing::warn!(
-                                        worker_id = %idle_worker.id,
-                                        %error,
-                                        "failed to retire idle worker"
-                                    );
-                                }
-                                tracing::info!(
-                                    worker_id = %idle_worker.id,
-                                    channel_id = %conversation_id,
-                                    %reason,
-                                    "retired idle worker (session expired)"
-                                );
-                            }
-                        }
-                    }
-
-                    // Spawn the channel event loop.
-                    let cleanup_channel_id = conversation_id.clone();
-                    let process_control_registry = agent.deps.process_control_registry.clone();
-                    let api_state_for_cleanup = api_state.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = channel.run().await {
-                            tracing::error!(%error, "channel event loop failed");
-                        }
-                        let scoped_channel_id: spacebot::ChannelId =
-                            Arc::from(cleanup_channel_id.as_str());
-                        process_control_registry
-                            .unregister_channel(&scoped_channel_id, channel_registration_id)
-                            .await;
-                        api_state_for_cleanup
-                            .unregister_channel_status(&cleanup_channel_id)
-                            .await;
-                        api_state_for_cleanup
-                            .unregister_channel_state(&cleanup_channel_id)
-                            .await;
-                    });
-
-                    let messaging_for_outbound = messaging_manager.clone();
-                    let api_event_tx = api_state.event_tx.clone();
-                    let sse_agent_id = agent_id.to_string();
-                    let sse_channel_id = conversation_id.clone();
-                    let outbound_handle = tokio::spawn(async move {
-                        while let Some(routed) = response_rx.recv().await {
-                            let spacebot::RoutedResponse {
-                                response,
-                                target,
-                                delivery_receipt,
-                            } = routed;
-                            forward_sse_event(
-                                &api_event_tx,
-                                &sse_agent_id,
-                                &sse_channel_id,
-                                &response,
-                            );
-                            let delivery =
-                                route_outbound(&messaging_for_outbound, &target, response).await;
-                            if let Some(receipt) = delivery_receipt {
-                                receipt.send(delivery).ok();
-                            }
-                        }
-                    });
-
-                    active_channels.insert(
-                        channel_key,
-                        ActiveChannel {
-                            relay: spacebot::agent::inbound_relay::spawn(
-                                &conversation_id,
-                                agent_id,
-                                channel_tx,
-                            ),
-                            _outbound_handle: outbound_handle,
-                        },
-                    );
-
-                    tracing::info!(
-                        conversation_id = %conversation_id,
-                        agent_id = %agent_id,
-                        any_resumed,
-                        "pre-created channel for idle worker resumption"
-                    );
+                    tracing::warn!(worker_id = %idle_worker.id, %reason, "failed to restore detached idle worker");
                 }
             }
         }
@@ -1933,6 +1668,7 @@ async fn run(
 
                     // Register the channel's status block with the API for snapshot queries
                     api_state.register_channel_status(
+                        agent_id.to_string(),
                         conversation_id.clone(),
                         channel.state.status_block.clone(),
                     ).await;
@@ -1971,6 +1707,7 @@ async fn run(
 
                     // Spawn the channel's event loop
                     let cleanup_channel_id = conversation_id.clone();
+                    let cleanup_agent_id = agent_id.to_string();
                     let process_control_registry = agent.deps.process_control_registry.clone();
                     let api_state_for_cleanup = api_state.clone();
                     tokio::spawn(async move {
@@ -1984,7 +1721,7 @@ async fn run(
                             .unregister_channel(&scoped_channel_id, channel_registration_id)
                             .await;
                         api_state_for_cleanup
-                            .unregister_channel_status(&cleanup_channel_id)
+                            .unregister_channel_status(&cleanup_agent_id, &cleanup_channel_id)
                             .await;
                         api_state_for_cleanup
                             .unregister_channel_state(&cleanup_channel_id)
@@ -2291,6 +2028,9 @@ async fn run(
     }
 
     // Graceful shutdown
+    for agent in agents.values() {
+        agent.deps.process_control_registry.close_admission().await;
+    }
     drop(active_channels);
 
     for agent in agents.values_mut() {
@@ -2305,6 +2045,18 @@ async fn run(
         scheduler.shutdown().await;
     }
     drop(cron_schedulers_for_shutdown);
+
+    for agent in agents.values() {
+        if final_state == spacebot::lifecycle::LifecycleState::Restart {
+            agent.deps.process_control_registry.detach_workers().await;
+        } else {
+            agent
+                .deps
+                .process_control_registry
+                .drain_workers(std::time::Duration::from_secs(2))
+                .await;
+        }
+    }
 
     messaging_manager.shutdown().await;
 
@@ -2831,6 +2583,7 @@ async fn initialize_agents(
     // Wire agent event streams, DB pools, and config summaries into the API server
     {
         let mut agent_pools = std::collections::HashMap::new();
+        let mut process_control_registries = std::collections::HashMap::new();
         let mut agent_configs = Vec::new();
         let mut memory_searches = std::collections::HashMap::new();
         let mut mcp_managers = std::collections::HashMap::new();
@@ -2841,10 +2594,18 @@ async fn initialize_agents(
         let mut sandboxes = std::collections::HashMap::new();
         for (agent_id, agent) in agents.iter() {
             let event_rx = agent.deps.event_tx.subscribe();
-            api_state.register_agent_events(agent_id.to_string(), event_rx);
+            api_state.register_agent_events(
+                agent_id.to_string(),
+                event_rx,
+                agent.deps.process_control_registry.clone(),
+            );
             let tool_output_rx = agent.deps.tool_output_tx.subscribe();
             api_state.register_tool_output_stream(agent_id.to_string(), tool_output_rx);
             agent_pools.insert(agent_id.to_string(), agent.db.sqlite.clone());
+            process_control_registries.insert(
+                agent_id.to_string(),
+                agent.deps.process_control_registry.clone(),
+            );
             memory_searches.insert(agent_id.to_string(), agent.deps.memory_search.clone());
             mcp_managers.insert(agent_id.to_string(), agent.deps.mcp_manager.clone());
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());
@@ -2866,6 +2627,7 @@ async fn initialize_agents(
             });
         }
         api_state.set_agent_pools(agent_pools);
+        api_state.set_process_control_registries(process_control_registries);
         api_state.set_agent_configs(agent_configs);
         api_state.set_memory_searches(memory_searches);
         api_state.set_mcp_managers(mcp_managers);

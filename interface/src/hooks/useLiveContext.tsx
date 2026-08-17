@@ -14,6 +14,7 @@ import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveBranch, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useServer } from "@/hooks/useServer";
 import { NOTIFICATIONS_QUERY_KEY } from "@/hooks/useNotifications";
+import {reconcileWorkerSnapshot, workerLifecycleKey} from "@/hooks/workerSnapshot";
 
 interface LiveContextValue {
 	liveStates: Record<string, ChannelLiveState>;
@@ -65,6 +66,8 @@ export function useLiveContext() {
 /** Duration (ms) an edge stays "active" after a message flows through it. */
 const LINK_ACTIVE_DURATION = 3000;
 
+type GlobalActiveWorker = ActiveWorker & {channelId?: string; agentId: string};
+
 function toolResultStatusFromText(result: string): ToolResultStatus {
 	if (
 		result.includes('"waiting_for_input":true') ||
@@ -93,9 +96,101 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	const channels = channelsData?.channels ?? [];
 	const { liveStates, handlers: channelHandlers, syncStatusSnapshot, loadOlderMessages } = useChannelLiveState(channels);
 
-	// Flat active workers map + event version counter for the workers tab.
-	// This is a separate piece of state from channel liveStates so the workers
-	// tab can react to SSE events without scanning all channels.
+	// Agent-scoped worker liveness is independent of channel registration. Channel
+	// state projects these workers for presentation but does not own their lifecycle.
+	const [activeWorkers, setActiveWorkers] = useState<
+		Record<string, GlobalActiveWorker>
+	>({});
+	const activeWorkersRef = useRef(activeWorkers);
+	const workerLifecycleGenerationRef = useRef(0);
+	const workerLifecycleGenerationsRef = useRef(new Map<string, number>());
+	const recordWorkerLifecycle = useCallback((agentId: string, workerId: string) => {
+		workerLifecycleGenerationRef.current += 1;
+		workerLifecycleGenerationsRef.current.set(
+			workerLifecycleKey(agentId, workerId),
+			workerLifecycleGenerationRef.current,
+		);
+	}, []);
+	const updateActiveWorkers = useCallback(
+		(
+			update: (
+				workers: Record<string, GlobalActiveWorker>,
+			) => Record<string, GlobalActiveWorker>,
+		) => {
+			setActiveWorkers((workers) => {
+				const next = update(workers);
+				activeWorkersRef.current = next;
+				return next;
+			});
+		},
+		[],
+	);
+	const syncWorkerSnapshot = useCallback(async () => {
+		const requestGeneration = workerLifecycleGenerationRef.current;
+		try {
+			const {agents} = await api.agents();
+			const snapshots = await Promise.all(
+				agents.map(async (agent) => ({
+					agentId: agent.id,
+					workers: (await api.workersList(agent.id, {limit: 200})).workers,
+				})),
+			);
+			updateActiveWorkers((current) => {
+				let next = current;
+				for (const {agentId, workers} of snapshots) {
+					const liveWorkers = workers.flatMap((worker): GlobalActiveWorker[] => {
+						if (!worker.runtime_attached || !worker.registration_id || !worker.runtime_state)
+							return [];
+						return [{
+							id: worker.id,
+							registrationId: worker.registration_id,
+							task: worker.task,
+							status: worker.live_status ?? worker.status,
+							startedAt: new Date(worker.started_at).getTime(),
+							toolCalls: worker.tool_calls,
+							currentTool: null,
+							isIdle: worker.runtime_state === "waiting_for_input",
+							runtimeState: worker.runtime_state,
+							runtimeAttached: true,
+							routable: worker.routable,
+							interactive: worker.interactive,
+							workerType: worker.backend,
+							channelId: worker.channel_id ?? undefined,
+							agentId,
+						}];
+					});
+					next = reconcileWorkerSnapshot(
+						next,
+						liveWorkers,
+						requestGeneration,
+						workerLifecycleGenerationsRef.current,
+						(worker) => worker.agentId === agentId,
+						(worker) => workerLifecycleKey(worker.agentId, worker.id),
+						(worker) => worker.id,
+						(worker) => workerLifecycleKey(worker.agentId, worker.id),
+						(existing, worker) => {
+							const sameRegistration = existing?.registrationId === worker.registrationId;
+							return sameRegistration
+								? {
+									...worker,
+									toolCalls: Math.max(existing.toolCalls, worker.toolCalls),
+									currentTool: existing.currentTool,
+								}
+								: worker;
+						},
+					);
+				}
+				return next;
+			});
+		} catch (error) {
+			console.warn("Failed to synchronize worker registry snapshot:", error);
+		}
+	}, [updateActiveWorkers]);
+
+	useEffect(() => {
+		void syncWorkerSnapshot();
+	}, [syncWorkerSnapshot]);
+
 	const [workerEventVersion, setWorkerEventVersion] = useState(0);
 	const bumpWorkerVersion = useCallback(() => setWorkerEventVersion((v) => v + 1), []);
 
@@ -118,20 +213,6 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	// Live OpenCode parts: per-worker insertion-ordered Map keyed by part ID.
 	// Updated via opencode_part_updated SSE events. Cleared when worker completes.
 	const [liveOpenCodeParts, setLiveOpenCodeParts] = useState<Record<string, Map<string, OpenCodePart>>>({});
-
-	// Derive flat active workers from channel live states
-	const activeWorkers = useMemo(() => {
-		const channelAgentIds = new Map(channels.map((channel) => [channel.id, channel.agent_id]));
-		const map: Record<string, ActiveWorker & { channelId?: string; agentId: string }> = {};
-		for (const [channelId, state] of Object.entries(liveStates)) {
-			const channelAgentId = channelAgentIds.get(channelId);
-			if (!channelAgentId) continue;
-			for (const [workerId, worker] of Object.entries(state.workers)) {
-				map[workerId] = { ...worker, channelId, agentId: channelAgentId };
-			}
-		}
-		return map;
-	}, [liveStates, channels]);
 
 	const activeBranches = useMemo(() => {
 		const channelAgentIds = new Map(channels.map((channel) => [channel.id, channel.agent_id]));
@@ -192,12 +273,33 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	// Wrap channel worker handlers to also bump the worker event version
 	// and accumulate live transcript steps from SSE events.
 	const wrappedWorkerStarted = useCallback((data: unknown) => {
+		const event = data as import("@/api/client").WorkerStartedEvent;
+		recordWorkerLifecycle(event.agent_id, event.worker_id);
 		channelHandlers.worker_started(data);
-		const event = data as { worker_id: string };
+		updateActiveWorkers((workers) => ({
+			...workers,
+			[event.worker_id]: {
+				id: event.worker_id,
+				registrationId: event.worker_registration_id,
+				task: event.task,
+				status: "starting",
+				startedAt: Date.now(),
+				toolCalls: 0,
+				currentTool: null,
+				isIdle: false,
+				runtimeState: "running",
+				runtimeAttached: true,
+				routable: false,
+				interactive: event.interactive ?? false,
+				workerType: event.worker_type ?? "builtin",
+				channelId: event.channel_id ?? undefined,
+				agentId: event.agent_id,
+			},
+		}));
 		setLiveTranscripts((prev) => ({ ...prev, [event.worker_id]: [] }));
 		setLiveOpenCodeParts((prev) => ({ ...prev, [event.worker_id]: new Map() }));
 		bumpWorkerVersion();
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, recordWorkerLifecycle, updateActiveWorkers, bumpWorkerVersion]);
 
 	const wrappedBranchStarted = useCallback((data: unknown) => {
 		channelHandlers.branch_started(data);
@@ -205,22 +307,75 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		setLiveTranscripts((previous) => ({...previous, [event.branch_id]: []}));
 	}, [channelHandlers]);
 
+	const workerEventIsCurrent = useCallback(
+		(event: {
+			agent_id: string;
+			process_type?: string;
+			process_id?: string;
+			worker_id?: string;
+			worker_registration_id: string | null;
+		}) => {
+			const workerId = event.worker_id ?? event.process_id;
+			if (!workerId || !event.worker_registration_id) return false;
+			const worker = activeWorkersRef.current[workerId];
+			return (
+				worker?.agentId === event.agent_id &&
+				worker.registrationId === event.worker_registration_id
+			);
+		},
+		[],
+	);
+
 	const wrappedWorkerStatus = useCallback((data: unknown) => {
+		const event = data as import("@/api/client").WorkerStatusEvent;
+		if (!workerEventIsCurrent(event)) return;
+		recordWorkerLifecycle(event.agent_id, event.worker_id);
 		channelHandlers.worker_status(data);
+		updateActiveWorkers((workers) => {
+			const worker = workers[event.worker_id];
+			if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
+			return {...workers, [event.worker_id]: {...worker, status: event.status}};
+		});
 		// Status text comes from set_status tool calls which already appear as
 		// paired tool_started/tool_completed events in the transcript. No need
 		// to duplicate them as standalone text steps.
 		bumpWorkerVersion();
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, recordWorkerLifecycle, updateActiveWorkers, bumpWorkerVersion]);
 
 	const wrappedWorkerIdle = useCallback((data: unknown) => {
+		const event = data as import("@/api/client").WorkerIdleEvent;
+		if (!workerEventIsCurrent(event)) return;
+		recordWorkerLifecycle(event.agent_id, event.worker_id);
 		channelHandlers.worker_idle(data);
+		updateActiveWorkers((workers) => {
+			const worker = workers[event.worker_id];
+			if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
+			return {
+				...workers,
+				[event.worker_id]: {
+					...worker,
+					isIdle: true,
+					runtimeState: "waiting_for_input",
+					routable: true,
+				},
+			};
+		});
 		bumpWorkerVersion();
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, recordWorkerLifecycle, updateActiveWorkers, bumpWorkerVersion]);
 
 	const wrappedWorkerCompleted = useCallback((data: unknown) => {
+		const event = data as import("@/api/client").WorkerCompletedEvent;
+		recordWorkerLifecycle(event.agent_id, event.worker_id);
 		channelHandlers.worker_completed(data);
-		const event = data as { worker_id: string };
+		const current = activeWorkersRef.current[event.worker_id];
+		if (!current || current.registrationId !== event.worker_registration_id) return;
+		updateActiveWorkers((workers) => {
+			const worker = workers[event.worker_id];
+			if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
+			const next = {...workers};
+			delete next[event.worker_id];
+			return next;
+		});
 		// Clean up live OpenCode parts — persisted transcript takes over
 		setLiveOpenCodeParts((prev) => {
 			const next = { ...prev };
@@ -228,11 +383,12 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			return next;
 		});
 		bumpWorkerVersion();
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, recordWorkerLifecycle, updateActiveWorkers, bumpWorkerVersion]);
 
 	const wrappedToolStarted = useCallback((data: unknown) => {
-		channelHandlers.tool_started(data);
 		const event = data as ToolStartedEvent;
+		if (event.process_type === "worker" && !workerEventIsCurrent(event)) return;
+		channelHandlers.tool_started(data);
 		if (event.process_type === "worker" || event.process_type === "branch") {
 			const callId = event.call_id || `${event.process_id}:${event.tool_name}:started`;
 			setLiveTranscripts((prev) => {
@@ -272,13 +428,21 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 						: [...nextSteps, step],
 				};
 			});
-			if (event.process_type === "worker") bumpWorkerVersion();
+			if (event.process_type === "worker") {
+				updateActiveWorkers((workers) => {
+					const worker = workers[event.process_id];
+					if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
+					return {...workers, [event.process_id]: {...worker, currentTool: event.tool_name}};
+				});
+				bumpWorkerVersion();
+			}
 		}
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, updateActiveWorkers, bumpWorkerVersion]);
 
 	const wrappedToolCompleted = useCallback((data: unknown) => {
-		channelHandlers.tool_completed(data);
 		const event = data as ToolCompletedEvent;
+		if (event.process_type === "worker" && !workerEventIsCurrent(event)) return;
+		channelHandlers.tool_completed(data);
 		if (event.process_type === "worker" || event.process_type === "branch") {
 			const callId = event.call_id || `${event.process_id}:${event.tool_name}:completed`;
 			setLiveTranscripts((prev) => {
@@ -300,12 +464,27 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 				}
 				return { ...prev, [event.process_id]: [...steps, step] };
 			});
-			if (event.process_type === "worker") bumpWorkerVersion();
+			if (event.process_type === "worker") {
+				updateActiveWorkers((workers) => {
+					const worker = workers[event.process_id];
+					if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
+					return {
+						...workers,
+						[event.process_id]: {
+							...worker,
+							currentTool: null,
+							toolCalls: worker.toolCalls + 1,
+						},
+					};
+				});
+				bumpWorkerVersion();
+			}
 		}
-	}, [channelHandlers, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, updateActiveWorkers, bumpWorkerVersion]);
 
 	const handleToolOutput = useCallback((data: unknown) => {
 		const event = data as ToolOutputEvent;
+		if (event.process_type === "worker" && !workerEventIsCurrent(event)) return;
 		if (event.process_type === "worker" || event.process_type === "branch") {
 			setLiveTranscripts((prev) => {
 				const steps = prev[event.process_id] ?? [];
@@ -341,11 +520,12 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			});
 			if (event.process_type === "worker") bumpWorkerVersion();
 		}
-	}, [bumpWorkerVersion]);
+	}, [workerEventIsCurrent, bumpWorkerVersion]);
 
 	// Handle OpenCode part updates — upsert parts into the per-worker ordered map
 	const handleOpenCodePartUpdated = useCallback((data: unknown) => {
 		const event = data as OpenCodePartUpdatedEvent;
+		if (!workerEventIsCurrent(event)) return;
 		setLiveOpenCodeParts((prev) => {
 			const existing = prev[event.worker_id] ?? new Map<string, OpenCodePart>();
 			const next = new Map(existing);
@@ -353,17 +533,20 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			return { ...prev, [event.worker_id]: next };
 		});
 		bumpWorkerVersion();
-	}, [bumpWorkerVersion]);
+	}, [workerEventIsCurrent, bumpWorkerVersion]);
 
-	const handleOpenCodeSessionCreated = useCallback(() => {
+	const handleOpenCodeSessionCreated = useCallback((data: unknown) => {
+		const event = data as import("@/api/client").OpenCodeSessionCreatedEvent;
+		if (!workerEventIsCurrent(event)) return;
 		queryClient.invalidateQueries({queryKey: ["orchestrate-workers"]});
 		bumpWorkerVersion();
-	}, [queryClient, bumpWorkerVersion]);
+	}, [queryClient, workerEventIsCurrent, bumpWorkerVersion]);
 
 	// Model text emitted by a branch or worker between tool calls.
 	const handleProcessText = useCallback((data: unknown) => {
 		const event = data as ProcessTextEvent;
 		if (event.process_type !== "worker" && event.process_type !== "branch") return;
+		if (event.process_type === "worker" && !workerEventIsCurrent(event)) return;
 		setLiveTranscripts((prev) => {
 			const steps = prev[event.process_id] ?? [];
 			const step: TranscriptStep = {
@@ -373,7 +556,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			return { ...prev, [event.process_id]: [...steps, step] };
 		});
 		if (event.process_type === "worker") bumpWorkerVersion();
-	}, [bumpWorkerVersion]);
+	}, [workerEventIsCurrent, bumpWorkerVersion]);
 
 	const handleCortexChatMessage = useCallback((data: unknown) => {
 		// Forward cortex chat auto-triggered messages to any listening useCortexChat hooks
@@ -418,6 +601,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 
 	const onReconnect = useCallback(() => {
 		syncStatusSnapshot();
+		void syncWorkerSnapshot();
 		queryClient.invalidateQueries({ queryKey: ["channels"] });
 		queryClient.invalidateQueries({ queryKey: ["status"] });
 		queryClient.invalidateQueries({ queryKey: ["agents"] });
@@ -425,7 +609,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_QUERY_KEY });
 		// Bump task version so any mounted task views refetch immediately.
 		bumpTaskVersion();
-	}, [syncStatusSnapshot, queryClient, bumpTaskVersion]);
+	}, [syncStatusSnapshot, syncWorkerSnapshot, queryClient, bumpTaskVersion]);
 
 	const { serverUrl, state: serverState } = useServer();
 	// Compute the SSE events URL from the current server URL so the

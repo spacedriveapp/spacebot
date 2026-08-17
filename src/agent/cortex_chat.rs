@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
+const MAX_LAG_RECONCILIATION_WORKERS: usize = 32;
+
 /// A persisted cortex chat message.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CortexChatMessage {
@@ -418,10 +420,21 @@ impl CortexChatStore {
 /// Holds the deps, tool server, store, and a mutex to prevent concurrent sends.
 /// Tracked worker entry: maps a cortex-spawned worker to the thread it was
 /// spawned from so the event loop can deliver results to the right conversation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedWorker {
     pub thread_id: String,
     pub channel_context: Option<String>,
+    pub registration_id: crate::agent::process_control::WorkerRegistrationId,
+    pub operation_id: crate::agent::process_control::WorkerOperationId,
+}
+
+fn tracked_completion_matches(
+    tracked: &TrackedWorker,
+    registration_id: Option<crate::agent::process_control::WorkerRegistrationId>,
+    operation_id: Option<crate::agent::process_control::WorkerOperationId>,
+) -> bool {
+    registration_id.is_none_or(|id| id == tracked.registration_id)
+        && operation_id.is_none_or(|id| id == tracked.operation_id)
 }
 
 pub struct CortexChatSession {
@@ -487,88 +500,141 @@ impl CortexChatSession {
                     Ok(event) => event,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         tracing::debug!(count, "cortex chat event loop lagged");
+                        session.reconcile_tracked_worker_terminals().await;
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
 
-                let (worker_id, result, success) = match &event {
+                let (worker_id, registration_id, active_operation, outcome_version) = match &event {
                     ProcessEvent::WorkerComplete {
                         agent_id: event_agent_id,
                         worker_id,
-                        result,
-                        success,
+                        worker_registration_id,
+                        active_operation,
+                        outcome_version,
                         ..
-                    } if *event_agent_id == agent_id => (*worker_id, result.clone(), *success),
+                    } if *event_agent_id == agent_id => (
+                        *worker_id,
+                        *worker_registration_id,
+                        active_operation
+                            .as_ref()
+                            .map(|operation| operation.operation_id),
+                        *outcome_version,
+                    ),
                     _ => continue,
                 };
+                session
+                    .reconcile_tracked_worker(
+                        worker_id,
+                        Some(registration_id),
+                        active_operation,
+                        Some(outcome_version),
+                    )
+                    .await;
+            }
+        });
+    }
 
-                let tracked: Option<TrackedWorker> = session
-                    .cortex_ctx
+    async fn reconcile_tracked_worker_terminals(self: &Arc<Self>) {
+        let worker_ids = self
+            .cortex_ctx
+            .tracked_workers
+            .read()
+            .await
+            .keys()
+            .copied()
+            .take(MAX_LAG_RECONCILIATION_WORKERS)
+            .collect::<Vec<_>>();
+        for worker_id in worker_ids {
+            self.reconcile_tracked_worker(worker_id, None, None, None)
+                .await;
+        }
+    }
+
+    async fn reconcile_tracked_worker(
+        self: &Arc<Self>,
+        worker_id: crate::WorkerId,
+        registration_id: Option<crate::agent::process_control::WorkerRegistrationId>,
+        operation_id: Option<crate::agent::process_control::WorkerOperationId>,
+        outcome_version: Option<i64>,
+    ) {
+        let Some(tracked) = self
+            .cortex_ctx
+            .tracked_workers
+            .read()
+            .await
+            .get(&worker_id)
+            .cloned()
+        else {
+            return;
+        };
+        if !tracked_completion_matches(&tracked, registration_id, operation_id) {
+            return;
+        }
+
+        let run_logger = ProcessRunLogger::new(self.deps.sqlite_pool.clone());
+        let terminal = match run_logger.read_worker_terminal(worker_id).await {
+            Ok(Some(terminal)) => terminal,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, %worker_id, "failed to reconcile cortex chat worker terminal");
+                return;
+            }
+        };
+        if outcome_version.is_some_and(|version| version != terminal.outcome_version) {
+            tracing::warn!(%worker_id, "cortex chat worker completion version mismatch");
+            return;
+        }
+
+        let removed = {
+            let mut tracked_workers = self.cortex_ctx.tracked_workers.write().await;
+            if tracked_workers.get(&worker_id) != Some(&tracked) {
+                false
+            } else {
+                tracked_workers.remove(&worker_id);
+                true
+            }
+        };
+        if !removed {
+            return;
+        }
+
+        let success = matches!(
+            terminal.outcome_kind,
+            crate::conversation::WorkerOutcomeKind::Succeeded
+                | crate::conversation::WorkerOutcomeKind::Partial
+        );
+        tracing::info!(
+            %worker_id,
+            thread_id = %tracked.thread_id,
+            success,
+            "cortex chat worker completed, auto-triggering follow-up"
+        );
+        let status_label = if success { "completed" } else { "failed" };
+        let retrigger_message =
+            format!("[Worker {worker_id} {status_label}]\n\n{}", terminal.result);
+        let event_rx = match self
+            .send_message_blocking(
+                &tracked.thread_id,
+                &retrigger_message,
+                tracked.channel_context.as_deref(),
+            )
+            .await
+        {
+            Ok(event_rx) => event_rx,
+            Err(error) => {
+                tracing::warn!(%worker_id, %error, "failed to auto-trigger cortex chat for worker result");
+                self.cortex_ctx
                     .tracked_workers
                     .write()
                     .await
-                    .remove(&worker_id);
-                let Some(tracked) = tracked else {
-                    continue;
-                };
-
-                let run_logger = ProcessRunLogger::new(session.deps.sqlite_pool.clone());
-                let Some(terminal) = run_logger
-                    .read_worker_terminal(worker_id)
-                    .await
-                    .ok()
-                    .flatten()
-                else {
-                    tracing::warn!(%worker_id, "cortex chat worker completion was not durable");
-                    continue;
-                };
-                if terminal.outcome_version
-                    != match &event {
-                        ProcessEvent::WorkerComplete {
-                            outcome_version, ..
-                        } => *outcome_version,
-                        _ => 0,
-                    }
-                {
-                    tracing::warn!(%worker_id, "cortex chat worker completion version mismatch");
-                    continue;
-                }
-
-                tracing::info!(
-                    %worker_id,
-                    thread_id = %tracked.thread_id,
-                    success,
-                    "cortex chat worker completed, auto-triggering follow-up"
-                );
-
-                let status_label = if success { "completed" } else { "failed" };
-                let retrigger_message = format!("[Worker {worker_id} {status_label}]\n\n{result}");
-
-                let channel_ref = tracked.channel_context.as_deref();
-
-                // The send_lock may be held if the admin is mid-conversation.
-                // Wait for it rather than dropping the result.
-                let event_rx = match session
-                    .send_message_blocking(&tracked.thread_id, &retrigger_message, channel_ref)
-                    .await
-                {
-                    Ok(rx) => rx,
-                    Err(error) => {
-                        tracing::warn!(
-                            %worker_id,
-                            %error,
-                            "failed to auto-trigger cortex chat for worker result"
-                        );
-                        continue;
-                    }
-                };
-
-                // Drain the event stream and emit the final response through the
-                // ProcessEvent pipeline so the frontend SSE picks it up.
-                Self::drain_auto_trigger_events(event_rx, &session.deps, &tracked.thread_id).await;
+                    .entry(worker_id)
+                    .or_insert(tracked);
+                return;
             }
-        });
+        };
+        Self::drain_auto_trigger_events(event_rx, &self.deps, &tracked.thread_id).await;
     }
 
     /// Drain events from an auto-triggered cortex chat turn and emit the final
@@ -966,7 +1032,10 @@ impl CortexChatSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{CortexChatSendError, resolve_lifecycle_call_id, try_acquire_send_lock};
+    use super::{
+        CortexChatSendError, TrackedWorker, resolve_lifecycle_call_id, tracked_completion_matches,
+        try_acquire_send_lock,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -999,6 +1068,35 @@ mod tests {
     fn resolve_lifecycle_call_id_falls_back_to_internal_call_id() {
         let call_id = resolve_lifecycle_call_id(None, "internal_1");
         assert_eq!(call_id, "internal_1");
+    }
+
+    #[test]
+    fn tracked_completion_rejects_stale_registration_and_operation() {
+        let registration_id = crate::agent::process_control::WorkerRegistrationId::new(7);
+        let operation_id = crate::agent::process_control::WorkerOperationId::new();
+        let tracked = TrackedWorker {
+            thread_id: "thread".to_string(),
+            channel_context: None,
+            registration_id,
+            operation_id,
+        };
+
+        assert!(tracked_completion_matches(
+            &tracked,
+            Some(registration_id),
+            Some(operation_id)
+        ));
+        assert!(!tracked_completion_matches(
+            &tracked,
+            Some(crate::agent::process_control::WorkerRegistrationId::new(8)),
+            Some(operation_id)
+        ));
+        assert!(!tracked_completion_matches(
+            &tracked,
+            Some(registration_id),
+            Some(crate::agent::process_control::WorkerOperationId::new())
+        ));
+        assert!(tracked_completion_matches(&tracked, None, None));
     }
 
     #[tokio::test]

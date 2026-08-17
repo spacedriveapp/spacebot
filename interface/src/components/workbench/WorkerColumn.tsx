@@ -35,8 +35,8 @@ export function WorkerColumn({worker}: {worker: OrchestrationWorker}) {
 						{taskText}
 					</p>
 					{/* Cancel button for running workers */}
-					{(isRunning || isIdle) && worker.channel_id && (
-						<CancelButton channelId={worker.channel_id} workerId={worker.id} />
+					{worker.runtime_attached && (
+						<CancelButton agentId={worker.agent_id} channelId={worker.channel_id ?? ""} workerId={worker.id} />
 					)}
 				</div>
 				<div className="flex items-center gap-2 text-tiny text-ink-faint">
@@ -71,9 +71,11 @@ export function WorkerColumn({worker}: {worker: OrchestrationWorker}) {
 }
 
 function CancelButton({
+	agentId,
 	channelId,
 	workerId,
 }: {
+	agentId: string;
 	channelId: string;
 	workerId: string;
 }) {
@@ -86,7 +88,7 @@ function CancelButton({
 				event.stopPropagation();
 				setCancelling(true);
 				api
-					.cancelProcess(channelId, "worker", workerId)
+					.cancelProcess(agentId, channelId, "worker", workerId)
 					.catch(console.warn)
 					.finally(() => setCancelling(false));
 			}}

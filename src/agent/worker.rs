@@ -1,6 +1,9 @@
 //! Worker: Independent task execution process.
 
 use crate::agent::compactor::{aligned_fractional_cut, estimate_history_tokens};
+use crate::agent::process_control::{
+    WorkerCallbackContext, WorkerFollowUp, WorkerOperationContext,
+};
 use crate::config::BrowserConfig;
 use crate::conversation::history::{ProcessRunLogger, WorkerLifecycle};
 use crate::conversation::settings::WorkerMemoryMode;
@@ -15,7 +18,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
-use uuid::Uuid;
 
 /// How many turns per segment before we check context and potentially compact.
 ///
@@ -266,7 +268,7 @@ pub struct Worker {
     /// System prompt loaded from prompts/WORKER.md.
     pub system_prompt: crate::prompts::SegmentedPrompt,
     /// Input channel for interactive workers (follow-up loop).
-    pub input_rx: Option<mpsc::Receiver<String>>,
+    pub input_rx: Option<mpsc::Receiver<WorkerFollowUp>>,
     /// Context injection channel. Unlike `input_rx` (which drives the
     /// interactive follow-up state machine), this delivers addendum context
     /// to a running worker at the next LLM turn boundary without changing
@@ -306,11 +308,16 @@ pub struct Worker {
     /// `WorkerOutcome::Blocked` when populated.
     pub blocked_signal: BlockSignal,
     pub transcript_snapshot: WorkerTranscriptSnapshot,
+    pub callback: WorkerCallbackContext,
+    pub initial_operation: Option<WorkerOperationContext>,
 }
 
 impl Worker {
     #[allow(clippy::too_many_arguments)]
     fn build(
+        id: WorkerId,
+        callback: WorkerCallbackContext,
+        initial_operation: Option<WorkerOperationContext>,
         channel_id: Option<ChannelId>,
         task: impl Into<String>,
         system_prompt: impl Into<crate::prompts::SegmentedPrompt>,
@@ -319,13 +326,12 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
-        input_rx: Option<mpsc::Receiver<String>>,
+        input_rx: Option<mpsc::Receiver<WorkerFollowUp>>,
         initial_history: Vec<rig::message::Message>,
         worker_memory_mode: WorkerMemoryMode,
         wiki_write: bool,
         model_override: Option<String>,
     ) -> (Self, mpsc::Sender<String>) {
-        let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
         let hook = SpacebotHook::new(
             deps.agent_id.clone(),
@@ -333,7 +339,8 @@ impl Worker {
             ProcessType::Worker,
             channel_id.clone(),
             deps.event_tx.clone(),
-        );
+        )
+        .with_worker_registration_id(callback.registration_id);
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (inject_tx, inject_rx) = mpsc::channel(8);
 
@@ -372,6 +379,8 @@ impl Worker {
                 segments_run: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 blocked_signal: new_block_signal(),
                 transcript_snapshot: new_worker_transcript_snapshot(),
+                callback,
+                initial_operation,
             },
             inject_tx,
         )
@@ -384,6 +393,9 @@ impl Worker {
     /// requiring the worker to be interactive.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        id: WorkerId,
+        callback: WorkerCallbackContext,
+        initial_operation: WorkerOperationContext,
         channel_id: Option<ChannelId>,
         task: impl Into<String>,
         system_prompt: impl Into<crate::prompts::SegmentedPrompt>,
@@ -398,6 +410,9 @@ impl Worker {
         model_override: Option<String>,
     ) -> (Self, mpsc::Sender<String>) {
         Self::build(
+            id,
+            callback,
+            Some(initial_operation),
             channel_id,
             task,
             system_prompt,
@@ -421,6 +436,9 @@ impl Worker {
     /// at LLM turn boundaries independently of the follow-up state machine.
     #[allow(clippy::too_many_arguments)]
     pub fn new_interactive(
+        id: WorkerId,
+        callback: WorkerCallbackContext,
+        initial_operation: WorkerOperationContext,
         channel_id: Option<ChannelId>,
         task: impl Into<String>,
         system_prompt: impl Into<crate::prompts::SegmentedPrompt>,
@@ -433,9 +451,12 @@ impl Worker {
         worker_memory_mode: WorkerMemoryMode,
         wiki_write: bool,
         model_override: Option<String>,
-    ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
+    ) -> (Self, mpsc::Sender<WorkerFollowUp>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
         let (worker, inject_tx) = Self::build(
+            id,
+            callback,
+            Some(initial_operation),
             channel_id,
             task,
             system_prompt,
@@ -462,6 +483,7 @@ impl Worker {
     #[allow(clippy::too_many_arguments)]
     pub fn resume_interactive(
         existing_id: WorkerId,
+        callback: WorkerCallbackContext,
         channel_id: Option<ChannelId>,
         task: impl Into<String>,
         system_prompt: impl Into<crate::prompts::SegmentedPrompt>,
@@ -471,10 +493,15 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
         prior_history: Vec<rig::message::Message>,
-    ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
+        worker_memory_mode: WorkerMemoryMode,
+        wiki_write: bool,
+        model_override: Option<String>,
+    ) -> (Self, mpsc::Sender<WorkerFollowUp>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
-        let wiki_write = deps.wiki_store.is_some();
         let (mut worker, inject_tx) = Self::build(
+            existing_id,
+            callback,
+            None,
             channel_id,
             task,
             system_prompt,
@@ -485,21 +512,9 @@ impl Worker {
             logs_dir,
             Some(input_rx),
             Vec::new(), // initial_history - will be replaced by prior_history below
-            WorkerMemoryMode::None, // Resumed workers don't have context settings
+            worker_memory_mode,
             wiki_write,
-            None, // Resumed workers don't have model override
-        );
-        // Reuse the original worker ID so DB row stays linked.
-        worker.id = existing_id;
-        // Rebuild the hook so it publishes events under the correct worker ID
-        // (Self::build creates it with a fresh random ID).
-        let process_id = ProcessId::Worker(existing_id);
-        worker.hook = SpacebotHook::new(
-            worker.deps.agent_id.clone(),
-            process_id,
-            ProcessType::Worker,
-            worker.channel_id.clone(),
-            worker.deps.event_tx.clone(),
+            model_override,
         );
         worker.state = WorkerState::WaitingForInput;
         // Stash the prior history so `run_follow_up_loop()` can pick it up.
@@ -596,6 +611,10 @@ impl Worker {
 
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
+        self.deps
+            .process_control_registry
+            .update_worker_status(self.callback, "running")
+            .await;
 
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
@@ -610,7 +629,8 @@ impl Worker {
         let interactive = self.input_rx.is_some();
         let worker_tool_server = crate::tools::create_worker_tool_server(
             self.deps.agent_id.clone(),
-            self.id,
+            self.callback,
+            self.deps.process_control_registry.clone(),
             self.channel_id.clone(),
             self.deps.task_store.clone(),
             self.deps.event_tx.clone(),
@@ -689,7 +709,10 @@ impl Worker {
                 "resuming interactive worker with prior history"
             );
             self.hook.send_status("resumed — waiting for input");
-            self.hook.send_worker_idle();
+            self.deps
+                .process_control_registry
+                .update_worker_status(self.callback, "resumed — waiting for input")
+                .await;
         } else if !history.is_empty() {
             tracing::info!(
                 worker_id = %self.id,
@@ -737,7 +760,7 @@ impl Worker {
                         url: data.url,
                         evidence: Box::new(data.evidence),
                     });
-                }
+                };
 
                 segments_run += 1;
                 self.segments_run
@@ -938,17 +961,44 @@ impl Worker {
                 } else {
                     result.clone()
                 };
-                self.deps
-                    .event_tx
-                    .send(crate::ProcessEvent::WorkerInitialResult {
-                        agent_id: self.deps.agent_id.clone(),
-                        worker_id: self.id,
-                        channel_id: self.channel_id.clone(),
-                        result: crate::secrets::scrub::scrub_leaks(&scrubbed),
-                    })
-                    .ok();
-                self.hook.send_status("waiting for input");
-                self.hook.send_worker_idle();
+                let operation = self
+                    .initial_operation
+                    .take()
+                    .expect("fresh workers have an initial operation");
+                let result = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                let applied = self
+                    .deps
+                    .process_control_registry
+                    .complete_worker_operation(
+                        self.callback,
+                        operation.operation_id,
+                        "waiting for input",
+                    )
+                    .await;
+                if applied == crate::agent::process_control::WorkerMutationResult::Applied {
+                    self.deps
+                        .event_tx
+                        .send(crate::ProcessEvent::WorkerOperationResult {
+                            agent_id: self.deps.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            operation_id: operation.operation_id,
+                            result_target: operation.result_target.clone(),
+                            result,
+                        })
+                        .ok();
+                    self.hook.send_status("waiting for input");
+                    self.deps
+                        .event_tx
+                        .send(crate::ProcessEvent::WorkerIdle {
+                            agent_id: self.deps.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            operation_id: operation.operation_id,
+                            channel_id: self.channel_id.clone(),
+                        })
+                        .ok();
+                }
             }
 
             while let Some(follow_up) = input_rx.recv().await {
@@ -974,7 +1024,7 @@ impl Worker {
                 self.maybe_compact_history(&mut compacted_history, &mut history)
                     .await;
 
-                let mut follow_up_prompt = follow_up.clone();
+                let mut follow_up_prompt = follow_up.message.clone();
                 let mut follow_up_overflow_retries = 0;
                 let mut follow_up_transient_retries = 0u32;
 
@@ -1022,7 +1072,7 @@ impl Worker {
                                 .await;
                             let prompt_engine = self.deps.runtime_config.prompts.load();
                             let overflow_msg = prompt_engine.render_system_worker_overflow()?;
-                            follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
+                            follow_up_prompt = format!("{}\n\n{overflow_msg}", follow_up.message);
                         }
                         Err(error) if is_retriable_error(&error.to_string()) => {
                             follow_up_transient_retries += 1;
@@ -1058,33 +1108,47 @@ impl Worker {
                     }
                 };
 
-                match follow_up_result {
+                let completion = match follow_up_result {
                     Ok(response) => {
-                        // Emit follow-up result so the channel can retrigger
-                        // and relay this to the user — same as initial result.
-                        if !response.is_empty() {
-                            let scrubbed = if let Some(store) =
-                                self.deps.runtime_config.secrets.load().as_ref().as_ref()
-                            {
-                                crate::secrets::scrub::scrub_with_store(
-                                    &response,
-                                    store,
-                                    &self.deps.agent_id,
-                                )
-                            } else {
-                                response
-                            };
-                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                        let response = crate::agent::process_control::operation_result_or_marker(
+                            response,
+                            crate::agent::process_control::WorkerBackend::Builtin,
+                        );
+                        let scrubbed = if let Some(store) =
+                            self.deps.runtime_config.secrets.load().as_ref().as_ref()
+                        {
+                            crate::secrets::scrub::scrub_with_store(
+                                &response,
+                                store,
+                                &self.deps.agent_id,
+                            )
+                        } else {
+                            response
+                        };
+                        let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                        let applied = self
+                            .deps
+                            .process_control_registry
+                            .complete_worker_operation(
+                                self.callback,
+                                follow_up.operation.operation_id,
+                                "waiting for input",
+                            )
+                            .await;
+                        if applied == crate::agent::process_control::WorkerMutationResult::Applied {
                             self.deps
                                 .event_tx
-                                .send(crate::ProcessEvent::WorkerInitialResult {
+                                .send(crate::ProcessEvent::WorkerOperationResult {
                                     agent_id: self.deps.agent_id.clone(),
                                     worker_id: self.id,
-                                    channel_id: self.channel_id.clone(),
+                                    worker_registration_id: self.callback.registration_id,
+                                    operation_id: follow_up.operation.operation_id,
+                                    result_target: follow_up.operation.result_target.clone(),
                                     result: scrubbed,
                                 })
                                 .ok();
                         }
+                        applied
                     }
                     Err(failure_reason) => {
                         // Surface as Blocked when the failure was caused by a
@@ -1114,7 +1178,7 @@ impl Worker {
                         follow_up_failure = Some(failure_reason);
                         break;
                     }
-                }
+                };
 
                 self.state = WorkerState::WaitingForInput;
                 self.persist_transcript(&compacted_history, &history).await;
@@ -1123,8 +1187,22 @@ impl Worker {
                     WorkerLifecycle::WaitingForInput,
                 )
                 .await;
-                self.hook.send_status("waiting for input");
-                self.hook.send_worker_idle();
+                if matches!(
+                    completion,
+                    crate::agent::process_control::WorkerMutationResult::Applied
+                ) {
+                    self.hook.send_status("waiting for input");
+                    self.deps
+                        .event_tx
+                        .send(crate::ProcessEvent::WorkerIdle {
+                            agent_id: self.deps.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            operation_id: follow_up.operation.operation_id,
+                            channel_id: self.channel_id.clone(),
+                        })
+                        .ok();
+                }
             }
         }
 

@@ -9,6 +9,8 @@ Autonomy gives an agent a durable operating model between conversations. Goals p
 
 The autonomy channel is separate from a user-facing conversation. On wake, it receives the agent identity, active goals, task state, queued wake events, recent activity, and recent run summaries. It records a durable outcome before the run settles.
 
+Worker liveness comes from the agent registry. Autonomy can route retained workers that originated in another channel, and each routed operation is tracked independently so an older result cannot settle the current run. Durable worker rows without live controls are shown as unavailable rather than actionable work.
+
 ## Authority Levels
 
 Each agent has an autonomy level:

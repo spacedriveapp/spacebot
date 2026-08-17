@@ -583,21 +583,6 @@ struct InjectedTaskContext<'a> {
     attempts: Vec<crate::tasks::TaskAttempt>,
 }
 
-fn summarize_duplicate_task(task: &str) -> String {
-    let trimmed = task.trim();
-    if trimmed.is_empty() {
-        return "unspecified task".to_string();
-    }
-
-    const MAX_CHARS: usize = 80;
-    if trimmed.len() <= MAX_CHARS {
-        trimmed.to_string()
-    } else {
-        let boundary = trimmed.floor_char_boundary(MAX_CHARS);
-        format!("{}...", &trimmed[..boundary])
-    }
-}
-
 /// Error type for spawn worker tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Worker spawn failed: {0}")]
@@ -886,41 +871,6 @@ impl SpawnWorkerTool {
         }
         let is_opencode = effective_worker_type.as_deref() == Some("opencode");
 
-        // Reject if an active worker already has the same task. This prevents
-        // duplicate workers when the LLM emits multiple spawn_worker calls in
-        // a single response and one fails/retries.
-        //
-        // Returned as a structured result (not an error) so the LLM can
-        // recover deterministically — e.g. route to the existing worker.
-        {
-            let status = self.state.status_block.read().await;
-            if let Some(existing_id) = status.find_duplicate_worker_task(&args.task) {
-                self.state
-                    .deps
-                    .working_memory
-                    .emit(
-                        crate::memory::WorkingMemoryEventType::BlockedOn,
-                        format!(
-                            "Worker spawn blocked on active worker {existing_id} for duplicate task: {}",
-                            summarize_duplicate_task(&args.task)
-                        ),
-                    )
-                    .channel(self.state.channel_id.to_string())
-                    .importance(0.6)
-                    .record();
-
-                return Ok(SpawnWorkerOutput {
-                    worker_id: existing_id,
-                    spawned: false,
-                    interactive: args.interactive,
-                    message: format!(
-                        "A worker is already running this task (worker {existing_id}). \
-                         Use route to send additional context to the running worker instead."
-                    ),
-                });
-            }
-        }
-
         // Resolve working directory: the task plan's directory wins, then the
         // explicit argument, then project/worktree lookup.
         let resolved_directory = match planned.as_ref().and_then(|plan| plan.directory.clone()) {
@@ -946,7 +896,7 @@ impl SpawnWorkerTool {
             origin_branch_id: self.branch_delegation.as_ref().map(|state| state.branch_id),
         };
 
-        let worker_id = if is_opencode {
+        let prepared = if is_opencode {
             let directory = resolved_directory.as_deref().ok_or_else(|| {
                 SpawnWorkerError(
                     "directory is required for opencode workers (set directory, project_id, or worktree_id)".into(),
@@ -988,15 +938,69 @@ impl SpawnWorkerTool {
             .map_err(|e| SpawnWorkerError(format!("{e}")))?
         };
 
-        // Bind the worker at the revision used to build its context. The
-        // process has already started, so a lost claim cancels it before it can
-        // continue against a task whose approval or specification changed.
+        let worker_id = prepared.worker_id;
+        let mut bound_task: Option<(i64, i64, crate::tasks::TaskStatus)> = None;
+
         if let Some(plan) = &planned
             && plan.bind_task
         {
+            if !prepared.is_starting().await {
+                prepared
+                    .fail_before_start("cancelled before task attempt claim")
+                    .await;
+                return Err(SpawnWorkerError(
+                    "worker was cancelled before task binding".to_string(),
+                ));
+            }
+            if let Err(error) = self
+                .state
+                .deps
+                .task_store
+                .start_task_attempt(
+                    plan.task_number,
+                    crate::tasks::StartTaskAttempt {
+                        worker_id: worker_id.to_string(),
+                        author_type: crate::tasks::TaskAuthorKind::Agent,
+                        author_id: Some(self.state.deps.agent_id.to_string()),
+                        agent_id: Some(self.state.deps.agent_id.to_string()),
+                        channel_id: Some(self.state.channel_id.to_string()),
+                    },
+                )
+                .await
+            {
+                prepared
+                    .fail_before_start("task attempt could not be claimed")
+                    .await;
+                return Err(SpawnWorkerError(format!(
+                    "task #{} could not record this attempt: {error}",
+                    plan.task_number
+                )));
+            }
+            if !prepared.is_starting().await {
+                if let Err(error) = self
+                    .state
+                    .deps
+                    .task_store
+                    .finish_task_attempt(
+                        &worker_id.to_string(),
+                        crate::tasks::TaskAttemptOutcome::Interrupted,
+                        Some("worker cancelled before task binding"),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, %worker_id, "failed to close cancelled task attempt");
+                }
+                prepared
+                    .fail_before_start("cancelled before task binding")
+                    .await;
+                return Err(SpawnWorkerError(
+                    "worker was cancelled before task binding".to_string(),
+                ));
+            }
+
             let status_change = (plan.previous_status == crate::tasks::TaskStatus::Ready)
                 .then_some(crate::tasks::TaskStatus::InProgress);
-            if let Err(error) = self
+            let binding = self
                 .state
                 .deps
                 .task_store
@@ -1016,77 +1020,62 @@ impl SpawnWorkerTool {
                         ..Default::default()
                     },
                 )
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    task_number = plan.task_number,
-                    %worker_id,
-                    "failed to bind spawned worker to task"
-                );
-                if let Err(cancel_error) = self
-                    .state
-                    .cancel_worker_with_reason(worker_id, "task changed before worker binding")
-                    .await
-                {
-                    tracing::warn!(
-                        %cancel_error,
-                        %worker_id,
-                        "failed to cancel worker after task binding failed"
-                    );
+                .await;
+            let bound_revision = match binding {
+                Ok(Some(task)) => task.revision,
+                Ok(None) => {
+                    let error = anyhow::anyhow!("task no longer exists");
+                    if let Err(finish_error) = self
+                        .state
+                        .deps
+                        .task_store
+                        .finish_task_attempt(
+                            &worker_id.to_string(),
+                            crate::tasks::TaskAttemptOutcome::Interrupted,
+                            Some("task disappeared before worker binding"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%finish_error, %worker_id, "failed to close unbound task attempt");
+                    }
+                    prepared
+                        .fail_before_start("task disappeared before worker binding")
+                        .await;
+                    return Err(SpawnWorkerError(format!(
+                        "task #{} disappeared before worker {worker_id} could be bound: {error}",
+                        plan.task_number
+                    )));
                 }
-                return Err(SpawnWorkerError(format!(
-                    "task #{} changed before worker {worker_id} could be bound, so the worker was cancelled: {error}",
-                    plan.task_number
-                )));
-            }
-
-            // The pointer above names only the run executing now. This is the
-            // history: what has been tried on this task and how it ended.
-            //
-            // Unlike the binding above this one is not fire-and-forget. The
-            // live-attempt index rejects a second open run on the same task, so
-            // a failure here means another spawn claimed the task between the
-            // guard and this insert. An unrecorded worker is invisible to the
-            // guard and to the board, so it is stopped instead of left running.
-            if let Err(error) = self
-                .state
-                .deps
-                .task_store
-                .start_task_attempt(
-                    plan.task_number,
-                    crate::tasks::StartTaskAttempt {
-                        worker_id: worker_id.to_string(),
-                        author_type: crate::tasks::TaskAuthorKind::Agent,
-                        author_id: Some(self.state.deps.agent_id.to_string()),
-                        agent_id: Some(self.state.deps.agent_id.to_string()),
-                        channel_id: Some(self.state.channel_id.to_string()),
-                    },
-                )
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    task_number = plan.task_number,
-                    %worker_id,
-                    "failed to record the task attempt"
-                );
-                if let Err(cancel_error) = self
-                    .state
-                    .cancel_worker_with_reason(worker_id, "task attempt could not be recorded")
-                    .await
-                {
+                Err(error) => {
                     tracing::warn!(
-                        %cancel_error,
+                        %error,
+                        task_number = plan.task_number,
                         %worker_id,
-                        "failed to cancel a worker with no recorded attempt"
+                        "failed to bind spawned worker to task"
                     );
+                    if let Err(finish_error) = self
+                        .state
+                        .deps
+                        .task_store
+                        .finish_task_attempt(
+                            &worker_id.to_string(),
+                            crate::tasks::TaskAttemptOutcome::Interrupted,
+                            Some("task changed before worker binding"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%finish_error, %worker_id, "failed to close unbound task attempt");
+                    }
+                    prepared
+                        .fail_before_start("task changed before worker binding")
+                        .await;
+                    return Err(SpawnWorkerError(format!(
+                        "task #{} changed before worker {worker_id} could be bound: {error}",
+                        plan.task_number
+                    )));
                 }
-                return Err(SpawnWorkerError(format!(
-                    "task #{} could not record this attempt, so worker {worker_id} was cancelled: {error}",
-                    plan.task_number
-                )));
-            }
+            };
+            bound_task = Some((plan.task_number, bound_revision, plan.previous_status));
         }
 
         // Link the worker to project/worktree if specified (fire-and-forget update).
@@ -1099,11 +1088,96 @@ impl SpawnWorkerTool {
             .and_then(|plan| plan.worktree_id.as_deref())
             .or(args.worktree_id.as_deref());
         if link_project_id.is_some() || link_worktree_id.is_some() {
-            self.state.process_run_logger.log_worker_project_link(
-                worker_id,
-                link_project_id,
-                link_worktree_id,
-            );
+            let link_result = self
+                .state
+                .process_run_logger
+                .set_worker_project_link(worker_id, link_project_id, link_worktree_id)
+                .await;
+            if !matches!(link_result, Ok(true)) {
+                if let Some((task_number, revision, previous_status)) = bound_task {
+                    if let Err(finish_error) = self
+                        .state
+                        .deps
+                        .task_store
+                        .finish_task_attempt(
+                            &worker_id.to_string(),
+                            crate::tasks::TaskAttemptOutcome::Interrupted,
+                            Some("worker project link failed before start"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%finish_error, %worker_id, "failed to close project-link task attempt");
+                    }
+                    if let Err(rollback_error) = self
+                        .state
+                        .deps
+                        .task_store
+                        .update(
+                            task_number,
+                            crate::tasks::UpdateTaskInput {
+                                clear_worker_id: true,
+                                status: Some(previous_status),
+                                context: crate::tasks::TaskMutationContext {
+                                    expected_revision: Some(revision),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(%rollback_error, %worker_id, task_number, "failed to rollback project-link task binding");
+                    }
+                }
+                prepared
+                    .fail_before_start("worker project link could not be persisted")
+                    .await;
+                let detail = link_result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "worker row was not found".to_string());
+                return Err(SpawnWorkerError(format!(
+                    "failed to link worker {worker_id} before start: {detail}"
+                )));
+            }
+        }
+        if let Err(error) = prepared.start().await {
+            if let Some((task_number, revision, previous_status)) = bound_task {
+                if let Err(finish_error) = self
+                    .state
+                    .deps
+                    .task_store
+                    .finish_task_attempt(
+                        &worker_id.to_string(),
+                        crate::tasks::TaskAttemptOutcome::Interrupted,
+                        Some("worker cancelled before start gate opened"),
+                    )
+                    .await
+                {
+                    tracing::warn!(%finish_error, %worker_id, "failed to close pre-start task attempt");
+                }
+                if let Err(rollback_error) = self
+                    .state
+                    .deps
+                    .task_store
+                    .update(
+                        task_number,
+                        crate::tasks::UpdateTaskInput {
+                            clear_worker_id: true,
+                            status: Some(previous_status),
+                            context: crate::tasks::TaskMutationContext {
+                                expected_revision: Some(revision),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(%rollback_error, %worker_id, task_number, "failed to rollback pre-start task binding");
+                }
+            }
+            return Err(SpawnWorkerError(error.to_string()));
         }
 
         let worker_type_label = if is_opencode { "OpenCode" } else { "builtin" };
@@ -1435,8 +1509,53 @@ impl Tool for DetachedSpawnWorkerTool {
         );
 
         let brave_search_key = (**rc.brave_search_key.load()).clone();
+        let worker_id = crate::WorkerId::new_v4();
+        let thread_id = if let Some(context) = &self.cortex_ctx {
+            context.current_thread_id.read().await.clone()
+        } else {
+            None
+        };
+        let result_target = thread_id.clone().map_or(
+            crate::agent::process_control::WorkerResultTarget::None,
+            |thread_id| crate::agent::process_control::WorkerResultTarget::CortexChat { thread_id },
+        );
+        let provenance = crate::agent::process_control::WorkerProvenance {
+            origin_channel_id: None,
+            origin_branch_id: None,
+            task: args.task.clone(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = self
+            .deps
+            .process_control_registry
+            .reserve_worker_in_scope(
+                worker_id,
+                &provenance,
+                Arc::from("cortex"),
+                **self.deps.runtime_config.max_concurrent_workers.load(),
+            )
+            .await
+            .map_err(|error| SpawnWorkerError(error.to_string()))?;
+        let callback = reservation.callback_context();
+        let initial_operation = crate::agent::process_control::WorkerOperationContext {
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+            requester: thread_id.map_or(
+                crate::agent::process_control::WorkerRequester::System,
+                |thread_id| crate::agent::process_control::WorkerRequester::CortexChat {
+                    thread_id,
+                },
+            ),
+            result_target,
+            autonomy_run_id: None,
+        };
+        let initial_operation_id = initial_operation.operation_id;
 
         let worker = crate::agent::worker::Worker::new(
+            worker_id,
+            callback,
+            initial_operation.clone(),
             None, // no parent channel
             &args.task,
             worker_system_prompt,
@@ -1451,13 +1570,37 @@ impl Tool for DetachedSpawnWorkerTool {
             None, // No model override for detached workers
         );
 
-        let (worker, _input_tx) = worker;
-        let worker_id = worker.id;
+        let (worker, inject_tx) = worker;
+        let transcript_snapshot = worker.transcript_snapshot();
+        let (runtime_control, cancel_rx, terminal_notify) =
+            crate::agent::process_control::WorkerRuntimeControl::new(
+                transcript_snapshot.clone(),
+                None,
+                None,
+                Some(inject_tx),
+                Some(crate::conversation::ProcessRunLogger::new(
+                    self.deps.sqlite_pool.clone(),
+                )),
+            );
+        let admission = self
+            .deps
+            .process_control_registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                crate::agent::process_control::WorkerBackend::Builtin,
+                false,
+                initial_operation,
+                "starting",
+                runtime_control,
+            )
+            .await
+            .map_err(|error| SpawnWorkerError(error.to_string()))?;
 
         // Log to worker_runs directly since there's no parent channel to do it.
         let run_logger =
             crate::conversation::history::ProcessRunLogger::new(self.deps.sqlite_pool.clone());
-        run_logger
+        if let Err(error) = run_logger
             .log_worker_started(
                 None,
                 worker_id,
@@ -1470,19 +1613,15 @@ impl Tool for DetachedSpawnWorkerTool {
                 None,
             )
             .await
-            .map_err(|error| {
-                SpawnWorkerError(format!("failed to persist worker start: {error}"))
-            })?;
-
-        let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
-            agent_id: self.deps.agent_id.clone(),
-            worker_id,
-            channel_id: None,
-            task: args.task.clone(),
-            worker_type: "cortex".into(),
-            interactive: false,
-            directory: None,
-        });
+        {
+            self.deps
+                .process_control_registry
+                .remove_worker_if_registration_matches(callback)
+                .await;
+            return Err(SpawnWorkerError(format!(
+                "failed to persist worker start: {error}"
+            )));
+        }
 
         self.deps
             .working_memory
@@ -1499,36 +1638,141 @@ impl Tool for DetachedSpawnWorkerTool {
             worker_id = %worker_id,
             spawned_by = "cortex_chat",
         );
-        crate::agent::channel_dispatch::spawn_worker_task(
-            worker_id,
+        let (start_gate, start_rx) = crate::agent::channel_dispatch::WorkerStartGate::new();
+        let handle = crate::agent::channel_dispatch::spawn_worker_task(
+            callback,
+            self.deps.process_control_registry.clone(),
+            cancel_rx,
+            terminal_notify,
+            start_rx,
             self.deps.event_tx.clone(),
             self.deps.agent_id.clone(),
             None,
-            run_logger,
-            worker.transcript_snapshot(),
-            None,
+            run_logger.clone(),
+            transcript_snapshot,
             None,
             secrets_store,
             Some(self.deps.task_store.clone()),
             "builtin",
             worker.run().instrument(worker_span),
         );
-
-        // Register the worker with the cortex chat event loop so it can
-        // auto-trigger a follow-up turn when the worker completes.
-        if let Some(ctx) = &self.cortex_ctx {
-            let thread_id: Option<String> = ctx.current_thread_id.read().await.clone();
-            let channel_context: Option<String> = ctx.current_channel_context.read().await.clone();
+        if let Err(handle) = self
+            .deps
+            .process_control_registry
+            .install_task_handle(admission.callback_context(), handle)
+            .await
+        {
+            handle.abort();
+            if let Err(error) = crate::agent::channel_dispatch::commit_worker_outcome_with_retry(
+                &run_logger,
+                worker_id,
+                crate::conversation::WorkerOutcomeKind::Cancelled,
+                "Worker cancelled before task installation.",
+                None,
+                crate::conversation::WorkerTerminalOwner::Cancel,
+            )
+            .await
+            {
+                tracing::warn!(%error, %worker_id, "failed to persist cancelled detached worker installation");
+            }
+            self.deps
+                .process_control_registry
+                .remove_worker_if_registration_matches(callback)
+                .await;
+            return Err(SpawnWorkerError(
+                "worker detached before task installation".to_string(),
+            ));
+        }
+        let state_result = self
+            .deps
+            .process_control_registry
+            .update_worker_state(
+                callback,
+                crate::agent::process_control::WorkerRuntimeState::Running,
+            )
+            .await;
+        if state_result != crate::agent::process_control::WorkerMutationResult::Applied {
+            if let Err(error) = crate::agent::channel_dispatch::commit_worker_outcome_with_retry(
+                &run_logger,
+                worker_id,
+                crate::conversation::WorkerOutcomeKind::Cancelled,
+                "Worker cancelled before start.",
+                None,
+                crate::conversation::WorkerTerminalOwner::Cancel,
+            )
+            .await
+            {
+                tracing::warn!(%error, %worker_id, "failed to persist rejected detached worker start");
+            }
+            self.deps
+                .process_control_registry
+                .remove_worker_if_registration_matches(callback)
+                .await;
+            return Err(SpawnWorkerError(
+                "worker registration was cancelled before start".to_string(),
+            ));
+        }
+        if let Some(context) = &self.cortex_ctx {
+            let thread_id = context.current_thread_id.read().await.clone();
+            let channel_context = context.current_channel_context.read().await.clone();
             if let Some(thread_id) = thread_id {
-                let mut workers = ctx.tracked_workers.write().await;
-                workers.insert(
+                context.tracked_workers.write().await.insert(
                     worker_id,
                     crate::agent::cortex_chat::TrackedWorker {
                         thread_id,
                         channel_context,
+                        registration_id: callback.registration_id,
+                        operation_id: initial_operation_id,
                     },
                 );
             }
+        }
+        let event_tx = self.deps.event_tx.clone();
+        let started_event = crate::ProcessEvent::WorkerStarted {
+            agent_id: self.deps.agent_id.clone(),
+            worker_id,
+            worker_registration_id: callback.registration_id,
+            channel_id: None,
+            task: args.task.clone(),
+            worker_type: "cortex".into(),
+            interactive: false,
+            directory: None,
+        };
+        let opened = self
+            .deps
+            .process_control_registry
+            .run_if_worker_state(
+                callback,
+                crate::agent::process_control::WorkerRuntimeState::Running,
+                move || {
+                    event_tx.send(started_event).ok();
+                    start_gate.open();
+                },
+            )
+            .await;
+        if opened != crate::agent::process_control::WorkerMutationResult::Applied {
+            if let Some(context) = &self.cortex_ctx {
+                context.tracked_workers.write().await.remove(&worker_id);
+            }
+            if let Err(error) = crate::agent::channel_dispatch::commit_worker_outcome_with_retry(
+                &run_logger,
+                worker_id,
+                crate::conversation::WorkerOutcomeKind::Cancelled,
+                "Worker cancelled before start.",
+                None,
+                crate::conversation::WorkerTerminalOwner::Cancel,
+            )
+            .await
+            {
+                tracing::warn!(%error, %worker_id, "failed to persist cancelled detached worker start");
+            }
+            self.deps
+                .process_control_registry
+                .remove_worker_if_registration_matches(callback)
+                .await;
+            return Err(SpawnWorkerError(
+                "worker registration was cancelled before the gate opened".to_string(),
+            ));
         }
 
         tracing::info!(worker_id = %worker_id, task = %args.task, "cortex chat spawned detached worker");
