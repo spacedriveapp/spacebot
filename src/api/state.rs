@@ -736,7 +736,6 @@ impl ApiState {
         &self,
         agent_id: String,
         mut agent_event_rx: broadcast::Receiver<ProcessEvent>,
-        process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_process_transcripts.clone();
@@ -1084,24 +1083,6 @@ impl ApiState {
                                 result,
                                 ..
                             } => {
-                                if let (
-                                    process_control_registry,
-                                    ProcessId::Worker(worker_id),
-                                    Some(registration_id),
-                                ) = (
-                                    &process_control_registry,
-                                    process_id,
-                                    worker_registration_id,
-                                ) {
-                                    process_control_registry
-                                        .increment_worker_tool_calls(
-                                            crate::agent::process_control::WorkerCallbackContext {
-                                                worker_id: *worker_id,
-                                                registration_id: *registration_id,
-                                            },
-                                        )
-                                        .await;
-                                }
                                 let (process_type, id_str) = process_id_info(process_id);
                                 // Accumulate tool results into branch and worker transcripts.
                                 if is_observable_process(process_id) {
@@ -1800,11 +1781,7 @@ mod tests {
         );
         let mut api_rx = api_state.event_tx.subscribe();
         let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
-        api_state.register_agent_events(
-            "agent".to_string(),
-            control_rx,
-            Arc::new(crate::agent::process_control::ProcessControlRegistry::new()),
-        );
+        api_state.register_agent_events("agent".to_string(), control_rx);
 
         let agent_id: crate::AgentId = Arc::from("agent");
         let channel_id: crate::ChannelId = Arc::from("autonomy");
@@ -1892,11 +1869,7 @@ mod tests {
 
         let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
         let (tool_output_tx, tool_output_rx) = tokio::sync::broadcast::channel(16);
-        api_state.register_agent_events(
-            "agent".to_string(),
-            control_rx,
-            Arc::new(crate::agent::process_control::ProcessControlRegistry::new()),
-        );
+        api_state.register_agent_events("agent".to_string(), control_rx);
         api_state.register_tool_output_stream("agent".to_string(), tool_output_rx);
 
         let agent_id: crate::AgentId = Arc::from("agent");
@@ -2019,11 +1992,7 @@ mod tests {
         );
         let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
         let (tool_output_tx, tool_output_rx) = tokio::sync::broadcast::channel(16);
-        api_state.register_agent_events(
-            "agent".to_string(),
-            control_rx,
-            Arc::new(crate::agent::process_control::ProcessControlRegistry::new()),
-        );
+        api_state.register_agent_events("agent".to_string(), control_rx);
         api_state.register_tool_output_stream("agent".to_string(), tool_output_rx);
 
         let agent_id: crate::AgentId = Arc::from("agent");
@@ -2129,11 +2098,7 @@ mod tests {
             injection_tx,
         );
         let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
-        api_state.register_agent_events(
-            "agent".to_string(),
-            control_rx,
-            Arc::new(crate::agent::process_control::ProcessControlRegistry::new()),
-        );
+        api_state.register_agent_events("agent".to_string(), control_rx);
 
         let agent_id: crate::AgentId = Arc::from("agent");
         let worker_id = uuid::Uuid::new_v4();
@@ -2206,11 +2171,7 @@ mod tests {
             injection_tx,
         );
         let (control_tx, control_rx) = tokio::sync::broadcast::channel(16);
-        api_state.register_agent_events(
-            "agent".to_string(),
-            control_rx,
-            Arc::new(crate::agent::process_control::ProcessControlRegistry::new()),
-        );
+        api_state.register_agent_events("agent".to_string(), control_rx);
 
         let agent_id: crate::AgentId = Arc::from("agent");
         let worker_id = uuid::Uuid::new_v4();
@@ -2254,88 +2215,5 @@ mod tests {
         let serialized = serde_json::to_string(&transcript).expect("transcript should serialize");
         assert!(serialized.contains("replacement"));
         assert!(!serialized.contains("stale"));
-    }
-
-    #[tokio::test]
-    async fn worker_tool_completion_increments_registry_snapshot_count() {
-        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
-        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
-        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
-        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
-        let api_state = super::ApiState::new_with_provider_sender(
-            provider_setup_tx,
-            agent_tx,
-            agent_remove_tx,
-            injection_tx,
-        );
-        let registry = Arc::new(crate::agent::process_control::ProcessControlRegistry::new());
-        let worker_id = uuid::Uuid::new_v4();
-        let provenance = crate::agent::process_control::WorkerProvenance {
-            origin_channel_id: Some(Arc::from("channel")),
-            origin_branch_id: None,
-            task: "task".to_string(),
-            task_id: None,
-            autonomy_run_id: None,
-            spawning_process: ProcessId::Worker(worker_id),
-        };
-        let reservation = registry
-            .reserve_worker(worker_id, &provenance, 1)
-            .await
-            .unwrap();
-        let registration_id = reservation.callback_context().registration_id;
-        let control = crate::agent::process_control::WorkerRuntimeControl::new(
-            crate::agent::worker::new_worker_transcript_snapshot(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .0;
-        registry
-            .register_new_worker(
-                reservation,
-                provenance,
-                crate::agent::process_control::WorkerBackend::Builtin,
-                false,
-                crate::agent::process_control::WorkerOperationContext {
-                    operation_id: crate::agent::process_control::WorkerOperationId::new(),
-                    requester: crate::agent::process_control::WorkerRequester::System,
-                    result_target: crate::agent::process_control::WorkerResultTarget::None,
-                    autonomy_run_id: None,
-                },
-                "starting",
-                control,
-            )
-            .await
-            .unwrap();
-        let (control_tx, control_rx) = tokio::sync::broadcast::channel(4);
-        api_state.register_agent_events("agent".to_string(), control_rx, registry.clone());
-
-        control_tx
-            .send(ProcessEvent::ToolCompleted {
-                agent_id: Arc::from("agent"),
-                process_id: ProcessId::Worker(worker_id),
-                worker_registration_id: Some(registration_id),
-                channel_id: Some(Arc::from("channel")),
-                call_id: "call".to_string(),
-                tool_name: "shell".to_string(),
-                result: "done".to_string(),
-            })
-            .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if registry
-                    .worker_snapshot(worker_id)
-                    .await
-                    .is_some_and(|snapshot| snapshot.tool_calls == 1)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("tool completion should increment the live registry count");
     }
 }

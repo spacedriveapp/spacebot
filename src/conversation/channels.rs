@@ -25,6 +25,18 @@ pub struct ChannelInfo {
     pub last_activity_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Outcome of a channel delete request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelDeletion {
+    Deleted,
+    NotFound,
+    /// Nonterminal worker rows still reference the channel, so deleting it
+    /// would cascade away live work.
+    BlockedByWorkers {
+        nonterminal_workers: i64,
+    },
+}
+
 impl ChannelStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -203,7 +215,7 @@ impl ChannelStore {
 
     /// Delete a channel and its message history.
     /// Branch/worker runs are cascade-deleted via FK constraints.
-    pub async fn delete(&self, channel_id: &str) -> crate::error::Result<bool> {
+    pub async fn delete(&self, channel_id: &str) -> crate::error::Result<ChannelDeletion> {
         let mut tx = self.pool.begin().await.map_err(|e| anyhow::anyhow!(e))?;
         let nonterminal_workers: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM worker_runs WHERE channel_id = ? AND lifecycle NOT IN ('succeeded', 'partial', 'cancelled', 'timed_out', 'blocked', 'failed')",
@@ -213,10 +225,9 @@ impl ChannelStore {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         if nonterminal_workers > 0 {
-            return Err(anyhow::anyhow!(
-                "can't delete channel: {nonterminal_workers} nonterminal workers still reference it"
-            )
-            .into());
+            return Ok(ChannelDeletion::BlockedByWorkers {
+                nonterminal_workers,
+            });
         }
 
         sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
@@ -233,7 +244,11 @@ impl ChannelStore {
 
         tx.commit().await.map_err(|e| anyhow::anyhow!(e))?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            Ok(ChannelDeletion::Deleted)
+        } else {
+            Ok(ChannelDeletion::NotFound)
+        }
     }
 
     /// Set active/archive state for a channel.
@@ -500,9 +515,12 @@ mod tests {
         .await
         .unwrap();
 
-        let error = store.delete("chan-live").await.unwrap_err();
-
-        assert!(error.to_string().contains("nonterminal workers"));
+        assert_eq!(
+            store.delete("chan-live").await.unwrap(),
+            ChannelDeletion::BlockedByWorkers {
+                nonterminal_workers: 1,
+            }
+        );
         assert!(store.get("chan-live").await.unwrap().is_some());
     }
 }

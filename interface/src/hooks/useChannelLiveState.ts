@@ -273,10 +273,10 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
                 startedAt: new Date(w.started_at).getTime(),
                 toolCalls: w.tool_calls,
                 currentTool: null,
-                isIdle: false,
-                runtimeState: "running",
+                isIdle: w.runtime_state === "waiting_for_input",
+                runtimeState: w.runtime_state,
                 runtimeAttached: true,
-                routable: false,
+                routable: w.routable,
                 interactive: w.interactive,
                 workerType: w.task.startsWith("[opencode]") ? "opencode" : "builtin",
               };

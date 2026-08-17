@@ -343,10 +343,31 @@ struct LiveWorkerEntry {
 pub type OpenCodeCancellationState =
     Arc<Mutex<Option<crate::opencode::worker::OpenCodeCancellationSession>>>;
 
+/// Admission bucket for workers with no origin channel. Detached workers share
+/// one quota rather than each inventing a scope name.
+pub const DETACHED_WORKER_ADMISSION_SCOPE: &str = "detached";
+
+/// Cancellation channel payload. `None` until cancellation is requested, then
+/// the reason the requester gave, which the supervisor records on the worker's
+/// terminal outcome.
+pub type WorkerCancelSignal = Option<Arc<str>>;
+
+/// Render a cancellation reason as the worker's terminal result text.
+pub fn worker_cancellation_result(reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|reason| crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS))
+        .unwrap_or_default();
+    if reason.is_empty() {
+        "Worker cancelled.".to_string()
+    } else {
+        format!("Worker cancelled: {reason}")
+    }
+}
+
 pub struct WorkerRuntimeControl {
     supervisor_handle: Mutex<Option<JoinHandle<()>>>,
     execution_abort_handle: Mutex<Option<AbortHandle>>,
-    cancel_tx: watch::Sender<bool>,
+    cancel_tx: watch::Sender<WorkerCancelSignal>,
     terminal_notify: Arc<Notify>,
     transcript_snapshot: WorkerTranscriptSnapshot,
     opencode_cancellation: Option<OpenCodeCancellationState>,
@@ -362,8 +383,8 @@ impl WorkerRuntimeControl {
         input_tx: Option<mpsc::Sender<WorkerFollowUp>>,
         injection_tx: Option<mpsc::Sender<String>>,
         process_run_logger: Option<crate::conversation::ProcessRunLogger>,
-    ) -> (Self, watch::Receiver<bool>, Arc<Notify>) {
-        let (cancel_tx, cancel_rx) = watch::channel(false);
+    ) -> (Self, watch::Receiver<WorkerCancelSignal>, Arc<Notify>) {
+        let (cancel_tx, cancel_rx) = watch::channel(None);
         let terminal_notify = Arc::new(Notify::new());
         (
             Self {
@@ -385,10 +406,24 @@ impl WorkerRuntimeControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerRouteResult {
-    Routed { operation: WorkerOperationContext },
+    Routed {
+        operation: WorkerOperationContext,
+    },
     Injected,
-    Busy { state: WorkerRuntimeState },
+    Busy {
+        state: WorkerRuntimeState,
+    },
     WaitUntilIdle,
+    /// A durable terminal worker. Carries the outcome so a caller learns how the
+    /// work ended instead of retrying a worker that can never accept input.
+    Terminal {
+        lifecycle: crate::conversation::WorkerLifecycle,
+        result: Option<String>,
+    },
+    /// A durable nonterminal worker with no live controls in this agent.
+    Unavailable {
+        lifecycle: crate::conversation::WorkerLifecycle,
+    },
     NotFound,
 }
 
@@ -432,7 +467,7 @@ impl ProcessControlRegistry {
         let admission_scope = provenance
             .origin_channel_id
             .clone()
-            .unwrap_or_else(|| Arc::from("system"));
+            .unwrap_or_else(|| Arc::from(DETACHED_WORKER_ADMISSION_SCOPE));
         self.reserve_worker_in_scope(
             worker_id,
             provenance,
@@ -633,22 +668,6 @@ impl ProcessControlRegistry {
         })
     }
 
-    pub async fn release_worker_admission(&self, token: WorkerAdmissionToken) -> bool {
-        let workers = self.workers.read().await;
-        if workers
-            .get(&token.worker_id)
-            .is_some_and(|entry| entry.registration_id == token.registration_id)
-        {
-            return false;
-        }
-        drop(workers);
-
-        self.admissions
-            .lock()
-            .await
-            .release_if_matches(token.worker_id, token.registration_id)
-    }
-
     pub async fn close_admission(&self) -> bool {
         let mut admissions = self.admissions.lock().await;
         let was_open = !admissions.closed;
@@ -768,17 +787,31 @@ impl ProcessControlRegistry {
     pub async fn cancel_worker_runtime(
         &self,
         worker_id: WorkerId,
+        reason: &str,
         grace: std::time::Duration,
     ) -> ControlActionResult {
         let Some(callback) = self.worker_callback_context(worker_id).await else {
             return ControlActionResult::NotFound;
         };
-        self.cancel_worker_callback(callback, grace).await
+        self.cancel_worker_callback(callback, reason, grace).await
+    }
+
+    /// The reason recorded against a pending cancellation, when one has been
+    /// requested for this exact registration.
+    pub async fn worker_cancellation_reason(
+        &self,
+        callback: WorkerCallbackContext,
+    ) -> Option<Arc<str>> {
+        let entry = self.worker_entry_for_callback(callback).await?;
+        // No await between the borrow and the clone, so the watch guard never
+        // has to be held across a suspension point.
+        entry.control.cancel_tx.borrow().clone()
     }
 
     async fn cancel_worker_callback(
         &self,
         callback: WorkerCallbackContext,
+        reason: &str,
         grace: std::time::Duration,
     ) -> ControlActionResult {
         let worker_id = callback.worker_id;
@@ -857,7 +890,10 @@ impl ProcessControlRegistry {
         }
         let terminal = entry.control.terminal_notify.notified();
         tokio::pin!(terminal);
-        entry.control.cancel_tx.send_replace(true);
+        entry
+            .control
+            .cancel_tx
+            .send_replace(Some(Arc::from(reason)));
         if tokio::time::timeout(grace, &mut terminal).await.is_err()
             && let Some(handle) = entry.control.execution_abort_handle.lock().await.as_ref()
         {
@@ -874,6 +910,7 @@ impl ProcessControlRegistry {
     pub async fn cancel_workers_by_origin_channel(
         &self,
         channel_id: &ChannelId,
+        reason: &str,
         grace: std::time::Duration,
     ) -> usize {
         let callbacks = self
@@ -889,7 +926,7 @@ impl ProcessControlRegistry {
             .collect::<Vec<_>>();
 
         for callback in &callbacks {
-            self.cancel_worker_callback(*callback, grace).await;
+            self.cancel_worker_callback(*callback, reason, grace).await;
         }
 
         let mut admissions = self.admissions.lock().await;
@@ -918,7 +955,7 @@ impl ProcessControlRegistry {
             .map(|entry| entry.control.transcript_snapshot.clone())
     }
 
-    pub async fn drain_workers(&self, grace: std::time::Duration) {
+    pub async fn drain_workers(&self, reason: &str, grace: std::time::Duration) {
         self.close_admission().await;
         let worker_ids = self
             .workers
@@ -928,7 +965,7 @@ impl ProcessControlRegistry {
             .copied()
             .collect::<Vec<_>>();
         for worker_id in worker_ids {
-            self.cancel_worker_runtime(worker_id, grace).await;
+            self.cancel_worker_runtime(worker_id, reason, grace).await;
         }
     }
 
@@ -1973,7 +2010,11 @@ mod tests {
 
         assert_eq!(
             registry
-                .cancel_worker_runtime(worker_id, std::time::Duration::from_millis(1))
+                .cancel_worker_runtime(
+                    worker_id,
+                    "test cancel",
+                    std::time::Duration::from_millis(1)
+                )
                 .await,
             ControlActionResult::Cancelled
         );
@@ -2023,12 +2064,17 @@ mod tests {
         let cancelled = registry
             .cancel_workers_by_origin_channel(
                 &Arc::from("cron:job"),
+                "test cleanup",
                 std::time::Duration::from_millis(1),
             )
             .await;
 
         assert_eq!(cancelled, 1);
-        assert!(*cron_cancel_rx.borrow());
+        assert_eq!(
+            cron_cancel_rx.borrow().as_deref(),
+            Some("test cleanup"),
+            "origin cleanup should record its cancellation reason"
+        );
         assert_eq!(
             registry
                 .worker_snapshot(cron_worker_id)
@@ -2178,7 +2224,7 @@ mod tests {
             tokio::spawn(async move {
                 barrier.wait().await;
                 registry
-                    .cancel_worker_runtime(worker_id, std::time::Duration::ZERO)
+                    .cancel_worker_runtime(worker_id, "test cancel", std::time::Duration::ZERO)
                     .await
             })
         };

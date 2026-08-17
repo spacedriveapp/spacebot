@@ -75,9 +75,7 @@ impl Tool for RouteTool {
         );
         let registry = &self.state.deps.process_control_registry;
         let Some(snapshot) = registry.worker_snapshot(worker_id).await else {
-            return Err(RouteError(format!(
-                "Worker {worker_id} was not found in this agent's live registry."
-            )));
+            return self.detached_worker_output(worker_id).await;
         };
         let result = if snapshot.state
             == crate::agent::process_control::WorkerRuntimeState::WaitingForInput
@@ -128,10 +126,11 @@ impl Tool for RouteTool {
                 if let Some(run) = &autonomy_run {
                     run.settle_child(child);
                 }
-                WorkerRouteResult::NotFound
-            } else {
-                WorkerRouteResult::Routed { operation }
+                return Err(RouteError(format!(
+                    "Worker {worker_id} stopped accepting input before the follow-up was delivered."
+                )));
             }
+            WorkerRouteResult::Routed { operation }
         } else if snapshot.state == crate::agent::process_control::WorkerRuntimeState::Running {
             registry.inject_running(worker_id, args.message).await
         } else {
@@ -165,9 +164,167 @@ impl Tool for RouteTool {
                 worker_id,
                 message: format!("Worker {worker_id} is {state}."),
             }),
-            WorkerRouteResult::NotFound => Err(RouteError(format!(
-                "Worker {worker_id} was not found in this agent's live registry."
+            // A worker that left the registry between the snapshot and the send
+            // resolves against durable state rather than reporting a bare miss.
+            WorkerRouteResult::Terminal { .. }
+            | WorkerRouteResult::Unavailable { .. }
+            | WorkerRouteResult::NotFound => self.detached_worker_output(worker_id).await,
+        }
+    }
+}
+
+impl RouteTool {
+    /// Describe a worker the registry does not hold. A terminal worker reports
+    /// its durable outcome, a nonterminal row without controls reports that it
+    /// is unavailable, and an unknown ID is an error.
+    async fn detached_worker_output(
+        &self,
+        worker_id: WorkerId,
+    ) -> std::result::Result<RouteOutput, RouteError> {
+        let resolved = resolve_detached_worker(&self.state.process_run_logger, worker_id)
+            .await
+            .map_err(|error| RouteError(error.to_string()))?;
+        match resolved {
+            WorkerRouteResult::Terminal { lifecycle, result } => Ok(RouteOutput {
+                routed: false,
+                worker_id,
+                message: match result {
+                    Some(result) => format!(
+                        "Worker {worker_id} already finished ({}). It cannot accept follow-ups. Its result was:\n\n{result}",
+                        lifecycle.as_str()
+                    ),
+                    None => format!(
+                        "Worker {worker_id} already finished ({}). It cannot accept follow-ups.",
+                        lifecycle.as_str()
+                    ),
+                },
+            }),
+            WorkerRouteResult::Unavailable { lifecycle } => Ok(RouteOutput {
+                routed: false,
+                worker_id,
+                message: format!(
+                    "Worker {worker_id} is recorded as {} but has no live controls in this agent, \
+                     so it cannot be routed to. Inspect its transcript instead of retrying.",
+                    lifecycle.as_str()
+                ),
+            }),
+            _ => Err(RouteError(format!(
+                "Worker {worker_id} was not found in this agent."
             ))),
         }
+    }
+}
+
+/// Resolve a worker that has no live registry entry against durable state.
+async fn resolve_detached_worker(
+    run_logger: &crate::conversation::ProcessRunLogger,
+    worker_id: WorkerId,
+) -> crate::Result<WorkerRouteResult> {
+    let Some(lifecycle) = run_logger.read_worker_lifecycle(worker_id).await? else {
+        return Ok(WorkerRouteResult::NotFound);
+    };
+    if !lifecycle.is_terminal() {
+        return Ok(WorkerRouteResult::Unavailable { lifecycle });
+    }
+    let result = run_logger
+        .read_worker_terminal(worker_id)
+        .await?
+        .map(|terminal| terminal.result);
+    Ok(WorkerRouteResult::Terminal { lifecycle, result })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerRouteResult, resolve_detached_worker};
+    use crate::conversation::{
+        ProcessRunLogger, WorkerLifecycle, WorkerOutcomeKind, WorkerTerminalOwner,
+    };
+    use std::sync::Arc;
+
+    async fn logger() -> ProcessRunLogger {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO channels (id, platform) VALUES ('channel-a', 'test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        ProcessRunLogger::new(pool)
+    }
+
+    async fn start_worker(logger: &ProcessRunLogger, worker_id: crate::WorkerId) {
+        logger
+            .log_worker_started(
+                Some(&Arc::from("channel-a")),
+                worker_id,
+                "task-a",
+                "builtin",
+                &Arc::from("agent"),
+                true,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// An ID with no durable row is the only genuine "not found".
+    #[tokio::test]
+    async fn unknown_worker_is_not_found() {
+        let logger = logger().await;
+
+        assert_eq!(
+            resolve_detached_worker(&logger, uuid::Uuid::new_v4())
+                .await
+                .unwrap(),
+            WorkerRouteResult::NotFound
+        );
+    }
+
+    /// A durable nonterminal row without live controls is unavailable, not
+    /// missing — the distinction the August 16 incident turned on.
+    #[tokio::test]
+    async fn detached_nonterminal_worker_is_unavailable() {
+        let logger = logger().await;
+        let worker_id = uuid::Uuid::new_v4();
+        start_worker(&logger, worker_id).await;
+        logger.log_worker_idle(worker_id).await.unwrap();
+
+        assert_eq!(
+            resolve_detached_worker(&logger, worker_id).await.unwrap(),
+            WorkerRouteResult::Unavailable {
+                lifecycle: WorkerLifecycle::WaitingForInput,
+            }
+        );
+    }
+
+    /// A terminal worker reports its outcome so the caller stops retrying.
+    #[tokio::test]
+    async fn terminal_worker_reports_its_durable_outcome() {
+        let logger = logger().await;
+        let worker_id = uuid::Uuid::new_v4();
+        start_worker(&logger, worker_id).await;
+        crate::agent::channel_dispatch::commit_worker_outcome(
+            &logger,
+            worker_id,
+            WorkerOutcomeKind::Succeeded,
+            "the answer is 42",
+            None,
+            WorkerTerminalOwner::Worker,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolve_detached_worker(&logger, worker_id).await.unwrap(),
+            WorkerRouteResult::Terminal {
+                lifecycle: WorkerLifecycle::Succeeded,
+                result: Some("the answer is 42".to_string()),
+            }
+        );
     }
 }

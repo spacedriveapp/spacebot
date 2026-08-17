@@ -1551,7 +1551,11 @@ async fn cancel_cron_workers(context: &CronContext, channel_id: &crate::ChannelI
     let cancelled = context
         .deps
         .process_control_registry
-        .cancel_workers_by_origin_channel(channel_id, Duration::from_secs(10))
+        .cancel_workers_by_origin_channel(
+            channel_id,
+            "cron channel exited",
+            Duration::from_secs(10),
+        )
         .await;
     if cancelled > 0 {
         tracing::info!(

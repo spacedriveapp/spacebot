@@ -1061,11 +1061,7 @@ pub async fn create_agent_internal(
     };
 
     let event_rx = event_tx.subscribe();
-    state.register_agent_events(
-        agent_id.clone(),
-        event_rx,
-        deps.process_control_registry.clone(),
-    );
+    state.register_agent_events(agent_id.clone(), event_rx);
     let tool_output_rx = tool_output_tx.subscribe();
     state.register_tool_output_stream(agent_id.clone(), tool_output_rx);
 
@@ -1499,7 +1495,7 @@ pub(super) async fn delete_agent(
     if let Some(deps) = removed_deps {
         deps.autonomy_control.shutdown_and_wait().await;
         deps.process_control_registry
-            .drain_workers(std::time::Duration::from_secs(2))
+            .drain_workers("agent deleted", std::time::Duration::from_secs(2))
             .await;
     }
 

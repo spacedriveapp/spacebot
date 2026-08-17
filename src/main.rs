@@ -2053,7 +2053,7 @@ async fn run(
             agent
                 .deps
                 .process_control_registry
-                .drain_workers(std::time::Duration::from_secs(2))
+                .drain_workers("daemon shutting down", std::time::Duration::from_secs(2))
                 .await;
         }
     }
@@ -2594,11 +2594,7 @@ async fn initialize_agents(
         let mut sandboxes = std::collections::HashMap::new();
         for (agent_id, agent) in agents.iter() {
             let event_rx = agent.deps.event_tx.subscribe();
-            api_state.register_agent_events(
-                agent_id.to_string(),
-                event_rx,
-                agent.deps.process_control_registry.clone(),
-            );
+            api_state.register_agent_events(agent_id.to_string(), event_rx);
             let tool_output_rx = agent.deps.tool_output_tx.subscribe();
             api_state.register_tool_output_stream(agent_id.to_string(), tool_output_rx);
             agent_pools.insert(agent_id.to_string(), agent.db.sqlite.clone());

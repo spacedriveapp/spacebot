@@ -340,7 +340,7 @@ impl Worker {
             channel_id.clone(),
             deps.event_tx.clone(),
         )
-        .with_worker_registration_id(callback.registration_id);
+        .with_worker_registry(callback, deps.process_control_registry.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (inject_tx, inject_rx) = mpsc::channel(8);
 

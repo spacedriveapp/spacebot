@@ -326,17 +326,25 @@ pub(super) async fn delete_channel(
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
     let store = ChannelStore::new(pool.clone());
 
-    let deleted = store.delete(&query.channel_id).await.map_err(|error| {
-        if error.to_string().starts_with("can't delete channel:") {
-            StatusCode::CONFLICT
-        } else {
-            tracing::error!(%error, "failed to delete channel");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+    let deletion = store.delete(&query.channel_id).await.map_err(|error| {
+        tracing::error!(%error, "failed to delete channel");
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if !deleted {
-        return Err(StatusCode::NOT_FOUND);
+    match deletion {
+        crate::conversation::ChannelDeletion::Deleted => {}
+        crate::conversation::ChannelDeletion::NotFound => return Err(StatusCode::NOT_FOUND),
+        crate::conversation::ChannelDeletion::BlockedByWorkers {
+            nonterminal_workers,
+        } => {
+            tracing::info!(
+                agent_id = %query.agent_id,
+                channel_id = %query.channel_id,
+                nonterminal_workers,
+                "channel delete rejected while workers still reference it"
+            );
+            return Err(StatusCode::CONFLICT);
+        }
     }
 
     tracing::info!(
@@ -428,7 +436,11 @@ pub(super) async fn cancel_process(
                 .get(&request.agent_id)
                 .ok_or(StatusCode::NOT_FOUND)?;
             match registry
-                .cancel_worker_runtime(worker_id, std::time::Duration::from_secs(2))
+                .cancel_worker_runtime(
+                    worker_id,
+                    "cancelled via API",
+                    std::time::Duration::from_secs(2),
+                )
                 .await
             {
                 crate::agent::process_control::ControlActionResult::Cancelled

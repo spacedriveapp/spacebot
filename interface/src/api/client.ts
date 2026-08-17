@@ -488,6 +488,8 @@ export interface WorkerStatusInfo {
 	registration_id: string | number;
 	task: string;
 	status: string;
+	runtime_state: string;
+	routable: boolean;
 	started_at: string;
 	notify_on_complete: boolean;
 	tool_calls: number;

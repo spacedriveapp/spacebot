@@ -109,7 +109,7 @@ impl Tool for CancelTool {
                     .state
                     .deps
                     .process_control_registry
-                    .cancel_worker_runtime(worker_id, std::time::Duration::from_secs(2))
+                    .cancel_worker_runtime(worker_id, reason, std::time::Duration::from_secs(2))
                     .await
                 {
                     crate::agent::process_control::ControlActionResult::Cancelled

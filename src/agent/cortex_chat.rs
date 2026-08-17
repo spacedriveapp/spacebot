@@ -216,11 +216,9 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         }
         let call_id = resolve_lifecycle_call_id(_tool_call_id, internal_call_id);
         let preview = crate::tools::truncate_utf8_ellipsis(result, 200);
-        self.spacebot_hook.emit_tool_completed_event_from_capped(
-            tool_name,
-            call_id.clone(),
-            preview.clone(),
-        );
+        self.spacebot_hook
+            .emit_tool_completed_event_from_capped(tool_name, call_id.clone(), preview.clone())
+            .await;
         self.spacebot_hook
             .record_tool_result_metrics(tool_name, internal_call_id);
 

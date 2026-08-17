@@ -160,6 +160,10 @@ pub struct WorkerStatus {
     pub registration_id: crate::agent::process_control::WorkerRegistrationId,
     pub task: String,
     pub status: String,
+    /// Registry runtime state. Presentation reads liveness from this rather
+    /// than pattern-matching the free-text status.
+    pub runtime_state: crate::agent::process_control::WorkerRuntimeState,
+    pub routable: bool,
     pub started_at: DateTime<Utc>,
     pub notify_on_complete: bool,
     pub tool_calls: usize,
@@ -214,6 +218,8 @@ impl StatusBlock {
                     registration_id: worker.registration_id,
                     task: worker.provenance.task,
                     status: worker.status,
+                    runtime_state: worker.state,
+                    routable: worker.routable,
                     started_at: prior.map_or_else(Utc::now, |worker| worker.started_at),
                     notify_on_complete: prior.is_some_and(|worker| worker.notify_on_complete),
                     tool_calls: worker.tool_calls,
@@ -261,6 +267,9 @@ impl StatusBlock {
                     worker.id == *worker_id && worker.registration_id == *worker_registration_id
                 }) {
                     worker.status = "idle".to_string();
+                    worker.runtime_state =
+                        crate::agent::process_control::WorkerRuntimeState::WaitingForInput;
+                    worker.routable = worker.interactive;
                 }
             }
             ProcessEvent::WorkerComplete {
@@ -371,6 +380,8 @@ impl StatusBlock {
             registration_id,
             task: task.into(),
             status: "starting".to_string(),
+            runtime_state: crate::agent::process_control::WorkerRuntimeState::Starting,
+            routable: false,
             started_at: Utc::now(),
             notify_on_complete,
             tool_calls: 0,

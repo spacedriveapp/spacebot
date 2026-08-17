@@ -27,6 +27,20 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
 
+/// The reason text a cancelled outcome carries. Falls back to the supervisor
+/// when a requester gave no reason, so the rendered result is never truncated
+/// to a dangling prefix.
+fn cancellation_reason_text(reason: Option<&str>) -> String {
+    let summarized = reason
+        .map(|reason| crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS))
+        .unwrap_or_default();
+    if summarized.is_empty() {
+        "cancelled by supervisor".to_string()
+    } else {
+        summarized
+    }
+}
+
 const TERMINAL_COMMIT_ATTEMPTS: usize = 3;
 const TERMINAL_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const TERMINAL_COMMIT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -74,6 +88,43 @@ pub struct PreparedWorkerSpawn {
     operation_id: WorkerOperationId,
 }
 
+/// Commit the terminal outcome for a worker cancelled before its start gate
+/// opened, retire the matching registration, and settle any autonomy child.
+/// The reason is read before the registration is removed, so the requester's
+/// wording survives onto the durable record.
+pub(crate) async fn settle_cancelled_start(
+    registry: &crate::agent::process_control::ProcessControlRegistry,
+    run_logger: &ProcessRunLogger,
+    callback: WorkerCallbackContext,
+    autonomy_run: Option<&crate::agent::autonomy::AutonomyRunHandle>,
+    operation_id: WorkerOperationId,
+) {
+    let worker_id = callback.worker_id;
+    let reason = registry.worker_cancellation_reason(callback).await;
+    let result = crate::agent::process_control::worker_cancellation_result(reason.as_deref());
+    if let Err(error) = commit_worker_outcome_with_retry(
+        run_logger,
+        worker_id,
+        WorkerOutcomeKind::Cancelled,
+        &result,
+        None,
+        WorkerTerminalOwner::Cancel,
+    )
+    .await
+    {
+        tracing::warn!(%error, %worker_id, "failed to persist worker cancelled before start");
+    }
+    registry
+        .remove_worker_if_registration_matches(callback)
+        .await;
+    if let Some(run) = autonomy_run {
+        run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id,
+        });
+    }
+}
+
 impl PreparedWorkerSpawn {
     pub async fn is_starting(&self) -> bool {
         self.registry
@@ -98,27 +149,14 @@ impl PreparedWorkerSpawn {
             .await
             != crate::agent::process_control::WorkerMutationResult::Applied
         {
-            if let Err(error) = commit_worker_outcome_with_retry(
+            settle_cancelled_start(
+                &registry,
                 &run_logger,
-                worker_id,
-                WorkerOutcomeKind::Cancelled,
-                "Worker cancelled before start.",
-                None,
-                WorkerTerminalOwner::Cancel,
+                callback,
+                autonomy_run.as_ref(),
+                operation_id,
             )
-            .await
-            {
-                tracing::warn!(%error, %worker_id, "failed to persist rejected worker start");
-            }
-            registry
-                .remove_worker_if_registration_matches(callback)
-                .await;
-            if let Some(run) = &autonomy_run {
-                run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                    worker_id,
-                    operation_id,
-                });
-            }
+            .await;
             return Err(AgentError::Other(anyhow::anyhow!(
                 "can't start worker: registration is no longer starting"
             )));
@@ -130,27 +168,14 @@ impl PreparedWorkerSpawn {
             })
             .await;
         if opened != crate::agent::process_control::WorkerMutationResult::Applied {
-            if let Err(error) = commit_worker_outcome_with_retry(
+            settle_cancelled_start(
+                &registry,
                 &run_logger,
-                worker_id,
-                WorkerOutcomeKind::Cancelled,
-                "Worker cancelled before start.",
-                None,
-                WorkerTerminalOwner::Cancel,
+                callback,
+                autonomy_run.as_ref(),
+                operation_id,
             )
-            .await
-            {
-                tracing::warn!(%error, %worker_id, "failed to persist cancelled worker start");
-            }
-            registry
-                .remove_worker_if_registration_matches(callback)
-                .await;
-            if let Some(run) = &autonomy_run {
-                run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                    worker_id,
-                    operation_id,
-                });
-            }
+            .await;
             return Err(AgentError::Other(anyhow::anyhow!(
                 "can't start worker: registration was cancelled before the gate opened"
             )));
@@ -1176,29 +1201,14 @@ async fn spawn_worker_inner(
         .worker_is_in_state(callback, WorkerRuntimeState::Starting)
         .await
     {
-        if let Err(error) = commit_worker_outcome_with_retry(
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
             &state.process_run_logger,
-            worker_id,
-            WorkerOutcomeKind::Cancelled,
-            "Worker cancelled while its durable start was being recorded.",
-            None,
-            WorkerTerminalOwner::Cancel,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
         )
-        .await
-        {
-            tracing::warn!(%error, %worker_id, "failed to persist cancellation during durable worker start");
-        }
-        state
-            .deps
-            .process_control_registry
-            .remove_worker_if_registration_matches(callback)
-            .await;
-        if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                worker_id,
-                operation_id: initial_operation.operation_id,
-            });
-        }
+        .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "can't start worker: cancelled during durable start"
         )));
@@ -1236,24 +1246,14 @@ async fn spawn_worker_inner(
         .await
     {
         handle.abort();
-        if let Err(error) = commit_worker_outcome_with_retry(
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
             &state.process_run_logger,
-            worker_id,
-            WorkerOutcomeKind::Cancelled,
-            "Worker cancelled before task handle installation.",
-            None,
-            WorkerTerminalOwner::Cancel,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
         )
-        .await
-        {
-            tracing::warn!(%error, %worker_id, "failed to persist cancelled worker installation");
-        }
-        if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                worker_id,
-                operation_id: initial_operation.operation_id,
-            });
-        }
+        .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "worker registration detached before task handle installation"
         )));
@@ -1577,29 +1577,14 @@ async fn spawn_opencode_worker_inner(
         .worker_is_in_state(callback, WorkerRuntimeState::Starting)
         .await
     {
-        if let Err(error) = commit_worker_outcome_with_retry(
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
             &state.process_run_logger,
-            worker_id,
-            WorkerOutcomeKind::Cancelled,
-            "Worker cancelled while its durable start was being recorded.",
-            None,
-            WorkerTerminalOwner::Cancel,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
         )
-        .await
-        {
-            tracing::warn!(%error, %worker_id, "failed to persist cancellation during durable OpenCode worker start");
-        }
-        state
-            .deps
-            .process_control_registry
-            .remove_worker_if_registration_matches(callback)
-            .await;
-        if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                worker_id,
-                operation_id: initial_operation.operation_id,
-            });
-        }
+        .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "can't start worker: cancelled during durable start"
         )));
@@ -1645,24 +1630,14 @@ async fn spawn_opencode_worker_inner(
         .await
     {
         handle.abort();
-        if let Err(error) = commit_worker_outcome_with_retry(
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
             &state.process_run_logger,
-            worker_id,
-            WorkerOutcomeKind::Cancelled,
-            "Worker cancelled before task handle installation.",
-            None,
-            WorkerTerminalOwner::Cancel,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
         )
-        .await
-        {
-            tracing::warn!(%error, %worker_id, "failed to persist cancelled worker installation");
-        }
-        if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
-                worker_id,
-                operation_id: initial_operation.operation_id,
-            });
-        }
+        .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "worker registration detached before task handle installation"
         )));
@@ -1730,7 +1705,7 @@ async fn spawn_opencode_worker_inner(
 pub(crate) fn spawn_worker_task<F>(
     callback: WorkerCallbackContext,
     process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
-    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    mut cancel_rx: tokio::sync::watch::Receiver<crate::agent::process_control::WorkerCancelSignal>,
     terminal_notify: Arc<tokio::sync::Notify>,
     mut start_rx: tokio::sync::watch::Receiver<bool>,
     event_tx: broadcast::Sender<ProcessEvent>,
@@ -1760,18 +1735,18 @@ where
             tokio::select! {
                 changed = start_rx.changed() => {
                     if changed.is_err() {
-                        let fallback = if *cancel_rx.borrow() {
-                            (
+                        let cancellation = cancel_rx.borrow().clone();
+                        let fallback = match &cancellation {
+                            Some(reason) => (
                                 WorkerOutcomeKind::Cancelled,
-                                "Worker cancelled before start.",
+                                crate::agent::process_control::worker_cancellation_result(Some(reason)),
                                 WorkerTerminalOwner::Cancel,
-                            )
-                        } else {
-                            (
+                            ),
+                            None => (
                                 WorkerOutcomeKind::Failed,
-                                "Worker failed before the start gate opened.",
+                                "Worker failed before the start gate opened.".to_string(),
                                 WorkerTerminalOwner::Worker,
-                            )
+                            ),
                         };
                         finalize_worker_supervision(
                             callback,
@@ -1782,7 +1757,7 @@ where
                             channel_id.clone(),
                             task_store.as_ref(),
                             fallback.0,
-                            fallback.1.to_string(),
+                            fallback.1,
                             None,
                             fallback.2,
                             false,
@@ -1800,7 +1775,8 @@ where
         #[cfg(feature = "metrics")]
         let worker_start = std::time::Instant::now();
 
-        if *cancel_rx.borrow() {
+        let pre_start_cancellation = cancel_rx.borrow().clone();
+        if let Some(reason) = pre_start_cancellation {
             finalize_worker_supervision(
                 callback,
                 &process_control_registry,
@@ -1810,7 +1786,7 @@ where
                 channel_id,
                 task_store.as_ref(),
                 WorkerOutcomeKind::Cancelled,
-                "Worker cancelled before execution started.".to_string(),
+                crate::agent::process_control::worker_cancellation_result(Some(&reason)),
                 None,
                 WorkerTerminalOwner::Cancel,
                 false,
@@ -1848,6 +1824,7 @@ where
             },
             changed = cancel_rx.changed() => {
                 debug_assert!(changed.is_ok(), "worker task retains cancellation sender");
+                let reason = cancel_rx.borrow().clone();
                 execution_abort_handle.abort();
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(2),
@@ -1855,7 +1832,7 @@ where
                 )
                 .await;
                 Ok(Ok(WorkerOutcome::Cancelled {
-                    reason: "cancelled by supervisor".to_string(),
+                    reason: cancellation_reason_text(reason.as_deref()),
                 }))
             }
         };
@@ -2383,10 +2360,9 @@ pub async fn restore_idle_worker_into_registry(
                 server_pool.clone(),
                 directory.clone(),
             );
-            let admission_scope = provenance
-                .origin_channel_id
-                .clone()
-                .unwrap_or_else(|| Arc::from("cortex"));
+            let admission_scope = provenance.origin_channel_id.clone().unwrap_or_else(|| {
+                Arc::from(crate::agent::process_control::DETACHED_WORKER_ADMISSION_SCOPE)
+            });
             let reservation = state
                 .deps
                 .process_control_registry
@@ -2605,10 +2581,9 @@ pub async fn restore_idle_worker_into_registry(
             )
             .await;
             let brave_search_key = (**rc.brave_search_key.load()).clone();
-            let admission_scope = provenance
-                .origin_channel_id
-                .clone()
-                .unwrap_or_else(|| Arc::from("cortex"));
+            let admission_scope = provenance.origin_channel_id.clone().unwrap_or_else(|| {
+                Arc::from(crate::agent::process_control::DETACHED_WORKER_ADMISSION_SCOPE)
+            });
             let reservation = state
                 .deps
                 .process_control_registry
@@ -3104,7 +3079,11 @@ mod tests {
 
         assert_eq!(
             registry
-                .cancel_workers_by_origin_channel(&channel_id, Duration::from_secs(1))
+                .cancel_workers_by_origin_channel(
+                    &channel_id,
+                    "test cleanup",
+                    Duration::from_secs(1)
+                )
                 .await,
             1
         );
@@ -3136,7 +3115,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .cancel_worker_runtime(worker_id, Duration::ZERO)
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::ZERO)
                 .await,
             crate::agent::process_control::ControlActionResult::Cancelled
         );
@@ -3264,7 +3243,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .cancel_worker_runtime(worker_id, Duration::from_secs(1))
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::from_secs(1))
                 .await,
             crate::agent::process_control::ControlActionResult::Cancelled
         );
@@ -3378,7 +3357,7 @@ mod tests {
 
         assert_eq!(
             registry
-                .cancel_worker_runtime(worker_id, Duration::from_secs(1))
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::from_secs(1))
                 .await,
             crate::agent::process_control::ControlActionResult::Cancelled
         );

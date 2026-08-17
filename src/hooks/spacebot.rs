@@ -44,6 +44,9 @@ pub struct SpacebotHook {
     process_id: ProcessId,
     process_type: ProcessType,
     worker_registration_id: Option<WorkerRegistrationId>,
+    /// Set for worker processes so completed tool calls are counted in the
+    /// agent registry rather than derived from the lossy event stream.
+    worker_registry: Option<Arc<crate::agent::process_control::ProcessControlRegistry>>,
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
     tool_nudge_policy: ToolNudgePolicy,
@@ -127,6 +130,7 @@ impl SpacebotHook {
             process_id,
             process_type,
             worker_registration_id: None,
+            worker_registry: None,
             channel_id,
             event_tx,
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
@@ -176,9 +180,38 @@ impl SpacebotHook {
         self
     }
 
-    pub fn with_worker_registration_id(mut self, registration_id: WorkerRegistrationId) -> Self {
-        self.worker_registration_id = Some(registration_id);
+    /// Bind this hook to a worker's registry entry so its events carry the
+    /// registration ID and its tool calls are counted against that entry.
+    pub fn with_worker_registry(
+        mut self,
+        callback: crate::agent::process_control::WorkerCallbackContext,
+        registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    ) -> Self {
+        self.worker_registration_id = Some(callback.registration_id);
+        self.worker_registry = Some(registry);
         self
+    }
+
+    /// The registry entry this hook counts tool calls against, when it is
+    /// bound to a live worker registration.
+    fn worker_control(
+        &self,
+    ) -> Option<(
+        crate::agent::process_control::WorkerCallbackContext,
+        &Arc<crate::agent::process_control::ProcessControlRegistry>,
+    )> {
+        let ProcessId::Worker(worker_id) = &self.process_id else {
+            return None;
+        };
+        let registration_id = self.worker_registration_id?;
+        let registry = self.worker_registry.as_ref()?;
+        Some((
+            crate::agent::process_control::WorkerCallbackContext {
+                worker_id: *worker_id,
+                registration_id,
+            },
+            registry,
+        ))
     }
 
     /// Attach a context injection receiver to this hook.
@@ -908,18 +941,27 @@ impl SpacebotHook {
         let _ = (tool_name, internal_call_id);
     }
 
-    pub(crate) fn emit_tool_completed_event(&self, tool_name: &str, call_id: String, result: &str) {
+    pub(crate) async fn emit_tool_completed_event(
+        &self,
+        tool_name: &str,
+        call_id: String,
+        result: &str,
+    ) {
         let capped_result =
             crate::tools::truncate_output(result, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-        self.emit_tool_completed_event_from_capped(tool_name, call_id, capped_result);
+        self.emit_tool_completed_event_from_capped(tool_name, call_id, capped_result)
+            .await;
     }
 
-    pub(crate) fn emit_tool_completed_event_from_capped(
+    pub(crate) async fn emit_tool_completed_event_from_capped(
         &self,
         tool_name: &str,
         call_id: String,
         capped_result: String,
     ) {
+        if let Some((callback, registry)) = self.worker_control() {
+            registry.increment_worker_tool_calls(callback).await;
+        }
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
@@ -1401,9 +1443,11 @@ where
             let scrubbed = crate::secrets::scrub::scrub_leaks(result);
             let capped =
                 crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-            self.emit_tool_completed_event_from_capped(tool_name, call_id, capped);
+            self.emit_tool_completed_event_from_capped(tool_name, call_id, capped)
+                .await;
         } else {
-            self.emit_tool_completed_event(tool_name, call_id, result);
+            self.emit_tool_completed_event(tool_name, call_id, result)
+                .await;
         }
 
         tracing::debug!(
@@ -2690,5 +2734,177 @@ mod tests {
 
         assert!(!contract_state.has_terminal_outcome());
         assert!(matches!(action, HookAction::Continue));
+    }
+
+    /// The registry owns the live tool-call count, so it must not depend on a
+    /// lossy broadcast subscriber observing the completion event.
+    #[tokio::test]
+    async fn worker_tool_results_count_against_the_registry_entry() {
+        use crate::agent::process_control::{
+            ProcessControlRegistry, WorkerBackend, WorkerOperationContext, WorkerOperationId,
+            WorkerProvenance, WorkerRequester, WorkerResultTarget, WorkerRuntimeControl,
+            WorkerRuntimeState,
+        };
+
+        let registry = Arc::new(ProcessControlRegistry::new());
+        let worker_id = uuid::Uuid::new_v4();
+        let provenance = WorkerProvenance {
+            origin_channel_id: Some(Arc::from("channel")),
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 1)
+            .await
+            .unwrap();
+        let callback = reservation.callback_context();
+        registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                false,
+                WorkerOperationContext {
+                    operation_id: WorkerOperationId::new(),
+                    requester: WorkerRequester::System,
+                    result_target: WorkerResultTarget::None,
+                    autonomy_run_id: None,
+                },
+                "starting",
+                WorkerRuntimeControl::new(
+                    crate::agent::worker::new_worker_transcript_snapshot(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .update_worker_state(callback, WorkerRuntimeState::Running)
+                .await,
+            crate::agent::process_control::WorkerMutationResult::Applied
+        );
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            Arc::<str>::from("agent"),
+            ProcessId::Worker(worker_id),
+            ProcessType::Worker,
+            None,
+            event_tx,
+        )
+        .with_worker_registry(callback, registry.clone());
+
+        <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "shell",
+            None,
+            "internal_1",
+            "{}",
+            "done",
+        )
+        .await;
+
+        assert_eq!(
+            registry
+                .worker_snapshot(worker_id)
+                .await
+                .unwrap()
+                .tool_calls,
+            1
+        );
+    }
+
+    /// A stale registration must not bump the replacement's counter.
+    #[tokio::test]
+    async fn stale_worker_hook_does_not_count_against_a_replacement() {
+        use crate::agent::process_control::{
+            ProcessControlRegistry, WorkerBackend, WorkerProvenance, WorkerRuntimeControl,
+        };
+
+        let registry = Arc::new(ProcessControlRegistry::new());
+        let worker_id = uuid::Uuid::new_v4();
+        let provenance = || WorkerProvenance {
+            origin_channel_id: Some(Arc::from("channel")),
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: ProcessId::Worker(worker_id),
+        };
+        let control = || {
+            WorkerRuntimeControl::new(
+                crate::agent::worker::new_worker_transcript_snapshot(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .0
+        };
+        let register = async |registry: &Arc<ProcessControlRegistry>| {
+            let reservation = registry
+                .reserve_worker(worker_id, &provenance(), 1)
+                .await
+                .unwrap();
+            let callback = reservation.callback_context();
+            registry
+                .register_restored_worker(
+                    reservation,
+                    provenance(),
+                    WorkerBackend::Builtin,
+                    true,
+                    "idle",
+                    0,
+                    control(),
+                )
+                .await
+                .unwrap();
+            callback
+        };
+
+        let stale_callback = register(&registry).await;
+        assert!(
+            registry
+                .remove_worker_if_registration_matches(stale_callback)
+                .await
+        );
+        register(&registry).await;
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            Arc::<str>::from("agent"),
+            ProcessId::Worker(worker_id),
+            ProcessType::Worker,
+            None,
+            event_tx,
+        )
+        .with_worker_registry(stale_callback, registry.clone());
+
+        <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "shell",
+            None,
+            "internal_1",
+            "{}",
+            "done",
+        )
+        .await;
+
+        assert_eq!(
+            registry
+                .worker_snapshot(worker_id)
+                .await
+                .unwrap()
+                .tool_calls,
+            0
+        );
     }
 }

@@ -1533,7 +1533,7 @@ impl Tool for DetachedSpawnWorkerTool {
             .reserve_worker_in_scope(
                 worker_id,
                 &provenance,
-                Arc::from("cortex"),
+                Arc::from(crate::agent::process_control::DETACHED_WORKER_ADMISSION_SCOPE),
                 **self.deps.runtime_config.max_concurrent_workers.load(),
             )
             .await
