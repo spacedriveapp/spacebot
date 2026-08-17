@@ -90,11 +90,12 @@ export function WorkersPanelContent() {
 	const active = useMemo(() => {
 		const rows: Array<ProcessRunDisplay & {agentId: string; agentName: string}> = [];
 		for (const worker of Object.values(activeWorkers)) {
+			if (!worker.runtimeAttached) continue;
 			rows.push({
 				kind: "worker",
 				id: worker.id,
 				input: worker.task,
-				status: worker.isIdle ? "idle" : "running",
+				status: worker.runtimeState === "waiting_for_input" ? "idle" : "running",
 				process_type: worker.workerType,
 				started_at: new Date(worker.startedAt).toISOString(),
 				tool_calls: worker.toolCalls,
@@ -139,7 +140,7 @@ export function WorkersPanelContent() {
 					{rows.length === 0 ? <div className="py-12 text-center text-sm text-ink-faint">No {tab} processes</div> : rows.map((process) => {
 						const liveWorker = process.kind === "worker" ? activeWorkers[process.id] : undefined;
 						const liveBranch = process.kind === "branch" ? activeBranches[process.id] : undefined;
-						return <div key={`${process.kind}:${process.id}`}><div className="px-[72px] pt-1 text-[10px] font-medium uppercase tracking-wide text-ink-faint">{process.agentName}</div><ProcessCard kind={process.kind} id={process.id} title={process.input} status={liveWorker ? (liveWorker.isIdle ? "idle" : "running") : liveBranch ? "running" : process.status} startedAt={process.started_at} toolCalls={liveWorker?.toolCalls ?? liveBranch?.toolCalls ?? process.tool_calls} currentTool={liveWorker?.currentTool ?? liveBranch?.currentTool} processType={process.process_type} selected={false} onSelect={() => setSelected({kind: process.kind, id: process.id, agentId: process.agentId, fallback: process})} /></div>;
+						return <div key={`${process.kind}:${process.id}`}><div className="px-[72px] pt-1 text-[10px] font-medium uppercase tracking-wide text-ink-faint">{process.agentName}</div><ProcessCard kind={process.kind} id={process.id} title={process.input} status={liveWorker ? (liveWorker.runtimeState === "waiting_for_input" ? "idle" : "running") : liveBranch ? "running" : process.status} startedAt={process.started_at} toolCalls={liveWorker?.toolCalls ?? liveBranch?.toolCalls ?? process.tool_calls} currentTool={liveWorker?.currentTool ?? liveBranch?.currentTool} processType={process.process_type} selected={false} onSelect={() => setSelected({kind: process.kind, id: process.id, agentId: process.agentId, fallback: process})} /></div>;
 					})}
 				</div>
 			</div>

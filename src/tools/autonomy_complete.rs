@@ -242,9 +242,10 @@ mod tests {
         let store = store().await;
         let run_id = store.begin_run().await.expect("begin");
         let handle = AutonomyRunHandle::new(run_id, 1, Arc::new(store));
-        handle.register_child(crate::agent::autonomy::AutonomyChild::Worker(
-            crate::WorkerId::new_v4(),
-        ));
+        handle.register_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+            worker_id: crate::WorkerId::new_v4(),
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+        });
         let tool = AutonomyCompleteTool::new(handle);
 
         let error = tool

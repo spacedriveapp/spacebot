@@ -65,13 +65,16 @@ pub(super) async fn health() -> Json<HealthResponse> {
 )]
 pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {
     let blocks = state.channel_status_blocks.read().await;
+    let registries = state.process_control_registries.load();
     let mut total_workers = 0;
     let mut total_branches = 0;
 
-    for status_block in blocks.values() {
-        let block = status_block.read().await;
-        total_workers += block.active_workers.len();
+    for registration in blocks.values() {
+        let block = registration.status_block.read().await;
         total_branches += block.active_branches.len();
+    }
+    for registry in registries.values() {
+        total_workers += registry.list_worker_snapshots().await.len();
     }
 
     Json(IdleResponse {

@@ -7,6 +7,11 @@
 use crate::agent::branch::{Branch, BranchExecutionConfig};
 use crate::agent::channel::ChannelState;
 use crate::agent::channel_prompt::TemporalContext;
+use crate::agent::process_control::{
+    WorkerBackend, WorkerCallbackContext, WorkerOperationContext, WorkerOperationId,
+    WorkerProvenance, WorkerRequester, WorkerResultTarget, WorkerRuntimeControl,
+    WorkerRuntimeState,
+};
 use crate::agent::worker::{Worker, WorkerOutcome};
 use crate::agent::worker::{WorkerTranscriptSnapshot, read_worker_transcript_snapshot};
 use crate::conversation::settings::{WorkerContextMode, WorkerHistoryMode};
@@ -22,7 +27,26 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
 
+/// The reason text a cancelled outcome carries. Falls back to the supervisor
+/// when a requester gave no reason, so the rendered result is never truncated
+/// to a dangling prefix.
+fn cancellation_reason_text(reason: Option<&str>) -> String {
+    let summarized = reason
+        .map(|reason| crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS))
+        .unwrap_or_default();
+    if summarized.is_empty() {
+        "cancelled by supervisor".to_string()
+    } else {
+        summarized
+    }
+}
+
+const TERMINAL_COMMIT_ATTEMPTS: usize = 3;
+const TERMINAL_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const TERMINAL_COMMIT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Validate worker capacity for a channel based on current active worker count.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn reserve_worker_slot_local(
     active_worker_count: usize,
     channel_id: &Arc<str>,
@@ -48,14 +72,152 @@ enum WorkerCompletionKind {
     Failed,
 }
 
-pub struct WorkerTaskControl {
-    pub handle: tokio::task::JoinHandle<()>,
-    pub cancel_tx: tokio::sync::watch::Sender<bool>,
-    pub terminal_notify: Arc<tokio::sync::Notify>,
-    pub transcript_snapshot: WorkerTranscriptSnapshot,
-    pub opencode_cancellation: Option<
-        Arc<tokio::sync::Mutex<Option<crate::opencode::worker::OpenCodeCancellationSession>>>,
-    >,
+pub struct WorkerStartGate {
+    tx: tokio::sync::watch::Sender<bool>,
+}
+
+pub struct PreparedWorkerSpawn {
+    pub worker_id: WorkerId,
+    callback: WorkerCallbackContext,
+    registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    run_logger: ProcessRunLogger,
+    start_gate: WorkerStartGate,
+    started_event: ProcessEvent,
+    event_tx: broadcast::Sender<ProcessEvent>,
+    autonomy_run: Option<crate::agent::autonomy::AutonomyRunHandle>,
+    operation_id: WorkerOperationId,
+}
+
+/// Commit the terminal outcome for a worker cancelled before its start gate
+/// opened, retire the matching registration, and settle any autonomy child.
+/// The reason is read before the registration is removed, so the requester's
+/// wording survives onto the durable record.
+pub(crate) async fn settle_cancelled_start(
+    registry: &crate::agent::process_control::ProcessControlRegistry,
+    run_logger: &ProcessRunLogger,
+    callback: WorkerCallbackContext,
+    autonomy_run: Option<&crate::agent::autonomy::AutonomyRunHandle>,
+    operation_id: WorkerOperationId,
+) {
+    let worker_id = callback.worker_id;
+    let reason = registry.worker_cancellation_reason(callback).await;
+    let result = crate::agent::process_control::worker_cancellation_result(reason.as_deref());
+    if let Err(error) = commit_worker_outcome_with_retry(
+        run_logger,
+        worker_id,
+        WorkerOutcomeKind::Cancelled,
+        &result,
+        None,
+        WorkerTerminalOwner::Cancel,
+    )
+    .await
+    {
+        tracing::warn!(%error, %worker_id, "failed to persist worker cancelled before start");
+    }
+    registry
+        .remove_worker_if_registration_matches(callback)
+        .await;
+    if let Some(run) = autonomy_run {
+        run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id,
+        });
+    }
+}
+
+impl PreparedWorkerSpawn {
+    pub async fn is_starting(&self) -> bool {
+        self.registry
+            .worker_is_in_state(self.callback, WorkerRuntimeState::Starting)
+            .await
+    }
+
+    pub async fn start(self) -> std::result::Result<WorkerId, AgentError> {
+        let Self {
+            worker_id,
+            callback,
+            registry,
+            run_logger,
+            start_gate,
+            started_event,
+            event_tx,
+            autonomy_run,
+            operation_id,
+        } = self;
+        if registry
+            .update_worker_state(callback, WorkerRuntimeState::Running)
+            .await
+            != crate::agent::process_control::WorkerMutationResult::Applied
+        {
+            settle_cancelled_start(
+                &registry,
+                &run_logger,
+                callback,
+                autonomy_run.as_ref(),
+                operation_id,
+            )
+            .await;
+            return Err(AgentError::Other(anyhow::anyhow!(
+                "can't start worker: registration is no longer starting"
+            )));
+        }
+        let opened = registry
+            .run_if_worker_state(callback, WorkerRuntimeState::Running, move || {
+                event_tx.send(started_event).ok();
+                start_gate.open();
+            })
+            .await;
+        if opened != crate::agent::process_control::WorkerMutationResult::Applied {
+            settle_cancelled_start(
+                &registry,
+                &run_logger,
+                callback,
+                autonomy_run.as_ref(),
+                operation_id,
+            )
+            .await;
+            return Err(AgentError::Other(anyhow::anyhow!(
+                "can't start worker: registration was cancelled before the gate opened"
+            )));
+        }
+        Ok(worker_id)
+    }
+
+    pub async fn fail_before_start(self, reason: &str) {
+        let result = format!("Worker failed before start: {reason}");
+        if let Err(error) = commit_worker_outcome_with_retry(
+            &self.run_logger,
+            self.worker_id,
+            WorkerOutcomeKind::Failed,
+            &result,
+            None,
+            WorkerTerminalOwner::Worker,
+        )
+        .await
+        {
+            tracing::warn!(%error, worker_id = %self.worker_id, "failed to persist pre-start worker failure");
+        }
+        self.registry
+            .remove_worker_if_registration_matches(self.callback)
+            .await;
+        if let Some(run) = &self.autonomy_run {
+            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id: self.worker_id,
+                operation_id: self.operation_id,
+            });
+        }
+    }
+}
+
+impl WorkerStartGate {
+    pub(crate) fn new() -> (Self, tokio::sync::watch::Receiver<bool>) {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        (Self { tx }, rx)
+    }
+
+    pub(crate) fn open(self) {
+        self.tx.send_replace(true);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -477,7 +639,6 @@ async fn spawn_branch(
         }
         return Err(AgentError::Other(anyhow::anyhow!(error)));
     }
-
     // Capture what the spawned task needs to notify the channel on failure.
     // branch.run() only sends BranchResult on the success path, so the
     // spawner must handle failures to prevent orphaned branches (see #279).
@@ -565,65 +726,6 @@ async fn spawn_branch(
     tracing::info!(branch_id = %branch_id, description = %status_label, "branch spawned");
 
     Ok(branch_id)
-}
-
-/// Check whether the channel has capacity for another worker.
-///
-/// Uses `worker_handles` as the source of truth for active workers, since
-/// `active_workers` (the `HashMap<WorkerId, Worker>`) is never populated —
-/// `Worker` is consumed by `.run()` inside `spawn_worker_task`.
-async fn check_worker_limit(state: &ChannelState) -> std::result::Result<(), AgentError> {
-    let max_workers = **state.deps.runtime_config.max_concurrent_workers.load();
-    let active_worker_count = state.worker_handles.read().await.len();
-    reserve_worker_slot_local(active_worker_count, &state.channel_id, max_workers)
-}
-
-/// Atomically check for duplicate tasks and reserve the task description.
-///
-/// This prevents the TOCTOU race where two concurrent `spawn_worker` calls
-/// both pass a read-only duplicate check before either registers in the
-/// status block. The reservation is held under a write lock on
-/// `reserved_tasks` and checked against both the status block (active
-/// workers) and existing reservations. The caller MUST call
-/// `release_task_reservation` when the worker is registered in the status
-/// block or the spawn fails.
-async fn reserve_task_if_unique(
-    state: &ChannelState,
-    task: &str,
-) -> std::result::Result<(), AgentError> {
-    // Normalize the task for comparison (strip [opencode] prefix).
-    let normalized = task.strip_prefix("[opencode] ").unwrap_or(task).to_string();
-
-    let mut reserved = state.reserved_tasks.write().await;
-
-    // Check existing reservations first (handles concurrent spawns).
-    if reserved.contains(&normalized) {
-        return Err(AgentError::DuplicateWorkerTask {
-            channel_id: state.channel_id.to_string(),
-            existing_worker_id: "pending".to_string(),
-        });
-    }
-
-    // Check the status block for already-running workers.
-    let status = state.status_block.read().await;
-    if let Some(existing_id) = status.find_duplicate_worker_task(task) {
-        return Err(AgentError::DuplicateWorkerTask {
-            channel_id: state.channel_id.to_string(),
-            existing_worker_id: existing_id.to_string(),
-        });
-    }
-    drop(status);
-
-    // Reserve the task.
-    reserved.insert(normalized);
-    Ok(())
-}
-
-/// Release a task reservation after the worker has been registered in the
-/// status block or the spawn failed.
-async fn release_task_reservation(state: &ChannelState, task: &str) {
-    let normalized = task.strip_prefix("[opencode] ").unwrap_or(task).to_string();
-    state.reserved_tasks.write().await.remove(&normalized);
 }
 
 fn worker_task_prompt(task: &str, task_context: Option<&str>) -> String {
@@ -734,6 +836,54 @@ pub async fn build_project_context(
     }
 }
 
+async fn append_worker_memory_context(
+    system_prompt: &mut crate::prompts::SegmentedPrompt,
+    deps: &AgentDeps,
+    channel_id: Option<&ChannelId>,
+    memory_mode: crate::conversation::settings::WorkerMemoryMode,
+) {
+    if !memory_mode.ambient_enabled() {
+        return;
+    }
+
+    let cortex_config = **deps.runtime_config.cortex.load();
+    match crate::memory::render::render_memory_store(
+        deps.memory_search.store(),
+        &deps.task_store,
+        &deps.agent_id,
+        cortex_config.memory_render_max_words,
+    )
+    .await
+    {
+        Ok(memory_store) if !memory_store.is_empty() => {
+            system_prompt.append_section("knowledge_synthesis", &memory_store);
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "worker ambient memory store render failed"),
+    }
+
+    let Some(channel_id) = channel_id else {
+        return;
+    };
+    let working_memory_config = **deps.runtime_config.working_memory.load();
+    let timezone = deps.working_memory.timezone();
+    match crate::memory::working::render_working_memory(
+        &deps.working_memory,
+        channel_id.as_ref(),
+        &working_memory_config,
+        timezone,
+    )
+    .await
+    {
+        Ok(working_memory) if !working_memory.is_empty() => system_prompt.append_section(
+            "working_memory",
+            &format!("## Recent Activity\n{working_memory}"),
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "worker ambient working memory render failed"),
+    }
+}
+
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
 ///
 /// `required_skills` differ from `suggested_skills`: their full content is
@@ -747,7 +897,7 @@ pub async fn spawn_worker_from_state(
     required_skills: &[&str],
     worker_context: &WorkerContextMode,
     task_context: WorkerTaskContext<'_>,
-) -> std::result::Result<WorkerId, AgentError> {
+) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
     let autonomy_run = state.autonomy_run();
     if state.kind == crate::agent::channel::ChannelKind::Autonomy && autonomy_run.is_none() {
         return Err(AgentError::Other(anyhow::anyhow!(
@@ -762,12 +912,9 @@ pub async fn spawn_worker_from_state(
             "can't spawn worker: autonomy run is settling"
         )));
     }
-    check_worker_limit(state).await?;
     let task = task.into();
-    reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "worker");
-
-    let result = spawn_worker_inner(
+    spawn_worker_inner(
         state,
         &task,
         interactive,
@@ -776,13 +923,7 @@ pub async fn spawn_worker_from_state(
         worker_context,
         task_context,
     )
-    .await;
-
-    // Release the reservation regardless of success or failure.
-    // On success the task is now in the status block; on failure it needs cleanup.
-    release_task_reservation(state, &task).await;
-
-    result
+    .await
 }
 
 /// Inner implementation of worker spawning, separated so the caller can
@@ -795,7 +936,7 @@ async fn spawn_worker_inner(
     required_skills: &[&str],
     worker_context: &WorkerContextMode,
     task_context: WorkerTaskContext<'_>,
-) -> std::result::Result<WorkerId, AgentError> {
+) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
 
@@ -870,51 +1011,46 @@ async fn spawn_worker_inner(
         "tool_use_enforcement",
     );
 
-    // Inject memory context based on worker_context settings
-    if worker_context.memory.ambient_enabled() {
-        // Render the memory store directly (deterministic, LLM-free) plus
-        // working memory.
-        let wm_config = **state.deps.runtime_config.working_memory.load();
-        let timezone = state.deps.working_memory.timezone();
-
-        let cortex_config = **state.deps.runtime_config.cortex.load();
-        let memory_store = match crate::memory::render::render_memory_store(
-            state.deps.memory_search.store(),
-            &state.deps.task_store,
-            &state.deps.agent_id,
-            cortex_config.memory_render_max_words,
-        )
-        .await
-        {
-            Ok(text) if !text.is_empty() => Some(text),
-            Ok(_) => None,
-            Err(error) => {
-                tracing::warn!(%error, "worker ambient memory store render failed");
-                None
-            }
-        };
-
-        if let Ok(working_memory) = crate::memory::working::render_working_memory(
-            &state.deps.working_memory,
-            state.channel_id.as_ref(),
-            &wm_config,
-            timezone,
-        )
-        .await
-        {
-            if let Some(memory_store) = memory_store {
-                system_prompt.append_section("knowledge_synthesis", &memory_store);
-            }
-            if !working_memory.is_empty() {
-                system_prompt.append_section(
-                    "working_memory",
-                    &format!("## Recent Activity\n{working_memory}"),
-                );
-            }
-        }
-    }
+    append_worker_memory_context(
+        &mut system_prompt,
+        &state.deps,
+        Some(&state.channel_id),
+        worker_context.memory,
+    )
+    .await;
 
     let worker_task = worker_task_prompt(task, task_context.task_context);
+    let worker_id = uuid::Uuid::new_v4();
+    let autonomy_run = state.autonomy_run();
+    let provenance = WorkerProvenance {
+        origin_channel_id: Some(state.channel_id.clone()),
+        origin_branch_id: task_context.origin_branch_id,
+        task: task.to_string(),
+        task_id: None,
+        autonomy_run_id: autonomy_run.as_ref().map(|run| run.run_id.clone()),
+        spawning_process: crate::ProcessId::Channel(state.channel_id.clone()),
+    };
+    let reservation = state
+        .deps
+        .process_control_registry
+        .reserve_worker(
+            worker_id,
+            &provenance,
+            **state.deps.runtime_config.max_concurrent_workers.load(),
+        )
+        .await
+        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    let callback = reservation.callback_context();
+    let initial_operation = WorkerOperationContext {
+        operation_id: WorkerOperationId::new(),
+        requester: WorkerRequester::Channel {
+            channel_id: state.channel_id.clone(),
+        },
+        result_target: WorkerResultTarget::Channel {
+            channel_id: state.channel_id.clone(),
+        },
+        autonomy_run_id: autonomy_run.as_ref().map(|run| run.run_id.clone()),
+    };
 
     // Fork the channel's conversation history under the worker's own system
     // prompt — the same fork semantic branches use. An oversized fork is
@@ -955,6 +1091,9 @@ async fn spawn_worker_inner(
 
     let worker = if interactive {
         let (worker, input_tx, inject_tx) = Worker::new_interactive(
+            worker_id,
+            callback,
+            initial_operation.clone(),
             Some(state.channel_id.clone()),
             &worker_task,
             system_prompt.clone(),
@@ -968,20 +1107,12 @@ async fn spawn_worker_inner(
             worker_context.wiki_write,
             worker_model_override,
         );
-        let worker_id = worker.id;
-        state
-            .worker_inputs
-            .write()
-            .await
-            .insert(worker_id, input_tx);
-        state
-            .worker_injections
-            .write()
-            .await
-            .insert(worker_id, inject_tx);
-        worker
+        (worker, Some(input_tx), Some(inject_tx))
     } else {
         let (worker, inject_tx) = Worker::new(
+            worker_id,
+            callback,
+            initial_operation.clone(),
             Some(state.channel_id.clone()),
             &worker_task,
             system_prompt,
@@ -995,21 +1126,42 @@ async fn spawn_worker_inner(
             worker_context.wiki_write,
             worker_model_override,
         );
-        state
-            .worker_injections
-            .write()
-            .await
-            .insert(worker.id, inject_tx);
-        worker
+        (worker, None, Some(inject_tx))
     };
-
-    let worker_id = worker.id;
+    let (worker, input_tx, injection_tx) = worker;
     let transcript_snapshot = worker.transcript_snapshot();
-    let autonomy_run = state.autonomy_run();
+    let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
+        transcript_snapshot.clone(),
+        None,
+        input_tx,
+        injection_tx,
+        Some(state.process_run_logger.clone()),
+    );
+    let admission = state
+        .deps
+        .process_control_registry
+        .register_new_worker(
+            reservation,
+            provenance,
+            WorkerBackend::Builtin,
+            interactive,
+            initial_operation.clone(),
+            "starting",
+            runtime_control,
+        )
+        .await
+        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
     if let Some(run) = &autonomy_run
-        && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
+        && !run.register_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id: initial_operation.operation_id,
+        })
     {
-        state.cleanup_worker_routing(worker_id).await;
+        state
+            .deps
+            .process_control_registry
+            .remove_worker_if_registration_matches(callback)
+            .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "can't spawn worker: autonomy epoch is finishing"
         )));
@@ -1031,10 +1183,35 @@ async fn spawn_worker_inner(
         .await
     {
         if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
+            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id,
+                operation_id: initial_operation.operation_id,
+            });
         }
-        state.cleanup_worker_routing(worker_id).await;
+        state
+            .deps
+            .process_control_registry
+            .remove_worker_if_registration_matches(callback)
+            .await;
         return Err(AgentError::Other(anyhow::anyhow!(error)));
+    }
+    if !state
+        .deps
+        .process_control_registry
+        .worker_is_in_state(callback, WorkerRuntimeState::Starting)
+        .await
+    {
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
+            &state.process_run_logger,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
+        )
+        .await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't start worker: cancelled during durable start"
+        )));
     }
 
     let worker_span = tracing::info_span!(
@@ -1043,14 +1220,18 @@ async fn spawn_worker_inner(
         channel_id = %state.channel_id,
     );
     let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
+    let (start_gate, start_rx) = WorkerStartGate::new();
     let handle = spawn_worker_task(
-        worker_id,
+        callback,
+        state.deps.process_control_registry.clone(),
+        cancel_rx,
+        terminal_notify,
+        start_rx,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         state.process_run_logger.clone(),
         transcript_snapshot,
-        None,
         None,
         secrets_store,
         Some(state.deps.task_store.clone()),
@@ -1058,26 +1239,47 @@ async fn spawn_worker_inner(
         worker.run().instrument(worker_span),
     );
 
-    state.worker_handles.write().await.insert(worker_id, handle);
+    if let Err(handle) = state
+        .deps
+        .process_control_registry
+        .install_task_handle(admission.callback_context(), handle)
+        .await
+    {
+        handle.abort();
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
+            &state.process_run_logger,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
+        )
+        .await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "worker registration detached before task handle installation"
+        )));
+    }
 
     {
         let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, task, false, interactive);
+        status.add_worker(
+            worker_id,
+            callback.registration_id,
+            task,
+            false,
+            interactive,
+        );
     }
 
-    state
-        .deps
-        .event_tx
-        .send(crate::ProcessEvent::WorkerStarted {
-            agent_id: state.deps.agent_id.clone(),
-            worker_id,
-            channel_id: Some(state.channel_id.clone()),
-            task: task.to_string(),
-            worker_type: "builtin".into(),
-            interactive,
-            directory: None,
-        })
-        .ok();
+    let started_event = crate::ProcessEvent::WorkerStarted {
+        agent_id: state.deps.agent_id.clone(),
+        worker_id,
+        worker_registration_id: callback.registration_id,
+        channel_id: Some(state.channel_id.clone()),
+        task: task.to_string(),
+        worker_type: "builtin".into(),
+        interactive,
+        directory: None,
+    };
 
     state
         .deps
@@ -1092,7 +1294,17 @@ async fn spawn_worker_inner(
 
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "worker spawned");
 
-    Ok(worker_id)
+    Ok(PreparedWorkerSpawn {
+        worker_id,
+        callback,
+        registry: state.deps.process_control_registry.clone(),
+        run_logger: state.process_run_logger.clone(),
+        start_gate,
+        started_event,
+        event_tx: state.deps.event_tx.clone(),
+        autonomy_run,
+        operation_id: initial_operation.operation_id,
+    })
 }
 
 /// Spawn an OpenCode-backed worker for coding tasks.
@@ -1107,19 +1319,16 @@ pub async fn spawn_opencode_worker_from_state(
     interactive: bool,
     required_skills: &[&str],
     task_context: WorkerTaskContext<'_>,
-) -> std::result::Result<crate::WorkerId, AgentError> {
+) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
     if !interactive {
         return Err(AgentError::Other(anyhow::anyhow!(
             "OpenCode workers must be interactive"
         )));
     }
 
-    check_worker_limit(state).await?;
     let task = task.into();
-    reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "opencode_worker");
-
-    let result = spawn_opencode_worker_inner(
+    spawn_opencode_worker_inner(
         state,
         &task,
         directory,
@@ -1127,12 +1336,7 @@ pub async fn spawn_opencode_worker_from_state(
         required_skills,
         task_context,
     )
-    .await;
-
-    // Release the reservation regardless of success or failure.
-    release_task_reservation(state, &task).await;
-
-    result
+    .await
 }
 
 /// Inner implementation of OpenCode worker spawning, separated so the
@@ -1144,7 +1348,7 @@ async fn spawn_opencode_worker_inner(
     interactive: bool,
     required_skills: &[&str],
     task_context: WorkerTaskContext<'_>,
-) -> std::result::Result<crate::WorkerId, AgentError> {
+) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
     let directory = expand_tilde(directory);
 
     let rc = &state.deps.runtime_config;
@@ -1212,21 +1416,51 @@ async fn spawn_opencode_worker_inner(
     }
 
     let worker_task = worker_task_prompt(task, task_context.task_context);
+    let worker_id = uuid::Uuid::new_v4();
+    let autonomy_run = state.autonomy_run();
+    let persisted_task = format!("[opencode] {task}");
+    let provenance = WorkerProvenance {
+        origin_channel_id: Some(state.channel_id.clone()),
+        origin_branch_id: task_context.origin_branch_id,
+        task: persisted_task.clone(),
+        task_id: None,
+        autonomy_run_id: autonomy_run.as_ref().map(|run| run.run_id.clone()),
+        spawning_process: crate::ProcessId::Channel(state.channel_id.clone()),
+    };
+    let reservation = state
+        .deps
+        .process_control_registry
+        .reserve_worker(
+            worker_id,
+            &provenance,
+            **state.deps.runtime_config.max_concurrent_workers.load(),
+        )
+        .await
+        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    let callback = reservation.callback_context();
+    let initial_operation = WorkerOperationContext {
+        operation_id: WorkerOperationId::new(),
+        requester: WorkerRequester::Channel {
+            channel_id: state.channel_id.clone(),
+        },
+        result_target: WorkerResultTarget::Channel {
+            channel_id: state.channel_id.clone(),
+        },
+        autonomy_run_id: autonomy_run.as_ref().map(|run| run.run_id.clone()),
+    };
     let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
+            worker_id,
+            callback,
+            initial_operation.clone(),
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
             &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
+            state.deps.process_control_registry.clone(),
         );
-        let worker_id = worker.id;
-        state
-            .worker_inputs
-            .write()
-            .await
-            .insert(worker_id, input_tx);
         let worker = match worker_status_text {
             Some(ref prompt) => worker.with_system_prompt(prompt),
             None => worker,
@@ -1235,15 +1469,22 @@ async fn spawn_opencode_worker_inner(
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
         };
-        worker.with_sqlite_pool(state.deps.sqlite_pool.clone())
+        (
+            worker.with_sqlite_pool(state.deps.sqlite_pool.clone()),
+            Some(input_tx),
+        )
     } else {
         let worker = crate::opencode::OpenCodeWorker::new(
+            worker_id,
+            callback,
+            initial_operation.clone(),
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
             &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
+            state.deps.process_control_registry.clone(),
         );
         let worker = match worker_status_text {
             Some(ref prompt) => worker.with_system_prompt(prompt),
@@ -1253,15 +1494,50 @@ async fn spawn_opencode_worker_inner(
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
         };
-        worker.with_sqlite_pool(state.deps.sqlite_pool.clone())
+        (
+            worker.with_sqlite_pool(state.deps.sqlite_pool.clone()),
+            None,
+        )
     };
-
-    let worker_id = worker.id;
-    let autonomy_run = state.autonomy_run();
+    let (worker, input_tx) = worker;
+    let worker = match state.model_overrides.resolve_model("worker") {
+        Some(model) => worker.with_model(model),
+        None => worker,
+    };
+    let transcript_snapshot = worker.transcript_snapshot();
+    let opencode_cancellation = worker.cancellation_session();
+    let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
+        transcript_snapshot.clone(),
+        Some(opencode_cancellation),
+        input_tx,
+        None,
+        Some(state.process_run_logger.clone()),
+    );
+    let admission = state
+        .deps
+        .process_control_registry
+        .register_new_worker(
+            reservation,
+            provenance,
+            WorkerBackend::OpenCode,
+            true,
+            initial_operation.clone(),
+            "starting",
+            runtime_control,
+        )
+        .await
+        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
     if let Some(run) = &autonomy_run
-        && !run.register_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id))
+        && !run.register_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+            worker_id,
+            operation_id: initial_operation.operation_id,
+        })
     {
-        state.cleanup_worker_routing(worker_id).await;
+        state
+            .deps
+            .process_control_registry
+            .remove_worker_if_registration_matches(callback)
+            .await;
         return Err(AgentError::Other(anyhow::anyhow!(
             "can't spawn worker: autonomy epoch is finishing"
         )));
@@ -1283,10 +1559,35 @@ async fn spawn_opencode_worker_inner(
         .await
     {
         if let Some(run) = &autonomy_run {
-            run.settle_child(crate::agent::autonomy::AutonomyChild::Worker(worker_id));
+            run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id,
+                operation_id: initial_operation.operation_id,
+            });
         }
-        state.cleanup_worker_routing(worker_id).await;
+        state
+            .deps
+            .process_control_registry
+            .remove_worker_if_registration_matches(callback)
+            .await;
         return Err(AgentError::Other(anyhow::anyhow!(error)));
+    }
+    if !state
+        .deps
+        .process_control_registry
+        .worker_is_in_state(callback, WorkerRuntimeState::Starting)
+        .await
+    {
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
+            &state.process_run_logger,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
+        )
+        .await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't start worker: cancelled during durable start"
+        )));
     }
 
     let worker_span = tracing::info_span!(
@@ -1295,16 +1596,18 @@ async fn spawn_opencode_worker_inner(
         channel_id = %state.channel_id,
         worker_type = "opencode",
     );
-    let transcript_snapshot = worker.transcript_snapshot();
-    let opencode_cancellation = worker.cancellation_session();
+    let (start_gate, start_rx) = WorkerStartGate::new();
     let handle = spawn_worker_task(
-        worker_id,
+        callback,
+        state.deps.process_control_registry.clone(),
+        cancel_rx,
+        terminal_notify,
+        start_rx,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         state.process_run_logger.clone(),
         transcript_snapshot,
-        Some(opencode_cancellation),
         Some(directory_claim),
         oc_secrets_store,
         Some(state.deps.task_store.clone()),
@@ -1320,27 +1623,48 @@ async fn spawn_opencode_worker_inner(
         .instrument(worker_span),
     );
 
-    state.worker_handles.write().await.insert(worker_id, handle);
+    if let Err(handle) = state
+        .deps
+        .process_control_registry
+        .install_task_handle(admission.callback_context(), handle)
+        .await
+    {
+        handle.abort();
+        settle_cancelled_start(
+            &state.deps.process_control_registry,
+            &state.process_run_logger,
+            callback,
+            autonomy_run.as_ref(),
+            initial_operation.operation_id,
+        )
+        .await;
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "worker registration detached before task handle installation"
+        )));
+    }
 
     let opencode_task = format!("[opencode] {task}");
     {
         let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, &opencode_task, false, interactive);
+        status.add_worker(
+            worker_id,
+            callback.registration_id,
+            &opencode_task,
+            false,
+            interactive,
+        );
     }
 
-    state
-        .deps
-        .event_tx
-        .send(crate::ProcessEvent::WorkerStarted {
-            agent_id: state.deps.agent_id.clone(),
-            worker_id,
-            channel_id: Some(state.channel_id.clone()),
-            task: opencode_task,
-            worker_type: "opencode".into(),
-            interactive,
-            directory: Some(persist_directory.to_string_lossy().to_string()),
-        })
-        .ok();
+    let started_event = crate::ProcessEvent::WorkerStarted {
+        agent_id: state.deps.agent_id.clone(),
+        worker_id,
+        worker_registration_id: callback.registration_id,
+        channel_id: Some(state.channel_id.clone()),
+        task: opencode_task,
+        worker_type: "opencode".into(),
+        interactive,
+        directory: Some(persist_directory.to_string_lossy().to_string()),
+    };
 
     state
         .deps
@@ -1355,7 +1679,17 @@ async fn spawn_opencode_worker_inner(
 
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "OpenCode worker spawned");
 
-    Ok(worker_id)
+    Ok(PreparedWorkerSpawn {
+        worker_id,
+        callback,
+        registry: state.deps.process_control_registry.clone(),
+        run_logger: state.process_run_logger.clone(),
+        start_gate,
+        started_event,
+        event_tx: state.deps.event_tx.clone(),
+        autonomy_run,
+        operation_id: initial_operation.operation_id,
+    })
 }
 
 /// Spawn a future as a tokio task that sends a `WorkerComplete` event on completion.
@@ -1369,37 +1703,98 @@ async fn spawn_opencode_worker_inner(
 /// `[REDACTED:<name>]` so they never propagate to channel context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_worker_task<F>(
-    worker_id: WorkerId,
+    callback: WorkerCallbackContext,
+    process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    mut cancel_rx: tokio::sync::watch::Receiver<crate::agent::process_control::WorkerCancelSignal>,
+    terminal_notify: Arc<tokio::sync::Notify>,
+    mut start_rx: tokio::sync::watch::Receiver<bool>,
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
     run_logger: ProcessRunLogger,
     transcript_snapshot: WorkerTranscriptSnapshot,
-    opencode_cancellation: Option<
-        Arc<tokio::sync::Mutex<Option<crate::opencode::worker::OpenCodeCancellationSession>>>,
-    >,
     opencode_directory_claim: Option<crate::opencode::server::OpenCodeDirectoryClaim>,
     secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
     // Present when the run should be recorded against a task's history.
     task_store: Option<Arc<crate::tasks::TaskStore>>,
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))] worker_type: &'static str,
     future: F,
-) -> WorkerTaskControl
+) -> tokio::task::JoinHandle<()>
 where
     F: std::future::Future<Output = crate::Result<WorkerOutcome>> + Send + 'static,
 {
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-    let terminal_notify = Arc::new(tokio::sync::Notify::new());
+    let worker_id = callback.worker_id;
     let task_terminal_notify = terminal_notify.clone();
     let task_transcript_snapshot = transcript_snapshot.clone();
-    // The parent owns cancellation authority, but its teardown must detach a
-    // worker rather than turn a dropped sender into a cancellation request.
-    let task_cancel_tx = cancel_tx.clone();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         let opencode_directory_claim = opencode_directory_claim;
-        let _task_cancel_tx = task_cancel_tx;
+        loop {
+            if *start_rx.borrow() {
+                break;
+            }
+            tokio::select! {
+                changed = start_rx.changed() => {
+                    if changed.is_err() {
+                        let cancellation = cancel_rx.borrow().clone();
+                        let fallback = match &cancellation {
+                            Some(reason) => (
+                                WorkerOutcomeKind::Cancelled,
+                                crate::agent::process_control::worker_cancellation_result(Some(reason)),
+                                WorkerTerminalOwner::Cancel,
+                            ),
+                            None => (
+                                WorkerOutcomeKind::Failed,
+                                "Worker failed before the start gate opened.".to_string(),
+                                WorkerTerminalOwner::Worker,
+                            ),
+                        };
+                        finalize_worker_supervision(
+                            callback,
+                            &process_control_registry,
+                            &run_logger,
+                            &event_tx,
+                            &agent_id,
+                            channel_id.clone(),
+                            task_store.as_ref(),
+                            fallback.0,
+                            fallback.1,
+                            None,
+                            fallback.2,
+                            false,
+                            &task_terminal_notify,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+                changed = cancel_rx.changed() => {
+                    debug_assert!(changed.is_ok(), "worker supervisor retains cancellation sender");
+                }
+            }
+        }
         #[cfg(feature = "metrics")]
         let worker_start = std::time::Instant::now();
+
+        let pre_start_cancellation = cancel_rx.borrow().clone();
+        if let Some(reason) = pre_start_cancellation {
+            finalize_worker_supervision(
+                callback,
+                &process_control_registry,
+                &run_logger,
+                &event_tx,
+                &agent_id,
+                channel_id,
+                task_store.as_ref(),
+                WorkerOutcomeKind::Cancelled,
+                crate::agent::process_control::worker_cancellation_result(Some(&reason)),
+                None,
+                WorkerTerminalOwner::Cancel,
+                false,
+                &task_terminal_notify,
+            )
+            .await;
+            return;
+        }
 
         #[cfg(feature = "metrics")]
         crate::telemetry::Metrics::global()
@@ -1407,17 +1802,43 @@ where
             .with_label_values(&[&*agent_id])
             .inc();
 
-        let worker_future = std::panic::AssertUnwindSafe(future).catch_unwind();
-        tokio::pin!(worker_future);
+        let execution_handle = tokio::spawn(std::panic::AssertUnwindSafe(future).catch_unwind());
+        let execution_abort_handle = execution_handle.abort_handle();
+        if process_control_registry
+            .install_execution_abort_handle(callback, execution_abort_handle.clone())
+            .await
+            != crate::agent::process_control::WorkerMutationResult::Applied
+        {
+            execution_abort_handle.abort();
+        }
+        tokio::pin!(execution_handle);
         let raw = tokio::select! {
-            result = &mut worker_future => result,
+            result = &mut execution_handle => match result {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(Ok(WorkerOutcome::Cancelled {
+                    reason: "cancelled by supervisor".to_string(),
+                })),
+                Err(error) => Ok(Err(SpacebotError::from(anyhow::anyhow!(
+                    "worker execution task failed: {error}"
+                )))),
+            },
             changed = cancel_rx.changed() => {
                 debug_assert!(changed.is_ok(), "worker task retains cancellation sender");
+                let reason = cancel_rx.borrow().clone();
+                execution_abort_handle.abort();
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    &mut execution_handle,
+                )
+                .await;
                 Ok(Ok(WorkerOutcome::Cancelled {
-                    reason: "cancelled by supervisor".to_string(),
+                    reason: cancellation_reason_text(reason.as_deref()),
                 }))
             }
         };
+        process_control_registry
+            .clear_execution_abort_handle(callback)
+            .await;
         if let Some(directory_claim) = opencode_directory_claim {
             directory_claim.release().await;
         }
@@ -1492,72 +1913,146 @@ where
             | WorkerOutcomeKind::Failed => WorkerTerminalOwner::Worker,
         };
         let transcript = read_worker_transcript_snapshot(&task_transcript_snapshot);
-        let commit = commit_worker_outcome(
+        finalize_worker_supervision(
+            callback,
+            &process_control_registry,
             &run_logger,
-            worker_id,
+            &event_tx,
+            &agent_id,
+            channel_id,
+            task_store.as_ref(),
             outcome_kind,
-            &result_text,
+            result_text,
             transcript.as_ref(),
             terminal_owner,
+            notify,
+            &task_terminal_notify,
         )
         .await;
+    })
+}
 
-        // Close this run in the task's attempt history, using the outcome the
-        // commit settled on: a completion racing a cancel or a timeout lands on
-        // a different terminal kind than the raw classification, and the board
-        // has to agree with the durable worker record. A commit that produced
-        // nothing still closes the attempt with what was classified here, so a
-        // failure to commit cannot leave the task blocked by an open run.
-        // Keyed by worker id, so a run never bound to a task matches nothing.
-        if let Some(task_store) = &task_store {
-            let (resolved, summary_source) = match &commit {
-                Ok(Some((terminal, _))) => (terminal.outcome_kind, terminal.result.as_str()),
-                _ => (outcome_kind, result_text.as_str()),
-            };
-            if let Err(error) = task_store
-                .finish_task_attempt(
-                    &worker_id.to_string(),
-                    resolved.into(),
-                    Some(summary_source),
-                )
-                .await
-            {
-                tracing::warn!(%error, %worker_id, "failed to record the task attempt outcome");
+#[allow(clippy::too_many_arguments)]
+async fn finalize_worker_supervision(
+    callback: WorkerCallbackContext,
+    process_control_registry: &crate::agent::process_control::ProcessControlRegistry,
+    run_logger: &ProcessRunLogger,
+    event_tx: &broadcast::Sender<ProcessEvent>,
+    agent_id: &crate::AgentId,
+    channel_id: Option<ChannelId>,
+    task_store: Option<&Arc<crate::tasks::TaskStore>>,
+    outcome_kind: WorkerOutcomeKind,
+    result_text: String,
+    transcript: Option<&crate::agent::worker::WorkerTranscriptPayload>,
+    terminal_owner: WorkerTerminalOwner,
+    notify: bool,
+    terminal_notify: &tokio::sync::Notify,
+) {
+    let worker_id = callback.worker_id;
+    let active_operation = process_control_registry
+        .worker_snapshot_for_callback(callback)
+        .await
+        .and_then(|snapshot| snapshot.active_operation);
+    let commit = commit_worker_outcome_with_retry(
+        run_logger,
+        worker_id,
+        outcome_kind,
+        &result_text,
+        transcript,
+        terminal_owner,
+    )
+    .await;
+    if let Some(task_store) = task_store {
+        let (resolved, summary) = commit
+            .as_ref()
+            .ok()
+            .and_then(|commit| commit.as_ref())
+            .map_or((outcome_kind, result_text.as_str()), |(terminal, _)| {
+                (terminal.outcome_kind, terminal.result.as_str())
+            });
+        if let Err(error) = task_store
+            .finish_task_attempt(&worker_id.to_string(), resolved.into(), Some(summary))
+            .await
+        {
+            tracing::warn!(%error, %worker_id, "failed to record the task attempt outcome");
+        }
+    }
+    process_control_registry
+        .remove_worker_if_registration_matches(callback)
+        .await;
+    terminal_notify.notify_waiters();
+    match commit {
+        Ok(Some((terminal, _))) => {
+            event_tx
+                .send(worker_complete_event(
+                    agent_id.clone(),
+                    channel_id,
+                    callback,
+                    active_operation,
+                    terminal,
+                    notify,
+                ))
+                .ok();
+        }
+        Ok(None) => {
+            tracing::error!(%worker_id, "worker terminal outcome remained unavailable after retries");
+        }
+        Err(error) => {
+            tracing::error!(%error, %worker_id, "worker terminal outcome failed after retries");
+        }
+    }
+}
+
+pub(crate) async fn commit_worker_outcome_with_retry(
+    run_logger: &ProcessRunLogger,
+    worker_id: WorkerId,
+    outcome_kind: WorkerOutcomeKind,
+    result: &str,
+    transcript: Option<&crate::agent::worker::WorkerTranscriptPayload>,
+    terminal_owner: WorkerTerminalOwner,
+) -> crate::Result<Option<(WorkerTerminalOutcome, bool)>> {
+    let mut last_error = None;
+    for attempt in 0..TERMINAL_COMMIT_ATTEMPTS {
+        match tokio::time::timeout(
+            TERMINAL_COMMIT_TIMEOUT,
+            commit_worker_outcome(
+                run_logger,
+                worker_id,
+                outcome_kind,
+                result,
+                transcript,
+                terminal_owner,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(Some(commit))) => return Ok(Some(commit)),
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(
+                    anyhow::anyhow!(
+                        "worker terminal commit timed out after {TERMINAL_COMMIT_TIMEOUT:?}"
+                    )
+                    .into(),
+                );
             }
         }
-
-        let (terminal, newly_committed) = match commit {
-            Ok(Some(commit)) => commit,
-            Ok(None) => {
-                tracing::error!(%worker_id, "worker terminal outcome could not be committed");
-                task_terminal_notify.notify_one();
-                return;
-            }
-            Err(error) => {
-                tracing::error!(%error, %worker_id, "failed to commit worker terminal outcome");
-                task_terminal_notify.notify_one();
-                return;
-            }
-        };
-        task_terminal_notify.notify_one();
-        if newly_committed {
-            let _ = event_tx.send(worker_complete_event(
-                agent_id, channel_id, terminal, notify,
-            ));
+        if attempt + 1 < TERMINAL_COMMIT_ATTEMPTS {
+            tokio::time::sleep(TERMINAL_COMMIT_RETRY_DELAY).await;
         }
-    });
-    WorkerTaskControl {
-        handle,
-        cancel_tx,
-        terminal_notify,
-        transcript_snapshot,
-        opencode_cancellation,
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
     }
 }
 
 pub(crate) fn worker_complete_event(
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
+    callback: WorkerCallbackContext,
+    active_operation: Option<WorkerOperationContext>,
     terminal: WorkerTerminalOutcome,
     notify: bool,
 ) -> ProcessEvent {
@@ -1567,6 +2062,8 @@ pub(crate) fn worker_complete_event(
             .worker_id
             .parse()
             .expect("persisted worker IDs are UUIDs"),
+        worker_registration_id: callback.registration_id,
+        active_operation,
         channel_id,
         result: terminal.result,
         notify,
@@ -1601,10 +2098,20 @@ pub(crate) async fn commit_worker_outcome(
         WorkerOutcomeKind::Succeeded | WorkerOutcomeKind::Partial | WorkerOutcomeKind::Blocked => {
             match lifecycle {
                 WorkerLifecycle::Completing => lifecycle,
-                WorkerLifecycle::Cancelling | WorkerLifecycle::TimingOut => {
-                    if outcome_kind == WorkerOutcomeKind::Blocked {
-                        outcome_kind = WorkerOutcomeKind::Partial;
-                    }
+                WorkerLifecycle::Cancelling => {
+                    outcome_kind = if transcript.is_some() {
+                        WorkerOutcomeKind::Partial
+                    } else {
+                        WorkerOutcomeKind::Cancelled
+                    };
+                    lifecycle
+                }
+                WorkerLifecycle::TimingOut => {
+                    outcome_kind = if transcript.is_some() {
+                        WorkerOutcomeKind::Partial
+                    } else {
+                        WorkerOutcomeKind::TimedOut
+                    };
                     lifecycle
                 }
                 WorkerLifecycle::Running | WorkerLifecycle::WaitingForInput => {
@@ -1687,6 +2194,36 @@ pub(crate) async fn commit_worker_outcome(
         },
     };
 
+    if lifecycle == WorkerLifecycle::Cancelling
+        && matches!(
+            outcome_kind,
+            WorkerOutcomeKind::Succeeded
+                | WorkerOutcomeKind::Partial
+                | WorkerOutcomeKind::Blocked
+                | WorkerOutcomeKind::Failed
+        )
+    {
+        outcome_kind = if transcript.is_some() {
+            WorkerOutcomeKind::Partial
+        } else {
+            WorkerOutcomeKind::Cancelled
+        };
+    } else if lifecycle == WorkerLifecycle::TimingOut
+        && matches!(
+            outcome_kind,
+            WorkerOutcomeKind::Succeeded
+                | WorkerOutcomeKind::Partial
+                | WorkerOutcomeKind::Blocked
+                | WorkerOutcomeKind::Failed
+        )
+    {
+        outcome_kind = if transcript.is_some() {
+            WorkerOutcomeKind::Partial
+        } else {
+            WorkerOutcomeKind::TimedOut
+        };
+    }
+
     let commit = run_logger
         .complete_worker(
             worker_id,
@@ -1767,21 +2304,33 @@ where
     }
 }
 
-/// Resume an idle interactive worker into a channel's state after restart.
-///
-/// Loads the prior transcript, creates a resumed worker (builtin or opencode),
-/// registers it into the channel's worker_inputs/worker_handles/status_block,
-/// and spawns the follow-up loop. Returns `Ok(worker_id)` on success, or
-/// an error string if the worker couldn't be resumed.
-pub async fn resume_idle_worker_into_state(
-    state: &ChannelState,
+pub struct WorkerRestorationContext {
+    pub deps: AgentDeps,
+    pub channel_id: Option<ChannelId>,
+    pub process_run_logger: ProcessRunLogger,
+    pub screenshot_dir: std::path::PathBuf,
+    pub logs_dir: std::path::PathBuf,
+    pub worker_context: WorkerContextMode,
+    pub model_overrides: Arc<crate::conversation::settings::ResolvedConversationSettings>,
+}
+
+/// Restore an idle interactive worker directly into its agent registry.
+pub async fn restore_idle_worker_into_registry(
+    state: &WorkerRestorationContext,
     idle_worker: &crate::conversation::history::IdleWorkerRow,
 ) -> std::result::Result<WorkerId, String> {
     let worker_id: WorkerId = idle_worker
         .id
         .parse::<uuid::Uuid>()
         .map_err(|error| format!("invalid worker ID '{}': {error}", idle_worker.id))?;
-
+    let provenance = WorkerProvenance {
+        origin_channel_id: idle_worker.channel_id.as_deref().map(Arc::<str>::from),
+        origin_branch_id: None,
+        task: idle_worker.task.clone(),
+        task_id: None,
+        autonomy_run_id: None,
+        spawning_process: crate::ProcessId::Worker(worker_id),
+    };
     match idle_worker.worker_type.as_str() {
         "opencode" => {
             let session_id = idle_worker
@@ -1811,9 +2360,25 @@ pub async fn resume_idle_worker_into_state(
                 server_pool.clone(),
                 directory.clone(),
             );
+            let admission_scope = provenance.origin_channel_id.clone().unwrap_or_else(|| {
+                Arc::from(crate::agent::process_control::DETACHED_WORKER_ADMISSION_SCOPE)
+            });
+            let reservation = state
+                .deps
+                .process_control_registry
+                .reserve_worker_in_scope(
+                    worker_id,
+                    &provenance,
+                    admission_scope,
+                    **state.deps.runtime_config.max_concurrent_workers.load(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let callback = reservation.callback_context();
             let result = crate::opencode::OpenCodeWorker::resume_interactive(
                 worker_id,
-                Some(state.channel_id.clone()),
+                callback,
+                state.channel_id.clone(),
                 state.deps.agent_id.clone(),
                 &idle_worker.task,
                 directory,
@@ -1821,13 +2386,24 @@ pub async fn resume_idle_worker_into_state(
                 state.deps.event_tx.clone(),
                 session_id.to_string(),
                 idle_worker.transcript.clone(),
+                state.deps.process_control_registry.clone(),
             )
             .await;
 
-            let (mut worker, input_tx) = result.ok_or_else(|| {
-                "failed to reconnect to OpenCode session (server dead or session expired)"
-                    .to_string()
-            })?;
+            let Some((mut worker, input_tx)) = result else {
+                state
+                    .deps
+                    .process_control_registry
+                    .release_worker_reservation(reservation)
+                    .await;
+                return Err(
+                    "failed to reconnect to OpenCode session (server dead or session expired)"
+                        .to_string(),
+                );
+            };
+            if let Some(model) = state.model_overrides.resolve_model("worker") {
+                worker = worker.with_model(model);
+            }
 
             // Apply builder chain (same as spawn_opencode_worker_from_state).
             let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
@@ -1836,28 +2412,47 @@ pub async fn resume_idle_worker_into_state(
             }
             worker = worker.with_sqlite_pool(state.deps.sqlite_pool.clone());
 
-            state
-                .worker_inputs
-                .write()
-                .await
-                .insert(worker_id, input_tx);
-
             let worker_span = tracing::info_span!(
                 "worker.resume",
                 worker_id = %worker_id,
-                channel_id = %state.channel_id,
+                channel_id = ?state.channel_id,
                 worker_type = "opencode",
             );
             let transcript_snapshot = worker.transcript_snapshot();
             let opencode_cancellation = worker.cancellation_session();
+            let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
+                transcript_snapshot.clone(),
+                Some(opencode_cancellation),
+                Some(input_tx),
+                None,
+                Some(state.process_run_logger.clone()),
+            );
+            let admission = state
+                .deps
+                .process_control_registry
+                .register_restored_worker(
+                    reservation,
+                    provenance,
+                    WorkerBackend::OpenCode,
+                    true,
+                    "idle",
+                    usize::try_from(idle_worker.tool_calls).unwrap_or(usize::MAX),
+                    runtime_control,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let (start_gate, start_rx) = WorkerStartGate::new();
             let handle = spawn_worker_task(
-                worker_id,
+                callback,
+                state.deps.process_control_registry.clone(),
+                cancel_rx,
+                terminal_notify,
+                start_rx,
                 state.deps.event_tx.clone(),
                 state.deps.agent_id.clone(),
-                Some(state.channel_id.clone()),
+                state.channel_id.clone(),
                 state.process_run_logger.clone(),
                 transcript_snapshot,
-                Some(opencode_cancellation),
                 Some(directory_claim),
                 oc_secrets_store,
                 Some(state.deps.task_store.clone()),
@@ -1871,27 +2466,50 @@ pub async fn resume_idle_worker_into_state(
                 .instrument(worker_span),
             );
 
-            state.worker_handles.write().await.insert(worker_id, handle);
-
-            let opencode_task = format!("[opencode] {}", idle_worker.task);
-            {
-                let mut status = state.status_block.write().await;
-                status.add_worker(worker_id, &opencode_task, false, true);
-            }
-
-            state
+            if let Err(handle) = state
                 .deps
-                .event_tx
-                .send(ProcessEvent::WorkerStarted {
-                    agent_id: state.deps.agent_id.clone(),
-                    worker_id,
-                    channel_id: Some(state.channel_id.clone()),
-                    task: opencode_task,
-                    worker_type: "opencode".into(),
-                    interactive: true,
-                    directory: Some(directory_str.clone()),
+                .process_control_registry
+                .install_task_handle(admission.callback_context(), handle)
+                .await
+            {
+                handle.abort();
+                state
+                    .deps
+                    .process_control_registry
+                    .remove_worker_if_registration_matches(callback)
+                    .await;
+                return Err("restored worker detached before task installation".to_string());
+            }
+            let opencode_task = format!("[opencode] {}", idle_worker.task);
+
+            let event_tx = state.deps.event_tx.clone();
+            let started_event = ProcessEvent::WorkerStarted {
+                agent_id: state.deps.agent_id.clone(),
+                worker_id,
+                worker_registration_id: callback.registration_id,
+                channel_id: state.channel_id.clone(),
+                task: opencode_task,
+                worker_type: "opencode".into(),
+                interactive: true,
+                directory: Some(directory_str.clone()),
+            };
+            if state
+                .deps
+                .process_control_registry
+                .run_if_worker_state(callback, WorkerRuntimeState::WaitingForInput, move || {
+                    event_tx.send(started_event).ok();
+                    start_gate.open();
                 })
-                .ok();
+                .await
+                != crate::agent::process_control::WorkerMutationResult::Applied
+            {
+                state
+                    .deps
+                    .process_control_registry
+                    .remove_worker_if_registration_matches(callback)
+                    .await;
+                return Err("restored worker was cancelled before its gate opened".to_string());
+            }
 
             tracing::info!(worker_id = %worker_id, task = %idle_worker.task, "OpenCode worker resumed");
             Ok(worker_id)
@@ -1941,7 +2559,7 @@ pub async fn resume_idle_worker_into_state(
                     &tool_secret_names,
                     browser_config.persist_session,
                     worker_status_text,
-                    false, // resumed workers use original context; wiki not re-injected
+                    state.worker_context.wiki_write && state.deps.wiki_store.is_some(),
                     project_context,
                 )
                 .map_err(|error| format!("failed to render worker prompt: {error}"))?;
@@ -1955,11 +2573,34 @@ pub async fn resume_idle_worker_into_state(
                     .map_err(|error| format!("failed to render worker prompt: {error}"))?,
                 "tool_use_enforcement",
             );
+            append_worker_memory_context(
+                &mut system_prompt,
+                &state.deps,
+                state.channel_id.as_ref(),
+                state.worker_context.memory,
+            )
+            .await;
             let brave_search_key = (**rc.brave_search_key.load()).clone();
+            let admission_scope = provenance.origin_channel_id.clone().unwrap_or_else(|| {
+                Arc::from(crate::agent::process_control::DETACHED_WORKER_ADMISSION_SCOPE)
+            });
+            let reservation = state
+                .deps
+                .process_control_registry
+                .reserve_worker_in_scope(
+                    worker_id,
+                    &provenance,
+                    admission_scope,
+                    **state.deps.runtime_config.max_concurrent_workers.load(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let callback = reservation.callback_context();
 
             let (worker, input_tx, inject_tx) = Worker::resume_interactive(
                 worker_id,
-                Some(state.channel_id.clone()),
+                callback,
+                state.channel_id.clone(),
                 &idle_worker.task,
                 system_prompt,
                 state.deps.clone(),
@@ -1968,34 +2609,54 @@ pub async fn resume_idle_worker_into_state(
                 brave_search_key,
                 state.logs_dir.clone(),
                 prior_history,
+                state.worker_context.memory,
+                state.worker_context.wiki_write,
+                state
+                    .model_overrides
+                    .resolve_model("worker")
+                    .map(String::from),
             );
-
-            state
-                .worker_inputs
-                .write()
-                .await
-                .insert(worker_id, input_tx);
-            state
-                .worker_injections
-                .write()
-                .await
-                .insert(worker_id, inject_tx);
 
             let worker_span = tracing::info_span!(
                 "worker.resume",
                 worker_id = %worker_id,
-                channel_id = %state.channel_id,
+                channel_id = ?state.channel_id,
             );
             let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
             let transcript_snapshot = worker.transcript_snapshot();
+            let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
+                transcript_snapshot.clone(),
+                None,
+                Some(input_tx),
+                Some(inject_tx),
+                Some(state.process_run_logger.clone()),
+            );
+            let admission = state
+                .deps
+                .process_control_registry
+                .register_restored_worker(
+                    reservation,
+                    provenance,
+                    WorkerBackend::Builtin,
+                    true,
+                    "idle",
+                    usize::try_from(idle_worker.tool_calls).unwrap_or(usize::MAX),
+                    runtime_control,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let (start_gate, start_rx) = WorkerStartGate::new();
             let handle = spawn_worker_task(
-                worker_id,
+                callback,
+                state.deps.process_control_registry.clone(),
+                cancel_rx,
+                terminal_notify,
+                start_rx,
                 state.deps.event_tx.clone(),
                 state.deps.agent_id.clone(),
-                Some(state.channel_id.clone()),
+                state.channel_id.clone(),
                 state.process_run_logger.clone(),
                 transcript_snapshot,
-                None,
                 None,
                 secrets_store,
                 Some(state.deps.task_store.clone()),
@@ -2003,26 +2664,48 @@ pub async fn resume_idle_worker_into_state(
                 worker.run().instrument(worker_span),
             );
 
-            state.worker_handles.write().await.insert(worker_id, handle);
-
-            {
-                let mut status = state.status_block.write().await;
-                status.add_worker(worker_id, &idle_worker.task, false, true);
-            }
-
-            state
+            if let Err(handle) = state
                 .deps
-                .event_tx
-                .send(ProcessEvent::WorkerStarted {
-                    agent_id: state.deps.agent_id.clone(),
-                    worker_id,
-                    channel_id: Some(state.channel_id.clone()),
-                    task: idle_worker.task.clone(),
-                    worker_type: "builtin".into(),
-                    interactive: true,
-                    directory: None,
+                .process_control_registry
+                .install_task_handle(admission.callback_context(), handle)
+                .await
+            {
+                handle.abort();
+                state
+                    .deps
+                    .process_control_registry
+                    .remove_worker_if_registration_matches(callback)
+                    .await;
+                return Err("restored worker detached before task installation".to_string());
+            }
+            let event_tx = state.deps.event_tx.clone();
+            let started_event = ProcessEvent::WorkerStarted {
+                agent_id: state.deps.agent_id.clone(),
+                worker_id,
+                worker_registration_id: callback.registration_id,
+                channel_id: state.channel_id.clone(),
+                task: idle_worker.task.clone(),
+                worker_type: "builtin".into(),
+                interactive: true,
+                directory: None,
+            };
+            if state
+                .deps
+                .process_control_registry
+                .run_if_worker_state(callback, WorkerRuntimeState::WaitingForInput, move || {
+                    event_tx.send(started_event).ok();
+                    start_gate.open();
                 })
-                .ok();
+                .await
+                != crate::agent::process_control::WorkerMutationResult::Applied
+            {
+                state
+                    .deps
+                    .process_control_registry
+                    .remove_worker_if_registration_matches(callback)
+                    .await;
+                return Err("restored worker was cancelled before its gate opened".to_string());
+            }
 
             tracing::info!(worker_id = %worker_id, task = %idle_worker.task, "builtin worker resumed");
             Ok(worker_id)
@@ -2051,8 +2734,9 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkerCompletionError, WorkerOutcome, commit_worker_outcome, map_worker_completion,
-        spawn_worker_task, worker_task_prompt,
+        WorkerCompletionError, WorkerOutcome, commit_worker_outcome,
+        commit_worker_outcome_with_retry, map_worker_completion, spawn_worker_task,
+        worker_task_prompt,
     };
     use crate::conversation::{
         ProcessRunLogger, WorkerLifecycle, WorkerOutcomeKind, WorkerTerminalOwner,
@@ -2104,6 +2788,94 @@ mod tests {
             .await
             .unwrap();
         logger
+    }
+
+    async fn spawn_test_worker_task<F>(
+        worker_id: WorkerId,
+        channel_id: &str,
+        event_tx: broadcast::Sender<ProcessEvent>,
+        run_logger: ProcessRunLogger,
+        future: F,
+    ) -> Arc<crate::agent::process_control::ProcessControlRegistry>
+    where
+        F: std::future::Future<Output = crate::Result<WorkerOutcome>> + Send + 'static,
+    {
+        use crate::agent::process_control::{
+            ProcessControlRegistry, WorkerBackend, WorkerOperationContext, WorkerOperationId,
+            WorkerProvenance, WorkerRequester, WorkerResultTarget, WorkerRuntimeControl,
+            WorkerRuntimeState,
+        };
+
+        let registry = Arc::new(ProcessControlRegistry::new());
+        let channel_id: crate::ChannelId = Arc::from(channel_id);
+        let provenance = WorkerProvenance {
+            origin_channel_id: Some(channel_id.clone()),
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 4)
+            .await
+            .unwrap();
+        let callback = reservation.callback_context();
+        let operation = WorkerOperationContext {
+            operation_id: WorkerOperationId::new(),
+            requester: WorkerRequester::Channel {
+                channel_id: channel_id.clone(),
+            },
+            result_target: WorkerResultTarget::Channel {
+                channel_id: channel_id.clone(),
+            },
+            autonomy_run_id: None,
+        };
+        let snapshot = crate::agent::worker::new_worker_transcript_snapshot();
+        let (control, cancel_rx, terminal_notify) =
+            WorkerRuntimeControl::new(snapshot.clone(), None, None, None, Some(run_logger.clone()));
+        let admission = registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                false,
+                operation,
+                "starting",
+                control,
+            )
+            .await
+            .unwrap();
+        let (start_gate, start_rx) = super::WorkerStartGate::new();
+        let handle = spawn_worker_task(
+            callback,
+            registry.clone(),
+            cancel_rx,
+            terminal_notify,
+            start_rx,
+            event_tx,
+            Arc::from("agent"),
+            Some(channel_id),
+            run_logger,
+            snapshot,
+            None,
+            None,
+            None,
+            "builtin",
+            future,
+        );
+        registry
+            .install_task_handle(admission.callback_context(), handle)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .update_worker_state(callback, WorkerRuntimeState::Running)
+                .await,
+            crate::agent::process_control::WorkerMutationResult::Applied
+        );
+        start_gate.open();
+        registry
     }
 
     /// A cancel arriving while the worker is already completing commits as
@@ -2258,35 +3030,20 @@ mod tests {
         let worker_id: WorkerId = Uuid::new_v4();
         let run_logger = setup_worker(worker_id, "channel").await;
 
-        let mut control = spawn_worker_task(
-            worker_id,
-            event_tx,
-            Arc::<str>::from("agent"),
-            Some(Arc::<str>::from("channel")),
-            run_logger,
-            crate::agent::worker::new_worker_transcript_snapshot(),
-            None,
-            None,
-            None,
-            None,
-            "builtin",
-            async {
-                Err::<WorkerOutcome, crate::Error>(
-                    crate::error::AgentError::Cancelled {
-                        reason: "user requested".to_string(),
-                    }
-                    .into(),
-                )
-            },
-        );
+        let _registry = spawn_test_worker_task(worker_id, "channel", event_tx, run_logger, async {
+            Err::<WorkerOutcome, crate::Error>(
+                crate::error::AgentError::Cancelled {
+                    reason: "user requested".to_string(),
+                }
+                .into(),
+            )
+        })
+        .await;
 
         let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
             .await
             .expect("worker completion event should be delivered")
             .expect("broadcast receive should succeed");
-        (&mut control.handle)
-            .await
-            .expect("worker task should join cleanly");
 
         match event {
             ProcessEvent::WorkerComplete {
@@ -2306,6 +3063,315 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn origin_cleanup_waits_for_worker_terminalization() {
+        let worker_id = Uuid::new_v4();
+        let channel_id: crate::ChannelId = Arc::from("cron:test-cleanup");
+        let logger = setup_worker(worker_id, &channel_id).await;
+        let (event_tx, _event_rx) = broadcast::channel(8);
+        let registry = spawn_test_worker_task(
+            worker_id,
+            &channel_id,
+            event_tx,
+            logger.clone(),
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(
+            registry
+                .cancel_workers_by_origin_channel(
+                    &channel_id,
+                    "test cleanup",
+                    Duration::from_secs(1)
+                )
+                .await,
+            1
+        );
+        assert!(registry.worker_snapshot(worker_id).await.is_none());
+        assert_eq!(
+            logger
+                .read_worker_terminal(worker_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .outcome_kind,
+            WorkerOutcomeKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_cancellation_converges_durable_state_and_publishes_completion() {
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        let worker_id = Uuid::new_v4();
+        let run_logger = setup_worker(worker_id, "forced-cancel-channel").await;
+        let registry = spawn_test_worker_task(
+            worker_id,
+            "forced-cancel-channel",
+            event_tx,
+            run_logger.clone(),
+            std::future::pending(),
+        )
+        .await;
+
+        assert_eq!(
+            registry
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::ZERO)
+                .await,
+            crate::agent::process_control::ControlActionResult::Cancelled
+        );
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("supervisor should publish terminal completion")
+            .unwrap();
+        let ProcessEvent::WorkerComplete {
+            worker_id: completed_worker_id,
+            outcome_kind,
+            ..
+        } = event
+        else {
+            panic!("expected worker completion");
+        };
+        assert_eq!(completed_worker_id, worker_id);
+        assert_eq!(outcome_kind, WorkerOutcomeKind::Cancelled);
+        assert!(registry.worker_snapshot(worker_id).await.is_none());
+        assert_eq!(
+            run_logger.read_worker_lifecycle(worker_id).await.unwrap(),
+            Some(WorkerLifecycle::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_commit_retry_exhaustion_leaves_missing_row_unavailable() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let logger = ProcessRunLogger::new(pool);
+
+        assert!(
+            commit_worker_outcome_with_retry(
+                &logger,
+                Uuid::new_v4(),
+                WorkerOutcomeKind::Failed,
+                "missing",
+                None,
+                WorkerTerminalOwner::Worker,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_start_gate_never_polls_worker_future() {
+        use crate::agent::process_control::{
+            ProcessControlRegistry, WorkerBackend, WorkerOperationContext, WorkerOperationId,
+            WorkerProvenance, WorkerRequester, WorkerResultTarget, WorkerRuntimeControl,
+            WorkerRuntimeState,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        let worker_id = Uuid::new_v4();
+        let run_logger = setup_worker(worker_id, "pre-gate-channel").await;
+        let registry = Arc::new(ProcessControlRegistry::new());
+        let channel_id: crate::ChannelId = Arc::from("pre-gate-channel");
+        let provenance = WorkerProvenance {
+            origin_channel_id: Some(channel_id.clone()),
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 1)
+            .await
+            .unwrap();
+        let callback = reservation.callback_context();
+        let operation = WorkerOperationContext {
+            operation_id: WorkerOperationId::new(),
+            requester: WorkerRequester::System,
+            result_target: WorkerResultTarget::None,
+            autonomy_run_id: None,
+        };
+        let snapshot = crate::agent::worker::new_worker_transcript_snapshot();
+        let (control, cancel_rx, terminal_notify) =
+            WorkerRuntimeControl::new(snapshot.clone(), None, None, None, None);
+        let admission = registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                false,
+                operation,
+                "starting",
+                control,
+            )
+            .await
+            .unwrap();
+        let (start_gate, start_rx) = super::WorkerStartGate::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let future_polls = polls.clone();
+        let handle = spawn_worker_task(
+            callback,
+            registry.clone(),
+            cancel_rx,
+            terminal_notify,
+            start_rx,
+            event_tx,
+            Arc::from("agent"),
+            Some(channel_id),
+            run_logger.clone(),
+            snapshot,
+            None,
+            None,
+            None,
+            "builtin",
+            std::future::poll_fn(move |_context| {
+                future_polls.fetch_add(1, Ordering::SeqCst);
+                std::task::Poll::Pending
+            }),
+        );
+        registry
+            .install_task_handle(admission.callback_context(), handle)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            registry
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::from_secs(1))
+                .await,
+            crate::agent::process_control::ControlActionResult::Cancelled
+        );
+        let task_binding_mutations = AtomicUsize::new(0);
+        if registry
+            .worker_is_in_state(callback, WorkerRuntimeState::Starting)
+            .await
+        {
+            task_binding_mutations.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(task_binding_mutations.load(Ordering::SeqCst), 0);
+        drop(start_gate);
+
+        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("pre-gate cancellation should converge")
+            .unwrap();
+
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert!(registry.worker_snapshot(worker_id).await.is_none());
+        assert_eq!(
+            run_logger.read_worker_lifecycle(worker_id).await.unwrap(),
+            Some(WorkerLifecycle::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_idle_worker_runs_after_gate_without_leaving_idle_state() {
+        use crate::agent::process_control::{
+            ProcessControlRegistry, WorkerBackend, WorkerProvenance, WorkerRuntimeControl,
+            WorkerRuntimeState,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        let worker_id = Uuid::new_v4();
+        let run_logger = setup_worker(worker_id, "restored-channel").await;
+        assert!(matches!(
+            run_logger.log_worker_idle(worker_id).await.unwrap(),
+            crate::conversation::WorkerTransitionResult::Applied { .. }
+        ));
+        let registry = Arc::new(ProcessControlRegistry::new());
+        let channel_id: crate::ChannelId = Arc::from("restored-channel");
+        let provenance = WorkerProvenance {
+            origin_channel_id: Some(channel_id.clone()),
+            origin_branch_id: None,
+            task: "task".to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 1)
+            .await
+            .unwrap();
+        let callback = reservation.callback_context();
+        let snapshot = crate::agent::worker::new_worker_transcript_snapshot();
+        let (control, cancel_rx, terminal_notify) =
+            WorkerRuntimeControl::new(snapshot.clone(), None, None, None, Some(run_logger.clone()));
+        let admission = registry
+            .register_restored_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                true,
+                "idle",
+                0,
+                control,
+            )
+            .await
+            .unwrap();
+        let (start_gate, start_rx) = super::WorkerStartGate::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let future_polls = polls.clone();
+        let handle = spawn_worker_task(
+            callback,
+            registry.clone(),
+            cancel_rx,
+            terminal_notify,
+            start_rx,
+            event_tx,
+            Arc::from("agent"),
+            Some(channel_id),
+            run_logger.clone(),
+            snapshot,
+            None,
+            None,
+            None,
+            "builtin",
+            std::future::poll_fn(move |_context| {
+                future_polls.fetch_add(1, Ordering::SeqCst);
+                std::task::Poll::Pending
+            }),
+        );
+        registry
+            .install_task_handle(admission.callback_context(), handle)
+            .await
+            .unwrap();
+        start_gate.open();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while polls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restored worker future should be polled after the gate opens");
+        let live = registry.worker_snapshot(worker_id).await.unwrap();
+        assert_eq!(live.state, WorkerRuntimeState::WaitingForInput);
+        assert!(live.active_operation.is_none());
+
+        assert_eq!(
+            registry
+                .cancel_worker_runtime(worker_id, "test cancel", Duration::from_secs(1))
+                .await,
+            crate::agent::process_control::ControlActionResult::Cancelled
+        );
+        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("restored worker cancellation should converge")
+            .unwrap();
+        assert_eq!(
+            run_logger.read_worker_lifecycle(worker_id).await.unwrap(),
+            Some(WorkerLifecycle::Cancelled)
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_parent_control_does_not_cancel_worker() {
         let (event_tx, mut event_rx) = broadcast::channel(8);
         let worker_id = Uuid::new_v4();
@@ -2313,18 +3379,11 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
 
-        let control = spawn_worker_task(
+        let registry = spawn_test_worker_task(
             worker_id,
+            "detached-channel",
             event_tx,
-            Arc::<str>::from("agent"),
-            Some(Arc::<str>::from("detached-channel")),
             run_logger,
-            crate::agent::worker::new_worker_transcript_snapshot(),
-            None,
-            None,
-            None,
-            None,
-            "builtin",
             async move {
                 started_tx.send(()).expect("test receiver remains active");
                 finish_rx.await.expect("test sender remains active");
@@ -2332,10 +3391,11 @@ mod tests {
                     result: "completed after parent exit".to_string(),
                 })
             },
-        );
+        )
+        .await;
 
         started_rx.await.expect("worker should start");
-        drop(control);
+        drop(registry);
         finish_tx.send(()).expect("worker should still be running");
 
         let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
@@ -2359,32 +3419,18 @@ mod tests {
         let channel_id: crate::ChannelId = Arc::from("test-channel");
         let run_logger = setup_worker(worker_id, &channel_id).await;
 
-        let mut control = spawn_worker_task(
-            worker_id,
-            event_tx,
-            Arc::<str>::from("agent"),
-            Some(channel_id.clone()),
-            run_logger,
-            crate::agent::worker::new_worker_transcript_snapshot(),
-            None,
-            None,
-            None,
-            None,
-            "builtin",
-            async {
+        let _registry =
+            spawn_test_worker_task(worker_id, &channel_id, event_tx, run_logger, async {
                 Ok::<WorkerOutcome, crate::Error>(WorkerOutcome::Success {
                     result: "result".to_string(),
                 })
-            },
-        );
+            })
+            .await;
 
         let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
             .await
             .expect("worker completion event should be delivered")
             .expect("broadcast receive should succeed");
-        (&mut control.handle)
-            .await
-            .expect("worker task should join cleanly");
 
         match event {
             ProcessEvent::WorkerComplete {
@@ -2399,6 +3445,7 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+        assert!(_registry.worker_snapshot(worker_id).await.is_none());
     }
 
     #[tokio::test]
@@ -2407,24 +3454,13 @@ mod tests {
         let worker_id = Uuid::new_v4();
         let run_logger = setup_worker(worker_id, "durable-channel").await;
         let inspect_logger = run_logger.clone();
-        let mut control = spawn_worker_task(
-            worker_id,
-            event_tx,
-            Arc::<str>::from("agent"),
-            Some(Arc::<str>::from("durable-channel")),
-            run_logger,
-            crate::agent::worker::new_worker_transcript_snapshot(),
-            None,
-            None,
-            None,
-            None,
-            "builtin",
-            async {
+        let _registry =
+            spawn_test_worker_task(worker_id, "durable-channel", event_tx, run_logger, async {
                 Ok::<WorkerOutcome, crate::Error>(WorkerOutcome::Success {
                     result: "durable result".to_string(),
                 })
-            },
-        );
+            })
+            .await;
 
         let event = event_rx.recv().await.unwrap();
         let ProcessEvent::WorkerComplete {
@@ -2442,6 +3478,5 @@ mod tests {
             .unwrap();
         assert_eq!(terminal.outcome_version, outcome_version);
         assert_eq!(terminal.outcome_kind, outcome_kind);
-        (&mut control.handle).await.unwrap();
     }
 }

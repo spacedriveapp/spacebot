@@ -119,12 +119,16 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 		// Overlay live state onto existing DB rows
 		const merged = workers.map((worker) => {
 			const live = scopedActiveWorkers[worker.id];
-			if (!live) return worker;
+			if (!live || (worker.registration_id && worker.registration_id !== live.registrationId)) return worker;
 			return {
 				...worker,
-				status: live.isIdle ? "idle" : "running",
+				status: live.runtimeState === "waiting_for_input" ? "idle" : "running",
 				live_status: live.status,
 				tool_calls: live.toolCalls,
+				registration_id: live.registrationId,
+				runtime_state: live.runtimeState,
+				runtime_attached: live.runtimeAttached,
+				routable: live.routable,
 			};
 		});
 
@@ -134,8 +138,13 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			.map((live) => ({
 				id: live.id,
 				task: live.task,
-				status: live.isIdle ? "idle" : "running",
+				status: live.runtimeState === "waiting_for_input" ? "idle" : "running",
 				worker_type: live.workerType ?? "builtin",
+				backend: live.workerType ?? "builtin",
+				registration_id: live.registrationId,
+				runtime_state: live.runtimeState,
+				runtime_attached: live.runtimeAttached,
+				routable: live.routable,
 				channel_id: live.channelId ?? null,
 				channel_name: null,
 				started_at: new Date(live.startedAt).toISOString(),
@@ -171,8 +180,15 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 
 		if (detailData) {
 			// DB data exists — overlay live status if worker is still running
-			if (!live) return detailData;
-			return {...detailData, status: live.isIdle ? "idle" : "running"};
+			if (!live || (detailData.registration_id && detailData.registration_id !== live.registrationId)) return detailData;
+			return {
+				...detailData,
+				status: live.runtimeState === "waiting_for_input" ? "idle" : "running",
+				registration_id: live.registrationId,
+				runtime_state: live.runtimeState,
+				runtime_attached: live.runtimeAttached,
+				routable: live.routable,
+			};
 		}
 
 		// No DB data yet — synthesize from SSE state
@@ -181,8 +197,13 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			id: live.id,
 			task: live.task,
 			result: null,
-			status: live.isIdle ? "idle" : "running",
+			status: live.runtimeState === "waiting_for_input" ? "idle" : "running",
 			worker_type: live.workerType ?? "builtin",
+			backend: live.workerType ?? "builtin",
+			registration_id: live.registrationId,
+			runtime_state: live.runtimeState,
+			runtime_attached: live.runtimeAttached,
+			routable: live.routable,
 			channel_id: live.channelId ?? null,
 			channel_name: null,
 			started_at: new Date(live.startedAt).toISOString(),
@@ -264,8 +285,9 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			{/* Right column: detail view */}
 			<div className="flex flex-1 flex-col overflow-hidden">
 				{selectedWorkerId && mergedDetail ? (
-					<WorkerDetail
-						detail={mergedDetail}
+						<WorkerDetail
+							agentId={agentId}
+							detail={mergedDetail}
 						liveWorker={scopedActiveWorkers[selectedWorkerId]}
 						liveTranscript={liveTranscripts[selectedWorkerId]}
 						liveOpenCodeParts={liveOpenCodeParts[selectedWorkerId]}
@@ -284,12 +306,16 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 
 export interface LiveWorker {
 	id: string;
+	registrationId: string;
 	task: string;
 	status: string;
 	startedAt: number;
 	toolCalls: number;
 	currentTool: string | null;
 	isIdle: boolean;
+	runtimeState: string;
+	runtimeAttached: boolean;
+	routable: boolean;
 	interactive: boolean;
 	workerType: string;
 }
@@ -305,10 +331,15 @@ function WorkerCard({
 	selected: boolean;
 	onClick: () => void;
 }) {
-	const isLive = worker.status === "running" || !!liveWorker;
-	const isIdle = liveWorker?.isIdle ?? worker.status === "idle";
+	const isLive = liveWorker?.runtimeAttached ?? worker.runtime_attached;
+	const isIdle =
+		(liveWorker?.runtimeState ?? worker.runtime_state) === "waiting_for_input";
 	const isInteractive = liveWorker?.interactive ?? worker.interactive;
-	const displayStatus = isIdle
+	const unavailable =
+		!isLive && (worker.status === "running" || worker.status === "idle");
+	const displayStatus = unavailable
+		? "unavailable"
+		: isIdle
 		? "idle"
 		: isLive
 			? "running"
@@ -380,18 +411,21 @@ function WorkerCard({
 type DetailTab = "opencode" | "transcript";
 
 export function WorkerDetail({
+	agentId,
 	detail,
 	liveWorker,
 	liveTranscript,
 	liveOpenCodeParts,
 }: {
+	agentId: string;
 	detail: WorkerDetailResponse;
 	liveWorker?: LiveWorker;
 	liveTranscript?: TranscriptStep[];
 	liveOpenCodeParts?: Map<string, OpenCodePart>;
 }) {
-	const isLive = detail.status === "running" || !!liveWorker;
-	const isIdle = liveWorker?.isIdle ?? detail.status === "idle";
+	const isLive = liveWorker?.runtimeAttached ?? detail.runtime_attached;
+	const isIdle =
+		(liveWorker?.runtimeState ?? detail.runtime_state) === "waiting_for_input";
 	const duration = durationBetween(
 		detail.started_at,
 		detail.completed_at ?? null,
@@ -459,9 +493,10 @@ export function WorkerDetail({
 			<div className="flex flex-col gap-2 border-b border-app-line/50 bg-app-dark-box/20 px-6 py-4">
 				<div className="flex items-start justify-between gap-3">
 					<TaskText text={detail.task} />
-					{isLive && detail.channel_id && (
+					{detail.runtime_attached && (
 						<CancelWorkerButton
-							channelId={detail.channel_id}
+							agentId={agentId}
+							channelId={detail.channel_id ?? ""}
 							workerId={detail.id}
 						/>
 					)}
@@ -719,9 +754,11 @@ function TaskText({text}: {text: string}) {
 }
 
 function CancelWorkerButton({
+	agentId,
 	channelId,
 	workerId,
 }: {
+	agentId: string;
 	channelId: string;
 	workerId: string;
 }) {
@@ -733,7 +770,7 @@ function CancelWorkerButton({
 			onClick={() => {
 				setCancelling(true);
 				api
-					.cancelProcess(channelId, "worker", workerId)
+					.cancelProcess(agentId, channelId, "worker", workerId)
 					.catch(console.warn)
 					.finally(() => setCancelling(false));
 			}}

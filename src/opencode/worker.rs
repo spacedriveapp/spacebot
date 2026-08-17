@@ -4,6 +4,9 @@
 //! delegates to an OpenCode subprocess that has its own codebase exploration,
 //! context management, and tool suite. Communication happens over HTTP + SSE.
 
+use crate::agent::process_control::{
+    WorkerCallbackContext, WorkerFollowUp, WorkerOperationContext, WorkerResultTarget,
+};
 use crate::opencode::server::OpenCodeServerPool;
 use crate::opencode::types::*;
 use crate::secrets::store::SecretsStore;
@@ -14,7 +17,6 @@ use futures::StreamExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc};
-use uuid::Uuid;
 
 /// State for resuming an idle OpenCode session after restart.
 pub struct ResumeSession {
@@ -33,7 +35,7 @@ pub struct OpenCodeWorker {
     pub server_pool: Arc<OpenCodeServerPool>,
     pub event_tx: broadcast::Sender<ProcessEvent>,
     /// Input channel for interactive follow-ups (permissions, questions, user messages).
-    pub input_rx: Option<mpsc::Receiver<String>>,
+    pub input_rx: Option<mpsc::Receiver<WorkerFollowUp>>,
     /// System prompt injected into each OpenCode prompt.
     pub system_prompt: Option<String>,
     /// Model override (provider/model format like "anthropic/claude-sonnet-4").
@@ -46,6 +48,10 @@ pub struct OpenCodeWorker {
     pub resuming_session: Option<ResumeSession>,
     pub transcript_snapshot: crate::agent::worker::WorkerTranscriptSnapshot,
     pub cancellation_session: Arc<Mutex<Option<OpenCodeCancellationSession>>>,
+    pub callback: WorkerCallbackContext,
+    pub initial_operation: Option<WorkerOperationContext>,
+    pub process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    pub interaction_target: Arc<Mutex<WorkerResultTarget>>,
 }
 
 #[derive(Clone)]
@@ -95,16 +101,22 @@ pub struct OpenCodeWorkerResult {
 
 impl OpenCodeWorker {
     /// Create a new OpenCode worker.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        id: WorkerId,
+        callback: WorkerCallbackContext,
+        initial_operation: WorkerOperationContext,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
         task: impl Into<String>,
         directory: PathBuf,
         server_pool: Arc<OpenCodeServerPool>,
         event_tx: broadcast::Sender<ProcessEvent>,
+        process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
     ) -> Self {
+        let interaction_target = initial_operation.result_target.clone();
         Self {
-            id: Uuid::new_v4(),
+            id,
             channel_id,
             agent_id,
             task: task.into(),
@@ -119,20 +131,40 @@ impl OpenCodeWorker {
             resuming_session: None,
             transcript_snapshot: crate::agent::worker::new_worker_transcript_snapshot(),
             cancellation_session: Arc::new(Mutex::new(None)),
+            callback,
+            initial_operation: Some(initial_operation),
+            process_control_registry,
+            interaction_target: Arc::new(Mutex::new(interaction_target)),
         }
     }
 
     /// Create an interactive OpenCode worker that accepts follow-up messages.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_interactive(
+        id: WorkerId,
+        callback: WorkerCallbackContext,
+        initial_operation: WorkerOperationContext,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
         task: impl Into<String>,
         directory: PathBuf,
         server_pool: Arc<OpenCodeServerPool>,
         event_tx: broadcast::Sender<ProcessEvent>,
-    ) -> (Self, mpsc::Sender<String>) {
+        process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    ) -> (Self, mpsc::Sender<WorkerFollowUp>) {
         let (input_tx, input_rx) = mpsc::channel(32);
-        let mut worker = Self::new(channel_id, agent_id, task, directory, server_pool, event_tx);
+        let mut worker = Self::new(
+            id,
+            callback,
+            initial_operation,
+            channel_id,
+            agent_id,
+            task,
+            directory,
+            server_pool,
+            event_tx,
+            process_control_registry,
+        );
         worker.input_rx = Some(input_rx);
         (worker, input_tx)
     }
@@ -180,6 +212,7 @@ impl OpenCodeWorker {
     #[allow(clippy::too_many_arguments)]
     pub async fn resume_interactive(
         existing_id: WorkerId,
+        callback: WorkerCallbackContext,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
         task: impl Into<String>,
@@ -188,7 +221,8 @@ impl OpenCodeWorker {
         event_tx: broadcast::Sender<ProcessEvent>,
         session_id: String,
         _prior_transcript_blob: Option<Vec<u8>>,
-    ) -> Option<(Self, mpsc::Sender<String>)> {
+        process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
+    ) -> Option<(Self, mpsc::Sender<WorkerFollowUp>)> {
         // Try to reconnect to the OpenCode server for this directory.
         let server = match server_pool.get_or_create(&directory).await {
             Ok(server) => server,
@@ -246,9 +280,27 @@ impl OpenCodeWorker {
             .count() as i64;
 
         let (input_tx, input_rx) = mpsc::channel(32);
-        let mut worker = Self::new(channel_id, agent_id, task, directory, server_pool, event_tx);
-        worker.id = existing_id;
-        worker.input_rx = Some(input_rx);
+        let mut worker = Self {
+            id: existing_id,
+            channel_id,
+            agent_id,
+            task: task.into(),
+            directory,
+            server_pool,
+            event_tx,
+            input_rx: Some(input_rx),
+            system_prompt: None,
+            model: None,
+            secrets_store: None,
+            sqlite_pool: None,
+            resuming_session: None,
+            transcript_snapshot: crate::agent::worker::new_worker_transcript_snapshot(),
+            cancellation_session: Arc::new(Mutex::new(None)),
+            callback,
+            initial_operation: None,
+            process_control_registry,
+            interaction_target: Arc::new(Mutex::new(WorkerResultTarget::None)),
+        };
         worker.resuming_session = Some(ResumeSession {
             session_id,
             accumulated_parts,
@@ -276,7 +328,7 @@ impl OpenCodeWorker {
         let (server, session_id, mut event_state, result_text) =
             if let Some(resume) = self.resuming_session.take() {
                 // Resumed worker: reconnect to the existing server + session.
-                self.send_status("reconnecting to OpenCode session");
+                self.send_status("reconnecting to OpenCode session").await;
 
                 let server = self
                     .server_pool
@@ -293,19 +345,21 @@ impl OpenCodeWorker {
                     let guard = server.lock().await;
                     guard.port()
                 };
-                self.persist_session_metadata(&resume.session_id, opencode_port)
-                    .await;
-
-                // Re-emit session metadata so the frontend can show the embed.
-                self.event_tx
-                    .send(ProcessEvent::OpenCodeSessionCreated {
-                        agent_id: self.agent_id.clone(),
-                        worker_id: self.id,
-                        channel_id: self.channel_id.clone(),
-                        session_id: resume.session_id.clone(),
-                        port: opencode_port,
-                    })
-                    .ok();
+                if self
+                    .persist_session_metadata(&resume.session_id, opencode_port)
+                    .await
+                {
+                    self.event_tx
+                        .send(ProcessEvent::OpenCodeSessionCreated {
+                            agent_id: self.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            channel_id: self.channel_id.clone(),
+                            session_id: resume.session_id.clone(),
+                            port: opencode_port,
+                        })
+                        .ok();
+                }
 
                 tracing::info!(
                     worker_id = %self.id,
@@ -324,7 +378,7 @@ impl OpenCodeWorker {
                 (server, resume.session_id, event_state, String::new())
             } else {
                 // Fresh worker: create a new server + session.
-                self.send_status("starting OpenCode server");
+                self.send_status("starting OpenCode server").await;
 
                 let server = self
                     .server_pool
@@ -337,7 +391,7 @@ impl OpenCodeWorker {
                         )
                     })?;
 
-                self.send_status("creating session");
+                self.send_status("creating session").await;
 
                 let session = {
                     let guard = server.lock().await;
@@ -351,17 +405,21 @@ impl OpenCodeWorker {
                     let guard = server.lock().await;
                     guard.port()
                 };
-                self.persist_session_metadata(&session_id, opencode_port)
-                    .await;
-                self.event_tx
-                    .send(ProcessEvent::OpenCodeSessionCreated {
-                        agent_id: self.agent_id.clone(),
-                        worker_id: self.id,
-                        channel_id: self.channel_id.clone(),
-                        session_id: session_id.clone(),
-                        port: opencode_port,
-                    })
-                    .ok();
+                if self
+                    .persist_session_metadata(&session_id, opencode_port)
+                    .await
+                {
+                    self.event_tx
+                        .send(ProcessEvent::OpenCodeSessionCreated {
+                            agent_id: self.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            channel_id: self.channel_id.clone(),
+                            session_id: session_id.clone(),
+                            port: opencode_port,
+                        })
+                        .ok();
+                }
 
                 tracing::info!(
                     worker_id = %self.id,
@@ -393,7 +451,7 @@ impl OpenCodeWorker {
                     agent: None,
                 };
 
-                self.send_status("sending task to OpenCode");
+                self.send_status("sending task to OpenCode").await;
                 {
                     let guard = server.lock().await;
                     guard
@@ -428,8 +486,7 @@ impl OpenCodeWorker {
                     crate::conversation::WorkerLifecycle::WaitingForInput,
                 )
                 .await;
-                self.send_status("resumed — waiting for follow-up");
-                self.send_idle();
+                self.send_status("resumed — waiting for follow-up").await;
             } else {
                 self.persist_transcript_snapshot(&event_state).await;
                 self.persist_lifecycle_transition(
@@ -441,23 +498,46 @@ impl OpenCodeWorker {
                 // so a lagged channel can recover it from durable state.
                 let scrubbed_result = self.scrub_text(&result_text);
                 let scrubbed_result = crate::secrets::scrub::scrub_leaks(&scrubbed_result);
-                let _ = self.event_tx.send(ProcessEvent::WorkerInitialResult {
-                    agent_id: self.agent_id.clone(),
-                    worker_id: self.id,
-                    channel_id: self.channel_id.clone(),
-                    result: scrubbed_result,
-                });
-                self.send_status("waiting for follow-up");
-                self.send_idle();
+                let operation = self
+                    .initial_operation
+                    .take()
+                    .expect("fresh OpenCode workers have an initial operation");
+                let scrubbed_result = crate::agent::process_control::operation_result_or_marker(
+                    scrubbed_result,
+                    crate::agent::process_control::WorkerBackend::OpenCode,
+                );
+                let applied = self
+                    .process_control_registry
+                    .complete_worker_operation(
+                        self.callback,
+                        operation.operation_id,
+                        "waiting for follow-up",
+                    )
+                    .await;
+                if applied == crate::agent::process_control::WorkerMutationResult::Applied {
+                    self.event_tx
+                        .send(ProcessEvent::WorkerOperationResult {
+                            agent_id: self.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            operation_id: operation.operation_id,
+                            result_target: operation.result_target.clone(),
+                            result: scrubbed_result,
+                        })
+                        .ok();
+                    self.send_status("waiting for follow-up").await;
+                    self.send_idle(operation.operation_id);
+                }
             }
 
             while let Some(follow_up) = input_rx.recv().await {
+                *self.interaction_target.lock().await = follow_up.operation.result_target.clone();
                 self.persist_lifecycle_transition(
                     crate::conversation::WorkerLifecycle::WaitingForInput,
                     crate::conversation::WorkerLifecycle::Running,
                 )
                 .await;
-                self.send_status("processing follow-up");
+                self.send_status("processing follow-up").await;
 
                 // Subscribe to fresh events for the follow-up
                 let event_response = {
@@ -467,7 +547,7 @@ impl OpenCodeWorker {
 
                 let follow_up_request = SendPromptRequest {
                     parts: vec![PartInput::Text {
-                        text: follow_up,
+                        text: follow_up.message.clone(),
                         synthetic: None,
                     }],
                     system: self.system_prompt.clone(),
@@ -494,18 +574,35 @@ impl OpenCodeWorker {
                             crate::conversation::WorkerLifecycle::WaitingForInput,
                         )
                         .await;
-                        if !follow_up_text.is_empty() {
-                            let scrubbed = self.scrub_text(&follow_up_text);
-                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
-                            let _ = self.event_tx.send(ProcessEvent::WorkerInitialResult {
-                                agent_id: self.agent_id.clone(),
-                                worker_id: self.id,
-                                channel_id: self.channel_id.clone(),
-                                result: scrubbed,
-                            });
+                        let follow_up_text =
+                            crate::agent::process_control::operation_result_or_marker(
+                                follow_up_text,
+                                crate::agent::process_control::WorkerBackend::OpenCode,
+                            );
+                        let scrubbed = self.scrub_text(&follow_up_text);
+                        let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                        let applied = self
+                            .process_control_registry
+                            .complete_worker_operation(
+                                self.callback,
+                                follow_up.operation.operation_id,
+                                "waiting for follow-up",
+                            )
+                            .await;
+                        if applied == crate::agent::process_control::WorkerMutationResult::Applied {
+                            self.event_tx
+                                .send(ProcessEvent::WorkerOperationResult {
+                                    agent_id: self.agent_id.clone(),
+                                    worker_id: self.id,
+                                    worker_registration_id: self.callback.registration_id,
+                                    operation_id: follow_up.operation.operation_id,
+                                    result_target: follow_up.operation.result_target.clone(),
+                                    result: scrubbed,
+                                })
+                                .ok();
+                            self.send_status("waiting for follow-up").await;
+                            self.send_idle(follow_up.operation.operation_id);
                         }
-                        self.send_status("waiting for follow-up");
-                        self.send_idle();
                     }
                     Err(error) => {
                         tracing::error!(
@@ -513,14 +610,14 @@ impl OpenCodeWorker {
                             %error,
                             "OpenCode follow-up failed"
                         );
-                        self.send_status("failed");
+                        self.send_status("failed").await;
                         break;
                     }
                 }
             }
         }
 
-        self.send_status("completed");
+        self.send_status("completed").await;
 
         // Fetch the full message history from the OpenCode API and convert
         // to TranscriptStep[] for persistence + extract all assistant text
@@ -666,11 +763,14 @@ impl OpenCodeWorker {
                 // Emit OpenCodePartUpdated for the frontend live transcript
                 // and accumulate for fallback transcript persistence.
                 if let Some(opencode_part) = part_to_opencode_part(part) {
-                    let _ = self.event_tx.send(ProcessEvent::OpenCodePartUpdated {
-                        agent_id: self.agent_id.clone(),
-                        worker_id: self.id,
-                        part: opencode_part.clone(),
-                    });
+                    self.event_tx
+                        .send(ProcessEvent::OpenCodePartUpdated {
+                            agent_id: self.agent_id.clone(),
+                            worker_id: self.id,
+                            worker_registration_id: self.callback.registration_id,
+                            part: opencode_part.clone(),
+                        })
+                        .ok();
                     state.accumulated_parts.push(opencode_part);
                 }
 
@@ -709,7 +809,7 @@ impl OpenCodeWorker {
                                         .map(String::from)
                                         .or_else(|| describe_tool_input(tool_name, input.as_ref()))
                                         .unwrap_or_else(|| tool_name.clone());
-                                    self.send_status(&format!("running: {label}"));
+                                    self.send_status(&format!("running: {label}")).await;
                                 }
                                 ToolState::Completed { output, title, .. } => {
                                     // Scrub and log potential secret-pattern hits
@@ -734,13 +834,14 @@ impl OpenCodeWorker {
                                         .as_deref()
                                         .filter(|t| !t.is_empty())
                                         .unwrap_or(tool_name.as_str());
-                                    self.send_status(&format!("done: {done_label}"));
+                                    self.send_status(&format!("done: {done_label}")).await;
                                 }
                                 ToolState::Error { error, .. } => {
                                     let description = error.as_deref().unwrap_or("unknown");
                                     self.send_status(&format!(
                                         "tool error: {tool_name}: {description}"
-                                    ));
+                                    ))
+                                    .await;
                                 }
                                 ToolState::Pending { .. } => {
                                     // Tool queued, no status update needed
@@ -803,9 +904,12 @@ impl OpenCodeWorker {
                     "OpenCode requesting permission"
                 );
 
-                let _ = self.event_tx.send(ProcessEvent::WorkerPermission {
+                let event_tx = self.event_tx.clone();
+                let event = ProcessEvent::WorkerPermission {
                     agent_id: self.agent_id.clone(),
                     worker_id: self.id,
+                    worker_registration_id: self.callback.registration_id,
+                    interaction_target: self.interaction_target.lock().await.clone(),
                     channel_id: self.channel_id.clone(),
                     permission_id: permission.id.clone(),
                     description: format!(
@@ -814,7 +918,16 @@ impl OpenCodeWorker {
                         permission.patterns.join(", ")
                     ),
                     patterns: permission.patterns.clone(),
-                });
+                };
+                self.process_control_registry
+                    .run_if_worker_state(
+                        self.callback,
+                        crate::agent::process_control::WorkerRuntimeState::Running,
+                        move || {
+                            event_tx.send(event).ok();
+                        },
+                    )
+                    .await;
 
                 // Auto-allow (OPENCODE_CONFIG_CONTENT should prevent most prompts)
                 let guard = server.lock().await;
@@ -845,21 +958,33 @@ impl OpenCodeWorker {
                     "OpenCode asking question"
                 );
 
-                let _ = self.event_tx.send(ProcessEvent::WorkerQuestion {
+                let event_tx = self.event_tx.clone();
+                let event = ProcessEvent::WorkerQuestion {
                     agent_id: self.agent_id.clone(),
                     worker_id: self.id,
+                    worker_registration_id: self.callback.registration_id,
+                    interaction_target: self.interaction_target.lock().await.clone(),
                     channel_id: self.channel_id.clone(),
                     question_id: question.id.clone(),
                     questions: question
                         .questions
                         .iter()
-                        .map(|q| QuestionInfo {
-                            question: q.question.clone(),
-                            header: q.header.clone(),
-                            options: q.options.clone(),
+                        .map(|question| QuestionInfo {
+                            question: question.question.clone(),
+                            header: question.header.clone(),
+                            options: question.options.clone(),
                         })
                         .collect(),
-                });
+                };
+                self.process_control_registry
+                    .run_if_worker_state(
+                        self.callback,
+                        crate::agent::process_control::WorkerRuntimeState::Running,
+                        move || {
+                            event_tx.send(event).ok();
+                        },
+                    )
+                    .await;
 
                 // Auto-select first option
                 let answers: Vec<QuestionAnswer> = question
@@ -905,10 +1030,11 @@ impl OpenCodeWorker {
                         attempt, message, ..
                     } => {
                         let description = message.as_deref().unwrap_or("rate limited");
-                        self.send_status(&format!("retry attempt {attempt}: {description}"));
+                        self.send_status(&format!("retry attempt {attempt}: {description}"))
+                            .await;
                     }
                     SessionStatusPayload::Busy => {
-                        self.send_status("working");
+                        self.send_status("working").await;
                     }
                     SessionStatusPayload::Idle => {}
                 }
@@ -920,39 +1046,56 @@ impl OpenCodeWorker {
     }
 
     /// Send a status update via the process event bus.
-    fn send_status(&self, status: &str) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerStatus {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.id,
-            channel_id: self.channel_id.clone(),
-            status: status.to_string(),
-        });
+    async fn send_status(&self, status: &str) {
+        let applied = self
+            .process_control_registry
+            .update_worker_status(self.callback, status)
+            .await;
+        if applied != crate::agent::process_control::WorkerMutationResult::Applied {
+            return;
+        }
+        self.event_tx
+            .send(ProcessEvent::WorkerStatus {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                worker_registration_id: self.callback.registration_id,
+                channel_id: self.channel_id.clone(),
+                status: status.to_string(),
+            })
+            .ok();
     }
 
     /// Send an idle event to mark this worker as waiting for follow-up input.
-    fn send_idle(&self) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerIdle {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.id,
-            channel_id: self.channel_id.clone(),
-        });
+    fn send_idle(&self, operation_id: crate::agent::process_control::WorkerOperationId) {
+        self.event_tx
+            .send(ProcessEvent::WorkerIdle {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                worker_registration_id: self.callback.registration_id,
+                operation_id,
+                channel_id: self.channel_id.clone(),
+            })
+            .ok();
     }
 
-    async fn persist_session_metadata(&self, session_id: &str, port: u16) {
+    async fn persist_session_metadata(&self, session_id: &str, port: u16) -> bool {
         let Some(pool) = &self.sqlite_pool else {
-            return;
+            return false;
         };
         let logger = crate::conversation::ProcessRunLogger::new(pool.clone());
-        match logger
-            .update_opencode_metadata(self.id, session_id, port)
+        match self
+            .process_control_registry
+            .persist_opencode_session(self.callback, &logger, session_id, port)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(worker_id = %self.id, session_id, port, "OpenCode worker row missing while persisting session metadata");
+            Ok(crate::agent::process_control::WorkerMutationResult::Applied) => true,
+            Ok(result) => {
+                tracing::debug!(worker_id = %self.id, session_id, port, ?result, "suppressed stale OpenCode session metadata");
+                false
             }
             Err(error) => {
                 tracing::warn!(%error, worker_id = %self.id, session_id, port, "failed to persist OpenCode session metadata");
+                false
             }
         }
     }

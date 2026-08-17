@@ -913,54 +913,27 @@ impl ProcessRunLogger {
         .transpose()
     }
 
-    /// Link a worker run to a project and/or worktree. Fire-and-forget.
-    ///
-    /// Called after spawn when `project_id` or `worktree_id` was set in the
-    /// spawn args. Uses a separate UPDATE to avoid changing the WorkerStarted
-    /// event shape.
-    pub fn log_worker_project_link(
+    /// Link a worker run to a project and/or worktree before execution starts.
+    pub async fn set_worker_project_link(
         &self,
         worker_id: WorkerId,
         project_id: Option<&str>,
         worktree_id: Option<&str>,
-    ) {
+    ) -> crate::error::Result<bool> {
         if project_id.is_none() && worktree_id.is_none() {
-            return;
+            return Ok(true);
         }
-        let pool = self.pool.clone();
-        let id = worker_id.to_string();
-        let project_id = project_id.map(|s| s.to_string());
-        let worktree_id = worktree_id.map(|s| s.to_string());
-
-        tokio::spawn(async move {
-            // Some callers link from a separate event loop before worker start has
-            // been observed. Retry a few times so the link is not silently lost.
-            for attempt in 0..3u8 {
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                match sqlx::query(
-                    "UPDATE worker_runs SET project_id = COALESCE(?, project_id), \
-                     worktree_id = COALESCE(?, worktree_id) WHERE id = ?",
-                )
-                .bind(&project_id)
-                .bind(&worktree_id)
-                .bind(&id)
-                .execute(&pool)
-                .await
-                {
-                    Ok(result) if result.rows_affected() > 0 => return,
-                    Ok(_) => {
-                        // Row doesn't exist yet — retry.
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, worker_id = %id, "failed to link worker to project");
-                        return;
-                    }
-                }
-            }
-            tracing::debug!(worker_id = %id, "worker_runs row not found after retries for project link");
-        });
+        let result = sqlx::query(
+            "UPDATE worker_runs SET project_id = COALESCE(?, project_id), \
+             worktree_id = COALESCE(?, worktree_id) WHERE id = ?",
+        )
+        .bind(project_id)
+        .bind(worktree_id)
+        .bind(worker_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Update a worker's status.

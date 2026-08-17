@@ -79,6 +79,7 @@ fn default_message_limit() -> i64 {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CancelProcessRequest {
+    agent_id: String,
     channel_id: String,
     process_type: String,
     process_id: String,
@@ -247,18 +248,46 @@ pub(super) async fn channel_status(
 ) -> Json<HashMap<String, serde_json::Value>> {
     let snapshot: Vec<_> = {
         let blocks = state.channel_status_blocks.read().await;
-        blocks.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        blocks
+            .iter()
+            .map(|(channel_id, registration)| {
+                (
+                    channel_id.clone(),
+                    registration.agent_id.clone(),
+                    registration.status_block.clone(),
+                )
+            })
+            .collect()
     };
 
     let mut result = HashMap::new();
-    for (channel_id, status_block) in snapshot {
-        let block = status_block.read().await;
-        if let Ok(value) = serde_json::to_value(&*block) {
+    let registries = state.process_control_registries.load();
+    for (channel_id, agent_id, status_block) in snapshot {
+        let mut block = status_block.read().await.clone();
+        let workers = live_workers_for_channel(&registries, &agent_id, &channel_id).await;
+        block.replace_workers_from_registry(workers);
+        if let Ok(value) = serde_json::to_value(&block) {
             result.insert(channel_id, value);
         }
     }
 
     Json(result)
+}
+
+async fn live_workers_for_channel(
+    registries: &HashMap<String, Arc<crate::agent::process_control::ProcessControlRegistry>>,
+    agent_id: &str,
+    channel_id: &str,
+) -> Vec<crate::agent::process_control::WorkerSnapshot> {
+    let Some(registry) = registries.get(agent_id) else {
+        return Vec::new();
+    };
+    registry
+        .list_worker_snapshots()
+        .await
+        .into_iter()
+        .filter(|worker| worker.provenance.origin_channel_id.as_deref() == Some(channel_id))
+        .collect()
 }
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
@@ -297,13 +326,25 @@ pub(super) async fn delete_channel(
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
     let store = ChannelStore::new(pool.clone());
 
-    let deleted = store.delete(&query.channel_id).await.map_err(|error| {
+    let deletion = store.delete(&query.channel_id).await.map_err(|error| {
         tracing::error!(%error, "failed to delete channel");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if !deleted {
-        return Err(StatusCode::NOT_FOUND);
+    match deletion {
+        crate::conversation::ChannelDeletion::Deleted => {}
+        crate::conversation::ChannelDeletion::NotFound => return Err(StatusCode::NOT_FOUND),
+        crate::conversation::ChannelDeletion::BlockedByWorkers {
+            nonterminal_workers,
+        } => {
+            tracing::info!(
+                agent_id = %query.agent_id,
+                channel_id = %query.channel_id,
+                nonterminal_workers,
+                "channel delete rejected while workers still reference it"
+            );
+            return Err(StatusCode::CONFLICT);
+        }
     }
 
     tracing::info!(
@@ -390,73 +431,51 @@ pub(super) async fn cancel_process(
                 .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-            let channel_state = {
-                let states = state.channel_states.read().await;
-                states.get(&request.channel_id).cloned()
-            };
-
-            if let Some(channel_state) = channel_state {
-                match channel_state
-                    .cancel_worker_with_reason(worker_id, "cancelled via API")
-                    .await
-                {
-                    Ok(()) => {
-                        return Ok(Json(CancelProcessResponse {
-                            success: true,
-                            message: format!("Worker {} cancelled", request.process_id),
-                        }));
-                    }
-                    Err(error) => {
-                        let not_found = error.to_ascii_lowercase().contains("not found");
-                        if not_found {
-                            tracing::debug!(
-                                channel_id = %request.channel_id,
-                                worker_id = %worker_id,
-                                %error,
-                                "worker not found in active channel state; attempting detached fallback"
-                            );
-                        } else {
-                            tracing::warn!(
-                                channel_id = %request.channel_id,
-                                worker_id = %worker_id,
-                                %error,
-                                "failed to cancel worker in channel state"
-                            );
-                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            let registries = state.process_control_registries.load();
+            let registry = registries
+                .get(&request.agent_id)
+                .ok_or(StatusCode::NOT_FOUND)?;
+            match registry
+                .cancel_worker_runtime(
+                    worker_id,
+                    "cancelled via API",
+                    std::time::Duration::from_secs(2),
+                )
+                .await
+            {
+                crate::agent::process_control::ControlActionResult::Cancelled
+                | crate::agent::process_control::ControlActionResult::AlreadyTerminal => {
+                    Ok(Json(CancelProcessResponse {
+                        success: true,
+                        message: format!("Worker {} cancelled", request.process_id),
+                    }))
+                }
+                crate::agent::process_control::ControlActionResult::NotFound => {
+                    let pools = state.agent_pools.load();
+                    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+                    let logger = ProcessRunLogger::new(pool.clone());
+                    match logger
+                        .read_worker_lifecycle(worker_id)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    {
+                        Some(lifecycle) if lifecycle.is_terminal() => {
+                            Ok(Json(CancelProcessResponse {
+                                success: true,
+                                message: format!(
+                                    "Worker {} is already terminal",
+                                    request.process_id
+                                ),
+                            }))
                         }
+                        Some(_) => Err(StatusCode::CONFLICT),
+                        None => Err(StatusCode::NOT_FOUND),
                     }
                 }
-            }
-
-            // Fallback for detached workers (for example after restart): no live
-            // channel state exists, but the DB row is still marked running.
-            let pools = state.agent_pools.load();
-            for pool in pools.values() {
-                let logger = ProcessRunLogger::new(pool.clone());
-                match logger.cancel_running_detached_worker(worker_id).await {
-                    Ok(true) => {
-                        return Ok(Json(CancelProcessResponse {
-                            success: true,
-                            message: format!(
-                                "Worker {} cancelled (detached run reconciled)",
-                                request.process_id
-                            ),
-                        }));
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %request.channel_id,
-                            process_id = %request.process_id,
-                            "failed to cancel detached worker run"
-                        );
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    }
+                crate::agent::process_control::ControlActionResult::Conflict => {
+                    Err(StatusCode::CONFLICT)
                 }
             }
-
-            Err(StatusCode::NOT_FOUND)
         }
         "branch" => {
             let channel_state = {
@@ -620,6 +639,83 @@ pub(super) async fn update_channel_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn register_status_test_worker(
+        registry: &crate::agent::process_control::ProcessControlRegistry,
+        worker_id: crate::WorkerId,
+        channel_id: &str,
+        task: &str,
+    ) {
+        use crate::agent::process_control::{
+            WorkerBackend, WorkerProvenance, WorkerRuntimeControl,
+        };
+
+        let provenance = WorkerProvenance {
+            origin_channel_id: Some(Arc::from(channel_id)),
+            origin_branch_id: None,
+            task: task.to_string(),
+            task_id: None,
+            autonomy_run_id: None,
+            spawning_process: crate::ProcessId::Worker(worker_id),
+        };
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 4)
+            .await
+            .unwrap();
+        let control = WorkerRuntimeControl::new(
+            crate::agent::worker::new_worker_transcript_snapshot(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .0;
+        registry
+            .register_restored_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                true,
+                "idle",
+                0,
+                control,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_channel_workers_use_only_the_registered_agent_registry() {
+        let agent_a_registry =
+            Arc::new(crate::agent::process_control::ProcessControlRegistry::new());
+        let agent_b_registry =
+            Arc::new(crate::agent::process_control::ProcessControlRegistry::new());
+        let agent_a_worker = uuid::Uuid::new_v4();
+        let agent_b_worker = uuid::Uuid::new_v4();
+        register_status_test_worker(
+            &agent_a_registry,
+            agent_a_worker,
+            "shared-channel",
+            "agent-a task",
+        )
+        .await;
+        register_status_test_worker(
+            &agent_b_registry,
+            agent_b_worker,
+            "shared-channel",
+            "agent-b task",
+        )
+        .await;
+        let registries = HashMap::from([
+            ("agent-a".to_string(), agent_a_registry),
+            ("agent-b".to_string(), agent_b_registry),
+        ]);
+
+        let workers = live_workers_for_channel(&registries, "agent-a", "shared-channel").await;
+
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].worker_id, agent_a_worker);
+    }
 
     #[test]
     fn resolve_is_active_filter_defaults_to_active_only() {

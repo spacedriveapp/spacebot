@@ -8,6 +8,7 @@
 //! `tool_output_tx` sender is provided (worker calls). System-internal calls
 //! skip streaming and just collect output.
 
+use crate::agent::process_control::WorkerRegistrationId;
 use crate::sandbox::Sandbox;
 use crate::tools::ToolCallRegistry;
 use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
@@ -51,6 +52,7 @@ pub struct ShellTool {
     process_id: Option<ProcessId>,
     channel_id: Option<ChannelId>,
     agent_id: Option<AgentId>,
+    worker_registration_id: Option<WorkerRegistrationId>,
     tool_call_registry: Option<ToolCallRegistry>,
 }
 
@@ -63,6 +65,7 @@ impl ShellTool {
             process_id: None,
             channel_id: None,
             agent_id: None,
+            worker_registration_id: None,
             tool_call_registry: None,
         }
     }
@@ -74,12 +77,14 @@ impl ShellTool {
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
+        worker_registration_id: Option<WorkerRegistrationId>,
         tool_call_registry: ToolCallRegistry,
     ) -> Self {
         self.tool_output_tx = Some(tool_output_tx);
         self.process_id = Some(process_id);
         self.channel_id = channel_id;
         self.agent_id = Some(agent_id);
+        self.worker_registration_id = worker_registration_id;
         self.tool_call_registry = Some(tool_call_registry);
         self
     }
@@ -130,6 +135,7 @@ pub struct ShellOutput {
 struct StreamContext {
     tool_output_tx: Option<tokio::sync::broadcast::Sender<ProcessEvent>>,
     agent_id: Option<AgentId>,
+    worker_registration_id: Option<WorkerRegistrationId>,
     process_id: Option<ProcessId>,
     channel_id: Option<ChannelId>,
     /// Stable identifier for this tool invocation, used to correlate ToolOutput events.
@@ -193,6 +199,7 @@ async fn stream_lines<R: AsyncBufRead + Unpin>(mut reader: R, ctx: &StreamContex
                     if let Err(err) = tx.send(ProcessEvent::ToolOutput {
                         agent_id: agent_id.clone(),
                         process_id: process_id.clone(),
+                        worker_registration_id: ctx.worker_registration_id,
                         channel_id: ctx.channel_id.clone(),
                         call_id: ctx.call_id.clone(),
                         tool_name: "shell".to_string(),
@@ -411,6 +418,7 @@ impl Tool for ShellTool {
             &self.process_id,
             &self.channel_id,
             &self.agent_id,
+            &self.worker_registration_id,
             streaming_call_id.expect("streaming call_id must exist when streaming is enabled"),
         )
         .await
@@ -456,6 +464,7 @@ async fn run_batch(
 }
 
 #[instrument(skip(cmd, tool_output_tx), fields(process_id = ?process_id))]
+#[allow(clippy::too_many_arguments)]
 async fn run_streaming(
     mut cmd: Command,
     timeout: std::time::Duration,
@@ -463,6 +472,7 @@ async fn run_streaming(
     process_id: &Option<ProcessId>,
     channel_id: &Option<ChannelId>,
     agent_id: &Option<AgentId>,
+    worker_registration_id: &Option<WorkerRegistrationId>,
     call_id: String,
 ) -> Result<ShellOutput, ShellError> {
     let mut child = cmd.spawn().map_err(|e| ShellError {
@@ -503,6 +513,7 @@ async fn run_streaming(
     let stdout_ctx = StreamContext {
         tool_output_tx: tool_output_tx.clone(),
         agent_id: agent_id.clone(),
+        worker_registration_id: *worker_registration_id,
         process_id: process_id.clone(),
         channel_id: channel_id.clone(),
         call_id: call_id.clone(),
@@ -515,6 +526,7 @@ async fn run_streaming(
     let stderr_ctx = StreamContext {
         tool_output_tx: tool_output_tx.clone(),
         agent_id: agent_id.clone(),
+        worker_registration_id: *worker_registration_id,
         process_id: process_id.clone(),
         channel_id: channel_id.clone(),
         call_id,

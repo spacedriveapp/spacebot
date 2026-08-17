@@ -25,6 +25,18 @@ pub struct ChannelInfo {
     pub last_activity_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Outcome of a channel delete request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelDeletion {
+    Deleted,
+    NotFound,
+    /// Nonterminal worker rows still reference the channel, so deleting it
+    /// would cascade away live work.
+    BlockedByWorkers {
+        nonterminal_workers: i64,
+    },
+}
+
 impl ChannelStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -203,8 +215,20 @@ impl ChannelStore {
 
     /// Delete a channel and its message history.
     /// Branch/worker runs are cascade-deleted via FK constraints.
-    pub async fn delete(&self, channel_id: &str) -> crate::error::Result<bool> {
+    pub async fn delete(&self, channel_id: &str) -> crate::error::Result<ChannelDeletion> {
         let mut tx = self.pool.begin().await.map_err(|e| anyhow::anyhow!(e))?;
+        let nonterminal_workers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM worker_runs WHERE channel_id = ? AND lifecycle NOT IN ('succeeded', 'partial', 'cancelled', 'timed_out', 'blocked', 'failed')",
+        )
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+        if nonterminal_workers > 0 {
+            return Ok(ChannelDeletion::BlockedByWorkers {
+                nonterminal_workers,
+            });
+        }
 
         sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
             .bind(channel_id)
@@ -220,7 +244,11 @@ impl ChannelStore {
 
         tx.commit().await.map_err(|e| anyhow::anyhow!(e))?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            Ok(ChannelDeletion::Deleted)
+        } else {
+            Ok(ChannelDeletion::NotFound)
+        }
     }
 
     /// Set active/archive state for a channel.
@@ -379,6 +407,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("channels table should create");
+        sqlx::query("CREATE TABLE conversation_messages (channel_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("conversation messages table should create");
+        sqlx::query("CREATE TABLE worker_runs (channel_id TEXT, lifecycle TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("worker runs table should create");
 
         ChannelStore::new(pool)
     }
@@ -463,5 +499,28 @@ mod tests {
             .expect("get should succeed")
             .expect("channel should still exist");
         assert!(channel.is_active);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_channel_referenced_by_nonterminal_worker() {
+        let store = setup_store().await;
+        sqlx::query("INSERT INTO channels (id, platform) VALUES ('chan-live', 'portal')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_runs (channel_id, lifecycle) VALUES ('chan-live', 'waiting_for_input')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store.delete("chan-live").await.unwrap(),
+            ChannelDeletion::BlockedByWorkers {
+                nonterminal_workers: 1,
+            }
+        );
+        assert!(store.get("chan-live").await.unwrap().is_some());
     }
 }

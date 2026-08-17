@@ -33,6 +33,7 @@ export function ChannelCard({
   channel: ChannelInfo;
   liveState: ChannelLiveState | undefined;
 }) {
+	const [deleteError, setDeleteError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const isTyping = liveState?.isTyping ?? false;
   const timeline = liveState?.timeline ?? [];
@@ -70,8 +71,13 @@ export function ChannelCard({
   }, [channelSettingsData, showSettings]);
 
   const deleteChannel = useMutation({
-    mutationFn: () => api.deleteChannel(channel.agent_id, channel.id),
+    mutationFn: () => {
+      setDeleteError(null);
+      return api.deleteChannel(channel.agent_id, channel.id);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+    onError: (error) =>
+      setDeleteError(error instanceof Error ? error.message : "Failed to delete channel."),
   });
 
   const saveSettingsMutation = useMutation({
@@ -182,6 +188,10 @@ export function ChannelCard({
           />
         </div>
       </div>
+
+      {deleteError && (
+        <p className="px-3 pb-2 text-tiny text-status-error">{deleteError}</p>
+      )}
 
       {/* Activity pills — always allocated */}
       <div className="flex items-start gap-1.5 px-3 pb-2">

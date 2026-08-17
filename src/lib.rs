@@ -217,6 +217,7 @@ pub enum ProcessEvent {
     WorkerStarted {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
         channel_id: Option<ChannelId>,
         task: String,
         worker_type: String,
@@ -228,6 +229,7 @@ pub enum ProcessEvent {
     WorkerStatus {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
         channel_id: Option<ChannelId>,
         status: String,
     },
@@ -237,11 +239,15 @@ pub enum ProcessEvent {
     WorkerIdle {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
+        operation_id: agent::process_control::WorkerOperationId,
         channel_id: Option<ChannelId>,
     },
     WorkerComplete {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
+        active_operation: Option<agent::process_control::WorkerOperationContext>,
         channel_id: Option<ChannelId>,
         result: String,
         notify: bool,
@@ -254,6 +260,7 @@ pub enum ProcessEvent {
     ToolStarted {
         agent_id: AgentId,
         process_id: ProcessId,
+        worker_registration_id: Option<agent::process_control::WorkerRegistrationId>,
         channel_id: Option<ChannelId>,
         call_id: String,
         tool_name: String,
@@ -262,6 +269,7 @@ pub enum ProcessEvent {
     ToolCompleted {
         agent_id: AgentId,
         process_id: ProcessId,
+        worker_registration_id: Option<agent::process_control::WorkerRegistrationId>,
         channel_id: Option<ChannelId>,
         call_id: String,
         tool_name: String,
@@ -309,6 +317,8 @@ pub enum ProcessEvent {
     WorkerPermission {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
+        interaction_target: agent::process_control::WorkerResultTarget,
         channel_id: Option<ChannelId>,
         permission_id: String,
         description: String,
@@ -317,6 +327,8 @@ pub enum ProcessEvent {
     WorkerQuestion {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
+        interaction_target: agent::process_control::WorkerResultTarget,
         channel_id: Option<ChannelId>,
         question_id: String,
         questions: Vec<opencode::QuestionInfo>,
@@ -344,6 +356,7 @@ pub enum ProcessEvent {
     OpenCodeSessionCreated {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
         channel_id: Option<ChannelId>,
         session_id: String,
         port: u16,
@@ -353,15 +366,16 @@ pub enum ProcessEvent {
     OpenCodePartUpdated {
         agent_id: AgentId,
         worker_id: WorkerId,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
         part: crate::opencode::types::OpenCodePart,
     },
-    /// An interactive worker's initial task completed. The worker remains alive
-    /// for follow-ups, but the channel should retrigger to deliver this result.
-    /// Unlike `WorkerComplete`, the worker is NOT removed from the active set.
-    WorkerInitialResult {
+    /// An interactive worker operation completed while the worker remains attached.
+    WorkerOperationResult {
         agent_id: AgentId,
         worker_id: WorkerId,
-        channel_id: Option<ChannelId>,
+        worker_registration_id: agent::process_control::WorkerRegistrationId,
+        operation_id: agent::process_control::WorkerOperationId,
+        result_target: agent::process_control::WorkerResultTarget,
         result: String,
     },
     TextDelta {
@@ -394,6 +408,7 @@ pub enum ProcessEvent {
     ProcessText {
         agent_id: AgentId,
         process_id: ProcessId,
+        worker_registration_id: Option<agent::process_control::WorkerRegistrationId>,
         channel_id: Option<ChannelId>,
         text: String,
     },
@@ -403,6 +418,7 @@ pub enum ProcessEvent {
     ToolOutput {
         agent_id: AgentId,
         process_id: ProcessId,
+        worker_registration_id: Option<agent::process_control::WorkerRegistrationId>,
         channel_id: Option<ChannelId>,
         /// Stable identifier matching the tool_call that initiated this stream.
         /// Allows frontend to deterministically associate lines with invocations.

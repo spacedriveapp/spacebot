@@ -1335,6 +1335,13 @@ async fn run_cron_job(
     };
 
     if let Err(error) = channel_tx.send(message).await {
+        channel_handle.abort();
+        if let Err(join_error) = channel_handle.await
+            && !join_error.is_cancelled()
+        {
+            tracing::warn!(cron_id = %job.id, %join_error, "failed to stop rejected cron channel");
+        }
+        cancel_cron_workers(context, &channel_id).await;
         let error_message = format!("failed to send cron prompt to channel: {error}");
         persist_cron_execution(
             context,
@@ -1372,6 +1379,7 @@ async fn run_cron_job(
     let timed_out = match tokio::time::timeout(timeout, &mut channel_handle).await {
         Ok(Ok(Ok(()))) => false,
         Ok(Ok(Err(error))) => {
+            cancel_cron_workers(context, &channel_id).await;
             let error_message = format!("cron channel failed: {error}");
             persist_cron_execution(
                 context,
@@ -1390,6 +1398,7 @@ async fn run_cron_job(
             ));
         }
         Ok(Err(join_error)) => {
+            cancel_cron_workers(context, &channel_id).await;
             let error_message = format!("cron channel join failed: {join_error}");
             persist_cron_execution(
                 context,
@@ -1413,9 +1422,8 @@ async fn run_cron_job(
     if timed_out {
         // Send a direct "wrap up" message so the LLM gets a turn to synthesize
         // whatever worker results have already landed in context.
-        // This is more reliable than cancelling workers and waiting for retrigger
-        // events, because cancel_worker removes from worker_handles before the
-        // event handler sees the WorkerComplete — the guard clause drops it.
+        // Agent-owned workers may outlive this channel, so timeout asks the
+        // channel to synthesize results that have already arrived.
         tracing::warn!(
             cron_id = %job.id,
             "cron job timed out, sending synthesis prompt"
@@ -1454,6 +1462,8 @@ async fn run_cron_job(
     } else {
         drop(channel_tx);
     }
+
+    cancel_cron_workers(context, &channel_id).await;
 
     // Channel has fully exited. Wake the owning agent so dormant-mode cortex
     // picks up any side-effect tasks the cron run created (delegations,
@@ -1535,6 +1545,25 @@ async fn run_cron_job(
     }
 
     Ok(())
+}
+
+async fn cancel_cron_workers(context: &CronContext, channel_id: &crate::ChannelId) {
+    let cancelled = context
+        .deps
+        .process_control_registry
+        .cancel_workers_by_origin_channel(
+            channel_id,
+            "cron channel exited",
+            Duration::from_secs(10),
+        )
+        .await;
+    if cancelled > 0 {
+        tracing::info!(
+            channel_id = %channel_id,
+            worker_count = cancelled,
+            "terminalized workers after cron channel exit"
+        );
+    }
 }
 
 fn persist_cron_execution(context: &CronContext, cron_id: &str, record: CronExecutionRecord) {

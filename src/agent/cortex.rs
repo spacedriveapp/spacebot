@@ -985,7 +985,7 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::ChronicleCheckpoint { .. }
         | ProcessEvent::OpenCodeSessionCreated { .. }
         | ProcessEvent::OpenCodePartUpdated { .. }
-        | ProcessEvent::WorkerInitialResult { .. }
+        | ProcessEvent::WorkerOperationResult { .. }
         | ProcessEvent::ProcessText { .. }
         | ProcessEvent::CortexChatUpdate { .. }
         | ProcessEvent::SettingsUpdated { .. }
@@ -2776,6 +2776,7 @@ mod tests {
             ProcessEvent::WorkerStarted {
                 agent_id: agent_id.clone(),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
                 channel_id: Some(channel_id.clone()),
                 task: "do work".to_string(),
                 worker_type: "shell".to_string(),
@@ -2785,12 +2786,15 @@ mod tests {
             ProcessEvent::WorkerStatus {
                 agent_id: agent_id.clone(),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
                 channel_id: Some(channel_id.clone()),
                 status: "running".to_string(),
             },
             ProcessEvent::WorkerComplete {
                 agent_id: agent_id.clone(),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+                active_operation: None,
                 channel_id: Some(channel_id.clone()),
                 result: "ok".to_string(),
                 notify: false,
@@ -2803,6 +2807,7 @@ mod tests {
             ProcessEvent::ToolStarted {
                 agent_id: agent_id.clone(),
                 process_id: crate::ProcessId::Worker(worker_id),
+                worker_registration_id: None,
                 channel_id: Some(channel_id.clone()),
                 call_id: "shell-call-1".to_string(),
                 tool_name: "shell".to_string(),
@@ -2811,6 +2816,7 @@ mod tests {
             ProcessEvent::ToolCompleted {
                 agent_id: agent_id.clone(),
                 process_id: crate::ProcessId::Worker(worker_id),
+                worker_registration_id: None,
                 channel_id: Some(channel_id.clone()),
                 call_id: "shell-call-1".to_string(),
                 tool_name: "shell".to_string(),
@@ -2837,6 +2843,10 @@ mod tests {
             ProcessEvent::WorkerPermission {
                 agent_id: agent_id.clone(),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+                interaction_target: crate::agent::process_control::WorkerResultTarget::Channel {
+                    channel_id: channel_id.clone(),
+                },
                 channel_id: Some(channel_id.clone()),
                 permission_id: "perm-1".to_string(),
                 description: "allow network".to_string(),
@@ -2845,6 +2855,10 @@ mod tests {
             ProcessEvent::WorkerQuestion {
                 agent_id: agent_id.clone(),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+                interaction_target: crate::agent::process_control::WorkerResultTarget::Channel {
+                    channel_id: channel_id.clone(),
+                },
                 channel_id: Some(channel_id.clone()),
                 question_id: "q-1".to_string(),
                 questions: vec![],
@@ -2877,11 +2891,14 @@ mod tests {
             ProcessEvent::WorkerIdle {
                 agent_id: Arc::from("agent"),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+                operation_id: crate::agent::process_control::WorkerOperationId::new(),
                 channel_id: Some(channel_id.clone()),
             },
             ProcessEvent::OpenCodeSessionCreated {
                 agent_id: Arc::from("agent"),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
                 channel_id: Some(channel_id.clone()),
                 session_id: "session-1".to_string(),
                 port: 19898,
@@ -2889,15 +2906,20 @@ mod tests {
             ProcessEvent::OpenCodePartUpdated {
                 agent_id: Arc::from("agent"),
                 worker_id,
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
                 part: crate::opencode::types::OpenCodePart::Text {
                     id: "part-1".to_string(),
                     text: "hello".to_string(),
                 },
             },
-            ProcessEvent::WorkerInitialResult {
+            ProcessEvent::WorkerOperationResult {
                 agent_id: Arc::from("agent"),
                 worker_id,
-                channel_id: Some(channel_id.clone()),
+                worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+                operation_id: crate::agent::process_control::WorkerOperationId::new(),
+                result_target: crate::agent::process_control::WorkerResultTarget::Channel {
+                    channel_id: channel_id.clone(),
+                },
                 result: "initial result".to_string(),
             },
         ];

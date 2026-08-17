@@ -497,10 +497,6 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
             channel_id: event_channel,
             ..
         }
-        | ProcessEvent::WorkerComplete {
-            channel_id: event_channel,
-            ..
-        }
         | ProcessEvent::WorkerStatus {
             channel_id: event_channel,
             ..
@@ -516,15 +512,37 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         | ProcessEvent::MemorySaved {
             channel_id: event_channel,
             ..
-        }
-        | ProcessEvent::WorkerPermission {
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::WorkerComplete {
             channel_id: event_channel,
+            active_operation,
             ..
+        } => active_operation.as_ref().map_or_else(
+            || event_channel.as_ref() == Some(channel_id),
+            |operation| {
+                matches!(
+                    &operation.result_target,
+                    crate::agent::process_control::WorkerResultTarget::Channel {
+                        channel_id: target
+                    } if target == channel_id
+                )
+            },
+        ),
+        ProcessEvent::WorkerPermission {
+            interaction_target, ..
         }
         | ProcessEvent::WorkerQuestion {
-            channel_id: event_channel,
+            interaction_target, ..
+        }
+        | ProcessEvent::WorkerOperationResult {
+            result_target: interaction_target,
             ..
-        } => event_channel.as_ref() == Some(channel_id),
+        } => matches!(
+            interaction_target,
+            crate::agent::process_control::WorkerResultTarget::Channel {
+                channel_id: target
+            } if target == channel_id
+        ),
         ProcessEvent::CompactionTriggered {
             channel_id: event_channel,
             ..
@@ -558,10 +576,6 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
             ..
         } => event_channel.as_ref() == Some(channel_id),
         ProcessEvent::WorkerIdle {
-            channel_id: event_channel,
-            ..
-        }
-        | ProcessEvent::WorkerInitialResult {
             channel_id: event_channel,
             ..
         } => event_channel.as_ref() == Some(channel_id),
@@ -1400,6 +1414,7 @@ mod tests {
         let related_event = ProcessEvent::ToolStarted {
             agent_id: Arc::from("agent"),
             process_id: process_id.clone(),
+            worker_registration_id: None,
             channel_id: Some(channel_id.clone()),
             call_id: "call-related".to_string(),
             tool_name: "memory_save".to_string(),
@@ -1408,6 +1423,7 @@ mod tests {
         let unrelated_event = ProcessEvent::ToolStarted {
             agent_id: Arc::from("agent"),
             process_id,
+            worker_registration_id: None,
             channel_id: Some(other_channel),
             call_id: "call-unrelated".to_string(),
             tool_name: "memory_save".to_string(),

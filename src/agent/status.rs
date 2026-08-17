@@ -157,8 +157,13 @@ pub struct BranchStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkerStatus {
     pub id: WorkerId,
+    pub registration_id: crate::agent::process_control::WorkerRegistrationId,
     pub task: String,
     pub status: String,
+    /// Registry runtime state. Presentation reads liveness from this rather
+    /// than pattern-matching the free-text status.
+    pub runtime_state: crate::agent::process_control::WorkerRuntimeState,
+    pub routable: bool,
     pub started_at: DateTime<Utc>,
     pub notify_on_complete: bool,
     pub tool_calls: usize,
@@ -196,6 +201,34 @@ pub enum CompletedItemType {
 }
 
 impl StatusBlock {
+    pub fn replace_workers_from_registry(
+        &mut self,
+        workers: Vec<crate::agent::process_control::WorkerSnapshot>,
+    ) {
+        let previous = std::mem::take(&mut self.active_workers)
+            .into_iter()
+            .map(|worker| ((worker.id, worker.registration_id), worker))
+            .collect::<std::collections::HashMap<_, _>>();
+        self.active_workers = workers
+            .into_iter()
+            .map(|worker| {
+                let prior = previous.get(&(worker.worker_id, worker.registration_id));
+                WorkerStatus {
+                    id: worker.worker_id,
+                    registration_id: worker.registration_id,
+                    task: worker.provenance.task,
+                    status: worker.status,
+                    runtime_state: worker.state,
+                    routable: worker.routable,
+                    started_at: prior.map_or_else(Utc::now, |worker| worker.started_at),
+                    notify_on_complete: prior.is_some_and(|worker| worker.notify_on_complete),
+                    tool_calls: worker.tool_calls,
+                    interactive: worker.interactive,
+                }
+            })
+            .collect();
+    }
+
     /// Create a new empty status block.
     pub fn new() -> Self {
         Self::default()
@@ -214,26 +247,42 @@ impl StatusBlock {
                 self.active_compaction = None;
             }
             ProcessEvent::WorkerStatus {
-                worker_id, status, ..
+                worker_id,
+                worker_registration_id,
+                status,
+                ..
             } => {
-                // Update existing worker or add new one
-                if let Some(worker) = self.active_workers.iter_mut().find(|w| w.id == *worker_id) {
+                if let Some(worker) = self.active_workers.iter_mut().find(|worker| {
+                    worker.id == *worker_id && worker.registration_id == *worker_registration_id
+                }) {
                     worker.status.clone_from(status);
                 }
             }
-            ProcessEvent::WorkerIdle { worker_id, .. } => {
-                if let Some(worker) = self.active_workers.iter_mut().find(|w| w.id == *worker_id) {
+            ProcessEvent::WorkerIdle {
+                worker_id,
+                worker_registration_id,
+                ..
+            } => {
+                if let Some(worker) = self.active_workers.iter_mut().find(|worker| {
+                    worker.id == *worker_id && worker.registration_id == *worker_registration_id
+                }) {
                     worker.status = "idle".to_string();
+                    worker.runtime_state =
+                        crate::agent::process_control::WorkerRuntimeState::WaitingForInput;
+                    worker.routable = worker.interactive;
                 }
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
+                worker_registration_id,
                 result,
                 notify,
                 ..
             } => {
                 // Remove from active, add to completed
-                if let Some(pos) = self.active_workers.iter().position(|w| w.id == *worker_id) {
+                if let Some(pos) = self.active_workers.iter().position(|worker| {
+                    worker.id == *worker_id && worker.registration_id == *worker_registration_id
+                }) {
                     let worker = self.active_workers.remove(pos);
 
                     if *notify {
@@ -321,14 +370,18 @@ impl StatusBlock {
     pub fn add_worker(
         &mut self,
         id: WorkerId,
+        registration_id: crate::agent::process_control::WorkerRegistrationId,
         task: impl Into<String>,
         notify_on_complete: bool,
         interactive: bool,
     ) {
         self.active_workers.push(WorkerStatus {
             id,
+            registration_id,
             task: task.into(),
             status: "starting".to_string(),
+            runtime_state: crate::agent::process_control::WorkerRuntimeState::Starting,
+            routable: false,
             started_at: Utc::now(),
             notify_on_complete,
             tool_calls: 0,
@@ -482,22 +535,6 @@ impl StatusBlock {
     /// Check if a worker is active.
     pub fn is_worker_active(&self, worker_id: WorkerId) -> bool {
         self.active_workers.iter().any(|w| w.id == worker_id)
-    }
-
-    /// Check if an active worker already exists with a matching task.
-    ///
-    /// The status block stores OpenCode tasks with a `[opencode] ` prefix, so
-    /// comparisons strip that prefix before matching. Returns the existing
-    /// worker's ID if found.
-    pub fn find_duplicate_worker_task(&self, task: &str) -> Option<WorkerId> {
-        let normalized = task.strip_prefix("[opencode] ").unwrap_or(task);
-        self.active_workers.iter().find_map(|worker| {
-            let existing = worker
-                .task
-                .strip_prefix("[opencode] ")
-                .unwrap_or(&worker.task);
-            (existing == normalized).then_some(worker.id)
-        })
     }
 
     /// Get the number of active branches.
@@ -697,56 +734,32 @@ mod tests {
     }
 
     #[test]
-    fn find_duplicate_exact_match() {
+    fn stale_registration_events_do_not_update_replacement_status() {
         let mut status = StatusBlock::new();
         let worker_id = Uuid::new_v4();
-        status.add_worker(worker_id, "Build a landing page", true, false);
+        let active_registration = crate::agent::process_control::WorkerRegistrationId::new(2);
+        status.add_worker(worker_id, active_registration, "task", false, true);
 
-        let found = status.find_duplicate_worker_task("Build a landing page");
-        assert_eq!(found, Some(worker_id));
-    }
+        status.update(&ProcessEvent::WorkerStatus {
+            agent_id: AgentId::from("agent"),
+            worker_id,
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            channel_id: Some(ChannelId::from("channel")),
+            status: "stale".to_string(),
+        });
+        status.update(&ProcessEvent::WorkerIdle {
+            agent_id: AgentId::from("agent"),
+            worker_id,
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            operation_id: crate::agent::process_control::WorkerOperationId::new(),
+            channel_id: Some(ChannelId::from("channel")),
+        });
 
-    #[test]
-    fn find_duplicate_no_match() {
-        let mut status = StatusBlock::new();
-        let worker_id = Uuid::new_v4();
-        status.add_worker(worker_id, "Build a landing page", true, false);
-
-        let found = status.find_duplicate_worker_task("Fix the CSS bug");
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn find_duplicate_strips_opencode_prefix() {
-        let mut status = StatusBlock::new();
-        let worker_id = Uuid::new_v4();
-        status.add_worker(worker_id, "[opencode] Build a landing page", true, false);
-
-        // Should match without the prefix
-        let found = status.find_duplicate_worker_task("Build a landing page");
-        assert_eq!(found, Some(worker_id));
-
-        // Should also match with the prefix
-        let found = status.find_duplicate_worker_task("[opencode] Build a landing page");
-        assert_eq!(found, Some(worker_id));
-    }
-
-    #[test]
-    fn find_duplicate_strips_opencode_prefix_in_query() {
-        let mut status = StatusBlock::new();
-        let worker_id = Uuid::new_v4();
-        status.add_worker(worker_id, "Build a landing page", true, false);
-
-        // Querying with prefix should still find the non-prefixed worker
-        let found = status.find_duplicate_worker_task("[opencode] Build a landing page");
-        assert_eq!(found, Some(worker_id));
-    }
-
-    #[test]
-    fn find_duplicate_empty_status_block() {
-        let status = StatusBlock::new();
-        let found = status.find_duplicate_worker_task("any task");
-        assert_eq!(found, None);
+        assert_eq!(status.active_workers[0].status, "starting");
+        assert_eq!(
+            status.active_workers[0].registration_id,
+            active_registration
+        );
     }
 
     #[test]

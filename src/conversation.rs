@@ -11,7 +11,7 @@ pub mod settings;
 pub mod worker_transcript;
 
 pub use channel_settings::ChannelSettingsStore;
-pub use channels::ChannelStore;
+pub use channels::{ChannelDeletion, ChannelStore};
 pub use chronicle::{
     CheckpointKind, ChronicleBoundary, ChronicleCheckpoint, ChronicleStats, ChronicleStore,
     CommitOutcome, NewCheckpoint,

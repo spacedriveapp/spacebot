@@ -113,7 +113,7 @@ This split keeps high-volume memory writes off the control bus so channel contro
 
 ### Retriggering
 
-When a branch or worker completes, the channel doesn't poll for results. The completion event **retriggers** the channel -- it runs another LLM turn with the result injected into its history. This keeps the channel reactive without polling loops.
+When a branch or worker completes, the result destination doesn't poll. The completion event **retriggers** the requesting channel, which runs another LLM turn with the result injected into its history. An interactive worker can outlive its origin channel and return later operations to a different same-agent requester.
 
 Retrigger events are debounced. If multiple branches complete within a short window, the channel batches them into a single turn. A retrigger limit (default: 3 per turn) prevents infinite cascades where a branch result triggers a new branch that triggers another retrigger.
 
@@ -132,7 +132,7 @@ Every turn, the channel receives a live snapshot of all active processes:
 - **[search]** completed 30s ago — "Found 3 relevant files for the query."
 ```
 
-Workers set their own status via the `set_status` tool. Short branches (< 3 seconds) are invisible in the status block to avoid noise. The status block is injected into the system prompt, giving the LLM awareness of concurrent activity.
+Workers set their own status via the `set_status` tool. Their live state comes from the agent worker registry and is projected into each channel's status block. The status block presents activity but does not own worker controls. Short branches (< 3 seconds) are invisible to avoid noise.
 
 ## Data Layer
 

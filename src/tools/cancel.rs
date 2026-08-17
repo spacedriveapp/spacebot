@@ -105,10 +105,32 @@ impl Tool for CancelTool {
                     .process_id
                     .parse::<WorkerId>()
                     .map_err(|e| CancelError(format!("Invalid worker ID: {e}")))?;
-                self.state
-                    .cancel_worker_with_reason(worker_id, reason)
+                match self
+                    .state
+                    .deps
+                    .process_control_registry
+                    .cancel_worker_runtime(worker_id, reason, std::time::Duration::from_secs(2))
                     .await
-                    .map_err(CancelError)?;
+                {
+                    crate::agent::process_control::ControlActionResult::Cancelled
+                    | crate::agent::process_control::ControlActionResult::AlreadyTerminal => {}
+                    crate::agent::process_control::ControlActionResult::NotFound => {
+                        let terminal = self
+                            .state
+                            .process_run_logger
+                            .read_worker_terminal(worker_id)
+                            .await
+                            .map_err(|error| CancelError(error.to_string()))?;
+                        if terminal.is_none() {
+                            return Err(CancelError(format!("Worker {worker_id} not found")));
+                        }
+                    }
+                    crate::agent::process_control::ControlActionResult::Conflict => {
+                        return Err(CancelError(format!(
+                            "Worker {worker_id} cancellation conflicted with its durable state"
+                        )));
+                    }
+                }
             }
             other => return Err(CancelError(format!("Unknown process type: {other}"))),
         }
