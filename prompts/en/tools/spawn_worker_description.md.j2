@@ -2,6 +2,8 @@ Spawn an independent worker process. By default uses a built-in agent with {tool
 
 If OpenCode is enabled and the task is coding-heavy (multi-file edits, debugging, refactors), set `worker_type` to `"opencode"` and include a `directory`.
 
-When the work executes an existing board task, pass its positive `task_number` — the task's execution plan (worker type, project, worktree, required skills) is loaded and enforced over the other arguments, the worker is bound to the task, and an approved task moves to in-progress. Omit `task_number` for ad-hoc work. A task with worktree_mode "create" gets its own worktree provisioned automatically.
+When the work executes an existing board task, pass its positive `task_number`. The task must be approved. The runtime injects the complete task record, comments, full revision snapshots, worker-attempt history, resolved execution plan, and registered project/repo/worktree records. The plan is enforced over other arguments, the worker is bound to the task, and a ready task moves to in-progress. Do not copy this data into `task`; provide only the specific objective or extra instructions. A task with worktree_mode "create" gets its own worktree provisioned automatically.
+
+For an audit or refinement of a task that must not be executed or claimed, pass `task_context_number` instead. This injects the same task and history context and selects its registered checkout without changing task state or enforcing its execution worker/skills. It works for pending-approval tasks. `task_number` and `task_context_number` are mutually exclusive. Omit both for ad-hoc work.
 
 {sandbox_note}

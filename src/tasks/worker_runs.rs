@@ -322,6 +322,23 @@ impl TaskStore {
         rows.iter().map(attempt_from_row).collect()
     }
 
+    /// Every run attempted against a task, newest first.
+    ///
+    /// Internal execution briefings use the complete history. User-facing list
+    /// endpoints remain bounded through [`Self::list_task_attempts`].
+    pub(crate) async fn all_task_attempts(&self, task_number: i64) -> Result<Vec<TaskAttempt>> {
+        let rows = sqlx::query(&format!(
+            "{ATTEMPT_COLUMNS} WHERE task_id = (SELECT id FROM tasks WHERE task_number = ?) \
+             ORDER BY attempt DESC"
+        ))
+        .bind(task_number)
+        .fetch_all(self.pool())
+        .await
+        .context("failed to load complete task attempt history")?;
+
+        rows.iter().map(attempt_from_row).collect()
+    }
+
     /// Every attempt still open, across all tasks.
     ///
     /// Read at startup to recover runs whose worker reached a terminal state
@@ -745,6 +762,41 @@ mod tests {
                 .expect("history should load")
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_briefing_reads_attempts_beyond_the_api_page_limit() {
+        let (store, number) = store_with_task().await;
+        let total = MAX_ATTEMPT_PAGE + 1;
+        for index in 0..total {
+            let worker_id = format!("worker-{index}");
+            store
+                .start_task_attempt(number, start(&worker_id))
+                .await
+                .expect("start should succeed")
+                .expect("task exists");
+            store
+                .finish_task_attempt(&worker_id, TaskAttemptOutcome::Succeeded, Some("finished"))
+                .await
+                .expect("finish should succeed");
+        }
+
+        assert_eq!(
+            store
+                .list_task_attempts(number, total)
+                .await
+                .expect("bounded history should load")
+                .len(),
+            MAX_ATTEMPT_PAGE as usize
+        );
+        assert_eq!(
+            store
+                .all_task_attempts(number)
+                .await
+                .expect("complete history should load")
+                .len(),
+            total as usize
         );
     }
 

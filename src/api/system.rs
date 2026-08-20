@@ -158,6 +158,7 @@ pub(super) async fn events_sse(
                             ApiEvent::WorkerStatusUpdate { .. } => "worker_status",
                             ApiEvent::WorkerIdle { .. } => "worker_idle",
                             ApiEvent::WorkerCompleted { .. } => "worker_completed",
+                            ApiEvent::OpenCodeSessionCreated { .. } => "opencode_session_created",
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
                             ApiEvent::CompactionStarted { .. } => "compaction_started",

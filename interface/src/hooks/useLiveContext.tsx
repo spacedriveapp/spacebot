@@ -355,6 +355,11 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		bumpWorkerVersion();
 	}, [bumpWorkerVersion]);
 
+	const handleOpenCodeSessionCreated = useCallback(() => {
+		queryClient.invalidateQueries({queryKey: ["orchestrate-workers"]});
+		bumpWorkerVersion();
+	}, [queryClient, bumpWorkerVersion]);
+
 	// Model text emitted by a branch or worker between tool calls.
 	const handleProcessText = useCallback((data: unknown) => {
 		const event = data as ProcessTextEvent;
@@ -397,6 +402,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			tool_completed: wrappedToolCompleted,
 			tool_output: handleToolOutput,
 			opencode_part_updated: handleOpenCodePartUpdated,
+			opencode_session_created: handleOpenCodeSessionCreated,
 			process_text: handleProcessText,
 			agent_message_sent: handleAgentMessage,
 			agent_message_received: handleAgentMessage,
@@ -407,7 +413,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			notification_created: handleNotificationCreated,
 			notification_updated: handleNotificationUpdated,
 		}),
-		[channelHandlers, wrappedBranchStarted, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleToolOutput, handleOpenCodePartUpdated, handleProcessText, handleAgentMessage, bumpTaskVersion, bumpTaskCommentVersion, bumpTaskRevisionVersion, handleCortexChatMessage, handleNotificationCreated, handleNotificationUpdated],
+		[channelHandlers, wrappedBranchStarted, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleToolOutput, handleOpenCodePartUpdated, handleOpenCodeSessionCreated, handleProcessText, handleAgentMessage, bumpTaskVersion, bumpTaskCommentVersion, bumpTaskRevisionVersion, handleCortexChatMessage, handleNotificationCreated, handleNotificationUpdated],
 	);
 
 	const onReconnect = useCallback(() => {

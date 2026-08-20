@@ -246,6 +246,15 @@ export interface WorkerCompletedEvent {
 	success?: boolean;
 }
 
+export interface OpenCodeSessionCreatedEvent {
+	type: "opencode_session_created";
+	agent_id: string;
+	channel_id: string | null;
+	worker_id: string;
+	session_id: string;
+	port: number;
+}
+
 export interface BranchStartedEvent {
 	type: "branch_started";
 	agent_id: string;
@@ -384,6 +393,7 @@ export type ApiEvent =
 	| WorkerStatusEvent
 	| WorkerIdleEvent
 	| WorkerCompletedEvent
+	| OpenCodeSessionCreatedEvent
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ChronicleCheckpointEvent

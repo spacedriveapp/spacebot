@@ -1387,7 +1387,7 @@ impl ProcessRunLogger {
     /// The worker start event may not have been observed when this runs, so a
     /// zero-row update is retried with a short back-off.
     pub fn log_opencode_metadata(&self, worker_id: WorkerId, session_id: &str, port: u16) {
-        let pool = self.pool.clone();
+        let logger = self.clone();
         let id = worker_id.to_string();
         let session_id = session_id.to_string();
 
@@ -1396,19 +1396,14 @@ impl ProcessRunLogger {
             const BASE_DELAY_MS: u64 = 50;
 
             for attempt in 0..=MAX_RETRIES {
-                match sqlx::query(
-                    "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
-                )
-                .bind(&session_id)
-                .bind(port as i32)
-                .bind(&id)
-                .execute(&pool)
-                .await
+                match logger
+                    .update_opencode_metadata(worker_id, &session_id, port)
+                    .await
                 {
-                    Ok(result) if result.rows_affected() > 0 => {
+                    Ok(true) => {
                         return; // Successfully updated.
                     }
-                    Ok(_) => {
+                    Ok(false) => {
                         // Row doesn't exist yet — INSERT hasn't committed.
                         if attempt < MAX_RETRIES {
                             let delay = BASE_DELAY_MS * 2u64.pow(attempt);
@@ -1438,6 +1433,28 @@ impl ProcessRunLogger {
                 }
             }
         });
+    }
+
+    /// Persist the provider session receipt for an OpenCode worker.
+    ///
+    /// Returns `false` when the worker row does not exist yet.
+    pub async fn update_opencode_metadata(
+        &self,
+        worker_id: WorkerId,
+        session_id: &str,
+        port: u16,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
+        )
+        .bind(session_id)
+        .bind(port as i32)
+        .bind(worker_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Mark orphaned **running** workers as failed for an agent.
@@ -2514,6 +2531,40 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn opencode_session_metadata_is_persisted_by_worker_id() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        assert!(
+            !logger
+                .update_opencode_metadata(worker_id, "session-1", 12_345)
+                .await
+                .unwrap()
+        );
+
+        start_worker(&logger, worker_id, true).await;
+        assert!(
+            logger
+                .update_opencode_metadata(worker_id, "session-1", 12_345)
+                .await
+                .unwrap()
+        );
+
+        let row =
+            sqlx::query("SELECT opencode_session_id, opencode_port FROM worker_runs WHERE id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.try_get::<String, _>("opencode_session_id").unwrap(),
+            "session-1"
+        );
+        assert_eq!(row.try_get::<i64, _>("opencode_port").unwrap(), 12_345);
     }
 
     #[tokio::test]

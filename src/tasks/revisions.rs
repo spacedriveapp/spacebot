@@ -579,6 +579,21 @@ impl TaskStore {
         row.map(revision_from_row).transpose()
     }
 
+    /// Complete revision snapshots for an internal task execution briefing.
+    pub(crate) async fn all_revisions(&self, task_number: i64) -> Result<Vec<TaskRevision>> {
+        let rows = sqlx::query(&format!(
+            "{REVISION_SELECT_COLUMNS} FROM task_revisions \
+             WHERE task_id = (SELECT id FROM tasks WHERE task_number = ?) \
+             ORDER BY revision ASC"
+        ))
+        .bind(task_number)
+        .fetch_all(self.pool())
+        .await
+        .context("failed to load complete task revision history")?;
+
+        rows.into_iter().map(revision_from_row).collect()
+    }
+
     /// Diff two revisions of a task. `to` defaults to the task's current
     /// revision, which is how "what changed since I last looked" is asked.
     pub async fn diff_revisions(
