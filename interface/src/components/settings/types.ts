@@ -4,6 +4,7 @@ export type SectionId =
 	| "prompt-debug"
 	| "instance"
 	| "appearance"
+	| "composition"
 	| "providers"
 	| "channels"
 	| "api-keys"

@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { ChatComposer, type ModelOption } from "@spacedrive/ai";
 import { usePopover } from "@spacedrive/primitives";
 import { Paperclip, X } from "@phosphor-icons/react";
+import { useChatInputPrefs } from "@/hooks/useChatInputPrefs";
 
 interface PortalComposerProps {
 	agentName: string;
@@ -44,6 +45,7 @@ export function PortalComposer({
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [isDragging, setIsDragging] = useState(false);
 	const dragCounter = useRef(0);
+	const {prefs} = useChatInputPrefs();
 
 	const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		const files = Array.from(e.target.files ?? []);
@@ -133,8 +135,15 @@ export function PortalComposer({
 				draft={draft}
 				onDraftChange={onDraftChange}
 				onSend={onSend}
-				placeholder={disabled ? "Waiting for response..." : `Message ${agentName}...`}
+				placeholder={
+					disabled
+						? "Waiting for response..."
+						: prefs.enterToSubmit
+							? `Message ${agentName}...`
+							: `Message ${agentName}... (⌘/Ctrl+Enter to send)`
+				}
 				isSending={disabled}
+				enterToSubmit={prefs.enterToSubmit}
 				toolbarExtra={paperclipButton}
 				projectSelector={
 					projectOptions.length > 0
