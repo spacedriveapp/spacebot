@@ -3793,8 +3793,11 @@ impl Channel {
         })
     }
 
-    /// Send outbound text and record send metrics.
-    async fn send_outbound_text(&self, text: String, error_context: &str) {
+    /// Send outbound text and record send metrics. Returns `true` on success.
+    ///
+    /// Failure here means the outbound response channel's receiver has closed
+    /// (e.g. shutdown) — `mpsc::Sender::send` does not fail transiently.
+    async fn send_outbound_text(&self, text: String, error_context: &str) -> bool {
         match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
@@ -3805,6 +3808,7 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
+                true
             }
             Err(error) => {
                 #[cfg(feature = "metrics")]
@@ -3816,6 +3820,7 @@ impl Channel {
                         .inc();
                 }
                 tracing::error!(%error, channel_id = %self.id, "{error_context}");
+                false
             }
         }
     }
@@ -3895,11 +3900,15 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                if self
+                                    .send_outbound_text(
+                                        final_text,
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await
+                                {
+                                    replied_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     } else {
@@ -3960,11 +3969,15 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                if self
+                                    .send_outbound_text(
+                                        final_text,
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await
+                                {
+                                    replied_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                     } else {
@@ -4020,8 +4033,11 @@ impl Channel {
                                     Some(self.agent_display_name()),
                                     tool_calls_json,
                                 );
-                            self.send_outbound_text(final_text, "failed to send fallback reply")
-                                .await;
+                            self.send_outbound_text(
+                                final_text,
+                                "failed to send fallback reply",
+                            )
+                            .await;
                         }
                     }
 
