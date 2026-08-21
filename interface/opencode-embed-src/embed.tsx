@@ -20,7 +20,7 @@ import { Font } from "@opencode-ai/ui/font"
 import { ThemeProvider, useTheme, type DesktopTheme, type ColorScheme } from "@opencode-ai/ui/theme"
 import { MetaProvider } from "@solidjs/meta"
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router"
-import { ErrorBoundary, lazy, onMount, type ParentProps, Show, Suspense } from "solid-js"
+import { createEffect, createSignal, ErrorBoundary, lazy, onMount, type ParentProps, Show, Suspense } from "solid-js"
 import { render } from "solid-js/web"
 // Theme overrides use `var(--color-*)` SpaceUI tokens rather than static hex,
 // so the embed tracks whichever Spacebot theme class is on <html> (dark,
@@ -124,8 +124,9 @@ function ServerKey(props: ParentProps) {
 
 /**
  * Registers and activates a custom theme + color scheme inside the
- * ThemeProvider. Runs once on mount — theme changes propagate
- * reactively through OpenCode's own effect in the ThemeProvider.
+ * ThemeProvider. Theme registration runs once on mount; colorScheme
+ * tracks props reactively so the host can flip light/dark without
+ * remounting (preserves session state).
  */
 function ThemeInjector(props: ParentProps & { theme?: DesktopTheme; colorScheme?: ColorScheme }) {
   const ctx = useTheme()
@@ -135,6 +136,9 @@ function ThemeInjector(props: ParentProps & { theme?: DesktopTheme; colorScheme?
       ctx.registerTheme(theme)
       ctx.setTheme(theme.id)
     }
+  })
+  // Reactive — re-fires whenever the host updates the colorScheme signal
+  createEffect(() => {
     if (props.colorScheme) {
       ctx.setColorScheme(props.colorScheme)
     }
@@ -180,6 +184,13 @@ export type MountOpenCodeHandle = {
    * e.g. handle.navigate("/<base64dir>/session/<sessionId>")
    */
   navigate: (route: string) => void
+
+  /**
+   * Update the active color scheme ("light" | "dark" | "system") at runtime.
+   * Lets host apps re-theme the embed when their own theme changes,
+   * without remounting the embedded SolidJS app.
+   */
+  setColorScheme: (scheme: ColorScheme) => void
 }
 
 /**
@@ -195,7 +206,10 @@ export function mountOpenCode(
   container: HTMLElement,
   config: MountOpenCodeConfig,
 ): MountOpenCodeHandle {
-  const { serverUrl, initialRoute = "/", colorScheme = "dark" } = config
+  const { serverUrl, initialRoute = "/", colorScheme: initialColorScheme = "dark" } = config
+  // Reactive signal so the host can flip color scheme post-mount
+  // (handle.setColorScheme) without remounting the SolidJS tree.
+  const [colorScheme, setColorScheme] = createSignal<ColorScheme>(initialColorScheme)
   // Resolve theme: undefined → default Spacebot theme, null → no injection
   const theme = config.theme === undefined
     ? (spacebotTheme as DesktopTheme)
@@ -238,7 +252,7 @@ export function mountOpenCode(
         <MetaProvider>
           <Font />
           <ThemeProvider>
-            <ThemeInjector theme={theme} colorScheme={colorScheme}>
+            <ThemeInjector theme={theme} colorScheme={colorScheme()}>
             <LanguageProvider>
               <UiI18nBridge>
                 <ErrorBoundary fallback={(error) => <ErrorPage error={error} />}>
@@ -283,6 +297,9 @@ export function mountOpenCode(
     dispose,
     navigate: (route: string) => {
       memory.set({ value: route })
+    },
+    setColorScheme: (scheme: ColorScheme) => {
+      setColorScheme(scheme)
     },
   }
 }
