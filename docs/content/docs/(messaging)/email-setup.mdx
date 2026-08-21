@@ -61,6 +61,7 @@ from_name = "Spacebot"
 poll_interval_secs = 30
 folders = ["INBOX"]
 allowed_senders = []
+sync_max_age_days = 0  # 0 = no limit; cap backfill at N days of unread mail (IMAP SINCE = inclusive midnight boundary)
 ```
 
 Credentials support `env:VAR_NAME` references.
@@ -141,6 +142,29 @@ poll_interval_secs = 30
 ```
 
 Use a longer interval if your provider rate limits IMAP polling.
+
+## Limiting backfill on first connect
+
+By default, the first poll after connecting an account imports every unread email in the configured folders. On an inbox with years of unread mail this floods the agent with stale messages it shouldn't respond to.
+
+Set `sync_max_age_days` to cap how far back the poller looks. The IMAP server filters server-side, so the check is cheap even on large mailboxes.
+
+```toml
+[messaging.email]
+sync_max_age_days = 1  # cap backfill at one day of unread mail
+```
+
+The same knob works on named instances:
+
+```toml
+[[messaging.email.instances]]
+name = "support"
+sync_max_age_days = 7  # cap backfill at one week of unread support mail
+```
+
+Default is `0` (no limit), which preserves the original behavior.
+
+**Semantics.** IMAP `SINCE` (RFC 3501 §6.4.4) is inclusive and matches against whole dates at midnight in the server's local time, not rolling 24-hour windows. `sync_max_age_days = 1` therefore bounds the *oldest* mail the poller will import to "received on or after yesterday's date", which can include mail up to ~48 hours old depending on the current time and the server's timezone. Treat the value as a backfill cap, not a literal "last N hours" window: a smaller value is stricter (imports less old mail) and a larger value is more lenient, with an effective floor of roughly N×24h. Round up if you'd rather over-fetch than miss mail near the date boundary.
 
 ## Verify it's working
 

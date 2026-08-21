@@ -703,6 +703,8 @@ pub(super) struct TomlEmailConfig {
     #[serde(default = "default_email_max_attachment_bytes")]
     pub(super) max_attachment_bytes: usize,
     #[serde(default)]
+    pub(super) sync_max_age_days: u64,
+    #[serde(default)]
     pub(super) instances: Vec<TomlEmailInstanceConfig>,
 }
 
@@ -739,6 +741,8 @@ pub(super) struct TomlEmailInstanceConfig {
     pub(super) max_body_bytes: usize,
     #[serde(default = "default_email_max_attachment_bytes")]
     pub(super) max_attachment_bytes: usize,
+    #[serde(default)]
+    pub(super) sync_max_age_days: u64,
 }
 
 #[derive(Deserialize)]

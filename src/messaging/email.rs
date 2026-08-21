@@ -90,6 +90,7 @@ struct EmailPollConfig {
     poll_interval: Duration,
     allowed_senders: Vec<String>,
     max_body_bytes: usize,
+    sync_max_age_days: u64,
     runtime_key: String,
 }
 
@@ -142,6 +143,7 @@ pub struct EmailAdapter {
     allowed_senders: Vec<String>,
     max_body_bytes: usize,
     max_attachment_bytes: usize,
+    sync_max_age_days: u64,
     smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     poll_task: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -200,6 +202,7 @@ impl EmailAdapter {
             allowed_senders: config.allowed_senders.clone(),
             max_body_bytes: config.max_body_bytes,
             max_attachment_bytes: config.max_attachment_bytes,
+            sync_max_age_days: config.sync_max_age_days,
             instances: Vec::new(),
         };
         Self::build(runtime_key.into(), &email_config)
@@ -239,6 +242,7 @@ impl EmailAdapter {
             allowed_senders: config.allowed_senders.clone(),
             max_body_bytes: config.max_body_bytes.max(1024),
             max_attachment_bytes: config.max_attachment_bytes.max(1024),
+            sync_max_age_days: config.sync_max_age_days,
             smtp_transport,
             shutdown_tx: Arc::new(RwLock::new(None)),
             poll_task: Arc::new(RwLock::new(None)),
@@ -258,6 +262,7 @@ impl EmailAdapter {
             poll_interval: self.poll_interval,
             allowed_senders: self.allowed_senders.clone(),
             max_body_bytes: self.max_body_bytes,
+            sync_max_age_days: self.sync_max_age_days,
             runtime_key: self.runtime_key.clone(),
         }
     }
@@ -714,8 +719,14 @@ fn poll_inbox_once(config: &EmailPollConfig) -> anyhow::Result<Vec<InboundMessag
             continue;
         }
 
+        // Combine UNSEEN with a SINCE date filter when sync_max_age_days is
+        // set, so first-connect doesn't flood the agent with years of unread
+        // email. Assembly is in build_poll_search_query so the query
+        // construction is unit-testable.
+        let search_query = build_poll_search_query(config.sync_max_age_days);
+
         let message_uids = session
-            .uid_search("UNSEEN")
+            .uid_search(&search_query)
             .with_context(|| format!("failed to search unseen messages in folder '{folder}'"))?;
 
         for uid in message_uids {
@@ -1211,6 +1222,7 @@ pub fn search_mailbox(
         poll_interval: Duration::from_secs(config.poll_interval_secs.max(5)),
         allowed_senders: config.allowed_senders.clone(),
         max_body_bytes: config.max_body_bytes.max(1024),
+        sync_max_age_days: config.sync_max_age_days,
         runtime_key: "email".to_string(),
     })?;
 
@@ -1381,10 +1393,7 @@ fn build_imap_search_criterion(query: &EmailSearchQuery) -> String {
         clauses.push(format!("TEXT {}", quote_imap_search_value(&text)));
     }
 
-    if let Some(since_days) = query.since_days.filter(|days| *days > 0) {
-        let since_date = (Utc::now() - ChronoDuration::days(since_days as i64))
-            .format("%d-%b-%Y")
-            .to_string();
+    if let Some(since_date) = build_since_date(query.since_days) {
         clauses.push(format!("SINCE {since_date}"));
     }
 
@@ -1394,6 +1403,50 @@ fn build_imap_search_criterion(query: &EmailSearchQuery) -> String {
         clauses.join(" ")
     }
 }
+
+/// Compute a `dd-MMM-YYYY` IMAP SINCE date for the given day count, or
+/// `None` if the count is zero / missing / larger than `MAX_SINCE_DAYS`.
+///
+/// `MAX_SINCE_DAYS` (~2739 years) is well past any realistic config value
+/// and stays inside chrono's `TimeDelta` bounds. Without this clamp a
+/// sufficiently large input would panic during `Utc::now() - Duration::days(n)`.
+///
+/// Shared between the poll path (`poll_inbox_once`) and the search path
+/// (`build_imap_search_criterion`) so the date format and the overflow
+/// guard stay in lockstep.
+fn build_since_date(days: Option<u32>) -> Option<String> {
+    let days = days.filter(|d| *d > 0 && *d <= MAX_SINCE_DAYS)?;
+    let days_i64 = i64::from(days);
+    Some(
+        (Utc::now() - ChronoDuration::days(days_i64))
+            .format("%d-%b-%Y")
+            .to_string(),
+    )
+}
+
+/// Build the IMAP search query for a poll cycle.
+///
+/// Returns `"UNSEEN"` when `sync_max_age_days` is zero (no limit) or
+/// outside a safe range; returns `"UNSEEN SINCE <dd-MMM-YYYY>"` otherwise.
+///
+/// The IMAP `SINCE` filter operates on whole dates with an inclusive,
+/// midnight-anchored boundary (RFC 3501 §6.4.4). That means
+/// `sync_max_age_days = 1` can include mail up to ~48h old depending on
+/// the current local time and the server's date, not strictly the last
+/// 24h. Document and name the field as a *backfill cap*, not a literal
+/// time window.
+fn build_poll_search_query(sync_max_age_days: u64) -> String {
+    let since_days = u32::try_from(sync_max_age_days).ok();
+    match build_since_date(since_days) {
+        Some(date) => format!("UNSEEN SINCE {date}"),
+        None => "UNSEEN".to_string(),
+    }
+}
+
+/// Maximum day count accepted by `build_since_date`. 1_000_000 days is
+/// ~2739 years, far past anything a user would type in TOML, and small
+/// enough to stay inside chrono's internal `TimeDelta` range.
+const MAX_SINCE_DAYS: u32 = 1_000_000;
 
 fn sanitize_imap_search_value(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
@@ -1756,9 +1809,10 @@ struct EmailReplyContext {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, derive_thread_key,
-        extract_message_ids, is_local_mail_host, normalize_email_target, normalize_reply_subject,
-        normalize_search_folders, parse_primary_mailbox, sort_and_limit_search_hits,
+        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, build_poll_search_query,
+        build_since_date, derive_thread_key, extract_message_ids, is_local_mail_host,
+        normalize_email_target, normalize_reply_subject, normalize_search_folders,
+        parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
     #[test]
@@ -1861,6 +1915,75 @@ mod tests {
         assert!(criterion.contains("FROM \"Alice <alice@example.com>\""));
         assert!(criterion.contains("SUBJECT \"Q1 update\""));
         assert!(criterion.contains("TEXT \"release \\\\\\\"candidate\\\\\\\"\""));
+    }
+
+    #[test]
+    fn build_since_date_returns_none_for_zero_and_missing() {
+        assert_eq!(build_since_date(None), None);
+        assert_eq!(build_since_date(Some(0)), None);
+    }
+
+    #[test]
+    fn build_poll_search_query_returns_unseen_for_zero() {
+        // No backfill cap means we use the original `UNSEEN` query exactly.
+        assert_eq!(build_poll_search_query(0), "UNSEEN");
+    }
+
+    #[test]
+    fn build_poll_search_query_appends_since_for_nonzero() {
+        // A non-zero cap composes `UNSEEN SINCE <date>`. The exact date
+        // depends on the local clock; only assert the structure here.
+        let query = build_poll_search_query(7);
+        assert!(query.starts_with("UNSEEN SINCE "), "got {query:?}");
+        // The date suffix is 11 chars (dd-MMM-YYYY).
+        assert_eq!(query.len(), "UNSEEN SINCE ".len() + 11, "got {query:?}");
+    }
+
+    #[test]
+    fn build_poll_search_query_degrades_to_unseen_for_absurd_inputs() {
+        // u64::MAX is way past MAX_SINCE_DAYS. The helper must not panic and
+        // must not produce a future-dated query (which would silently exclude
+        // every message). Falling back to plain `UNSEEN` is the safe behavior.
+        assert_eq!(build_poll_search_query(u64::MAX), "UNSEEN");
+    }
+
+    #[test]
+    fn build_since_date_emits_imap_date_format() {
+        // The IMAP SINCE clause requires dd-MMM-YYYY with a 4-digit year
+        // (RFC 3501 §6.4.4). Verify length and dash positions.
+        let date = build_since_date(Some(1)).expect("non-zero days should produce a date");
+        assert_eq!(date.len(), 11, "expected dd-MMM-YYYY (got {date:?})");
+        let bytes = date.as_bytes();
+        assert!(
+            bytes[2] == b'-' && bytes[6] == b'-',
+            "expected dashes at idx 2 and 6 (got {date:?})"
+        );
+        assert!(
+            bytes[7..].iter().all(|b| b.is_ascii_digit()),
+            "year must be ASCII digits (got {date:?})"
+        );
+    }
+
+    #[test]
+    fn build_since_date_handles_large_day_counts_without_overflow() {
+        // A year is ~365 days; 1_000 days is ~3 years. Should produce a
+        // well-formed date in the past.
+        let date = build_since_date(Some(1_000)).expect("1000 days should produce a date");
+        let year: u32 = date[7..].parse().expect("year must parse as u32");
+        assert!(
+            (1900..=2100).contains(&year),
+            "expected a sane past year, got {date:?}"
+        );
+
+        // Chrono's TimeDelta is internally bounded — past a few million days
+        // the `Utc::now() - ChronoDuration::days(n)` call panics. We accept
+        // those values by returning None (i.e. degrade to "no SINCE clause"
+        // rather than crashing the poll task).
+        assert_eq!(
+            build_since_date(Some(100_000_000)),
+            None,
+            "absurdly large day counts must not produce a date"
+        );
     }
 
     #[test]
