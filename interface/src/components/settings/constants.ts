@@ -102,6 +102,13 @@ export const PROVIDERS = [
 		envVar: "KILO_API_KEY",
 	},
 	{
+		id: "requesty",
+		name: "Requesty",
+		description: "OpenAI-compatible multi-provider gateway",
+		placeholder: "rqsty-...",
+		envVar: "REQUESTY_API_KEY",
+	},
+	{
 		id: "opencode-zen",
 		name: "OpenCode Zen",
 		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",

@@ -44,6 +44,7 @@ pub(super) struct ProviderStatus {
     openai_chatgpt: bool,
     openrouter: bool,
     kilo: bool,
+    requesty: bool,
     zhipu: bool,
     groq: bool,
     together: bool,
@@ -157,6 +158,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "openai" => Some("openai_key"),
         "openrouter" => Some("openrouter_key"),
         "kilo" => Some("kilo_key"),
+        "requesty" => Some("requesty_key"),
         "zhipu" => Some("zhipu_key"),
         "groq" => Some("groq_key"),
         "together" => Some("together_key"),
@@ -225,6 +227,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         openai_key: (provider == "openai").then(|| credential.to_string()),
         openrouter_key: (provider == "openrouter").then(|| credential.to_string()),
         kilo_key: (provider == "kilo").then(|| credential.to_string()),
+        requesty_key: (provider == "requesty").then(|| credential.to_string()),
         zhipu_key: (provider == "zhipu").then(|| credential.to_string()),
         groq_key: (provider == "groq").then(|| credential.to_string()),
         together_key: (provider == "together").then(|| credential.to_string()),
@@ -506,6 +509,7 @@ pub(super) async fn get_providers(
         openai_chatgpt,
         openrouter,
         kilo,
+        requesty,
         zhipu,
         groq,
         together,
@@ -575,6 +579,7 @@ pub(super) async fn get_providers(
             openai_oauth_configured,
             has_value("openrouter_key", "OPENROUTER_API_KEY"),
             has_value("kilo_key", "KILO_API_KEY"),
+            has_value("requesty_key", "REQUESTY_API_KEY"),
             has_value("zhipu_key", "ZHIPU_API_KEY"),
             has_value("groq_key", "GROQ_API_KEY"),
             has_value("together_key", "TOGETHER_API_KEY"),
@@ -607,6 +612,7 @@ pub(super) async fn get_providers(
             openai_oauth_configured,
             env_set("OPENROUTER_API_KEY"),
             env_set("KILO_API_KEY"),
+            env_set("REQUESTY_API_KEY"),
             env_set("ZHIPU_API_KEY"),
             env_set("GROQ_API_KEY"),
             env_set("TOGETHER_API_KEY"),
@@ -634,6 +640,7 @@ pub(super) async fn get_providers(
         openai_chatgpt,
         openrouter,
         kilo,
+        requesty,
         zhipu,
         groq,
         together,
@@ -658,6 +665,7 @@ pub(super) async fn get_providers(
         || providers.openai_chatgpt
         || providers.openrouter
         || providers.kilo
+        || providers.requesty
         || providers.zhipu
         || providers.groq
         || providers.together
@@ -695,6 +703,7 @@ pub(super) async fn get_provider_default_models() -> Json<ProviderDefaultModelsR
         "openai-chatgpt",
         "openrouter",
         "kilo",
+        "requesty",
         "zhipu",
         "groq",
         "together",
@@ -1533,6 +1542,7 @@ pub(super) async fn test_provider_model(
             openai_key: None,
             openrouter_key: None,
             kilo_key: None,
+            requesty_key: None,
             zhipu_key: None,
             groq_key: None,
             together_key: None,

@@ -39,6 +39,7 @@ anthropic_key = "env:ANTHROPIC_API_KEY"
 openai_key = "env:OPENAI_API_KEY"
 openrouter_key = "env:OPENROUTER_API_KEY"
 kilo_key = "env:KILO_API_KEY"
+requesty_key = "env:REQUESTY_API_KEY"
 zhipu_key = "env:ZHIPU_API_KEY"
 groq_key = "env:GROQ_API_KEY"
 together_key = "env:TOGETHER_API_KEY"
@@ -252,7 +253,7 @@ groq_key = "gsk_abc123..."
 
 The `secret:` prefix resolves from the agent's secret store at config load time. If the secret doesn't exist, the value is treated as missing and implicit env fallbacks are tried.
 
-LLM keys also have implicit env fallbacks — if no key is set in the TOML, Spacebot checks `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `KILO_API_KEY`, and `OPENCODE_GO_API_KEY` automatically.
+LLM keys also have implicit env fallbacks — if no key is set in the TOML, Spacebot checks `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `KILO_API_KEY`, `REQUESTY_API_KEY`, and `OPENCODE_GO_API_KEY` automatically.
 
 Use `POST /api/secrets/migrate` to automatically move plaintext credentials from `config.toml` into the secret store and replace them with `secret:` references. See [Secret Store -- Migration](/docs/secrets#migration) for details.
 
@@ -290,6 +291,7 @@ Model names include the provider as a prefix:
 | OpenAI | `openai/<model>` | `openai/gpt-4o` |
 | OpenRouter | `openrouter/<provider>/<model>` | `openrouter/anthropic/claude-sonnet-4-20250514` |
 | Kilo Gateway | `kilo/<provider>/<model>` | `kilo/anthropic/claude-sonnet-4.5` |
+| Requesty | `requesty/<provider>/<model>` | `requesty/openai/gpt-4o-mini` |
 | Custom provider | `<provider_id>/<model>` | `my_openai/gpt-4o-mini` |
 
 You can mix providers across process types. See [Routing](/docs/routing) for the full routing system.
@@ -413,6 +415,7 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `openai_key` | string | None | OpenAI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `openrouter_key` | string | None | OpenRouter API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `kilo_key` | string | None | Kilo Gateway API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `requesty_key` | string | None | Requesty API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `zhipu_key` | string | None | Zhipu AI (GLM) API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `groq_key` | string | None | Groq API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 | `together_key` | string | None | Together AI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
