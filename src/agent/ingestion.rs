@@ -29,6 +29,39 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Max ingestion attempts before a file is quarantined.
+const MAX_INGEST_ATTEMPTS: i64 = 3;
+/// Base backoff between failed ingestion attempts (seconds).
+const INGEST_BACKOFF_BASE_SECS: i64 = 60;
+/// Cap on the exponential backoff (seconds) — 1 hour.
+const MAX_INGEST_BACKOFF_SECS: i64 = 3600;
+
+/// Exponential backoff for the Nth failed attempt (1-based), capped.
+fn backoff_secs(attempts: i64) -> i64 {
+    let exp = attempts.saturating_sub(1).min(20) as u32;
+    INGEST_BACKOFF_BASE_SECS
+        .saturating_mul(2_i64.saturating_pow(exp))
+        .min(MAX_INGEST_BACKOFF_SECS)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RetryDecision {
+    Retry { backoff_secs: i64 },
+    Quarantine,
+}
+
+/// Decide what to do after a failed attempt. `attempts` is the count AFTER
+/// incrementing for this failure.
+fn retry_decision(attempts: i64) -> RetryDecision {
+    if attempts >= MAX_INGEST_ATTEMPTS {
+        RetryDecision::Quarantine
+    } else {
+        RetryDecision::Retry {
+            backoff_secs: backoff_secs(attempts),
+        }
+    }
+}
+
 /// Spawn the ingestion polling loop for an agent.
 ///
 /// Runs until the returned JoinHandle is dropped or aborted. Scans the ingest
@@ -185,6 +218,18 @@ async fn process_file(
     }
 
     let hash = content_hash(&content);
+
+    if let Some(state) = load_retry_state(&deps.sqlite_pool, &hash).await? {
+        if state.status == "quarantined" {
+            tracing::debug!(file = %filename, "skipping quarantined ingest file");
+            return Ok(());
+        }
+        if state.not_due {
+            tracing::debug!(file = %filename, "ingest file still backing off, skipping this cycle");
+            return Ok(());
+        }
+    }
+
     let file_size = content.len() as i64;
     let chunks = chunk_text(&content, config.chunk_size);
     let total_chunks = chunks.len();
@@ -263,10 +308,6 @@ async fn process_file(
         }
     }
 
-    // Mark file as completed (or failed if any chunk errored)
-    let final_status = if had_failure { "failed" } else { "completed" };
-    complete_ingestion_file(&deps.sqlite_pool, &hash, final_status).await?;
-
     #[cfg(feature = "metrics")]
     {
         let result = if had_failure { "failure" } else { "success" };
@@ -277,26 +318,52 @@ async fn process_file(
     }
 
     if had_failure {
-        // Keep the source file and progress rows so the next poll cycle can
-        // resume from where it left off. Deleting on failure would cause data
-        // loss when a provider error interrupts mid-ingestion (fixes #48).
-        tracing::warn!(
-            file = %filename,
-            chunks = total_chunks,
-            "file ingestion had failures — keeping file and progress for retry"
-        );
+        let attempts: i64 = sqlx::query_scalar(
+            "UPDATE ingestion_files SET attempts = attempts + 1 WHERE content_hash = ? RETURNING attempts",
+        )
+        .bind(&hash)
+        .fetch_one(&deps.sqlite_pool)
+        .await
+        .context("failed to bump ingestion attempts")?;
+
+        match retry_decision(attempts) {
+            RetryDecision::Quarantine => {
+                complete_ingestion_file(&deps.sqlite_pool, &hash, "quarantined").await?;
+                tracing::error!(
+                    file = %filename, attempts,
+                    "ingest file quarantined after exhausting retry budget — use the UI retry action to re-arm"
+                );
+            }
+            RetryDecision::Retry { backoff_secs } => {
+                sqlx::query(
+                    "UPDATE ingestion_files SET status = 'failed', \
+                     next_attempt_at = datetime('now', '+' || ? || ' seconds'), \
+                     completed_at = CURRENT_TIMESTAMP WHERE content_hash = ?",
+                )
+                .bind(backoff_secs)
+                .bind(&hash)
+                .execute(&deps.sqlite_pool)
+                .await
+                .context("failed to schedule ingestion retry")?;
+                tracing::warn!(
+                    file = %filename, attempts, backoff_secs,
+                    "ingest file had failures — scheduled for retry with backoff"
+                );
+            }
+        }
         return Ok(());
     }
 
-    // Full success: clean up progress rows and remove the source file.
-    delete_progress(&deps.sqlite_pool, &hash).await?;
-
+    // Full success: mark completed, remove the source file, then clear progress.
+    // Order matters: remove the file BEFORE clearing chunk progress. If remove_file
+    // fails, the progress rows must survive so the next poll skips already-ingested
+    // chunks instead of re-processing them (which would re-create their memories).
+    complete_ingestion_file(&deps.sqlite_pool, &hash, "completed").await?;
     tokio::fs::remove_file(path)
         .await
         .with_context(|| format!("failed to delete ingested file: {}", path.display()))?;
-
-    tracing::info!(file = %filename, chunks = total_chunks, status = final_status, "file ingestion complete, file deleted");
-
+    delete_progress(&deps.sqlite_pool, &hash).await?;
+    tracing::info!(file = %filename, chunks = total_chunks, status = "completed", "file ingestion complete, file deleted");
     Ok(())
 }
 
@@ -378,6 +445,32 @@ async fn delete_progress(pool: &SqlitePool, hash: &str) -> anyhow::Result<()> {
 }
 
 // -- File-level tracking queries ------------------------------------------------
+
+struct IngestRetryState {
+    status: String,
+    not_due: bool,
+}
+
+/// Load the retry gate for a file: its status and whether it is still backing
+/// off (`next_attempt_at` in the future). Returns None if no row exists yet.
+async fn load_retry_state(
+    pool: &SqlitePool,
+    hash: &str,
+) -> anyhow::Result<Option<IngestRetryState>> {
+    let row = sqlx::query_as::<_, (String, Option<i64>)>(
+        "SELECT status, CAST((julianday(next_attempt_at) - julianday('now')) * 86400 AS INTEGER) \
+         FROM ingestion_files WHERE content_hash = ?",
+    )
+    .bind(hash)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load ingestion retry state")?;
+
+    Ok(row.map(|(status, secs_until_due)| IngestRetryState {
+        status,
+        not_due: secs_until_due.map(|s| s > 0).unwrap_or(false),
+    }))
+}
 
 /// Record that a file is now being processed. If a `queued` record already
 /// exists (from the upload handler), update it with chunk info and flip to
@@ -557,11 +650,20 @@ async fn process_chunk(
     let result = hook.prompt_once(&agent, &mut history, &user_prompt).await;
     classify_chunk_prompt_result(result, filename, chunk_number, total_chunks)?;
 
-    if !contract_state.has_terminal_outcome() {
-        return Err(anyhow::anyhow!(
-            "ingestion chunk {chunk_number}/{total_chunks} for {filename} completed without memory_persistence_complete signal"
-        ));
-    }
+    // A chunk is complete when the LLM run returns Ok — that is a deterministic
+    // fact the harness owns. We do NOT gate completion on the LLM calling
+    // memory_persistence_complete: a weak model may not emit that signal, yet
+    // any memory_save calls it made are already committed. Gating on the signal
+    // turned "model forgot to call the tool" into a permanent chunk failure,
+    // which the poll loop then retried forever (re-saving duplicates). The
+    // contract state is kept only for observability.
+    let saved = contract_state.saved_memory_ids().len();
+    tracing::info!(
+        file = %filename,
+        chunk = %format!("{chunk_number}/{total_chunks}"),
+        saved_memories = saved,
+        "chunk processed"
+    );
 
     Ok(())
 }
@@ -728,5 +830,43 @@ mod tests {
             result.is_err(),
             "max turns must be treated as chunk failure for retry"
         );
+    }
+
+    #[test]
+    fn test_chunk_success_does_not_require_terminal_contract_outcome() {
+        // After the fix, chunk success is decided by classify_chunk_prompt_result
+        // alone (the LLM run returning Ok), NOT by the memory_persistence contract.
+        // A run that returns Ok with no memory_persistence_complete signal is a
+        // legitimate success (the chunk may have had nothing worth saving, or the
+        // small model simply didn't emit the signal — memories it DID save are
+        // already committed).
+        let result =
+            classify_chunk_prompt_result(Ok("processed chunk".to_string()), "notes.txt", 1, 3);
+        assert!(
+            result.is_ok(),
+            "Ok prompt result must classify as chunk success"
+        );
+    }
+
+    #[test]
+    fn test_backoff_secs_is_exponential_and_capped() {
+        assert_eq!(backoff_secs(1), 60); // base 60s
+        assert_eq!(backoff_secs(2), 120);
+        assert_eq!(backoff_secs(3), 240);
+        assert_eq!(backoff_secs(20), MAX_INGEST_BACKOFF_SECS); // capped
+    }
+
+    #[test]
+    fn test_retry_decision_quarantines_at_cap() {
+        // attempts is the count AFTER this failure.
+        assert!(matches!(retry_decision(1), RetryDecision::Retry { .. }));
+        assert!(matches!(
+            retry_decision(MAX_INGEST_ATTEMPTS - 1),
+            RetryDecision::Retry { .. }
+        ));
+        assert!(matches!(
+            retry_decision(MAX_INGEST_ATTEMPTS),
+            RetryDecision::Quarantine
+        ));
     }
 }
