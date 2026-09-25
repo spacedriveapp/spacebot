@@ -4,10 +4,10 @@ use super::providers::{
     KILO_PROVIDER_BASE_URL, MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL,
     MISTRAL_PROVIDER_BASE_URL, MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL,
     OLLAMA_PROVIDER_BASE_URL, OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL,
-    OPENCODE_ZEN_PROVIDER_BASE_URL, OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL,
-    XAI_PROVIDER_BASE_URL, ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL,
-    add_shorthand_provider, infer_routing_from_providers, openrouter_extra_headers,
-    resolve_routing,
+    OPENCODE_ZEN_PROVIDER_BASE_URL, OPENROUTER_PROVIDER_BASE_URL, REQUESTY_PROVIDER_BASE_URL,
+    TOGETHER_PROVIDER_BASE_URL, XAI_PROVIDER_BASE_URL, ZAI_CODING_PLAN_BASE_URL,
+    ZHIPU_PROVIDER_BASE_URL, add_shorthand_provider, infer_routing_from_providers,
+    openrouter_extra_headers, resolve_routing,
 };
 use super::toml_schema::*;
 use super::{
@@ -485,6 +485,7 @@ impl Config {
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
             || std::env::var("KILO_API_KEY").is_ok()
+            || std::env::var("REQUESTY_API_KEY").is_ok()
             || std::env::var("ZHIPU_API_KEY").is_ok()
             || std::env::var("GROQ_API_KEY").is_ok()
             || std::env::var("TOGETHER_API_KEY").is_ok()
@@ -520,6 +521,7 @@ impl Config {
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
             || std::env::var("KILO_API_KEY").is_ok()
+            || std::env::var("REQUESTY_API_KEY").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
             || std::env::var("OPENCODE_GO_API_KEY").is_ok()
             || std::env::var("MINIMAX_CN_API_KEY").is_ok();
@@ -574,6 +576,7 @@ impl Config {
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             kilo_key: std::env::var("KILO_API_KEY").ok(),
+            requesty_key: std::env::var("REQUESTY_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
@@ -635,6 +638,15 @@ impl Config {
             ApiType::KiloGateway,
             KILO_PROVIDER_BASE_URL,
             Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "requesty",
+            llm.requesty_key.clone(),
+            ApiType::OpenAiCompletions,
+            REQUESTY_PROVIDER_BASE_URL,
+            Some("Requesty"),
             false,
         );
         add_shorthand_provider(
@@ -753,6 +765,15 @@ impl Config {
             ApiType::KiloGateway,
             KILO_PROVIDER_BASE_URL,
             Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "requesty",
+            llm.requesty_key.clone(),
+            ApiType::OpenAiCompletions,
+            REQUESTY_PROVIDER_BASE_URL,
+            Some("Requesty"),
             false,
         );
         add_shorthand_provider(
@@ -1185,6 +1206,12 @@ impl Config {
             kilo_key: std::env::var("KILO_API_KEY")
                 .ok()
                 .or_else(|| toml.llm.kilo_key.as_deref().and_then(resolve_env_value)),
+            requesty_key: toml
+                .llm
+                .requesty_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("REQUESTY_API_KEY").ok()),
             zhipu_key: toml
                 .llm
                 .zhipu_key
@@ -1386,6 +1413,15 @@ impl Config {
             ApiType::KiloGateway,
             KILO_PROVIDER_BASE_URL,
             Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "requesty",
+            llm.requesty_key.clone(),
+            ApiType::OpenAiCompletions,
+            REQUESTY_PROVIDER_BASE_URL,
+            Some("Requesty"),
             false,
         );
         add_shorthand_provider(

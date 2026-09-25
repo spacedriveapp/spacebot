@@ -365,6 +365,7 @@ pub struct LlmConfig {
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
     pub kilo_key: Option<String>,
+    pub requesty_key: Option<String>,
     pub zhipu_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
@@ -402,6 +403,10 @@ impl std::fmt::Debug for LlmConfig {
                 &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("kilo_key", &self.kilo_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "requesty_key",
+                &self.requesty_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
             .field(
@@ -470,6 +475,7 @@ impl LlmConfig {
             || self.openai_key.is_some()
             || self.openrouter_key.is_some()
             || self.kilo_key.is_some()
+            || self.requesty_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -522,6 +528,11 @@ impl SystemSecrets for LlmConfig {
             SecretField {
                 toml_key: "kilo_key",
                 secret_name: "KILO_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "requesty_key",
+                secret_name: "REQUESTY_API_KEY",
                 instance_pattern: None,
             },
             SecretField {

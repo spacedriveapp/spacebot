@@ -4467,6 +4467,7 @@ fn provider_display_name(provider_id: &str) -> String {
         "openai-chatgpt" => "OpenAI ChatGPT".to_string(),
         "openrouter" => "OpenRouter".to_string(),
         "kilo" => "Kilo Gateway".to_string(),
+        "requesty" => "Requesty".to_string(),
         "zhipu" => "Z.AI (GLM)".to_string(),
         "groq" => "Groq".to_string(),
         "together" => "Together".to_string(),

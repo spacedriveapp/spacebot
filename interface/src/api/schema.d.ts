@@ -4579,6 +4579,7 @@ export interface components {
             opencode_go: boolean;
             opencode_zen: boolean;
             openrouter: boolean;
+            requesty: boolean;
             together: boolean;
             xai: boolean;
             zai_coding_plan: boolean;

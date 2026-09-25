@@ -106,6 +106,7 @@ fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
         "anthropic" => Some("anthropic"),
         "openai" => Some("openai"),
         "kilo" => Some("kilo"),
+        "requesty" => Some("requesty"),
         "deepseek" => Some("deepseek"),
         "xai" => Some("xai"),
         "mistral" => Some("mistral"),
@@ -304,6 +305,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("kilo_key", "KILO_API_KEY") {
         providers.push("kilo");
+    }
+    if has_key("requesty_key", "REQUESTY_API_KEY") {
+        providers.push("requesty");
     }
     if has_key("zhipu_key", "ZHIPU_API_KEY") {
         providers.push("zhipu");
