@@ -66,6 +66,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Moonshot AI (Kimi)",
         "Z.AI Coding Plan",
         "Kilo Gateway",
+        "Cheaper Inference",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -131,6 +132,11 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             "zai-coding-plan",
         ),
         17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
+        18 => (
+            "Cheaper Inference API key",
+            "cheaperinference_key",
+            "cheaperinference",
+        ),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";

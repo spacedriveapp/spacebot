@@ -305,6 +305,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("kilo_key", "KILO_API_KEY") {
         providers.push("kilo");
     }
+    if has_key("cheaperinference_key", "CHEAPERINFERENCE_API_KEY") {
+        providers.push("cheaperinference");
+    }
     if has_key("zhipu_key", "ZHIPU_API_KEY") {
         providers.push("zhipu");
     }

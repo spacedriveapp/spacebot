@@ -111,6 +111,24 @@ function KiloIcon({ size = 24, className }: IconProps) {
 	);
 }
 
+function CheaperInferenceIcon({ size = 24, className }: IconProps) {
+	return (
+		<svg
+			width={size}
+			height={size}
+			viewBox="0 0 24 24"
+			fill="currentColor"
+			fillRule="evenodd"
+			xmlns="http://www.w3.org/2000/svg"
+			className={className}
+			aria-hidden="true"
+			focusable="false"
+		>
+			<path d="M9.107 2.786H15.429V8.839H9.589a3.213 3.213 0 0 0 0.321 6.375H15.214L9.434 20.994A9.107 9.107 0 1 1 9.107 2.786Z M22.179 3.429H22.607a1.286 1.286 0 0 1 1.286 1.286V19.714a1.393 1.393 0 0 1 -1.393 1.393H17.464V8.143Z" />
+		</svg>
+	);
+}
+
 export function ProviderIcon({ provider, className = "text-ink-faint", size = 24 }: ProviderIconProps) {
 	const iconProps: Partial<IconProps> = {
 		size,
@@ -123,6 +141,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		"openai-chatgpt": OpenAI,
 		openrouter: OpenRouter,
 		kilo: KiloIcon,
+		cheaperinference: CheaperInferenceIcon,
 		groq: Groq,
 		mistral: Mistral,
 		gemini: Google,

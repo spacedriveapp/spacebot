@@ -273,6 +273,22 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
+        "cheaperinference" => {
+            let channel: String = "cheaperinference/claude-sonnet-5".into();
+            let worker: String = "cheaperinference/gpt-5.4-mini".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker,
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel)]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
         "openai" => {
             let channel: String = "openai/gpt-4.1".into();
             let worker: String = "openai/gpt-4.1-mini".into();
@@ -508,6 +524,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
     match provider {
         "openrouter" => "openrouter/",
         "kilo" => "kilo/",
+        "cheaperinference" => "cheaperinference/",
         "openai" => "openai/",
         "openai-chatgpt" => "openai-chatgpt/",
         "anthropic" => "anthropic/",
