@@ -4562,6 +4562,7 @@ export interface components {
         ProviderStatus: {
             anthropic: boolean;
             azure: boolean;
+            cheaperinference: boolean;
             deepseek: boolean;
             fireworks: boolean;
             gemini: boolean;

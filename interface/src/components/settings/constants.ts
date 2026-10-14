@@ -102,6 +102,13 @@ export const PROVIDERS = [
 		envVar: "KILO_API_KEY",
 	},
 	{
+		id: "cheaperinference",
+		name: "Cheaper Inference",
+		description: "OpenAI-compatible multi-provider gateway",
+		placeholder: "ci_live_...",
+		envVar: "CHEAPERINFERENCE_API_KEY",
+	},
+	{
 		id: "opencode-zen",
 		name: "OpenCode Zen",
 		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",

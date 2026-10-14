@@ -8,6 +8,7 @@ pub(super) const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com"
 pub(super) const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 pub(super) const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 pub(super) const KILO_PROVIDER_BASE_URL: &str = "https://api.kilo.ai/api/gateway";
+pub(super) const CHEAPERINFERENCE_PROVIDER_BASE_URL: &str = "https://api.cheaperinference.com";
 pub(super) const OLLAMA_PROVIDER_BASE_URL: &str = "http://localhost:11434";
 pub(super) const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
 pub(super) const OPENCODE_GO_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen/go";
@@ -89,6 +90,16 @@ pub(crate) fn default_provider_config(
             base_url: KILO_PROVIDER_BASE_URL.to_string(),
             api_key,
             name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
+            extra_headers: vec![],
+            api_version: None,
+            deployment: None,
+        },
+        "cheaperinference" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: CHEAPERINFERENCE_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: Some("Cheaper Inference".to_string()),
             use_bearer_auth: false,
             extra_headers: vec![],
             api_version: None,
