@@ -509,14 +509,30 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        let split_at = remaining[..max_len]
+        // Walk back to a valid char boundary before slicing
+        let safe_max = remaining.floor_char_boundary(max_len);
+        let split_at = remaining[..safe_max]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..safe_max].rfind(' '))
+            .unwrap_or(safe_max);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start();
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_message_respects_multibyte_char_boundaries() {
+        // "é" is two bytes, so byte 5 falls inside a character.
+        let text = "éééééééééé";
+        let chunks = split_message(text, 5);
+        assert_eq!(chunks, vec!["éé", "éé", "éé", "éé", "éé"]);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 5));
+    }
 }
