@@ -27,8 +27,14 @@ fn lookup_pricing(model_name: &str) -> ModelPricing {
 
     let per_m = |price: f64| price / 1_000_000.0;
 
+    if let Some(listed) = list_pricing(model) {
+        return listed;
+    }
+
     // Anthropic cache-write pricing is 1.25× input. OpenAI cache-write is same as input.
     match model {
+        // Opus 4.5 and later are $5/$25 (served by list_pricing above); this arm
+        // is the Opus 4 / 4.1 price.
         m if m.starts_with("claude-opus-4") => ModelPricing {
             input: per_m(15.0),
             output: per_m(75.0),
@@ -47,7 +53,13 @@ fn lookup_pricing(model_name: &str) -> ModelPricing {
             cached_input: per_m(0.30),
             cache_write: per_m(3.75),
         },
-        m if m.starts_with("claude-3-5-haiku") || m.starts_with("claude-haiku-4") => ModelPricing {
+        m if m.starts_with("claude-haiku-4") => ModelPricing {
+            input: per_m(1.0),
+            output: per_m(5.0),
+            cached_input: per_m(0.10),
+            cache_write: per_m(1.25),
+        },
+        m if m.starts_with("claude-3-5-haiku") => ModelPricing {
             input: per_m(0.80),
             output: per_m(4.0),
             cached_input: per_m(0.08),
@@ -170,6 +182,25 @@ fn lookup_pricing(model_name: &str) -> ModelPricing {
 ///
 /// `cached_input_tokens` are subtracted from `input_tokens` for pricing
 /// since cached tokens are billed at the (lower) cached rate.
+/// List prices for Anthropic, OpenAI and Google model ids from `llm-prices`, whose rows
+/// are read from each provider's pricing page and dated. Other providers, and ids it does
+/// not list, use the prefix table in `lookup_pricing`.
+fn list_pricing(model: &str) -> Option<ModelPricing> {
+    let p = llm_prices::lookup(model)?;
+    if !matches!(p.provider, "anthropic" | "openai" | "google") {
+        return None;
+    }
+    let per_m = |price: f64| price / 1_000_000.0;
+    let input = p.input?;
+    Some(ModelPricing {
+        input: per_m(input),
+        output: per_m(p.output?),
+        cached_input: per_m(p.cache_read.unwrap_or(input)),
+        // Anthropic's 5-minute cache write; OpenAI and Google bill writes as input.
+        cache_write: per_m(p.cache_write("5m").unwrap_or(input)),
+    })
+}
+
 pub fn estimate_cost(
     model_name: &str,
     input_tokens: u64,
@@ -211,6 +242,19 @@ mod tests {
         let no_cache = estimate_cost("anthropic/claude-sonnet-4-20250514", 1000, 500, 0);
         let with_cache = estimate_cost("anthropic/claude-sonnet-4-20250514", 1000, 500, 500);
         assert!(with_cache < no_cache);
+    }
+
+    #[test]
+    fn test_list_prices() {
+        // 1M input + 1M output tokens
+        let per = |m: &str| estimate_cost(m, 1_000_000, 1_000_000, 0);
+        assert!((per("anthropic/claude-opus-4-6") - 30.0).abs() < 1e-9);
+        assert!((per("claude-opus-4-7") - 30.0).abs() < 1e-9);
+        assert!((per("anthropic/claude-haiku-4-5") - 6.0).abs() < 1e-9);
+        assert!((per("gemini/gemini-2.5-flash") - 2.8).abs() < 1e-9);
+        assert!((per("openai/gpt-5.4") - 17.5).abs() < 1e-9);
+        // Opus 4.1 keeps its own price
+        assert!((per("claude-opus-4-1-20250805") - 90.0).abs() < 1e-9);
     }
 
     #[test]
