@@ -19,6 +19,7 @@ serde_yaml = "0.9"
 
 # LLM / Rig framework
 rig = { version = "0.33", package = "rig-core", features = ["derive"] }
+llm-prices = "1.4"
 
 # HTTP clients for LLM providers
 reqwest = { version = "0.13", features = ["json", "stream", "form", "query", "gzip", "multipart"] }
